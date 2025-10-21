@@ -1,4 +1,7 @@
-use eframe::egui::{self, pos2};
+use egui::{
+    Align, CentralPanel, Color32, ColorImage, Context, Frame, Image, Layout, Margin, Rect,
+    RichText, TextureHandle, TextureOptions, UiBuilder, Vec2, load::SizedTexture, pos2, vec2,
+};
 use log::warn;
 use mpris::PlayerFinder;
 use std::{
@@ -6,9 +9,8 @@ use std::{
     time::{Duration, Instant},
 };
 
-const ALBUM_ART_SIZE: f32 = 96.0;
 const PANEL_MARGIN: f32 = 12.0;
-const BLUR_SIGMA: f32 = 32.0;
+const BLUR_SIGMA: f32 = 12.0;
 const ART_RETRY_DELAY_SECS: u64 = 10;
 
 fn main() -> eframe::Result<()> {
@@ -86,7 +88,7 @@ impl CantusApp {
         }
     }
 
-    fn ensure_album_art(&mut self, ctx: &egui::Context) {
+    fn ensure_album_art(&mut self, ctx: &Context) {
         let Some(url) = self
             .track
             .as_ref()
@@ -136,11 +138,7 @@ impl CantusApp {
         self.current_art_url = Some(url);
     }
 
-    fn load_album_art(
-        &mut self,
-        ctx: &egui::Context,
-        url: &str,
-    ) -> Result<AlbumArtTextures, String> {
+    fn load_album_art(&mut self, ctx: &Context, url: &str) -> Result<AlbumArtTextures, String> {
         let mut bytes = Vec::new();
         let response = ureq::get(url)
             .call()
@@ -169,20 +167,20 @@ impl CantusApp {
 
         let original = ctx.load_texture(
             next_name(&mut self.texture_seq),
-            egui::ColorImage::from_rgba_unmultiplied(
+            ColorImage::from_rgba_unmultiplied(
                 [rgba.width() as usize, rgba.height() as usize],
                 rgba.as_raw(),
             ),
-            egui::TextureOptions::LINEAR,
+            TextureOptions::LINEAR,
         );
 
         let blurred = ctx.load_texture(
             next_name(&mut self.texture_seq),
-            egui::ColorImage::from_rgba_unmultiplied(
+            ColorImage::from_rgba_unmultiplied(
                 [blurred.width() as usize, blurred.height() as usize],
                 blurred.as_raw(),
             ),
-            egui::TextureOptions::LINEAR,
+            TextureOptions::LINEAR,
         );
 
         Ok(AlbumArtTextures { original, blurred })
@@ -190,7 +188,7 @@ impl CantusApp {
 }
 
 impl eframe::App for CantusApp {
-    fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+    fn update(&mut self, ctx: &Context, _frame: &mut eframe::Frame) {
         if self.last_poll.elapsed() >= Duration::from_millis(500) {
             self.refresh_track();
             self.last_poll = Instant::now();
@@ -198,78 +196,83 @@ impl eframe::App for CantusApp {
 
         self.ensure_album_art(ctx);
 
-        egui::CentralPanel::default().show(ctx, |ui| {
-            let full_rect = ui.max_rect();
+        CentralPanel::default()
+            .frame(Frame {
+                inner_margin: Margin::same(0),
+                ..Default::default()
+            })
+            .show(ctx, |ui| {
+                let full_rect = ui.max_rect();
 
-            if let Some(album_art) = &self.album_art {
-                let painter = ui.painter_at(full_rect);
-                painter.image(
-                    album_art.blurred.id(),
-                    full_rect,
-                    egui::Rect::from_min_max(pos2(0.0, 0.0), pos2(1.0, 1.0)),
-                    egui::Color32::WHITE,
-                );
-                painter.rect_filled(
-                    full_rect,
-                    0.0,
-                    egui::Color32::from_rgba_unmultiplied(10, 10, 10, 170),
-                );
-            } else {
-                ui.painter().rect_filled(
-                    full_rect,
-                    0.0,
-                    egui::Color32::from_rgba_unmultiplied(18, 18, 18, 230),
-                );
-            }
-
-            let mut content_ui = ui.new_child(
-                egui::UiBuilder::new()
-                    .max_rect(full_rect.shrink2(egui::vec2(PANEL_MARGIN, PANEL_MARGIN)))
-                    .layout(egui::Layout::left_to_right(egui::Align::Center)),
-            );
-            content_ui.set_min_height(ALBUM_ART_SIZE);
-
-            if self.album_art.is_some() {
-                content_ui.visuals_mut().override_text_color =
-                    Some(egui::Color32::from_rgb(240, 240, 240));
-            }
-
-            let art_size = egui::vec2(ALBUM_ART_SIZE, ALBUM_ART_SIZE);
-            if let Some(album_art) = &self.album_art {
-                content_ui.add(
-                    egui::Image::from_texture(egui::load::SizedTexture::from_handle(
-                        &album_art.original,
-                    ))
-                    .fit_to_exact_size(art_size)
-                    .corner_radius(8.0),
-                );
-            } else {
-                let (rect, _) = content_ui.allocate_exact_size(art_size, egui::Sense::hover());
-                content_ui.painter().rect_filled(
-                    rect,
-                    egui::CornerRadius::same(8),
-                    egui::Color32::from_rgba_unmultiplied(0, 0, 0, 160),
-                );
-            }
-
-            content_ui.add_space(10.0);
-            content_ui.vertical(|ui| {
-                ui.heading("Cantus");
-                ui.add_space(6.0);
-
-                if let Some(track) = &self.track {
-                    ui.label(egui::RichText::new(&track.title).strong().size(20.0));
-                    ui.label(&track.artist);
-                    if let Some(album) = &track.album
-                        && !album.is_empty()
-                    {
-                        ui.label(album);
-                    }
-                } else {
-                    ui.label("Nothing playing right now.");
+                // Render the blurred album art over the entire background
+                if let Some(album_art) = &self.album_art {
+                    let painter = ui.painter_at(full_rect);
+                    painter.image(
+                        album_art.blurred.id(),
+                        full_rect,
+                        Rect::from_min_max(pos2(0.0, 0.0), pos2(1.0, 1.0)),
+                        Color32::WHITE,
+                    );
+                    painter.rect_filled(
+                        full_rect,
+                        0.0,
+                        Color32::from_rgba_unmultiplied(10, 10, 10, 170),
+                    );
                 }
+
+                let content_rect = full_rect.shrink2(Vec2::splat(PANEL_MARGIN));
+                let mut content_ui = ui.new_child(
+                    UiBuilder::new()
+                        .max_rect(content_rect)
+                        .layout(Layout::left_to_right(Align::Center)),
+                );
+
+                if self.album_art.is_some() {
+                    content_ui.visuals_mut().override_text_color =
+                        Some(Color32::from_rgb(240, 240, 240));
+                }
+
+                let art_size = Vec2::splat(content_rect.height().max(0.0));
+                if let Some(album_art) = &self.album_art {
+                    let texture_size = album_art.original.size_vec2();
+                    let uv_rect = if texture_size.x > texture_size.y {
+                        let crop = (texture_size.x - texture_size.y) / (2.0 * texture_size.x);
+                        Rect::from_min_max(pos2(crop, 0.0), pos2(1.0 - crop, 1.0))
+                    } else if texture_size.y > texture_size.x {
+                        let crop = (texture_size.y - texture_size.x) / (2.0 * texture_size.y);
+                        Rect::from_min_max(pos2(0.0, crop), pos2(1.0, 1.0 - crop))
+                    } else {
+                        Rect::from_min_max(pos2(0.0, 0.0), pos2(1.0, 1.0))
+                    };
+
+                    content_ui.add(
+                        Image::from_texture(SizedTexture::from_handle(&album_art.original))
+                            .uv(uv_rect)
+                            .fit_to_exact_size(art_size)
+                            .corner_radius(8.0),
+                    );
+                }
+
+                content_ui.add_space(10.0);
+                let text_width = (content_rect.width() - art_size.x - 10.0).max(0.0);
+                content_ui.allocate_ui_with_layout(
+                    vec2(text_width, art_size.y),
+                    Layout::top_down(Align::LEFT).with_main_align(Align::Center),
+                    |ui| {
+                        if let Some(track) = &self.track {
+                            ui.label(RichText::new(&track.title).strong().size(20.0));
+                            ui.label(&track.artist);
+                            if let Some(album) = &track.album
+                                && !album.is_empty()
+                            {
+                                ui.label(album);
+                            }
+                        } else {
+                            ui.label("Nothing playing right now.");
+                        }
+                    },
+                );
             });
-        });
 
         ctx.request_repaint_after(Duration::from_millis(300));
     }
@@ -309,6 +312,6 @@ impl TrackInfo {
 }
 
 struct AlbumArtTextures {
-    original: egui::TextureHandle,
-    blurred: egui::TextureHandle,
+    original: TextureHandle,
+    blurred: TextureHandle,
 }
