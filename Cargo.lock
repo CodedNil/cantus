@@ -262,6 +262,7 @@ dependencies = [
 name = "cantus"
 version = "0.1.0"
 dependencies = [
+ "bytemuck",
  "eframe",
  "egui",
  "image",
@@ -270,6 +271,7 @@ dependencies = [
  "rspotify",
  "simple_logger",
  "ureq 3.1.2",
+ "url",
  "wgpu",
 ]
 
