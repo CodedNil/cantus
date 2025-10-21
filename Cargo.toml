@@ -13,8 +13,17 @@ eframe = { version = "0.33.0", default-features = false, features = [
     "wayland",
 ] }
 egui = { version = "0.33.0", features = ["serde"] }
-egui_extras = { version = "0.33.0", features = ["http", "image", "webp"] }
 mpris = "2.0.1"
+rspotify = { version = "0.15.1", default-features = false, features = [
+    "client-ureq",
+    "ureq-rustls-tls",
+] }
+image = { version = "0.25.8", default-features = false, features = [
+    "webp",
+    "jpeg",
+    "png",
+] }
+ureq = { version = "3.1.2", default-features = false, features = ["rustls"] }
 
 [lints.rust]
 unsafe_code = "forbid"
