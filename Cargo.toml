@@ -13,6 +13,7 @@ eframe = { version = "0.33.0", default-features = false, features = [
     "wayland",
 ] }
 egui = { version = "0.33.0", features = ["serde"] }
+ehttp = "0.5.0"
 mpris = "2.0.1"
 rspotify = { version = "0.15.1", default-features = false, features = [
     "client-ureq",
@@ -23,9 +24,10 @@ image = { version = "0.25.8", default-features = false, features = [
     "jpeg",
     "png",
 ] }
-ureq = { version = "3.1.2", default-features = false, features = ["rustls"] }
 bytemuck = { version = "1.24.0", features = ["derive"] }
 url = "2.5.7"
+uuid = { version = "1.18.1", features = ["v4"] }
+anyhow = "1.0.100"
 
 [lints.rust]
 unsafe_code = "forbid"
@@ -34,6 +36,7 @@ unsafe_code = "forbid"
 pedantic = { level = "warn", priority = -1 }
 nursery = { level = "warn", priority = -1 }
 cast-possible-truncation = "allow"
+too-many-lines = "allow"
 
 [profile.release]
 opt-level = 3

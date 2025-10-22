@@ -60,8 +60,8 @@ fn fs(@builtin(position) frag_pos: vec4<f32>) -> @location(0) vec4<f32> {
 
     let target_aspect = resolution.x * inv_resolution.y;
     var sample_uv = clamp(warped, vec2<f32>(0.0, 0.0), vec2<f32>(1.0, 1.0));
-    if (texture_aspect > 0.0 && abs(texture_aspect - target_aspect) > 0.001) {
-        if (texture_aspect > target_aspect) {
+    if texture_aspect > 0.0 && abs(texture_aspect - target_aspect) > 0.001 {
+        if texture_aspect > target_aspect {
             let scale = target_aspect / texture_aspect;
             sample_uv.x = clamp(sample_uv.x * scale + (1.0 - scale) * 0.5, 0.0, 1.0);
         } else {

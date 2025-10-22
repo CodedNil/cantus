@@ -1,3 +1,4 @@
+use anyhow::{Result, anyhow};
 use bytemuck::{Pod, Zeroable};
 use eframe::{
     HardwareAcceleration,
@@ -8,226 +9,245 @@ use eframe::{
 };
 use egui::{
     Align2, CentralPanel, Color32, ColorImage, Context, FontId, Frame, Margin, Rect, TextureHandle,
-    TextureOptions, Vec2, pos2,
+    TextureOptions, Vec2, ViewportBuilder, pos2, vec2,
 };
 use log::warn;
 use mpris::PlayerFinder;
 use std::{
     borrow::Cow,
     collections::HashMap,
-    convert::TryFrom,
     fs,
-    io::Read,
+    sync::{Arc, Mutex},
     time::{Duration, Instant},
 };
 use url::Url;
+use uuid::Uuid;
 
 const PANEL_MARGIN: f32 = 12.0;
 const BLUR_SIGMA: f32 = 60.0;
 const WARP_STRENGTH: f32 = 2.0;
 const SWIRL_STRENGTH: f32 = 0.4;
+const WARP_TIME_SCALE: f32 = 0.8;
 
 const WARP_SHADER: &str = include_str!("warp_background.wgsl");
 
+const TEXTURE_BIND_GROUP_ENTRIES: &[wgpu::BindGroupLayoutEntry] = &[
+    // Binding 0: Texture
+    wgpu::BindGroupLayoutEntry {
+        binding: 0,
+        visibility: wgpu::ShaderStages::FRAGMENT,
+        ty: wgpu::BindingType::Texture {
+            sample_type: wgpu::TextureSampleType::Float { filterable: true },
+            view_dimension: wgpu::TextureViewDimension::D2,
+            multisampled: false,
+        },
+        count: None,
+    },
+    // Binding 1: Sampler
+    wgpu::BindGroupLayoutEntry {
+        binding: 1,
+        visibility: wgpu::ShaderStages::FRAGMENT,
+        ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
+        count: None,
+    },
+];
+
+const UNIFORM_BIND_GROUP_ENTRIES: &[wgpu::BindGroupLayoutEntry] = &[wgpu::BindGroupLayoutEntry {
+    binding: 0,
+    visibility: wgpu::ShaderStages::FRAGMENT,
+    ty: wgpu::BindingType::Buffer {
+        ty: wgpu::BufferBindingType::Uniform,
+        has_dynamic_offset: false,
+        min_binding_size: None,
+    },
+    count: None,
+}];
+
+/// Runs the eframe application.
 fn main() -> eframe::Result<()> {
     simple_logger::SimpleLogger::new()
         .with_level(log::LevelFilter::Info)
         .init()
         .unwrap();
 
-    let native_options = eframe::NativeOptions {
-        viewport: egui::ViewportBuilder::default()
-            .with_title("Cantus")
-            .with_app_id("cantus")
-            .with_inner_size([320.0, 120.0])
-            .with_active(false)
-            .with_window_level(egui::WindowLevel::AlwaysOnTop)
-            .with_decorations(false),
-        hardware_acceleration: HardwareAcceleration::Required,
-        wgpu_options: WgpuConfiguration {
-            present_mode: wgpu::PresentMode::Fifo,
-            desired_maximum_frame_latency: Some(2),
-            ..Default::default()
-        },
-        ..Default::default()
-    };
-
     eframe::run_native(
         "Cantus",
-        native_options,
+        eframe::NativeOptions {
+            viewport: ViewportBuilder {
+                title: Some("Cantus".to_string()),
+                app_id: Some("cantus".to_string()),
+                position: Some(pos2(100.0, 100.0)),
+                inner_size: Some(vec2(320.0, 120.0)),
+                resizable: Some(true),
+                transparent: Some(true),
+                decorations: Some(false),
+                active: Some(true),
+                window_level: Some(egui::WindowLevel::AlwaysOnTop),
+                ..Default::default()
+            },
+            hardware_acceleration: HardwareAcceleration::Required,
+            wgpu_options: WgpuConfiguration {
+                present_mode: wgpu::PresentMode::Fifo,
+                desired_maximum_frame_latency: Some(2),
+                ..Default::default()
+            },
+            ..Default::default()
+        },
         Box::new(|_cc| Ok(Box::new(CantusApp::new()))),
     )
 }
 
+type ArtResponseData = Option<(String, Vec<u8>)>;
+type ArtResponse = Arc<Mutex<ArtResponseData>>;
+
+/// Represents the state of the album art currently displayed or being fetched.
+enum AlbumArtState {
+    /// No album art is associated with the current track.
+    None,
+    /// Album art is currently being fetched from the given URL.
+    Loading(String),
+    /// Album art has been successfully loaded from the given URL.
+    Loaded(String, AlbumArtTextures),
+}
+
+/// The main application state for Cantus.
 struct CantusApp {
     last_poll: Instant,
     track: Option<TrackInfo>,
-    album_art: Option<AlbumArtTextures>,
-    current_art_url: Option<String>,
-    next_art_retry: Option<Instant>,
-    texture_seq: u64,
+    art_state: AlbumArtState,
+    art_response: ArtResponse,
     start_time: Instant,
 }
 
 impl CantusApp {
+    /// Creates a new instance of the Cantus application.
     fn new() -> Self {
-        let mut app = Self {
+        Self {
             last_poll: Instant::now(),
             track: None,
-            album_art: None,
-            current_art_url: None,
-            next_art_retry: None,
-            texture_seq: 0,
+            art_state: AlbumArtState::None,
+            art_response: ArtResponse::new(Mutex::new(None)),
             start_time: Instant::now(),
-        };
-
-        app.refresh_track();
-        app
+        }
     }
 
-    fn refresh_track(&mut self) {
-        let art_was = self
-            .track
-            .as_ref()
-            .and_then(|track| track.album_art_url.as_deref());
-
+    /// Polls the MPRIS player to get the current track metadata and ensures the corresponding album art is loaded if available.
+    fn refresh_track(&mut self, ctx: &Context) {
         let track = PlayerFinder::new()
             .ok()
             .and_then(|finder| finder.find_active().ok())
             .and_then(|player| player.get_metadata().ok())
             .map(|metadata| TrackInfo::from_metadata(&metadata));
 
-        let track_missing = track.is_none();
-        let art_changed = art_was != track.as_ref().and_then(|t| t.album_art_url.as_deref());
+        let previous_art_url = self.track.as_ref().and_then(|t| t.album_art_url.clone());
+        let new_art_url = track.as_ref().and_then(|t| t.album_art_url.clone());
+        let art_changed = previous_art_url != new_art_url;
 
         self.track = track;
 
-        if track_missing || art_changed {
-            self.album_art = None;
-            self.current_art_url = None;
-            self.next_art_retry = None;
+        if art_changed {
+            self.art_state = AlbumArtState::None;
+        }
+
+        // If no new art URL, we are done.
+        let Some(url) = new_art_url else {
+            return;
+        };
+
+        // If we already have the art or are currently fetching it, skip loading.
+        match &self.art_state {
+            AlbumArtState::Loading(loading_url) if loading_url == &url => return,
+            AlbumArtState::Loaded(loaded_url, _) if loaded_url == &url => return,
+            _ => {}
+        }
+
+        println!("Loading album art from {url}");
+
+        let parsed = Url::parse(&url);
+        let Ok(parsed) = parsed else {
+            warn!(
+                "Failed to parse album art URL {url}: {}",
+                parsed.unwrap_err()
+            );
+            return;
+        };
+
+        if parsed.scheme() == "file" {
+            // Handle local file synchronously
+            match Self::load_album_art_from_file(&parsed) {
+                Ok(bytes) => match Self::process_album_art_bytes(ctx, &bytes) {
+                    Ok(textures) => {
+                        self.art_state = AlbumArtState::Loaded(url, textures);
+                    }
+                    Err(err) => {
+                        warn!("Failed to process album art bytes for {url}: {err}");
+                        self.art_state = AlbumArtState::None;
+                    }
+                },
+                Err(err) => {
+                    warn!("Failed to load album art from file {url}: {err}");
+                    self.art_state = AlbumArtState::None;
+                }
+            }
+        } else {
+            // Handle remote URL asynchronously using ehttp
+            self.art_state = AlbumArtState::Loading(url.clone());
+            let art_response = self.art_response.clone();
+            let ctx_clone = ctx.clone();
+
+            ehttp::fetch(ehttp::Request::get(url), move |response| {
+                if let Ok(response) = response
+                    && response.ok
+                    && !response.bytes.is_empty()
+                    && let Ok(mut response_lock) = art_response.lock()
+                {
+                    *response_lock = Some((response.url, response.bytes));
+                }
+                ctx_clone.request_repaint();
+            });
         }
     }
 
-    fn ensure_album_art(&mut self, ctx: &Context) {
-        let Some(url) = self
-            .track
-            .as_ref()
-            .and_then(|track| track.album_art_url.as_ref())
-            .filter(|value| !value.is_empty())
-            .cloned()
-        else {
-            self.album_art = None;
-            self.current_art_url = None;
-            self.next_art_retry = None;
-            return;
-        };
+    /// Loads album art from a file URL and returns the raw bytes.
+    fn load_album_art_from_file(parsed_url: &Url) -> Result<Vec<u8>> {
+        let path = parsed_url
+            .to_file_path()
+            .map_err(|()| anyhow!("Unsupported file path in URL: {parsed_url}"))?;
 
-        let url_str = url.as_str();
-        let same_url = self.current_art_url.as_deref() == Some(url_str);
-
-        if same_url && self.album_art.is_some() {
-            return;
-        }
-
-        if same_url
-            && self
-                .next_art_retry
-                .is_some_and(|instant| Instant::now() < instant)
-        {
-            return;
-        }
-
-        if !same_url {
-            self.album_art = None;
-            self.next_art_retry = None;
-        }
-
-        match self.load_album_art(ctx, url_str) {
-            Ok(textures) => {
-                self.album_art = Some(textures);
-                self.next_art_retry = None;
-            }
-            Err(err) => {
-                warn!("Failed to load album art from {url}: {err}");
-                self.album_art = None;
-                self.next_art_retry = Some(Instant::now() + Duration::from_secs(10));
-            }
-        }
-
-        self.current_art_url = Some(url);
+        fs::read(&path).map_err(Into::into)
     }
 
-    fn load_album_art(&mut self, ctx: &Context, url: &str) -> Result<AlbumArtTextures, String> {
-        let fetch_remote = |url: &str| -> Result<Vec<u8>, String> {
-            let mut bytes = Vec::new();
-            let response = ureq::get(url)
-                .call()
-                .map_err(|err| format!("HTTP request failed: {err}"))?;
+    /// Decodes image bytes and creates two egui textures: the original image and a heavily blurred version.
+    fn process_album_art_bytes(ctx: &Context, bytes: &[u8]) -> Result<AlbumArtTextures> {
+        // Decode and process image
+        let rgba = image::load_from_memory(bytes)?.to_rgba8();
 
-            let status = response.status();
-            if !status.is_success() {
-                return Err(format!("HTTP request returned status {}", status.as_u16()));
-            }
+        // Create a heavily blurred version for the background effect
+        let blurred_img = image::imageops::blur(&rgba, BLUR_SIGMA);
 
-            response
-                .into_body()
-                .into_reader()
-                .read_to_end(&mut bytes)
-                .map_err(|err| format!("failed to read HTTP body: {err}"))?;
-
-            Ok(bytes)
-        };
-
-        let bytes = match Url::parse(url) {
-            Ok(parsed) if parsed.scheme() == "file" => {
-                let path = parsed
-                    .to_file_path()
-                    .map_err(|()| format!("Unsupported file path in URL: {url}"))?;
-                fs::read(&path).map_err(|err| {
-                    format!("failed to read album art from {}: {err}", path.display())
-                })?
-            }
-            Ok(parsed) if parsed.scheme() == "http" || parsed.scheme() == "https" => {
-                fetch_remote(url)?
-            }
-            Ok(_) => fetch_remote(url)?,
-            Err(_) if url.starts_with('/') => fs::read(url)
-                .map_err(|err| format!("failed to read album art from {url}: {err}"))?,
-            Err(_) => fetch_remote(url)?,
-        };
-
-        let rgba = image::load_from_memory(&bytes)
-            .map_err(|err| format!("failed to decode album art image: {err}"))?
-            .to_rgba8();
-        let blurred = image::imageops::blur(&rgba, BLUR_SIGMA);
-
-        let next_name = |seq: &mut u64| {
-            *seq = seq.wrapping_add(1);
-            format!("album_art_{seq:010}")
-        };
-
-        let original = ctx.load_texture(
-            next_name(&mut self.texture_seq),
-            ColorImage::from_rgba_unmultiplied(
-                [rgba.width() as usize, rgba.height() as usize],
-                rgba.as_raw(),
+        // Load textures into egui
+        let texture_name_base = Uuid::new_v4().to_string();
+        Ok(AlbumArtTextures {
+            original: ctx.load_texture(
+                format!("album_{texture_name_base}_original"),
+                ColorImage::from_rgba_unmultiplied(
+                    [rgba.width() as usize, rgba.height() as usize],
+                    rgba.as_raw(),
+                ),
+                TextureOptions::LINEAR,
             ),
-            TextureOptions::LINEAR,
-        );
-
-        let blurred = ctx.load_texture(
-            next_name(&mut self.texture_seq),
-            ColorImage::from_rgba_unmultiplied(
-                [blurred.width() as usize, blurred.height() as usize],
-                blurred.as_raw(),
+            blurred: ctx.load_texture(
+                format!("album_{texture_name_base}_blurred"),
+                ColorImage::from_rgba_unmultiplied(
+                    [blurred_img.width() as usize, blurred_img.height() as usize],
+                    blurred_img.as_raw(),
+                ),
+                TextureOptions::LINEAR,
             ),
-            TextureOptions::LINEAR,
-        );
-
-        Ok(AlbumArtTextures { original, blurred })
+        })
     }
 
+    /// Adds a custom wgpu callback to render the warped, blurred album art as a background.
     fn add_dynamic_background(
         &self,
         painter: &egui::Painter,
@@ -240,20 +260,16 @@ impl CantusApp {
             .wgpu_render_state()
             .expect("Cantus requires a wgpu render state");
 
-        let texture_id = album_art.blurred.id();
-        let texture_view = {
-            let renderer = render_state.renderer.read();
-            let Some(texture) = renderer.texture(&texture_id) else {
-                return;
-            };
-            let Some(wgpu_texture) = texture.texture.as_ref() else {
-                return;
-            };
-
-            let view = wgpu_texture.create_view(&wgpu::TextureViewDescriptor::default());
-            drop(renderer);
-            view
+        // Retrieve the wgpu TextureView for the blurred egui texture.
+        let renderer = render_state.renderer.read();
+        let Some(wgpu_texture) = renderer
+            .texture(&album_art.blurred.id())
+            .and_then(|t| t.texture.as_ref())
+        else {
+            return;
         };
+        let texture_view = wgpu_texture.create_view(&wgpu::TextureViewDescriptor::default());
+        drop(renderer);
 
         let sampler = render_state
             .device
@@ -267,43 +283,58 @@ impl CantusApp {
                 ..Default::default()
             });
 
-        let size = rect.size();
         let pixels_per_point = ctx.pixels_per_point();
-        let width_px = (size.x * pixels_per_point).max(1.0);
-        let height_px = (size.y * pixels_per_point).max(1.0);
+        let width_px = (rect.width() * pixels_per_point).max(1.0);
+        let height_px = (rect.height() * pixels_per_point).max(1.0);
 
-        let elapsed_time = self.start_time.elapsed().as_secs_f32() * 0.6;
         let texture_size = album_art.blurred.size_vec2();
-        let texture_aspect = if texture_size.y > 0.0 {
-            texture_size.x / texture_size.y
-        } else {
-            1.0
-        };
         let uniforms = WarpUniforms {
             resolution: [width_px, height_px, 1.0 / width_px, 1.0 / height_px],
-            params: [elapsed_time, WARP_STRENGTH, SWIRL_STRENGTH, texture_aspect],
+            params: [
+                self.start_time.elapsed().as_secs_f32() * WARP_TIME_SCALE,
+                WARP_STRENGTH,
+                SWIRL_STRENGTH,
+                texture_size.x / texture_size.y,
+            ],
         };
 
-        let callback = WarpedBackgroundCallback::new(
-            texture_view,
-            sampler,
-            uniforms,
-            render_state.target_format,
-        );
-
-        painter.add(WgpuCallback::new_paint_callback(rect, callback));
+        painter.add(WgpuCallback::new_paint_callback(
+            rect,
+            WarpedBackgroundCallback {
+                texture_view,
+                sampler,
+                uniforms,
+                target_format: render_state.target_format,
+            },
+        ));
     }
 }
 
 impl eframe::App for CantusApp {
-    #[allow(clippy::too_many_lines)]
+    /// The main update loop for the application.
     fn update(&mut self, ctx: &Context, frame: &mut eframe::Frame) {
-        if self.last_poll.elapsed() >= Duration::from_millis(500) {
-            self.refresh_track();
+        // Poll for new track info every second
+        if self.last_poll.elapsed() > Duration::from_secs(1) {
+            self.refresh_track(ctx);
             self.last_poll = Instant::now();
         }
 
-        self.ensure_album_art(ctx);
+        // Process any album art response received asynchronously
+        if let Ok(mut response_lock) = self.art_response.lock()
+            && let Some((url, bytes)) = response_lock.take()
+            && let AlbumArtState::Loading(loading_url) = &self.art_state
+            && loading_url == &url
+        {
+            match Self::process_album_art_bytes(ctx, &bytes) {
+                Ok(textures) => {
+                    self.art_state = AlbumArtState::Loaded(url, textures);
+                }
+                Err(err) => {
+                    warn!("Failed to process album art bytes for {url}: {err}");
+                    self.art_state = AlbumArtState::None;
+                }
+            }
+        }
 
         CentralPanel::default()
             .frame(Frame {
@@ -315,18 +346,18 @@ impl eframe::App for CantusApp {
                 let painter = ui.painter_at(full_rect);
 
                 // Render the blurred album art over the entire background
-                if let Some(album_art) = &self.album_art {
+                if let AlbumArtState::Loaded(_, album_art) = &self.art_state {
                     self.add_dynamic_background(&painter, ctx, frame, full_rect, album_art);
                     painter.rect_filled(
                         full_rect,
                         0.0,
-                        Color32::from_rgba_unmultiplied(10, 10, 10, 170),
+                        Color32::from_rgba_unmultiplied(10, 10, 10, 100),
                     );
                 }
 
                 let content_rect = full_rect.shrink2(Vec2::splat(PANEL_MARGIN));
 
-                let album_art_drawn = self.album_art.as_ref().map(|album_art| {
+                let album_art_drawn = if let AlbumArtState::Loaded(_, album_art) = &self.art_state {
                     let texture_size = album_art.original.size_vec2();
                     let art_edge = content_rect.height().max(0.0);
                     let art_rect = Rect::from_center_size(
@@ -337,22 +368,23 @@ impl eframe::App for CantusApp {
                         Vec2::splat(art_edge),
                     );
 
-                    let uv_rect = if texture_size.x > texture_size.y {
+                    // Calculate UV coordinates to crop the image to a square aspect ratio (center crop).
+                    let uv_rect = if texture_size.x >= texture_size.y {
                         let crop = (texture_size.x - texture_size.y) / (2.0 * texture_size.x);
                         Rect::from_min_max(pos2(crop, 0.0), pos2(1.0 - crop, 1.0))
-                    } else if texture_size.y > texture_size.x {
+                    } else {
                         let crop = (texture_size.y - texture_size.x) / (2.0 * texture_size.y);
                         Rect::from_min_max(pos2(0.0, crop), pos2(1.0, 1.0 - crop))
-                    } else {
-                        Rect::from_min_max(pos2(0.0, 0.0), pos2(1.0, 1.0))
                     };
 
                     painter.image(album_art.original.id(), art_rect, uv_rect, Color32::WHITE);
 
-                    (art_rect, texture_size)
-                });
+                    Some((art_rect, texture_size))
+                } else {
+                    None
+                };
 
-                let text_color = if self.album_art.is_some() {
+                let text_color = if matches!(self.art_state, AlbumArtState::Loaded(..)) {
                     Color32::from_rgb(240, 240, 240)
                 } else {
                     ui.visuals().strong_text_color()
@@ -392,10 +424,8 @@ impl eframe::App for CantusApp {
 
                 let text_height: f32 = text_rows.iter().map(|(_, _, _, height)| *height).sum();
                 let gap_count = text_rows.len().saturating_sub(1);
-                let gap_height = u32::try_from(gap_count).map_or_else(
-                    |_| (f64::from(u32::MAX) * 4.0) as f32,
-                    |count| (f64::from(count) * 4.0) as f32,
-                );
+                // Calculate total height needed for text rows and the 4.0pt gaps between them.
+                let gap_height = f32::from(gap_count as u8) * 4.0;
                 let total_height = text_height + gap_height;
                 let half_total_height = total_height * 0.5;
                 let mut current_y = content_rect.center().y - half_total_height;
@@ -417,6 +447,7 @@ impl eframe::App for CantusApp {
     }
 }
 
+/// Uniform data passed to the warp shader.
 #[repr(C)]
 #[derive(Clone, Copy, Debug, Default, Pod, Zeroable)]
 struct WarpUniforms {
@@ -424,6 +455,7 @@ struct WarpUniforms {
     params: [f32; 4],
 }
 
+/// Custom egui callback to render the warped background using wgpu.
 struct WarpedBackgroundCallback {
     texture_view: wgpu::TextureView,
     sampler: wgpu::Sampler,
@@ -431,22 +463,7 @@ struct WarpedBackgroundCallback {
     target_format: wgpu::TextureFormat,
 }
 
-impl WarpedBackgroundCallback {
-    const fn new(
-        texture_view: wgpu::TextureView,
-        sampler: wgpu::Sampler,
-        uniforms: WarpUniforms,
-        target_format: wgpu::TextureFormat,
-    ) -> Self {
-        Self {
-            texture_view,
-            sampler,
-            uniforms,
-            target_format,
-        }
-    }
-}
-
+/// Resources needed to render the warped background effect.
 struct PipelineResources {
     pipeline: wgpu::RenderPipeline,
     texture_layout: wgpu::BindGroupLayout,
@@ -454,57 +471,34 @@ struct PipelineResources {
 }
 
 impl PipelineResources {
+    /// Creates the wgpu render pipeline and bind group layouts for the warp effect.
     fn new(device: &wgpu::Device, target_format: wgpu::TextureFormat) -> Self {
         let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("cantus_warp_shader"),
             source: wgpu::ShaderSource::Wgsl(Cow::Borrowed(WARP_SHADER)),
         });
 
+        // Bind Group Layout 0: Texture and Sampler
         let texture_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
             label: Some("cantus_warp_texture_layout"),
-            entries: &[
-                wgpu::BindGroupLayoutEntry {
-                    binding: 0,
-                    visibility: wgpu::ShaderStages::FRAGMENT,
-                    ty: wgpu::BindingType::Texture {
-                        sample_type: wgpu::TextureSampleType::Float { filterable: true },
-                        view_dimension: wgpu::TextureViewDimension::D2,
-                        multisampled: false,
-                    },
-                    count: None,
-                },
-                wgpu::BindGroupLayoutEntry {
-                    binding: 1,
-                    visibility: wgpu::ShaderStages::FRAGMENT,
-                    ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
-                    count: None,
-                },
-            ],
+            entries: TEXTURE_BIND_GROUP_ENTRIES,
         });
 
+        // Bind Group Layout 1: Uniforms
         let uniform_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
             label: Some("cantus_warp_uniform_layout"),
-            entries: &[wgpu::BindGroupLayoutEntry {
-                binding: 0,
-                visibility: wgpu::ShaderStages::FRAGMENT,
-                ty: wgpu::BindingType::Buffer {
-                    ty: wgpu::BufferBindingType::Uniform,
-                    has_dynamic_offset: false,
-                    min_binding_size: None,
-                },
-                count: None,
-            }],
-        });
-
-        let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
-            label: Some("cantus_warp_pipeline_layout"),
-            bind_group_layouts: &[&texture_layout, &uniform_layout],
-            push_constant_ranges: &[],
+            entries: UNIFORM_BIND_GROUP_ENTRIES,
         });
 
         let pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
             label: Some("cantus_warp_pipeline"),
-            layout: Some(&pipeline_layout),
+            layout: Some(
+                &device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+                    label: Some("cantus_warp_pipeline_layout"),
+                    bind_group_layouts: &[&texture_layout, &uniform_layout],
+                    push_constant_ranges: &[],
+                }),
+            ),
             vertex: wgpu::VertexState {
                 module: &shader,
                 entry_point: Some("vs"),
@@ -521,15 +515,7 @@ impl PipelineResources {
                     write_mask: wgpu::ColorWrites::ALL,
                 })],
             }),
-            primitive: wgpu::PrimitiveState {
-                topology: wgpu::PrimitiveTopology::TriangleList,
-                strip_index_format: None,
-                front_face: wgpu::FrontFace::Ccw,
-                cull_mode: None,
-                unclipped_depth: false,
-                polygon_mode: wgpu::PolygonMode::Fill,
-                conservative: false,
-            },
+            primitive: wgpu::PrimitiveState::default(),
             depth_stencil: None,
             multisample: wgpu::MultisampleState::default(),
             multiview: None,
@@ -544,6 +530,7 @@ impl PipelineResources {
     }
 }
 
+/// Caches wgpu resources (pipelines, buffers, bind groups) across frames.
 #[derive(Default)]
 struct WarpedBackgroundCache {
     pipelines: HashMap<wgpu::TextureFormat, PipelineResources>,
@@ -553,6 +540,8 @@ struct WarpedBackgroundCache {
 }
 
 impl CallbackTrait for WarpedBackgroundCallback {
+    /// Prepares necessary wgpu resources (pipeline, uniform buffer, bind groups)
+    /// and uploads uniform data to the GPU.
     fn prepare(
         &self,
         device: &wgpu::Device,
@@ -570,6 +559,7 @@ impl CallbackTrait for WarpedBackgroundCallback {
             .entry(self.target_format)
             .or_insert_with(|| PipelineResources::new(device, self.target_format));
 
+        // Ensure Uniform Buffer exists
         if cache.uniform_buffer.is_none() {
             cache.uniform_buffer = Some(device.create_buffer(&wgpu::BufferDescriptor {
                 label: Some("cantus_warp_uniform_buffer"),
@@ -579,6 +569,7 @@ impl CallbackTrait for WarpedBackgroundCallback {
             }));
         }
 
+        // Ensure Uniform Bind Group exists
         if cache.uniform_bind_group.is_none() {
             cache.uniform_bind_group = Some(device.create_bind_group(&wgpu::BindGroupDescriptor {
                 label: Some("cantus_warp_uniform_bind_group"),
@@ -590,6 +581,7 @@ impl CallbackTrait for WarpedBackgroundCallback {
             }));
         }
 
+        // Create Texture Bind Group
         cache.texture_bind_group = Some(device.create_bind_group(&wgpu::BindGroupDescriptor {
             label: Some("cantus_warp_texture_bind_group"),
             layout: &pipeline_resources.texture_layout,
@@ -605,6 +597,7 @@ impl CallbackTrait for WarpedBackgroundCallback {
             ],
         }));
 
+        // Upload dynamic uniform data
         queue.write_buffer(
             cache.uniform_buffer.as_ref().unwrap(),
             0,
@@ -614,6 +607,7 @@ impl CallbackTrait for WarpedBackgroundCallback {
         Vec::new()
     }
 
+    /// Executes the rendering commands for the warp effect.
     fn paint(
         &self,
         _info: egui::epaint::PaintCallbackInfo,
@@ -623,13 +617,11 @@ impl CallbackTrait for WarpedBackgroundCallback {
         let Some(cache) = callback_resources.get::<WarpedBackgroundCache>() else {
             return;
         };
-        let Some(pipeline_resources) = cache.pipelines.get(&self.target_format) else {
-            return;
-        };
-        let Some(texture_bind_group) = &cache.texture_bind_group else {
-            return;
-        };
-        let Some(uniform_bind_group) = &cache.uniform_bind_group else {
+        let (Some(pipeline_resources), Some(texture_bind_group), Some(uniform_bind_group)) = (
+            cache.pipelines.get(&self.target_format),
+            &cache.texture_bind_group,
+            &cache.uniform_bind_group,
+        ) else {
             return;
         };
 
@@ -640,6 +632,7 @@ impl CallbackTrait for WarpedBackgroundCallback {
     }
 }
 
+/// Holds relevant metadata for the currently playing track.
 struct TrackInfo {
     title: String,
     artist: String,
@@ -648,6 +641,7 @@ struct TrackInfo {
 }
 
 impl TrackInfo {
+    /// Creates a `TrackInfo` from MPRIS metadata.
     fn from_metadata(metadata: &mpris::Metadata) -> Self {
         let title = metadata
             .title()
@@ -673,6 +667,7 @@ impl TrackInfo {
     }
 }
 
+/// Holds the egui texture handles for the album art.
 struct AlbumArtTextures {
     original: TextureHandle,
     blurred: TextureHandle,
