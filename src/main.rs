@@ -97,17 +97,36 @@ fn main() -> eframe::Result<()> {
     )
 }
 
-type ArtResponseData = Option<(String, Vec<u8>)>;
-type ArtResponse = Arc<Mutex<ArtResponseData>>;
-
 /// Represents the state of the album art currently displayed or being fetched.
 enum AlbumArtState {
     /// No album art is associated with the current track.
     None,
     /// Album art is currently being fetched from the given URL.
-    Loading(String),
+    Loading {
+        url: String,
+        response: Arc<Mutex<Option<Vec<u8>>>>,
+    },
     /// Album art has been successfully loaded from the given URL.
-    Loaded(String, AlbumArtTextures),
+    Loaded {
+        url: String,
+        textures: AlbumArtTextures,
+    },
+}
+
+impl AlbumArtState {
+    fn url(&self) -> Option<&str> {
+        match self {
+            Self::Loading { url, .. } | Self::Loaded { url, .. } => Some(url),
+            Self::None => None,
+        }
+    }
+
+    const fn textures(&self) -> Option<&AlbumArtTextures> {
+        match self {
+            Self::Loaded { textures, .. } => Some(textures),
+            _ => None,
+        }
+    }
 }
 
 /// The main application state for Cantus.
@@ -115,8 +134,6 @@ struct CantusApp {
     last_poll: Instant,
     track: Option<TrackInfo>,
     art_state: AlbumArtState,
-    art_response: ArtResponse,
-    start_time: Instant,
 }
 
 impl CantusApp {
@@ -126,28 +143,31 @@ impl CantusApp {
             last_poll: Instant::now(),
             track: None,
             art_state: AlbumArtState::None,
-            art_response: ArtResponse::new(Mutex::new(None)),
-            start_time: Instant::now(),
         }
     }
 
     /// Polls the MPRIS player to get the current track metadata and ensures the corresponding album art is loaded if available.
     fn refresh_track(&mut self, ctx: &Context) {
-        let track = PlayerFinder::new()
+        let new_track = PlayerFinder::new()
             .ok()
             .and_then(|finder| finder.find_active().ok())
             .and_then(|player| player.get_metadata().ok())
             .map(|metadata| TrackInfo::from_metadata(&metadata));
 
-        let previous_art_url = self.track.as_ref().and_then(|t| t.album_art_url.clone());
-        let new_art_url = track.as_ref().and_then(|t| t.album_art_url.clone());
-        let art_changed = previous_art_url != new_art_url;
+        let new_art_url = new_track
+            .as_ref()
+            .and_then(|track| track.album_art_url.clone());
 
-        self.track = track;
-
-        if art_changed {
+        if self
+            .track
+            .as_ref()
+            .and_then(|track| track.album_art_url.clone())
+            != new_art_url
+        {
             self.art_state = AlbumArtState::None;
         }
+
+        self.track = new_track;
 
         // If no new art URL, we are done.
         let Some(url) = new_art_url else {
@@ -155,56 +175,73 @@ impl CantusApp {
         };
 
         // If we already have the art or are currently fetching it, skip loading.
-        match &self.art_state {
-            AlbumArtState::Loading(loading_url) if loading_url == &url => return,
-            AlbumArtState::Loaded(loaded_url, _) if loaded_url == &url => return,
-            _ => {}
+        if self
+            .art_state
+            .url()
+            .is_some_and(|current_url| current_url == url)
+        {
+            return;
         }
 
         println!("Loading album art from {url}");
 
-        let parsed = Url::parse(&url);
-        let Ok(parsed) = parsed else {
-            warn!(
-                "Failed to parse album art URL {url}: {}",
-                parsed.unwrap_err()
-            );
-            return;
-        };
-
-        if parsed.scheme() == "file" {
-            // Handle local file synchronously
-            match Self::load_album_art_from_file(&parsed) {
-                Ok(bytes) => match Self::process_album_art_bytes(ctx, &bytes) {
-                    Ok(textures) => {
-                        self.art_state = AlbumArtState::Loaded(url, textures);
-                    }
+        match Url::parse(&url) {
+            Ok(parsed) if parsed.scheme() == "file" => {
+                match Self::load_album_art_from_file(&parsed) {
+                    Ok(bytes) => match Self::process_album_art_bytes(ctx, &bytes) {
+                        Ok(textures) => {
+                            self.art_state = AlbumArtState::Loaded {
+                                url: url.clone(),
+                                textures,
+                            };
+                        }
+                        Err(err) => {
+                            warn!("Failed to process album art bytes for {url}: {err}");
+                            self.art_state = AlbumArtState::None;
+                        }
+                    },
                     Err(err) => {
-                        warn!("Failed to process album art bytes for {url}: {err}");
+                        warn!("Failed to load album art from file {url}: {err}");
                         self.art_state = AlbumArtState::None;
                     }
-                },
-                Err(err) => {
-                    warn!("Failed to load album art from file {url}: {err}");
-                    self.art_state = AlbumArtState::None;
                 }
             }
-        } else {
-            // Handle remote URL asynchronously using ehttp
-            self.art_state = AlbumArtState::Loading(url.clone());
-            let art_response = self.art_response.clone();
-            let ctx_clone = ctx.clone();
+            Ok(_) => {
+                // Handle remote URL asynchronously using ehttp
+                let response_slot = Arc::new(Mutex::new(None));
+                let request_url = url.clone();
+                let ctx_clone = ctx.clone();
+                self.art_state = AlbumArtState::Loading {
+                    url,
+                    response: response_slot.clone(),
+                };
 
-            ehttp::fetch(ehttp::Request::get(url), move |response| {
-                if let Ok(response) = response
-                    && response.ok
-                    && !response.bytes.is_empty()
-                    && let Ok(mut response_lock) = art_response.lock()
-                {
-                    *response_lock = Some((response.url, response.bytes));
-                }
-                ctx_clone.request_repaint();
-            });
+                ehttp::fetch(ehttp::Request::get(request_url.clone()), move |response| {
+                    if let Ok(response) = response
+                        && response.ok
+                        && !response.bytes.is_empty()
+                        && response.url == request_url
+                        && let Ok(mut response_lock) = response_slot.lock()
+                    {
+                        *response_lock = Some(response.bytes);
+                    }
+                    ctx_clone.request_repaint();
+                });
+            }
+            Err(err) => {
+                warn!("Failed to parse album art URL {url}: {err}");
+            }
+        }
+    }
+
+    fn take_pending_album_art(&self) -> Option<(String, Vec<u8>)> {
+        if let AlbumArtState::Loading { url, response } = &self.art_state {
+            response
+                .lock()
+                .ok()
+                .and_then(|mut guard| guard.take().map(|bytes| (url.clone(), bytes)))
+        } else {
+            None
         }
     }
 
@@ -249,7 +286,6 @@ impl CantusApp {
 
     /// Adds a custom wgpu callback to render the warped, blurred album art as a background.
     fn add_dynamic_background(
-        &self,
         painter: &egui::Painter,
         ctx: &Context,
         frame: &eframe::Frame,
@@ -288,10 +324,12 @@ impl CantusApp {
         let height_px = (rect.height() * pixels_per_point).max(1.0);
 
         let texture_size = album_art.blurred.size_vec2();
+        let elapsed = ctx.input(|i| i.time as f32);
+
         let uniforms = WarpUniforms {
             resolution: [width_px, height_px, 1.0 / width_px, 1.0 / height_px],
             params: [
-                self.start_time.elapsed().as_secs_f32() * WARP_TIME_SCALE,
+                elapsed * WARP_TIME_SCALE,
                 WARP_STRENGTH,
                 SWIRL_STRENGTH,
                 texture_size.x / texture_size.y,
@@ -320,14 +358,10 @@ impl eframe::App for CantusApp {
         }
 
         // Process any album art response received asynchronously
-        if let Ok(mut response_lock) = self.art_response.lock()
-            && let Some((url, bytes)) = response_lock.take()
-            && let AlbumArtState::Loading(loading_url) = &self.art_state
-            && loading_url == &url
-        {
+        if let Some((url, bytes)) = self.take_pending_album_art() {
             match Self::process_album_art_bytes(ctx, &bytes) {
                 Ok(textures) => {
-                    self.art_state = AlbumArtState::Loaded(url, textures);
+                    self.art_state = AlbumArtState::Loaded { url, textures };
                 }
                 Err(err) => {
                     warn!("Failed to process album art bytes for {url}: {err}");
@@ -346,8 +380,8 @@ impl eframe::App for CantusApp {
                 let painter = ui.painter_at(full_rect);
 
                 // Render the blurred album art over the entire background
-                if let AlbumArtState::Loaded(_, album_art) = &self.art_state {
-                    self.add_dynamic_background(&painter, ctx, frame, full_rect, album_art);
+                if let Some(textures) = self.art_state.textures() {
+                    Self::add_dynamic_background(&painter, ctx, frame, full_rect, textures);
                     painter.rect_filled(
                         full_rect,
                         0.0,
@@ -356,44 +390,46 @@ impl eframe::App for CantusApp {
                 }
 
                 let content_rect = full_rect.shrink2(Vec2::splat(PANEL_MARGIN));
+                let center_y = content_rect.center().y;
 
-                let album_art_drawn = if let AlbumArtState::Loaded(_, album_art) = &self.art_state {
-                    let texture_size = album_art.original.size_vec2();
-                    let art_edge = content_rect.height().max(0.0);
-                    let art_rect = Rect::from_center_size(
-                        pos2(
-                            art_edge.mul_add(0.5, content_rect.min.x),
-                            content_rect.center().y,
-                        ),
-                        Vec2::splat(art_edge),
-                    );
+                let text_start_x =
+                    self.art_state
+                        .textures()
+                        .map_or(content_rect.min.x, |textures| {
+                            let texture_size = textures.original.size_vec2();
+                            let art_edge = content_rect.height().max(0.0);
+                            let art_rect = Rect::from_center_size(
+                                pos2(art_edge.mul_add(0.5, content_rect.min.x), center_y),
+                                Vec2::splat(art_edge),
+                            );
 
-                    // Calculate UV coordinates to crop the image to a square aspect ratio (center crop).
-                    let uv_rect = if texture_size.x >= texture_size.y {
-                        let crop = (texture_size.x - texture_size.y) / (2.0 * texture_size.x);
-                        Rect::from_min_max(pos2(crop, 0.0), pos2(1.0 - crop, 1.0))
-                    } else {
-                        let crop = (texture_size.y - texture_size.x) / (2.0 * texture_size.y);
-                        Rect::from_min_max(pos2(0.0, crop), pos2(1.0, 1.0 - crop))
-                    };
+                            let uv_rect = if texture_size.x >= texture_size.y {
+                                let crop =
+                                    (texture_size.x - texture_size.y) / (2.0 * texture_size.x);
+                                Rect::from_min_max(pos2(crop, 0.0), pos2(1.0 - crop, 1.0))
+                            } else {
+                                let crop =
+                                    (texture_size.y - texture_size.x) / (2.0 * texture_size.y);
+                                Rect::from_min_max(pos2(0.0, crop), pos2(1.0, 1.0 - crop))
+                            };
 
-                    painter.image(album_art.original.id(), art_rect, uv_rect, Color32::WHITE);
+                            painter.image(
+                                textures.original.id(),
+                                art_rect,
+                                uv_rect,
+                                Color32::WHITE,
+                            );
 
-                    Some((art_rect, texture_size))
-                } else {
-                    None
-                };
+                            art_rect.max.x + 10.0
+                        });
 
-                let text_color = if matches!(self.art_state, AlbumArtState::Loaded(..)) {
+                let text_color = if matches!(self.art_state, AlbumArtState::Loaded { .. }) {
                     Color32::from_rgb(240, 240, 240)
                 } else {
                     ui.visuals().strong_text_color()
                 };
 
-                let text_start_x = album_art_drawn
-                    .map_or(content_rect.min.x, |(art_rect, _)| art_rect.max.x + 10.0);
-
-                let mut lines: Vec<(String, FontId, Color32)> = Vec::new();
+                let mut lines = Vec::new();
                 if let Some(track) = &self.track {
                     lines.push((track.title.clone(), FontId::proportional(20.0), text_color));
                     lines.push((track.artist.clone(), FontId::proportional(16.0), text_color));
@@ -414,23 +450,18 @@ impl eframe::App for CantusApp {
                     ));
                 }
 
-                let text_rows: Vec<_> = lines
-                    .into_iter()
-                    .map(|(text, font_id, color)| {
-                        let row_height = font_id.size;
-                        (text, font_id, color, row_height)
-                    })
-                    .collect();
+                let gap = 4.0_f32;
+                let total_height =
+                    lines
+                        .iter()
+                        .enumerate()
+                        .fold(0.0, |acc, (index, (_, font_id, _))| {
+                            acc + font_id.size + if index == 0 { 0.0 } else { gap }
+                        });
+                let mut current_y = total_height.mul_add(-0.5, center_y);
 
-                let text_height: f32 = text_rows.iter().map(|(_, _, _, height)| *height).sum();
-                let gap_count = text_rows.len().saturating_sub(1);
-                // Calculate total height needed for text rows and the 4.0pt gaps between them.
-                let gap_height = f32::from(gap_count as u8) * 4.0;
-                let total_height = text_height + gap_height;
-                let half_total_height = total_height * 0.5;
-                let mut current_y = content_rect.center().y - half_total_height;
-
-                for (text, font_id, color, row_height) in text_rows {
+                for (text, font_id, color) in lines {
+                    let line_height = font_id.size;
                     painter.text(
                         pos2(text_start_x, current_y),
                         Align2::LEFT_TOP,
@@ -438,7 +469,7 @@ impl eframe::App for CantusApp {
                         font_id,
                         color,
                     );
-                    current_y += row_height + 4.0;
+                    current_y += line_height + gap;
                 }
             });
 
