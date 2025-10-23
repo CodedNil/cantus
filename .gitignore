@@ -1,2 +1,4 @@
 /target
 /.direnv
+.env
+.spotify_token_cache.json

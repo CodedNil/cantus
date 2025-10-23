@@ -2,6 +2,8 @@ use parley::{
     FontContext, Layout, LayoutContext, layout::PositionedLayoutItem, style::StyleProperty,
 };
 use std::sync::Arc;
+use tracing::{error, level_filters::LevelFilter};
+use tracing_subscriber::EnvFilter;
 use vello::{
     AaConfig, Glyph, Renderer, RendererOptions, Scene,
     kurbo::{Affine, RoundedRect},
@@ -18,6 +20,8 @@ use winit::{
     window::{Window, WindowLevel},
 };
 
+mod spotify;
+
 const PANEL_MARGIN: f64 = 12.0;
 const BLUR_SIGMA: f32 = 60.0;
 const WARP_STRENGTH: f32 = 2.0;
@@ -25,6 +29,35 @@ const SWIRL_STRENGTH: f32 = 0.4;
 const WARP_TIME_SCALE: f32 = 0.8;
 
 const WARP_SHADER: &str = include_str!("warp_background.wgsl");
+
+#[tokio::main]
+async fn main() {
+    #[cfg(debug_assertions)]
+    dotenvy::dotenv().ok();
+
+    tracing_subscriber::fmt()
+        .with_env_filter(
+            EnvFilter::try_from_default_env()
+                .unwrap_or_else(|_| EnvFilter::new(LevelFilter::WARN.to_string())),
+        )
+        .init();
+
+    // Run the spotify async task
+    if let Err(e) = spotify::init().await {
+        error!("Spotify init failed: {}", e);
+    }
+
+    // Create and run a winit event loop
+    let event_loop = EventLoop::new().expect("Failed to create event loop");
+    event_loop
+        .run_app(&mut CantusApp {
+            context: RenderContext::new(),
+            renderers: vec![],
+            state: RenderState::Suspended(None),
+            scene: Scene::new(),
+        })
+        .expect("Couldn't run event loop");
+}
 
 #[derive(Debug)]
 enum RenderState {
@@ -176,11 +209,30 @@ impl ApplicationHandler for CantusApp {
                     )
                     .expect("failed to render to surface");
 
+                let RenderState::Active {
+                    surface, window, ..
+                } = &mut self.state
+                else {
+                    return;
+                };
+
                 // Get the surface's texture
-                let surface_texture = surface
-                    .surface
-                    .get_current_texture()
-                    .expect("failed to get surface texture");
+                let surface_texture = match surface.surface.get_current_texture() {
+                    Ok(texture) => texture,
+                    Err(vello::wgpu::SurfaceError::Outdated | vello::wgpu::SurfaceError::Lost) => {
+                        let size = window.inner_size();
+                        surface.config.width = size.width;
+                        surface.config.height = size.height;
+                        surface.surface.configure(
+                            &self.context.devices[surface.dev_id].device,
+                            &surface.config,
+                        );
+                        return;
+                    }
+                    Err(e) => {
+                        panic!("Failed to get surface texture: {e:?}");
+                    }
+                };
 
                 // Perform the copy
                 let mut encoder =
@@ -206,22 +258,6 @@ impl ApplicationHandler for CantusApp {
             _ => {}
         }
     }
-}
-
-fn main() {
-    // Setup a bunch of state:
-    let mut app = CantusApp {
-        context: RenderContext::new(),
-        renderers: vec![],
-        state: RenderState::Suspended(None),
-        scene: Scene::new(),
-    };
-
-    // Create and run a winit event loop
-    let event_loop = EventLoop::new().expect("Failed to create event loop");
-    event_loop
-        .run_app(&mut app)
-        .expect("Couldn't run event loop");
 }
 
 /// Create the vello scene structure
