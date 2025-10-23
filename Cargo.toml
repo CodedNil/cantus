@@ -4,21 +4,10 @@ version = "0.1.0"
 edition = "2024"
 
 [dependencies]
-log = "0.4.28"
-simple_logger = "5.1.0"
-wgpu = "27.0.1"
-eframe = { version = "0.33.0", default-features = false, features = [
-    "default_fonts",
-    "wgpu",
-    "wayland",
-] }
-egui = { version = "0.33.0", features = ["serde"] }
-ehttp = "0.5.0"
-mpris = "2.0.1"
-rspotify = { version = "0.15.1", default-features = false, features = [
-    "client-ureq",
-    "ureq-rustls-tls",
-] }
+tracing = "0.1.41"
+winit = { version = "0.30.12", default-features = false, features = ["wayland", "rwh_06"] }
+vello = "0.6.0"
+rspotify = "0.15.1"
 image = { version = "0.25.8", default-features = false, features = [
     "webp",
     "jpeg",
@@ -28,6 +17,8 @@ bytemuck = { version = "1.24.0", features = ["derive"] }
 url = "2.5.7"
 uuid = { version = "1.18.1", features = ["v4"] }
 anyhow = "1.0.100"
+pollster = "0.4.0"
+parley = "0.6.0"
 
 [lints.rust]
 unsafe_code = "forbid"
@@ -35,7 +26,6 @@ unsafe_code = "forbid"
 [lints.clippy]
 pedantic = { level = "warn", priority = -1 }
 nursery = { level = "warn", priority = -1 }
-cast-possible-truncation = "allow"
 too-many-lines = "allow"
 
 [profile.release]
