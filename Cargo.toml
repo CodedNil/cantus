@@ -7,10 +7,10 @@ edition = "2024"
 tracing = "0.1.41"
 tracing-subscriber = { version = "0.3.20", features = ["env-filter"] }
 dotenvy = "0.15.7"
-winit = { version = "0.30.12", default-features = false, features = [
-    "wayland",
-    "rwh_06",
-] }
+raw-window-handle = "0.6.2"
+wayland-backend = { version = "0.3.11", features = ["client_system"] }
+wayland-client = "0.31.11"
+smithay-client-toolkit = "0.20.0"
 vello = "0.6.0"
 rspotify = { version = "0.15.2", features = ["cli"] }
 image = { version = "0.25.8", default-features = false, features = [
@@ -18,21 +18,23 @@ image = { version = "0.25.8", default-features = false, features = [
     "jpeg",
     "png",
 ] }
-bytemuck = { version = "1.24.0", features = ["derive"] }
-url = "2.5.7"
-uuid = { version = "1.18.1", features = ["v4"] }
 anyhow = "1.0.100"
 pollster = "0.4.0"
 parley = "0.6.0"
 tokio = { version = "1.48.0", features = ["full"] }
 
 [lints.rust]
-unsafe_code = "forbid"
+unsafe_code = "allow"
 
 [lints.clippy]
 pedantic = { level = "warn", priority = -1 }
 nursery = { level = "warn", priority = -1 }
 too-many-lines = "allow"
+too-many-arguments = "allow"
+cast-possible-wrap = "allow"
+cast-possible-truncation = "allow"
+cast-precision-loss = "allow"
+cast-sign-loss = "allow"
 
 [profile.release]
 opt-level = 3

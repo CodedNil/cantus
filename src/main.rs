@@ -1,7 +1,25 @@
+use anyhow::{Result, bail};
 use parley::{
     FontContext, Layout, LayoutContext, layout::PositionedLayoutItem, style::StyleProperty,
 };
-use std::sync::Arc;
+use raw_window_handle::{
+    DisplayHandle, HandleError, HasDisplayHandle, HasWindowHandle, RawDisplayHandle,
+    RawWindowHandle, WaylandDisplayHandle, WaylandWindowHandle, WindowHandle,
+};
+use smithay_client_toolkit::{
+    compositor::{CompositorHandler, CompositorState},
+    delegate_compositor, delegate_layer, delegate_output, delegate_registry,
+    output::{OutputHandler, OutputState},
+    registry::{ProvidesRegistryState, RegistryState},
+    shell::{
+        WaylandSurface,
+        wlr_layer::{
+            Anchor, KeyboardInteractivity, Layer, LayerShell, LayerShellHandler, LayerSurface,
+            LayerSurfaceConfigure,
+        },
+    },
+};
+use std::{ffi::c_void, ptr::NonNull};
 use tracing::{error, level_filters::LevelFilter};
 use tracing_subscriber::EnvFilter;
 use vello::{
@@ -9,26 +27,23 @@ use vello::{
     kurbo::{Affine, RoundedRect},
     peniko::{Color, Fill, color::palette},
     util::{RenderContext, RenderSurface},
-    wgpu::{CommandEncoderDescriptor, PollType, PresentMode, TextureViewDescriptor},
+    wgpu::{
+        CommandEncoderDescriptor, CompositeAlphaMode, PollType, PresentMode, SurfaceError,
+        SurfaceTarget, TextureViewDescriptor,
+    },
 };
-use winit::{
-    application::ApplicationHandler,
-    dpi::{LogicalPosition, LogicalSize},
-    event::WindowEvent,
-    event_loop::{ActiveEventLoop, EventLoop},
-    platform::wayland::WindowAttributesExtWayland,
-    window::{Window, WindowLevel},
+use wayland_client::{
+    Connection, Proxy, QueueHandle,
+    globals::registry_queue_init,
+    protocol::{wl_callback, wl_output, wl_surface},
 };
 
 mod spotify;
 
-const PANEL_MARGIN: f64 = 12.0;
-const BLUR_SIGMA: f32 = 60.0;
-const WARP_STRENGTH: f32 = 2.0;
-const SWIRL_STRENGTH: f32 = 0.4;
-const WARP_TIME_SCALE: f32 = 0.8;
+const PANEL_WIDTH: u32 = 280;
+const PANEL_HEIGHT: u32 = 38;
 
-const WARP_SHADER: &str = include_str!("warp_background.wgsl");
+const PANEL_MARGIN: f64 = 3.0;
 
 #[tokio::main]
 async fn main() {
@@ -42,225 +57,408 @@ async fn main() {
         )
         .init();
 
-    // Run the spotify async task
-    if let Err(e) = spotify::init().await {
-        error!("Spotify init failed: {}", e);
+    spotify::init().await.unwrap();
+    run_layer_shell();
+}
+
+/// Initialize the Wayland layer shell and create a layer surface.
+fn run_layer_shell() {
+    let connection = Connection::connect_to_env().unwrap();
+    let (globals, mut event_queue) = registry_queue_init(&connection).unwrap();
+    let qh = event_queue.handle();
+
+    let compositor = CompositorState::bind(&globals, &qh).unwrap();
+    let layer_shell = LayerShell::bind(&globals, &qh).unwrap();
+
+    let layer_surface = layer_shell.create_layer_surface(
+        &qh,
+        compositor.create_surface(&qh),
+        Layer::Overlay,
+        Some("cantus"),
+        None,
+    );
+    layer_surface.set_anchor(Anchor::TOP | Anchor::LEFT);
+    layer_surface.set_keyboard_interactivity(KeyboardInteractivity::None);
+    layer_surface.set_exclusive_zone(-1);
+    layer_surface.set_margin(4, 4, 4, 4);
+    layer_surface.set_size(PANEL_WIDTH, PANEL_HEIGHT);
+    layer_surface.commit();
+
+    let registry_state = RegistryState::new(&globals);
+    let output_state = OutputState::new(&globals, &qh);
+
+    let display_ptr = NonNull::new(connection.backend().display_ptr().cast::<c_void>()).unwrap();
+    let surface_ptr =
+        NonNull::new(layer_surface.wl_surface().id().as_ptr().cast::<c_void>()).unwrap();
+
+    let mut app = CantusLayer::new(
+        registry_state,
+        output_state,
+        layer_surface,
+        display_ptr,
+        surface_ptr,
+    );
+
+    while !app.should_exit {
+        event_queue.blocking_dispatch(&mut app).unwrap();
     }
-
-    // Create and run a winit event loop
-    let event_loop = EventLoop::new().expect("Failed to create event loop");
-    event_loop
-        .run_app(&mut CantusApp {
-            context: RenderContext::new(),
-            renderers: vec![],
-            state: RenderState::Suspended(None),
-            scene: Scene::new(),
-        })
-        .expect("Couldn't run event loop");
 }
 
-#[derive(Debug)]
-enum RenderState {
-    /// `RenderSurface` and `Window` for active rendering.
-    Active {
-        surface: Box<RenderSurface<'static>>,
-        valid_surface: bool,
-        window: Arc<Window>,
-    },
-    /// Cache a window so that it can be reused when the app is resumed after being suspended.
-    Suspended(Option<Arc<Window>>),
-}
-
-struct CantusApp {
-    /// The Vello `RenderContext` which is a global context that lasts for the lifetime of the application
-    context: RenderContext,
-    /// An array of renderers, one per wgpu device
+struct CantusLayer {
+    registry_state: RegistryState,
+    output_state: OutputState,
+    layer_surface: LayerSurface,
+    render_context: RenderContext,
     renderers: Vec<Option<Renderer>>,
-    /// State with the winit Window and the wgpu Surface
-    state: RenderState,
-    /// Vello scene structure which is passed for rendering
+    render_surface: Option<RenderSurface<'static>>,
     scene: Scene,
+    width: u32,
+    height: u32,
+    frame_callback: Option<wl_callback::WlCallback>,
+    should_exit: bool,
+    display_ptr: NonNull<c_void>,
+    surface_ptr: NonNull<c_void>,
 }
 
-impl ApplicationHandler for CantusApp {
-    fn resumed(&mut self, event_loop: &ActiveEventLoop) {
-        let RenderState::Suspended(cached_window) = &mut self.state else {
+impl CantusLayer {
+    fn new(
+        registry_state: RegistryState,
+        output_state: OutputState,
+        layer_surface: LayerSurface,
+        display_ptr: NonNull<c_void>,
+        surface_ptr: NonNull<c_void>,
+    ) -> Self {
+        Self {
+            registry_state,
+            output_state,
+            layer_surface,
+            render_context: RenderContext::new(),
+            renderers: Vec::new(),
+            render_surface: None,
+            scene: Scene::new(),
+            width: PANEL_WIDTH,
+            height: PANEL_HEIGHT,
+            frame_callback: None,
+            should_exit: false,
+            display_ptr,
+            surface_ptr,
+        }
+    }
+
+    fn request_frame(&mut self, qh: &QueueHandle<Self>) {
+        if self.frame_callback.is_some() {
             return;
-        };
+        }
+        let callback = self
+            .layer_surface
+            .wl_surface()
+            .frame(qh, self.layer_surface.wl_surface().clone());
+        self.frame_callback = Some(callback);
+    }
 
-        // Get the winit window cached in a previous Suspended event or else create a new window
-        let window = cached_window.take().unwrap_or_else(|| {
-            let attr = Window::default_attributes()
-                .with_title("Cantus")
-                .with_name("cantus", "")
-                .with_inner_size(LogicalSize::new(250, 80))
-                .with_min_inner_size(LogicalSize::new(200, 60))
-                .with_max_inner_size(LogicalSize::new(300, 150))
-                .with_position(LogicalPosition::new(100, 100))
-                .with_resizable(true)
-                .with_active(false)
-                .with_blur(true)
-                .with_decorations(false)
-                .with_transparent(true)
-                .with_window_level(WindowLevel::AlwaysOnTop);
-            Arc::new(event_loop.create_window(attr).unwrap())
-        });
+    fn ensure_surface(&mut self, width: u32, height: u32) -> Result<()> {
+        if width == 0 || height == 0 {
+            self.render_surface = None;
+            return Ok(());
+        }
 
-        // Create a vello Surface
-        let size = window.inner_size();
-        let surface_future = self.context.create_surface(
-            window.clone(),
-            size.width,
-            size.height,
-            PresentMode::AutoVsync,
-        );
-        let surface = pollster::block_on(surface_future).expect("Error creating surface");
+        if let Some(surface) = &mut self.render_surface {
+            if surface.config.width != width || surface.config.height != height {
+                self.render_context.resize_surface(surface, width, height);
+            }
+            return Ok(());
+        }
 
-        // Create a vello Renderer for the surface (using its device id)
+        let handles = WaylandHandles::new(self.display_ptr, self.surface_ptr);
+        let surface = self
+            .render_context
+            .instance
+            .create_surface(SurfaceTarget::Window(Box::new(handles)))?;
+
+        let mut render_surface = pollster::block_on(self.render_context.create_render_surface(
+            surface,
+            width,
+            height,
+            PresentMode::AutoNoVsync,
+        ))?;
+
+        let dev_id = render_surface.dev_id;
+        let device_handle = &self.render_context.devices[dev_id];
+        let capabilities = render_surface
+            .surface
+            .get_capabilities(device_handle.adapter());
+        let mut desired_alpha = render_surface.config.alpha_mode;
+        for mode in [
+            CompositeAlphaMode::PreMultiplied,
+            CompositeAlphaMode::PostMultiplied,
+            CompositeAlphaMode::Inherit,
+        ] {
+            if capabilities.alpha_modes.contains(&mode) {
+                desired_alpha = mode;
+                break;
+            }
+        }
+        if desired_alpha != render_surface.config.alpha_mode {
+            render_surface.config.alpha_mode = desired_alpha;
+            render_surface
+                .surface
+                .configure(&device_handle.device, &render_surface.config);
+        }
+
         self.renderers
-            .resize_with(self.context.devices.len(), || None);
-        self.renderers[surface.dev_id].get_or_insert_with(|| {
-            Renderer::new(
-                &self.context.devices[surface.dev_id].device,
-                RendererOptions::default(),
-            )
-            .expect("Couldn't create renderer")
-        });
-
-        // Save the Window and Surface to a state variable
-        self.state = RenderState::Active {
-            surface: Box::new(surface),
-            valid_surface: true,
-            window,
-        };
+            .resize_with(self.render_context.devices.len(), || None);
+        self.render_surface = Some(render_surface);
+        Ok(())
     }
 
-    fn suspended(&mut self, _event_loop: &ActiveEventLoop) {
-        if let RenderState::Active { window, .. } = &self.state {
-            self.state = RenderState::Suspended(Some(window.clone()));
-        }
-    }
-
-    fn window_event(
-        &mut self,
-        event_loop: &ActiveEventLoop,
-        window_id: winit::window::WindowId,
-        event: WindowEvent,
-    ) {
-        // Only process events for our window, and only when we have a surface.
-        let (surface, valid_surface) = match &mut self.state {
-            RenderState::Active {
-                surface,
-                valid_surface,
-                window,
-            } if window.id() == window_id => (surface, valid_surface),
-            _ => return,
+    fn render(&mut self) -> Result<()> {
+        let Some(surface) = &mut self.render_surface else {
+            return Ok(());
         };
 
-        match event {
-            // Exit the event loop when a close is requested (e.g. window's close button is pressed)
-            WindowEvent::CloseRequested => event_loop.exit(),
+        self.scene.reset();
+        create_scene(
+            &mut self.scene,
+            f64::from(surface.config.width),
+            f64::from(surface.config.height),
+        );
 
-            // Resize the surface when the window is resized
-            WindowEvent::Resized(size) => {
-                if size.width != 0 && size.height != 0 {
-                    self.context
-                        .resize_surface(surface, size.width, size.height);
-                    *valid_surface = true;
-                } else {
-                    *valid_surface = false;
-                }
-            }
-
-            // This is where all the rendering happens
-            WindowEvent::RedrawRequested => {
-                if !*valid_surface {
-                    return;
-                }
-
-                // Empty the scene of objects to draw.
-                self.scene.reset();
-
-                // Re-add the objects to draw to the scene.
-                create_scene(
-                    &mut self.scene,
-                    f64::from(surface.config.width),
-                    f64::from(surface.config.height),
-                );
-
-                // Get a handle to the device
-                let device_handle = &self.context.devices[surface.dev_id];
-
-                // Render to a texture, which we will later copy into the surface
-                self.renderers[surface.dev_id]
-                    .as_mut()
-                    .unwrap()
-                    .render_to_texture(
-                        &device_handle.device,
-                        &device_handle.queue,
-                        &self.scene,
-                        &surface.target_view,
-                        &vello::RenderParams {
-                            base_color: palette::css::TRANSPARENT,
-                            width: surface.config.width,
-                            height: surface.config.height,
-                            antialiasing_method: AaConfig::Msaa16,
-                        },
-                    )
-                    .expect("failed to render to surface");
-
-                let RenderState::Active {
-                    surface, window, ..
-                } = &mut self.state
-                else {
-                    return;
-                };
-
-                // Get the surface's texture
-                let surface_texture = match surface.surface.get_current_texture() {
-                    Ok(texture) => texture,
-                    Err(vello::wgpu::SurfaceError::Outdated | vello::wgpu::SurfaceError::Lost) => {
-                        let size = window.inner_size();
-                        surface.config.width = size.width;
-                        surface.config.height = size.height;
-                        surface.surface.configure(
-                            &self.context.devices[surface.dev_id].device,
-                            &surface.config,
-                        );
-                        return;
-                    }
-                    Err(e) => {
-                        panic!("Failed to get surface texture: {e:?}");
-                    }
-                };
-
-                // Perform the copy
-                let mut encoder =
-                    device_handle
-                        .device
-                        .create_command_encoder(&CommandEncoderDescriptor {
-                            label: Some("Surface Blit"),
-                        });
-                surface.blitter.copy(
-                    &device_handle.device,
-                    &mut encoder,
-                    &surface.target_view,
-                    &surface_texture
-                        .texture
-                        .create_view(&TextureViewDescriptor::default()),
-                );
-                device_handle.queue.submit([encoder.finish()]);
-                // Queue the texture to be presented on the surface
-                surface_texture.present();
-
-                device_handle.device.poll(PollType::Poll).unwrap();
-            }
-            _ => {}
+        let dev_id = surface.dev_id;
+        self.renderers
+            .resize_with(self.render_context.devices.len(), || None);
+        let device_handle = &self.render_context.devices[dev_id];
+        if self.renderers[dev_id].is_none() {
+            let renderer = Renderer::new(&device_handle.device, RendererOptions::default())?;
+            self.renderers[dev_id] = Some(renderer);
         }
+        let renderer = self.renderers[dev_id]
+            .as_mut()
+            .expect("renderer must be initialized");
+
+        renderer.render_to_texture(
+            &device_handle.device,
+            &device_handle.queue,
+            &self.scene,
+            &surface.target_view,
+            &vello::RenderParams {
+                base_color: palette::css::TRANSPARENT,
+                width: surface.config.width,
+                height: surface.config.height,
+                antialiasing_method: AaConfig::Area,
+            },
+        )?;
+
+        let surface_texture = match surface.surface.get_current_texture() {
+            Ok(texture) => texture,
+            Err(SurfaceError::Outdated | SurfaceError::Lost) => {
+                self.render_surface = None;
+                self.ensure_surface(self.width, self.height)?;
+                return Ok(());
+            }
+            Err(SurfaceError::Timeout) => return Ok(()),
+            Err(err) => bail!("Failed to acquire surface texture: {err:?}"),
+        };
+
+        let mut encoder = device_handle
+            .device
+            .create_command_encoder(&CommandEncoderDescriptor {
+                label: Some("Cantus Surface Blit"),
+            });
+        surface.blitter.copy(
+            &device_handle.device,
+            &mut encoder,
+            &surface.target_view,
+            &surface_texture
+                .texture
+                .create_view(&TextureViewDescriptor::default()),
+        );
+        device_handle.queue.submit([encoder.finish()]);
+        surface_texture.present();
+
+        device_handle.device.poll(PollType::Poll)?;
+
+        Ok(())
     }
 }
 
-/// Create the vello scene structure
+impl CompositorHandler for CantusLayer {
+    fn scale_factor_changed(
+        &mut self,
+        _conn: &Connection,
+        _qh: &QueueHandle<Self>,
+        _surface: &wl_surface::WlSurface,
+        _new_factor: i32,
+    ) {
+    }
+
+    fn transform_changed(
+        &mut self,
+        _conn: &Connection,
+        _qh: &QueueHandle<Self>,
+        _surface: &wl_surface::WlSurface,
+        _new_transform: wl_output::Transform,
+    ) {
+    }
+
+    fn frame(
+        &mut self,
+        _conn: &Connection,
+        qh: &QueueHandle<Self>,
+        surface: &wl_surface::WlSurface,
+        _time: u32,
+    ) {
+        let _ = self.frame_callback.take();
+        if self.layer_surface.wl_surface().id() != surface.id() {
+            return;
+        }
+        if let Err(err) = self.render() {
+            error!("Rendering failed: {err:?}");
+            return;
+        }
+        self.request_frame(qh);
+    }
+
+    fn surface_enter(
+        &mut self,
+        _conn: &Connection,
+        _qh: &QueueHandle<Self>,
+        _surface: &wl_surface::WlSurface,
+        _output: &wl_output::WlOutput,
+    ) {
+    }
+
+    fn surface_leave(
+        &mut self,
+        _conn: &Connection,
+        _qh: &QueueHandle<Self>,
+        _surface: &wl_surface::WlSurface,
+        _output: &wl_output::WlOutput,
+    ) {
+    }
+}
+
+impl LayerShellHandler for CantusLayer {
+    fn closed(&mut self, _conn: &Connection, _qh: &QueueHandle<Self>, _layer: &LayerSurface) {
+        self.should_exit = true;
+    }
+
+    fn configure(
+        &mut self,
+        _conn: &Connection,
+        qh: &QueueHandle<Self>,
+        _layer: &LayerSurface,
+        configure: LayerSurfaceConfigure,
+        _serial: u32,
+    ) {
+        let (width, height) = configure.new_size;
+        self.width = if width == 0 { PANEL_WIDTH } else { width };
+        self.height = if height == 0 { PANEL_HEIGHT } else { height };
+
+        if let Err(err) = self.ensure_surface(self.width, self.height) {
+            error!("Failed to prepare render surface: {err:?}");
+            self.should_exit = true;
+            return;
+        }
+        if let Err(err) = self.render() {
+            error!("Rendering failed: {err:?}");
+        }
+        self.request_frame(qh);
+    }
+}
+
+impl OutputHandler for CantusLayer {
+    fn output_state(&mut self) -> &mut OutputState {
+        &mut self.output_state
+    }
+
+    fn new_output(
+        &mut self,
+        _conn: &Connection,
+        _qh: &QueueHandle<Self>,
+        _output: wl_output::WlOutput,
+    ) {
+    }
+
+    fn update_output(
+        &mut self,
+        _conn: &Connection,
+        _qh: &QueueHandle<Self>,
+        _output: wl_output::WlOutput,
+    ) {
+    }
+
+    fn output_destroyed(
+        &mut self,
+        _conn: &Connection,
+        _qh: &QueueHandle<Self>,
+        _output: wl_output::WlOutput,
+    ) {
+    }
+}
+
+impl ProvidesRegistryState for CantusLayer {
+    fn registry(&mut self) -> &mut RegistryState {
+        &mut self.registry_state
+    }
+
+    fn runtime_add_global(
+        &mut self,
+        _conn: &Connection,
+        _qh: &QueueHandle<Self>,
+        _name: u32,
+        _interface: &str,
+        _version: u32,
+    ) {
+    }
+
+    fn runtime_remove_global(
+        &mut self,
+        _conn: &Connection,
+        _qh: &QueueHandle<Self>,
+        _name: u32,
+        _interface: &str,
+    ) {
+    }
+}
+
+delegate_compositor!(CantusLayer);
+delegate_output!(CantusLayer);
+delegate_layer!(CantusLayer);
+delegate_registry!(CantusLayer);
+
+struct WaylandHandles {
+    display: NonNull<c_void>,
+    surface: NonNull<c_void>,
+}
+
+impl WaylandHandles {
+    const fn new(display: NonNull<c_void>, surface: NonNull<c_void>) -> Self {
+        Self { display, surface }
+    }
+}
+
+impl HasDisplayHandle for WaylandHandles {
+    fn display_handle(&self) -> Result<DisplayHandle<'_>, HandleError> {
+        let handle = WaylandDisplayHandle::new(self.display);
+        // Safety: the Wayland compositor guarantees that display pointers remain valid
+        // while the connection is alive, which matches the lifetime of `CantusLayer`.
+        unsafe { Ok(DisplayHandle::borrow_raw(RawDisplayHandle::Wayland(handle))) }
+    }
+}
+
+impl HasWindowHandle for WaylandHandles {
+    fn window_handle(&self) -> Result<WindowHandle<'_>, HandleError> {
+        let handle = WaylandWindowHandle::new(self.surface);
+        // Safety: the wl_surface stays alive for the lifetime of the layer surface.
+        unsafe { Ok(WindowHandle::borrow_raw(RawWindowHandle::Wayland(handle))) }
+    }
+}
+
+// SAFETY: The wl_display and wl_surface referenced by the pointers remain valid for the lifetime
+// of `CantusLayer`, and wgpu only reads the pointers when creating the surface.
+unsafe impl Send for WaylandHandles {}
+unsafe impl Sync for WaylandHandles {}
+
 fn create_scene(scene: &mut Scene, width: f64, height: f64) {
     // Draw a rectangle filling the screen
     scene.fill(
@@ -287,23 +485,31 @@ fn create_scene(scene: &mut Scene, width: f64, height: f64) {
     );
 
     // Draw the text for song, album, and artist
-    let song_text_x = height - PANEL_MARGIN + 20.0;
-    let text_color = Color::from_rgb8(240, 240, 240);
-    let text_items = vec![
-        ("Song: TODO", 22.0, -22.0),
-        ("Album: TODO", 14.0, 0.0),
-        ("Artist: TODO", 18.0, 22.0),
-    ];
-    for (text, size, y_offset) in text_items {
-        draw_text(
-            scene,
-            text,
-            size,
-            text_color,
-            song_text_x,
-            height.mul_add(0.5, y_offset),
-        );
-    }
+    let mut text_x = height - PANEL_MARGIN + 10.0;
+    text_x += draw_text(
+        scene,
+        "Song",
+        16.0,
+        Color::from_rgb8(240, 240, 240),
+        text_x,
+        height * 0.5,
+    ) + 6.0;
+    text_x += draw_text(
+        scene,
+        "- Album",
+        14.0,
+        Color::from_rgb8(240, 240, 240),
+        text_x,
+        height * 0.5,
+    ) + 6.0;
+    draw_text(
+        scene,
+        "- Artist",
+        12.0,
+        Color::from_rgb8(210, 210, 210),
+        text_x,
+        height * 0.5,
+    );
 }
 
 fn draw_text(
@@ -313,7 +519,7 @@ fn draw_text(
     font_color: Color,
     text_x: f64,
     text_y: f64,
-) {
+) -> f64 {
     let mut font_cx = FontContext::new();
     let mut layout_cx = LayoutContext::new();
 
@@ -339,7 +545,10 @@ fn draw_text(
             .font_size(run.font_size())
             .normalized_coords(run.normalized_coords())
             .transform(text_transform)
+            .hint(true)
             .brush(font_color)
             .draw(Fill::NonZero, glyphs);
     }
+
+    f64::from(layout.width())
 }
