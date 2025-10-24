@@ -6,6 +6,7 @@ use raw_window_handle::{
     DisplayHandle, HandleError, HasDisplayHandle, HasWindowHandle, RawDisplayHandle,
     RawWindowHandle, WaylandDisplayHandle, WaylandWindowHandle, WindowHandle,
 };
+use rspotify::model::PlayableItem;
 use smithay_client_toolkit::{
     compositor::{CompositorHandler, CompositorState},
     delegate_compositor, delegate_layer, delegate_output, delegate_registry,
@@ -38,10 +39,12 @@ use wayland_client::{
     protocol::{wl_callback, wl_output, wl_surface},
 };
 
+use crate::spotify::CURRENT_SONGS;
+
 mod spotify;
 
-const PANEL_WIDTH: u32 = 280;
-const PANEL_HEIGHT: u32 = 38;
+const PANEL_WIDTH: f64 = 600.0;
+const PANEL_HEIGHT: f64 = 80.0;
 
 const PANEL_MARGIN: f64 = 3.0;
 
@@ -80,8 +83,8 @@ fn run_layer_shell() {
     layer_surface.set_anchor(Anchor::TOP | Anchor::LEFT);
     layer_surface.set_keyboard_interactivity(KeyboardInteractivity::None);
     layer_surface.set_exclusive_zone(-1);
-    layer_surface.set_margin(4, 4, 4, 4);
-    layer_surface.set_size(PANEL_WIDTH, PANEL_HEIGHT);
+    layer_surface.set_margin(4, 0, 0, 4);
+    layer_surface.set_size(PANEL_WIDTH as u32, PANEL_HEIGHT as u32);
     layer_surface.commit();
 
     let registry_state = RegistryState::new(&globals);
@@ -112,12 +115,13 @@ struct CantusLayer {
     renderers: Vec<Option<Renderer>>,
     render_surface: Option<RenderSurface<'static>>,
     scene: Scene,
-    width: u32,
-    height: u32,
+    width: f64,
+    height: f64,
     frame_callback: Option<wl_callback::WlCallback>,
     should_exit: bool,
     display_ptr: NonNull<c_void>,
     surface_ptr: NonNull<c_void>,
+    scale_factor: i32,
 }
 
 impl CantusLayer {
@@ -142,6 +146,7 @@ impl CantusLayer {
             should_exit: false,
             display_ptr,
             surface_ptr,
+            scale_factor: 1,
         }
     }
 
@@ -156,15 +161,16 @@ impl CantusLayer {
         self.frame_callback = Some(callback);
     }
 
-    fn ensure_surface(&mut self, width: u32, height: u32) -> Result<()> {
-        if width == 0 || height == 0 {
+    fn ensure_surface(&mut self, width: f64, height: f64) -> Result<()> {
+        if width == 0.0 || height == 0.0 {
             self.render_surface = None;
             return Ok(());
         }
 
         if let Some(surface) = &mut self.render_surface {
-            if surface.config.width != width || surface.config.height != height {
-                self.render_context.resize_surface(surface, width, height);
+            if surface.config.width != width as u32 || surface.config.height != height as u32 {
+                self.render_context
+                    .resize_surface(surface, width as u32, height as u32);
             }
             return Ok(());
         }
@@ -177,8 +183,8 @@ impl CantusLayer {
 
         let mut render_surface = pollster::block_on(self.render_context.create_render_surface(
             surface,
-            width,
-            height,
+            width as u32,
+            height as u32,
             PresentMode::AutoNoVsync,
         ))?;
 
@@ -221,6 +227,7 @@ impl CantusLayer {
             &mut self.scene,
             f64::from(surface.config.width),
             f64::from(surface.config.height),
+            f64::from(self.scale_factor),
         );
 
         let dev_id = surface.dev_id;
@@ -285,10 +292,18 @@ impl CompositorHandler for CantusLayer {
     fn scale_factor_changed(
         &mut self,
         _conn: &Connection,
-        _qh: &QueueHandle<Self>,
+        qh: &QueueHandle<Self>,
         _surface: &wl_surface::WlSurface,
-        _new_factor: i32,
+        new_factor: i32,
     ) {
+        self.scale_factor = new_factor;
+        self.layer_surface.wl_surface().set_buffer_scale(new_factor);
+        self.layer_surface.wl_surface().commit();
+        // Re-render to apply the new scale factor
+        if let Err(err) = self.render() {
+            error!("Rendering failed after scale factor change: {err:?}");
+        }
+        self.request_frame(qh);
     }
 
     fn transform_changed(
@@ -351,8 +366,16 @@ impl LayerShellHandler for CantusLayer {
         _serial: u32,
     ) {
         let (width, height) = configure.new_size;
-        self.width = if width == 0 { PANEL_WIDTH } else { width };
-        self.height = if height == 0 { PANEL_HEIGHT } else { height };
+        self.width = if width == 0 {
+            PANEL_WIDTH * f64::from(self.scale_factor)
+        } else {
+            f64::from(width)
+        };
+        self.height = if height == 0 {
+            PANEL_HEIGHT * f64::from(self.scale_factor)
+        } else {
+            f64::from(height)
+        };
 
         if let Err(err) = self.ensure_surface(self.width, self.height) {
             error!("Failed to prepare render surface: {err:?}");
@@ -459,14 +482,16 @@ impl HasWindowHandle for WaylandHandles {
 unsafe impl Send for WaylandHandles {}
 unsafe impl Sync for WaylandHandles {}
 
-fn create_scene(scene: &mut Scene, width: f64, height: f64) {
+fn create_scene(scene: &mut Scene, width: f64, height: f64, scale_factor: f64) {
+    let scaled_panel_margin = PANEL_MARGIN * scale_factor;
+
     // Draw a rectangle filling the screen
     scene.fill(
         Fill::NonZero,
         Affine::IDENTITY,
         Color::new([0.9, 0.5, 0.6, 1.0]),
         None,
-        &RoundedRect::new(0.0, 0.0, width, height, 10.0),
+        &RoundedRect::new(0.0, 0.0, width, height, 10.0 * scale_factor),
     );
 
     // Draw the album art
@@ -476,46 +501,51 @@ fn create_scene(scene: &mut Scene, width: f64, height: f64) {
         Color::new([0.5, 0.0, 0.0, 1.0]),
         None,
         &RoundedRect::new(
-            PANEL_MARGIN,
-            PANEL_MARGIN,
-            height - PANEL_MARGIN,
-            height - PANEL_MARGIN,
-            10.0,
+            scaled_panel_margin,
+            scaled_panel_margin,
+            height - scaled_panel_margin,
+            height - scaled_panel_margin,
+            10.0 * scale_factor,
         ),
     );
 
     // Draw the text for song, album, and artist
-    let mut text_x = height - PANEL_MARGIN + 10.0;
-    text_x += draw_text(
+    let album_art_right_edge = scaled_panel_margin + (height - 2.0 * scaled_panel_margin);
+    let text_x = album_art_right_edge + (10.0 * scale_factor);
+    let text_y = height * 0.5;
+
+    // Get current queue and song
+    let Some(current_queue) = CURRENT_SONGS.lock().clone() else {
+        return;
+    };
+    let Some(PlayableItem::Track(song)) = current_queue.currently_playing else {
+        return;
+    };
+
+    let song_text_width = draw_text(
         scene,
-        "Song",
-        16.0,
+        &song.name,
+        15.0 * scale_factor,
         Color::from_rgb8(240, 240, 240),
         text_x,
-        height * 0.5,
-    ) + 6.0;
-    text_x += draw_text(
-        scene,
-        "- Album",
-        14.0,
-        Color::from_rgb8(240, 240, 240),
-        text_x,
-        height * 0.5,
-    ) + 6.0;
+        text_y,
+    ) + 8.0 * scale_factor;
     draw_text(
         scene,
-        "- Artist",
-        12.0,
-        Color::from_rgb8(210, 210, 210),
-        text_x,
-        height * 0.5,
+        song.artists
+            .first()
+            .map_or("Unknown Artist", |artist| artist.name.as_str()),
+        12.0 * scale_factor,
+        Color::from_rgb8(240, 240, 240),
+        text_x + song_text_width,
+        text_y,
     );
 }
 
 fn draw_text(
     scene: &mut Scene,
     text: &str,
-    font_size: f32,
+    font_size: f64,
     font_color: Color,
     text_x: f64,
     text_y: f64,
@@ -524,7 +554,7 @@ fn draw_text(
     let mut layout_cx = LayoutContext::new();
 
     let mut builder = layout_cx.ranged_builder(&mut font_cx, text, 1.0, false);
-    builder.push_default(StyleProperty::FontSize(font_size));
+    builder.push_default(StyleProperty::FontSize(font_size as f32));
 
     let mut layout: Layout<()> = builder.build(text);
     layout.break_all_lines(None);

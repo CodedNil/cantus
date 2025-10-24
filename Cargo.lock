@@ -219,6 +219,7 @@ dependencies = [
  "anyhow",
  "dotenvy",
  "image",
+ "parking_lot",
  "parley",
  "pollster",
  "raw-window-handle",

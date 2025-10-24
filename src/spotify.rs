@@ -1,7 +1,15 @@
 use anyhow::Result;
+use parking_lot::Mutex;
 use rspotify::{
-    AuthCodeSpotify, Config, Credentials, OAuth, model::PlayableItem, prelude::OAuthClient, scopes,
+    AuthCodeSpotify, Config, Credentials, OAuth,
+    model::{CurrentUserQueue, PlayableItem},
+    prelude::OAuthClient,
+    scopes,
 };
+use std::sync::{Arc, LazyLock};
+
+pub static CURRENT_SONGS: LazyLock<Arc<Mutex<Option<CurrentUserQueue>>>> =
+    LazyLock::new(|| Arc::new(Mutex::new(None)));
 
 pub async fn init() -> Result<()> {
     let spotify = AuthCodeSpotify::with_config(
@@ -48,6 +56,8 @@ pub async fn init() -> Result<()> {
     }
     if let Ok(queue) = spotify.current_user_queue().await {
         println!("Queue: {:?}", queue.queue.len());
+        let mut binding = CURRENT_SONGS.lock();
+        *binding = Some(queue);
     }
 
     Ok(())
