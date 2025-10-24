@@ -1,6 +1,7 @@
 use anyhow::{Result, bail};
 use parley::{
-    FontContext, Layout, LayoutContext, layout::PositionedLayoutItem, style::StyleProperty,
+    FontContext, FontWeight, Layout, LayoutContext, layout::PositionedLayoutItem,
+    style::StyleProperty,
 };
 use raw_window_handle::{
     DisplayHandle, HandleError, HasDisplayHandle, HasWindowHandle, RawDisplayHandle,
@@ -20,13 +21,13 @@ use smithay_client_toolkit::{
         },
     },
 };
-use std::{ffi::c_void, ptr::NonNull};
+use std::{ffi::c_void, ptr::NonNull, sync::Arc};
 use tracing::{error, level_filters::LevelFilter};
 use tracing_subscriber::EnvFilter;
 use vello::{
     AaConfig, Glyph, Renderer, RendererOptions, Scene,
     kurbo::{Affine, RoundedRect},
-    peniko::{Color, Fill, color::palette},
+    peniko::{Blob, Color, Fill, color::palette},
     util::{RenderContext, RenderSurface},
     wgpu::{
         CommandEncoderDescriptor, CompositeAlphaMode, PollType, PresentMode, SurfaceError,
@@ -115,6 +116,8 @@ struct CantusLayer {
     renderers: Vec<Option<Renderer>>,
     render_surface: Option<RenderSurface<'static>>,
     scene: Scene,
+    font_context: FontContext,
+    layout_context: LayoutContext<()>,
     width: f64,
     height: f64,
     frame_callback: Option<wl_callback::WlCallback>,
@@ -132,6 +135,14 @@ impl CantusLayer {
         display_ptr: NonNull<c_void>,
         surface_ptr: NonNull<c_void>,
     ) -> Self {
+        let mut font_context = FontContext::new();
+        font_context.collection.register_fonts(
+            Blob::new(Arc::new(include_bytes!("../assets/epilogue.ttf"))),
+            None,
+        );
+        // Verify the font was added correctly
+        font_context.collection.family_id("epilogue").unwrap();
+
         Self {
             registry_state,
             output_state,
@@ -140,6 +151,8 @@ impl CantusLayer {
             renderers: Vec::new(),
             render_surface: None,
             scene: Scene::new(),
+            font_context,
+            layout_context: LayoutContext::new(),
             width: PANEL_WIDTH,
             height: PANEL_HEIGHT,
             frame_callback: None,
@@ -225,6 +238,8 @@ impl CantusLayer {
         self.scene.reset();
         create_scene(
             &mut self.scene,
+            &mut self.font_context,
+            &mut self.layout_context,
             f64::from(surface.config.width),
             f64::from(surface.config.height),
             f64::from(self.scale_factor),
@@ -482,7 +497,14 @@ impl HasWindowHandle for WaylandHandles {
 unsafe impl Send for WaylandHandles {}
 unsafe impl Sync for WaylandHandles {}
 
-fn create_scene(scene: &mut Scene, width: f64, height: f64, scale_factor: f64) {
+fn create_scene(
+    scene: &mut Scene,
+    font_context: &mut FontContext,
+    layout_context: &mut LayoutContext<()>,
+    width: f64,
+    height: f64,
+    scale_factor: f64,
+) {
     let scaled_panel_margin = PANEL_MARGIN * scale_factor;
 
     // Draw a rectangle filling the screen
@@ -491,7 +513,7 @@ fn create_scene(scene: &mut Scene, width: f64, height: f64, scale_factor: f64) {
         Affine::IDENTITY,
         Color::new([0.9, 0.5, 0.6, 1.0]),
         None,
-        &RoundedRect::new(0.0, 0.0, width, height, 10.0 * scale_factor),
+        &RoundedRect::new(0.0, 0.0, width, height, 14.0 * scale_factor),
     );
 
     // Draw the album art
@@ -524,19 +546,23 @@ fn create_scene(scene: &mut Scene, width: f64, height: f64, scale_factor: f64) {
 
     let song_text_width = draw_text(
         scene,
+        font_context,
+        layout_context,
         &song.name,
         15.0 * scale_factor,
         Color::from_rgb8(240, 240, 240),
+        FontWeight::SEMI_BOLD,
         text_x,
         text_y,
     ) + 8.0 * scale_factor;
     draw_text(
         scene,
-        song.artists
-            .first()
-            .map_or("Unknown Artist", |artist| artist.name.as_str()),
+        font_context,
+        layout_context,
+        song.artists.first().map_or("Unknown", |a| &a.name),
         12.0 * scale_factor,
         Color::from_rgb8(240, 240, 240),
+        FontWeight::EXTRA_BLACK,
         text_x + song_text_width,
         text_y,
     );
@@ -544,17 +570,18 @@ fn create_scene(scene: &mut Scene, width: f64, height: f64, scale_factor: f64) {
 
 fn draw_text(
     scene: &mut Scene,
+    font_context: &mut FontContext,
+    layout_context: &mut LayoutContext<()>,
     text: &str,
     font_size: f64,
     font_color: Color,
+    font_weight: FontWeight,
     text_x: f64,
     text_y: f64,
 ) -> f64 {
-    let mut font_cx = FontContext::new();
-    let mut layout_cx = LayoutContext::new();
-
-    let mut builder = layout_cx.ranged_builder(&mut font_cx, text, 1.0, false);
+    let mut builder = layout_context.ranged_builder(font_context, text, 1.0, false);
     builder.push_default(StyleProperty::FontSize(font_size as f32));
+    builder.push_default(StyleProperty::FontWeight(font_weight));
 
     let mut layout: Layout<()> = builder.build(text);
     layout.break_all_lines(None);

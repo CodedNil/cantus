@@ -12,6 +12,7 @@ wayland-backend = { version = "0.3.11", features = ["client_system"] }
 wayland-client = "0.31.11"
 smithay-client-toolkit = "0.20.0"
 vello = "0.6.0"
+parley = "0.6.0"
 rspotify = { version = "0.15.2", features = ["cli"] }
 image = { version = "0.25.8", default-features = false, features = [
     "webp",
@@ -20,7 +21,6 @@ image = { version = "0.25.8", default-features = false, features = [
 ] }
 anyhow = "1.0.100"
 pollster = "0.4.0"
-parley = "0.6.0"
 tokio = { version = "1.48.0", features = ["full"] }
 parking_lot = "0.12.5"
 
