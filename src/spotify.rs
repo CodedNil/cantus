@@ -3,26 +3,24 @@ use mpris::{PlaybackStatus, PlayerFinder};
 use parking_lot::Mutex;
 use rspotify::{
     AuthCodeSpotify, Config, Credentials, OAuth,
-    model::{AdditionalType, CurrentUserQueue},
+    model::{AdditionalType, PlayableItem},
     prelude::OAuthClient,
     scopes,
 };
 use std::sync::{Arc, LazyLock};
 use tokio::time::{Duration, sleep};
 
-/// Stores the current Spotify queue and currently playing item.
-pub static CURRENT_SONGS: LazyLock<Arc<Mutex<Option<CurrentUserQueue>>>> =
-    LazyLock::new(|| Arc::new(Mutex::new(None)));
-
-/// Stores the current playback progress in milliseconds.
+/// Stores the current playback state
 pub static PLAYBACK_STATE: LazyLock<Arc<Mutex<PlaybackState>>> =
     LazyLock::new(|| Arc::new(Mutex::new(PlaybackState::default())));
 
-#[derive(Default)]
+#[derive(Default, Clone)]
 pub struct PlaybackState {
-    playing: bool,
-    shuffle: bool,
-    progress: u64,
+    pub playing: bool,
+    pub shuffle: bool,
+    pub progress: u64,
+    pub currently_playing: Option<PlayableItem>,
+    pub queue: Vec<PlayableItem>,
 }
 
 /// Initializes the Spotify client and spawns the combined MPRIS and Spotify polling task.
@@ -110,17 +108,17 @@ async fn polling_task(spotify_client: AuthCodeSpotify) {
 
             // Fetch the current user's queue from Spotify
             if let Ok(queue) = spotify_client.current_user_queue().await {
-                *CURRENT_SONGS.lock() = Some(queue.clone());
+                PLAYBACK_STATE.lock().currently_playing = queue.currently_playing;
+                PLAYBACK_STATE.lock().queue = queue.queue;
             }
             if let Ok(Some(playback)) = spotify_client
                 .current_playback(None, None::<Vec<&AdditionalType>>)
                 .await
             {
-                *PLAYBACK_STATE.lock() = PlaybackState {
-                    playing: playback.is_playing,
-                    shuffle: playback.shuffle_state,
-                    progress: playback.progress.map_or(0, |p| p.num_milliseconds() as u64),
-                };
+                PLAYBACK_STATE.lock().playing = playback.is_playing;
+                PLAYBACK_STATE.lock().shuffle = playback.shuffle_state;
+                PLAYBACK_STATE.lock().progress =
+                    playback.progress.map_or(0, |p| p.num_milliseconds() as u64);
             }
         }
 

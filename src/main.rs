@@ -1,4 +1,4 @@
-use crate::spotify::CURRENT_SONGS;
+use crate::spotify::PLAYBACK_STATE;
 use anyhow::Result;
 use parley::{
     FontContext, FontFamily, FontStack, FontWeight, Layout, LayoutContext,
@@ -9,7 +9,7 @@ use raw_window_handle::{
 };
 use rspotify::model::PlayableItem;
 use std::{borrow::Cow, env, ffi::c_void, ptr::NonNull, sync::Arc};
-use tracing::{error, info, level_filters::LevelFilter, warn};
+use tracing::error;
 use tracing_subscriber::EnvFilter;
 use vello::{
     AaConfig, Glyph, Renderer, RendererOptions, Scene,
@@ -17,8 +17,8 @@ use vello::{
     peniko::{Blob, Color, Fill, color::palette},
     util::{RenderContext, RenderSurface},
     wgpu::{
-        CommandEncoderDescriptor, CompositeAlphaMode, PollType, PresentMode, SurfaceTargetUnsafe,
-        TextureViewDescriptor,
+        CommandEncoderDescriptor, CompositeAlphaMode, InstanceDescriptor, PollType, PresentMode,
+        SurfaceTargetUnsafe, TextureViewDescriptor,
     },
 };
 use wayland_client::{
@@ -48,8 +48,8 @@ use wayland_protocols_wlr::layer_shell::v1::client::{
 
 mod spotify;
 
-const PANEL_WIDTH: f64 = 600.0;
-const PANEL_HEIGHT: f64 = 80.0;
+const PANEL_WIDTH: f64 = 300.0;
+const PANEL_HEIGHT: f64 = 40.0;
 
 const PANEL_MARGIN: f64 = 3.0;
 
@@ -59,10 +59,9 @@ async fn main() {
     dotenvy::dotenv().ok();
 
     tracing_subscriber::fmt()
-        .with_env_filter(
-            EnvFilter::try_from_default_env()
-                .unwrap_or_else(|_| EnvFilter::new(LevelFilter::WARN.to_string())),
-        )
+        .with_env_filter(EnvFilter::new(
+            ["warn", "cantus=info", "wgpu_hal=error"].join(","),
+        ))
         .init();
 
     spotify::init().await.unwrap();
@@ -81,32 +80,23 @@ fn run_layer_shell() {
 
     // Initial roundtrip to get globals
     if let Err(err) = event_queue.roundtrip(&mut app) {
-        error!("Initial roundtrip failed: {:?}", err);
-        return;
+        panic!("Initial roundtrip failed: {err}");
     }
     let (Some(compositor), Some(layer_shell)) = (app.compositor.take(), app.layer_shell.take())
     else {
-        error!("Missing compositor or layer shell");
-        return;
+        panic!("Missing compositor or layer shell");
     };
-    if app.outputs.is_empty() {
-        error!("No Wayland outputs found");
-        return;
-    }
+    assert!(!app.outputs.is_empty(), "No Wayland outputs found");
 
     if let Err(err) = event_queue.roundtrip(&mut app) {
-        error!("Failed to fetch output details: {:?}", err);
-        return;
+        panic!("Failed to fetch output details: {err}");
     }
 
     let wl_surface = compositor.create_surface(&qh, ());
     let surface_ptr = NonNull::new(wl_surface.id().as_ptr().cast::<c_void>()).unwrap();
 
     app.surface_ptr = Some(surface_ptr);
-    if !app.try_select_output() {
-        error!("Failed to select a Wayland output");
-        return;
-    }
+    assert!(app.try_select_output(), "Failed to select a Wayland output");
     app.wl_surface = Some(wl_surface);
 
     if let (Some(vp), Some(fm)) = (app.viewporter.take(), app.fractional_manager.take()) {
@@ -117,7 +107,7 @@ fn run_layer_shell() {
     let layer_surface = layer_shell.get_layer_surface(
         app.wl_surface.as_ref().unwrap(),
         app.output.as_ref(),
-        zwlr_layer_shell_v1::Layer::Top,
+        zwlr_layer_shell_v1::Layer::Overlay,
         "cantus".into(),
         &qh,
         (),
@@ -126,26 +116,23 @@ fn run_layer_shell() {
     let ls = app.layer_surface.as_ref().unwrap();
     ls.set_size(PANEL_WIDTH as u32, PANEL_HEIGHT as u32);
     ls.set_anchor(zwlr_layer_surface_v1::Anchor::Top | zwlr_layer_surface_v1::Anchor::Left);
-    ls.set_margin(PANEL_MARGIN as i32, 0, 0, PANEL_MARGIN as i32);
+    ls.set_margin(6, 0, 0, 6);
     ls.set_exclusive_zone(0);
 
     app.wl_surface.as_ref().unwrap().commit();
-    if connection.flush().is_err() {
-        error!("Failed to flush initial commit");
-        return;
+    if let Err(err) = connection.flush() {
+        panic!("Failed to flush initial commit: {err}");
     }
 
     while !app.is_configured && !app.should_exit {
-        if event_queue.blocking_dispatch(&mut app).is_err() {
-            error!("Error awaiting configure");
-            return;
+        if let Err(err) = event_queue.blocking_dispatch(&mut app) {
+            panic!("Error awaiting configure: {err}");
         }
     }
 
     while !app.should_exit {
-        if event_queue.blocking_dispatch(&mut app).is_err() {
-            error!("Wayland dispatch error");
-            break;
+        if let Err(err) = event_queue.blocking_dispatch(&mut app) {
+            panic!("Wayland dispatch error: {err}");
         }
     }
 }
@@ -227,6 +214,13 @@ impl CantusLayer {
         // Verify the font was added correctly
         font_context.collection.family_id("epilogue").unwrap();
 
+        // Create a RenderContext with Vulkan backend
+        let mut render_context = RenderContext::new();
+        render_context.instance = vello::wgpu::Instance::new(&InstanceDescriptor {
+            backends: vello::wgpu::Backends::VULKAN,
+            ..Default::default()
+        });
+
         Self {
             // --- Wayland globals ---
             compositor: None,
@@ -245,7 +239,7 @@ impl CantusLayer {
             frame_callback: None,
 
             // --- Rendering ---
-            render_context: RenderContext::new(),
+            render_context,
             render_surface: None,
             renderers: Vec::new(),
             scene: Scene::new(),
@@ -266,7 +260,7 @@ impl CantusLayer {
     }
 
     fn request_frame(&mut self, qh: &QueueHandle<Self>) {
-        if self.frame_callback.is_none() {
+        if self.frame_callback.is_none() && self.wl_surface.is_some() {
             self.frame_callback = Some(self.wl_surface.as_ref().unwrap().frame(qh, ()));
         }
     }
@@ -327,18 +321,6 @@ impl CantusLayer {
                 .map_or_else(|| true, |id| id.id() != info.handle.id())
                 || (matches_target && !self.output_matched)
             {
-                let name = info
-                    .description
-                    .unwrap_or_else(|| info.handle.id().to_string());
-                if let Some(target) = target_monitor {
-                    if matches_target {
-                        info!("Selecting monitor '{name}' for TARGET_MONITOR={target}");
-                    } else {
-                        warn!("No output matching TARGET_MONITOR={target}; using '{name}'");
-                    }
-                } else {
-                    info!("Selecting default monitor '{name}'");
-                }
                 self.output = Some(info.handle);
                 self.output_matched = matches_target;
             }
@@ -359,59 +341,106 @@ impl CantusLayer {
             update(info);
         }
     }
+    // New method: try_render_frame (replaces render). Returns Result<()> for error handling.
+    fn try_render_frame(&mut self, qh: &QueueHandle<Self>) -> Result<()> {
+        // Auto-recover if surface lost
+        if self.render_surface.is_none() {
+            let buffer_width = (self.logical_width * self.scale_factor).round();
+            let buffer_height = (self.logical_height * self.scale_factor).round();
+            self.ensure_surface(buffer_width, buffer_height)?;
+        }
 
-    fn render(&mut self) -> Result<()> {
-        let Some(surface) = &mut self.render_surface else {
+        let Some(surface) = self.render_surface.take() else {
             return Ok(());
         };
-        self.scene.reset();
-        create_scene(
-            &mut self.scene,
-            &mut self.font_context,
-            &mut self.layout_context,
-            surface.config.width.into(),
-            surface.config.height.into(),
-            self.scale_factor,
-        );
 
         let dev_id = surface.dev_id;
-        let device_handle = &self.render_context.devices[dev_id];
-        let renderer = self.renderers[dev_id].get_or_insert(Renderer::new(
-            &device_handle.device,
-            RendererOptions::default(),
-        )?);
+        let mut surface_lost = false;
+        let mut tex = None;
+        let mut command_buffer = None;
 
-        renderer.render_to_texture(
-            &device_handle.device,
-            &device_handle.queue,
-            &self.scene,
-            &surface.target_view,
-            &vello::RenderParams {
-                base_color: palette::css::TRANSPARENT,
-                width: surface.config.width,
-                height: surface.config.height,
-                antialiasing_method: AaConfig::Area,
-            },
-        )?;
+        {
+            let device_handle = &self.render_context.devices[dev_id];
+            let renderer = self.renderers[dev_id].get_or_insert(Renderer::new(
+                &device_handle.device,
+                RendererOptions::default(),
+            )?);
 
-        let Ok(tex) = surface.surface.get_current_texture() else {
+            // Prepare scene (offscreen render).
+            self.scene.reset();
+            create_scene(
+                &mut self.scene,
+                &mut self.font_context,
+                &mut self.layout_context,
+                surface.config.width.into(),
+                surface.config.height.into(),
+                self.scale_factor,
+            );
+
+            renderer.render_to_texture(
+                &device_handle.device,
+                &device_handle.queue,
+                &self.scene,
+                &surface.target_view,
+                &vello::RenderParams {
+                    base_color: palette::css::TRANSPARENT,
+                    width: surface.config.width,
+                    height: surface.config.height,
+                    antialiasing_method: AaConfig::Area,
+                },
+            )?;
+
+            if let Ok(acquired) = surface.surface.get_current_texture() {
+                let mut encoder =
+                    device_handle
+                        .device
+                        .create_command_encoder(&CommandEncoderDescriptor {
+                            label: Some("Cantus blit"),
+                        });
+                surface.blitter.copy(
+                    &device_handle.device,
+                    &mut encoder,
+                    &surface.target_view,
+                    &acquired
+                        .texture
+                        .create_view(&TextureViewDescriptor::default()),
+                );
+                tex = Some(acquired);
+                command_buffer = Some(encoder.finish());
+            } else {
+                surface_lost = true;
+            }
+        }
+
+        if surface_lost {
+            // Keep the surface dropped to force recreation; schedule a new frame before committing
+            // so the compositor will notify us once it is ready again.
             self.render_surface = None;
+            self.request_frame(qh);
+            if let Some(s) = &self.wl_surface {
+                s.commit();
+            }
+            return Ok(());
+        }
+
+        let Some(tex) = tex else {
+            // Should be unreachable but bail defensively.
             return Ok(());
         };
-        let mut encoder = device_handle
-            .device
-            .create_command_encoder(&CommandEncoderDescriptor {
-                label: Some("Cantus blit"),
-            });
-        surface.blitter.copy(
-            &device_handle.device,
-            &mut encoder,
-            &surface.target_view,
-            &tex.texture.create_view(&TextureViewDescriptor::default()),
-        );
-        device_handle.queue.submit([encoder.finish()]);
+        let command_buffer = command_buffer.expect("missing command buffer after successful blit");
+
+        // Put the surface back before issuing queue operations so future calls can reuse it.
+        self.render_surface = Some(surface);
+
+        // Queue frame request after rendering but before presenting so the callback associates
+        // with this frame.
+        self.request_frame(qh);
+
+        let device_handle = &self.render_context.devices[dev_id];
+        device_handle.queue.submit([command_buffer]);
         tex.present();
         device_handle.device.poll(PollType::Poll)?;
+
         Ok(())
     }
 
@@ -448,7 +477,7 @@ impl Dispatch<ZwlrLayerSurfaceV1, ()> for CantusLayer {
                 width,
                 height,
             } => {
-                // Step 1: Update dimensions
+                // Update dimensions
                 state.logical_width = if width == 0 {
                     PANEL_WIDTH
                 } else {
@@ -460,35 +489,26 @@ impl Dispatch<ZwlrLayerSurfaceV1, ()> for CantusLayer {
                     f64::from(height)
                 };
 
-                // Step 2: Acknowledge immediately
                 proxy.ack_configure(serial);
-
-                // Step 3: Update scale and viewport
                 state.update_scale_and_viewport();
-
-                // Step 4: Commit all changes together
                 if let Some(surface) = &state.wl_surface {
                     surface.commit();
                 }
-
-                // Step 5: Mark as configured
                 state.is_configured = true;
 
-                // Step 6: Create surface if needed (only after configured)
                 let buffer_width = (state.logical_width * state.scale_factor).round();
                 let buffer_height = (state.logical_height * state.scale_factor).round();
 
                 if let Err(err) = state.ensure_surface(buffer_width, buffer_height) {
-                    error!("Failed to prepare render surface: {err:?}");
+                    error!("Failed to prepare render surface: {err}");
                     state.should_exit = true;
                     return;
                 }
 
-                // Step 7: Render and request frame
-                if let Err(err) = state.render() {
-                    error!("Rendering failed: {err:?}");
+                // Render first frame and request next.
+                if let Err(err) = state.try_render_frame(qhandle) {
+                    error!("Initial rendering failed: {err}");
                 }
-                state.request_frame(qhandle);
             }
             zwlr_layer_surface_v1::Event::Closed => {
                 state.should_exit = true;
@@ -505,7 +525,7 @@ impl Dispatch<WpFractionalScaleV1, ()> for CantusLayer {
         event: wp_fractional_scale_v1::Event,
         _data: &(),
         _conn: &Connection,
-        _qhandle: &QueueHandle<Self>,
+        qhandle: &QueueHandle<Self>,
     ) {
         if let wp_fractional_scale_v1::Event::PreferredScale { scale } = event {
             state.scale_factor = f64::from(scale) / 120.0;
@@ -521,13 +541,13 @@ impl Dispatch<WpFractionalScaleV1, ()> for CantusLayer {
                 let buffer_height = (state.logical_height * state.scale_factor).round();
 
                 if let Err(err) = state.ensure_surface(buffer_width, buffer_height) {
-                    error!("Failed to prepare render surface: {err:?}");
+                    error!("Failed to prepare render surface: {err}");
                     state.should_exit = true;
                     return;
                 }
 
-                if let Err(err) = state.render() {
-                    error!("Rendering failed after scale change: {err:?}");
+                if let Err(err) = state.try_render_frame(qhandle) {
+                    error!("Rendering failed after scale change: {err}");
                 }
             }
         }
@@ -543,13 +563,11 @@ impl Dispatch<WlCallback, ()> for CantusLayer {
         _conn: &Connection,
         qhandle: &QueueHandle<Self>,
     ) {
-        if let wl_callback::Event::Done { .. } = event {
-            state.frame_callback.take();
-            if let Err(err) = state.render() {
-                error!("Rendering failed: {err:?}");
-                return;
-            }
-            state.request_frame(qhandle);
+        if let wl_callback::Event::Done { .. } = event
+            && let Some(_) = state.frame_callback.take()
+            && let Err(err) = state.try_render_frame(qhandle)
+        {
+            error!("Rendering failed: {err}");
         }
     }
 }
@@ -742,39 +760,23 @@ fn create_scene(
     );
 
     // Draw the text for song, album, and artist
-    let album_art_right_edge = scaled_panel_margin + (height - 2.0 * scaled_panel_margin);
-    let text_x = album_art_right_edge + (10.0 * scale_factor);
-    let text_y = height * 0.5;
-
-    // Get current queue and song
-    let Some(current_queue) = CURRENT_SONGS.lock().clone() else {
+    let playback_state = PLAYBACK_STATE.lock().clone();
+    let Some(PlayableItem::Track(song)) = &playback_state.currently_playing else {
         return;
     };
-    let Some(PlayableItem::Track(song)) = current_queue.currently_playing else {
-        return;
-    };
-
-    let song_text_width = draw_text(
-        scene,
-        font_context,
-        layout_context,
-        &song.name,
-        15.0 * scale_factor,
-        Color::from_rgb8(240, 240, 240),
-        FontWeight::SEMI_BOLD,
-        text_x,
-        text_y,
-    ) + 8.0 * scale_factor;
     draw_text(
         scene,
         font_context,
         layout_context,
-        song.artists.first().map_or("Unknown", |a| &a.name),
-        12.0 * scale_factor,
+        &song.artists.first().map_or_else(
+            || song.name.clone(),
+            |artist| format!("{} • {}", song.name, artist.name),
+        ),
+        14.0 * scale_factor,
         Color::from_rgb8(240, 240, 240),
         FontWeight::EXTRA_BLACK,
-        text_x + song_text_width,
-        text_y,
+        scaled_panel_margin + (height - 2.0 * scaled_panel_margin) + (10.0 * scale_factor),
+        height * 0.5,
     );
 }
 
