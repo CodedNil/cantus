@@ -26,6 +26,10 @@ anyhow = "1.0.100"
 pollster = "0.4.0"
 parking_lot = "0.12.5"
 dashmap = "6.1.0"
+reqwest = { version = "0.12.24", default-features = false, features = [
+    "rustls-tls",
+] }
+futures = "0.3.31"
 
 [lints.clippy]
 pedantic = { level = "warn", priority = -1 }

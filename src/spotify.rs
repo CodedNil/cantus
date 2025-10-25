@@ -1,6 +1,9 @@
+use anyhow::Result;
 use dashmap::DashMap;
-use image::DynamicImage;
+use futures::future::join_all;
+use image::GenericImageView;
 use parking_lot::Mutex;
+use reqwest::Client;
 use rspotify::{
     AuthCodeSpotify, Config, Credentials, OAuth,
     model::{AdditionalType, FullTrack, PlayableItem},
@@ -8,11 +11,13 @@ use rspotify::{
     scopes,
 };
 use std::{
-    collections::HashMap,
+    collections::{HashMap, HashSet},
     convert::TryInto,
     sync::{Arc, LazyLock},
 };
 use tokio::time::{Duration, sleep};
+use tracing::warn;
+use vello::peniko::{Blob, ImageAlphaType, ImageData, ImageFormat};
 use zbus::{
     Connection,
     fdo::{DBusProxy, PropertiesProxy},
@@ -29,7 +34,8 @@ const MPRIS_OBJECT_PATH: &str = "/org/mpris/MediaPlayer2";
 /// Stores the current playback state
 pub static PLAYBACK_STATE: LazyLock<Arc<Mutex<PlaybackState>>> =
     LazyLock::new(|| Arc::new(Mutex::new(PlaybackState::default())));
-pub static IMAGES_CACHE: LazyLock<DashMap<String, DynamicImage>> = LazyLock::new(DashMap::new);
+pub static IMAGES_CACHE: LazyLock<DashMap<String, ImageData>> = LazyLock::new(DashMap::new);
+static HTTP_CLIENT: LazyLock<Client> = LazyLock::new(Client::new);
 
 #[derive(Default, Clone, Debug)]
 pub struct PlaybackState {
@@ -259,23 +265,46 @@ async fn update_state_from_mpris(
 /// Pulls the current playback queue and status from the Spotify Web API and updates shared state.
 async fn update_state_from_spotify(spotify_client: &AuthCodeSpotify) {
     if let Ok(queue) = spotify_client.current_user_queue().await {
-        update_playback_state(move |state| {
-            state.currently_playing = queue.currently_playing.and_then(|item| match item {
+        let currently_playing_track = queue.currently_playing.and_then(|item| match item {
+            PlayableItem::Track(track) => Some(Track::from_rspotify(track)),
+            _ => None,
+        });
+        let queued_tracks: Vec<Track> = queue
+            .queue
+            .into_iter()
+            .filter_map(|item| match item {
                 PlayableItem::Track(track) => Some(Track::from_rspotify(track)),
                 _ => None,
+            })
+            .collect();
+
+        // Start a task to fetch missing images
+        let mut missing_urls = HashSet::new();
+        if let Some(track) = currently_playing_track.as_ref()
+            && !IMAGES_CACHE.contains_key(&track.image.url)
+        {
+            missing_urls.insert(track.image.url.clone());
+        }
+        for track in &queued_tracks {
+            if !IMAGES_CACHE.contains_key(&track.image.url) {
+                missing_urls.insert(track.image.url.clone());
+            }
+        }
+        if !missing_urls.is_empty() {
+            tokio::spawn(async move {
+                join_all(missing_urls.into_iter().map(|url| async move {
+                    if let Err(err) = ensure_image_cached(url.as_str()).await {
+                        warn!("failed to cache image {url}: {err}");
+                    }
+                }))
+                .await;
             });
-            tracing::info!(
-                "Updated currently playing track {:?}",
-                state.currently_playing
-            );
-            state.queue = queue
-                .queue
-                .into_iter()
-                .filter_map(|item| match item {
-                    PlayableItem::Track(track) => Some(Track::from_rspotify(track)),
-                    _ => None,
-                })
-                .collect();
+        }
+
+        // Update the playback state
+        update_playback_state(move |state| {
+            state.currently_playing = currently_playing_track;
+            state.queue = queued_tracks;
         });
     }
 
@@ -293,4 +322,23 @@ async fn update_state_from_spotify(spotify_client: &AuthCodeSpotify) {
             state.progress = progress;
         });
     }
+}
+
+/// Downloads and caches an image from the given URL.
+async fn ensure_image_cached(url: &str) -> Result<()> {
+    if IMAGES_CACHE.contains_key(url) {
+        return Ok(());
+    }
+    let response = HTTP_CLIENT.get(url).send().await?.error_for_status()?;
+    let dynamic_image = image::load_from_memory(&response.bytes().await?)?;
+    let (width, height) = dynamic_image.dimensions();
+    let image_data = ImageData {
+        data: Blob::from(dynamic_image.to_rgba8().into_raw()),
+        format: ImageFormat::Rgba8,
+        alpha_type: ImageAlphaType::Alpha,
+        width,
+        height,
+    };
+    IMAGES_CACHE.insert(url.to_string(), image_data);
+    Ok(())
 }

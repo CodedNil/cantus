@@ -1,4 +1,4 @@
-use crate::spotify::PLAYBACK_STATE;
+use crate::spotify::{IMAGES_CACHE, PLAYBACK_STATE};
 use parley::{
     FontContext, FontFamily, FontStack, FontWeight, Layout, LayoutContext,
     layout::PositionedLayoutItem, style::StyleProperty,
@@ -7,7 +7,7 @@ use std::borrow::Cow;
 use vello::{
     Glyph, Scene,
     kurbo::{Affine, RoundedRect},
-    peniko::{Color, Fill},
+    peniko::{Color, Fill, ImageBrush},
 };
 
 const PANEL_MARGIN: f64 = 3.0;
@@ -32,26 +32,29 @@ pub fn create_scene(
         &RoundedRect::new(0.0, 0.0, width, height, 14.0 * scale_factor),
     );
 
-    // Draw the album art
-    scene.fill(
-        Fill::NonZero,
-        Affine::IDENTITY,
-        Color::new([0.5, 0.0, 0.0, 1.0]),
-        None,
-        &RoundedRect::new(
-            scaled_panel_margin,
-            scaled_panel_margin,
-            height - scaled_panel_margin,
-            height - scaled_panel_margin,
-            10.0 * scale_factor,
-        ),
-    );
-
     let playback_state = PLAYBACK_STATE.lock().clone();
     let Some(song) = &playback_state.currently_playing else {
         return;
     };
 
+    // Draw the album art
+    if let Some(image) = IMAGES_CACHE.get(&song.image.url) {
+        scene.fill(
+            Fill::NonZero,
+            Affine::IDENTITY,
+            &ImageBrush::new(image.clone()),
+            None,
+            &RoundedRect::new(
+                scaled_panel_margin,
+                scaled_panel_margin,
+                height - scaled_panel_margin,
+                height - scaled_panel_margin,
+                10.0 * scale_factor,
+            ),
+        );
+    }
+
+    // Render the songs title and artist
     let text = song.artists.first().map_or_else(
         || song.name.clone(),
         |artist| format!("{} • {}", song.name, artist),
