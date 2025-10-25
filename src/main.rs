@@ -1,4 +1,5 @@
-use anyhow::{Result, bail};
+use crate::spotify::CURRENT_SONGS;
+use anyhow::Result;
 use parley::{
     FontContext, FontWeight, Layout, LayoutContext, layout::PositionedLayoutItem,
     style::StyleProperty,
@@ -16,8 +17,8 @@ use vello::{
     peniko::{Blob, Color, Fill, color::palette},
     util::{RenderContext, RenderSurface},
     wgpu::{
-        CommandEncoderDescriptor, CompositeAlphaMode, PollType, PresentMode, SurfaceError,
-        SurfaceTargetUnsafe, TextureViewDescriptor,
+        CommandEncoderDescriptor, CompositeAlphaMode, PollType, PresentMode, SurfaceTargetUnsafe,
+        TextureViewDescriptor,
     },
 };
 use wayland_client::{
@@ -44,8 +45,6 @@ use wayland_protocols_wlr::layer_shell::v1::client::{
     zwlr_layer_shell_v1::{self, ZwlrLayerShellV1},
     zwlr_layer_surface_v1::{self, ZwlrLayerSurfaceV1},
 };
-
-use crate::spotify::CURRENT_SONGS;
 
 mod spotify;
 
@@ -75,11 +74,9 @@ fn run_layer_shell() {
     let connection = Connection::connect_to_env().unwrap();
     let mut event_queue = connection.new_event_queue();
     let qh = event_queue.handle();
-
-    let _registry = connection.display().get_registry(&qh, ());
+    connection.display().get_registry(&qh, ());
 
     let display_ptr = NonNull::new(connection.backend().display_ptr().cast::<c_void>()).unwrap();
-
     let mut app = CantusLayer::new(display_ptr);
 
     // Initial roundtrip to get globals
@@ -87,118 +84,96 @@ fn run_layer_shell() {
         error!("Initial roundtrip failed: {:?}", err);
         return;
     }
-
-    // Now extract bound globals
-    let Some(compositor) = app.compositor.take() else {
-        error!("No wl_compositor global available");
+    let (Some(compositor), Some(layer_shell)) = (app.compositor.take(), app.layer_shell.take())
+    else {
+        error!("Missing compositor or layer shell");
         return;
     };
-    let Some(layer_shell) = app.layer_shell.take() else {
-        error!("No zwlr_layer_shell_v1 global available");
-        return;
-    };
-
-    let viewporter = app.viewporter.take();
-    let fractional_manager = app.fractional_manager.take();
     if app.outputs.is_empty() {
         error!("No Wayland outputs found");
         return;
     }
 
-    let output = app.outputs.remove(0); // Use first output (primary)
     let wl_surface = compositor.create_surface(&qh, ());
     let surface_ptr = NonNull::new(wl_surface.id().as_ptr().cast::<c_void>()).unwrap();
 
-    app.wl_surface = Some(wl_surface);
     app.surface_ptr = Some(surface_ptr);
-    app.output = Some(output);
+    app.output = Some(app.outputs.remove(0));
+    app.wl_surface = Some(wl_surface);
 
-    // Attach viewport and fractional scale BEFORE creating layer surface
-    if let (Some(viewporter), Some(fractional_manager)) = (viewporter, fractional_manager) {
-        app.viewport = Some(viewporter.get_viewport(app.wl_surface.as_ref().unwrap(), &qh, ()));
-        app.fractional = Some(fractional_manager.get_fractional_scale(
-            app.wl_surface.as_ref().unwrap(),
-            &qh,
-            (),
-        ));
+    if let (Some(vp), Some(fm)) = (app.viewporter.take(), app.fractional_manager.take()) {
+        app.viewport = Some(vp.get_viewport(app.wl_surface.as_ref().unwrap(), &qh, ()));
+        app.fractional = Some(fm.get_fractional_scale(app.wl_surface.as_ref().unwrap(), &qh, ()));
     }
 
-    // Create the layer surface
     let layer_surface = layer_shell.get_layer_surface(
         app.wl_surface.as_ref().unwrap(),
-        Some(app.output.as_ref().unwrap()),
+        app.output.as_ref(),
         zwlr_layer_shell_v1::Layer::Top,
-        "cantus".to_string(),
+        "cantus".into(),
         &qh,
         (),
     );
     app.layer_surface = Some(layer_surface);
+    let ls = app.layer_surface.as_ref().unwrap();
+    ls.set_size(PANEL_WIDTH as u32, PANEL_HEIGHT as u32);
+    ls.set_anchor(zwlr_layer_surface_v1::Anchor::Top | zwlr_layer_surface_v1::Anchor::Left);
+    ls.set_margin(PANEL_MARGIN as i32, 0, 0, PANEL_MARGIN as i32);
+    ls.set_exclusive_zone(0);
 
-    // Configure layer surface
-    app.layer_surface
-        .as_ref()
-        .unwrap()
-        .set_size(PANEL_WIDTH as u32, PANEL_HEIGHT as u32);
-    app.layer_surface
-        .as_ref()
-        .unwrap()
-        .set_anchor(zwlr_layer_surface_v1::Anchor::Top | zwlr_layer_surface_v1::Anchor::Left);
-    app.layer_surface
-        .as_ref()
-        .unwrap()
-        .set_margin(PANEL_MARGIN as i32, 0, 0, PANEL_MARGIN as i32);
-    app.layer_surface.as_ref().unwrap().set_exclusive_zone(0);
-
-    // Commit to trigger configure
     app.wl_surface.as_ref().unwrap().commit();
-
-    // Flush to send the commit
-    if let Err(err) = connection.flush() {
-        error!("Failed to flush initial commit: {:?}", err);
+    if connection.flush().is_err() {
+        error!("Failed to flush initial commit");
         return;
     }
 
-    // Wait for initial configure
-    app.is_configured = false;
     while !app.is_configured && !app.should_exit {
-        if let Err(err) = event_queue.blocking_dispatch(&mut app) {
-            error!("Waiting for configure failed: {:?}", err);
+        if event_queue.blocking_dispatch(&mut app).is_err() {
+            error!("Error awaiting configure");
             return;
         }
     }
 
-    // Event loop
     while !app.should_exit {
-        if let Err(err) = event_queue.blocking_dispatch(&mut app) {
-            error!("Wayland dispatch error: {:?}", err);
-            app.should_exit = true;
+        if event_queue.blocking_dispatch(&mut app).is_err() {
+            error!("Wayland dispatch error");
+            break;
         }
     }
 }
 
 struct CantusLayer {
-    wl_surface: Option<WlSurface>,
-    layer_surface: Option<ZwlrLayerSurfaceV1>,
-    output: Option<WlOutput>,
-    outputs: Vec<WlOutput>,
+    // --- Wayland globals ---
     compositor: Option<WlCompositor>,
     layer_shell: Option<ZwlrLayerShellV1>,
     viewporter: Option<WpViewporter>,
     fractional_manager: Option<WpFractionalScaleManagerV1>,
+    output: Option<WlOutput>,
+    outputs: Vec<WlOutput>,
+
+    // --- Surface and layer resources ---
+    wl_surface: Option<WlSurface>,
+    layer_surface: Option<ZwlrLayerSurfaceV1>,
     viewport: Option<WpViewport>,
     fractional: Option<WpFractionalScaleV1>,
+    frame_callback: Option<WlCallback>,
+
+    // --- Rendering ---
     render_context: RenderContext,
-    renderers: Vec<Option<Renderer>>,
     render_surface: Option<RenderSurface<'static>>,
+    renderers: Vec<Option<Renderer>>,
     scene: Scene,
+
+    // --- Text ---
     font_context: FontContext,
     layout_context: LayoutContext<()>,
+
+    // --- State ---
     logical_width: f64,
     logical_height: f64,
     scale_factor: f64,
-    frame_callback: Option<WlCallback>,
-    should_exit: bool,
     is_configured: bool,
+    should_exit: bool,
     display_ptr: NonNull<c_void>,
     surface_ptr: Option<NonNull<c_void>>,
 }
@@ -214,103 +189,80 @@ impl CantusLayer {
         font_context.collection.family_id("epilogue").unwrap();
 
         Self {
-            wl_surface: None,
-            layer_surface: None,
-            output: None,
-            outputs: Vec::new(),
+            // --- Wayland globals ---
             compositor: None,
             layer_shell: None,
             viewporter: None,
             fractional_manager: None,
+            output: None,
+            outputs: Vec::new(),
+
+            // --- Surface and layer resources ---
+            wl_surface: None,
+            layer_surface: None,
             viewport: None,
             fractional: None,
+            frame_callback: None,
+
+            // --- Rendering ---
             render_context: RenderContext::new(),
-            renderers: Vec::new(),
             render_surface: None,
+            renderers: Vec::new(),
             scene: Scene::new(),
+
+            // --- Text ---
             font_context,
             layout_context: LayoutContext::new(),
+
+            // --- State ---
             logical_width: PANEL_WIDTH,
             logical_height: PANEL_HEIGHT,
             scale_factor: 1.0,
-            frame_callback: None,
-            should_exit: false,
             is_configured: false,
+            should_exit: false,
             display_ptr,
             surface_ptr: None,
         }
     }
 
     fn request_frame(&mut self, qh: &QueueHandle<Self>) {
-        if self.frame_callback.is_some() {
-            return;
+        if self.frame_callback.is_none() {
+            self.frame_callback = Some(self.wl_surface.as_ref().unwrap().frame(qh, ()));
         }
-        let callback = self.wl_surface.as_ref().unwrap().frame(qh, ());
-        self.frame_callback = Some(callback);
     }
 
-    fn ensure_surface(&mut self, buffer_width: f64, buffer_height: f64) -> Result<()> {
-        if buffer_width == 0.0 || buffer_height == 0.0 {
+    fn ensure_surface(&mut self, w: f64, h: f64) -> Result<()> {
+        if w == 0.0 || h == 0.0 || !self.is_configured {
             return Ok(());
         }
 
-        // Check if we need to create or resize
-        let needs_creation = self.render_surface.is_none();
-        let needs_resize = self.render_surface.as_ref().is_some_and(|surface| {
-            surface.config.width != buffer_width as u32
-                || surface.config.height != buffer_height as u32
-        });
-
-        if !needs_creation && !needs_resize {
+        let recreate = self
+            .render_surface
+            .as_ref()
+            .is_none_or(|s| s.config.width != w as u32 || s.config.height != h as u32);
+        if !recreate {
             return Ok(());
         }
 
-        if needs_resize
-            && !needs_creation
-            && let Some(surface) = &mut self.render_surface
-        {
-            self.render_context
-                .resize_surface(surface, buffer_width as u32, buffer_height as u32);
-            return Ok(());
-        }
-
-        // Only create if configured
-        if !self.is_configured {
-            return Ok(());
-        }
-
-        let Some(surface_ptr) = self.surface_ptr else {
-            return Ok(());
-        };
-
-        let raw_display_handle =
-            RawDisplayHandle::Wayland(WaylandDisplayHandle::new(self.display_ptr));
-        let raw_window_handle = RawWindowHandle::Wayland(WaylandWindowHandle::new(surface_ptr));
         let target = SurfaceTargetUnsafe::RawHandle {
-            raw_display_handle,
-            raw_window_handle,
+            raw_display_handle: RawDisplayHandle::Wayland(WaylandDisplayHandle::new(
+                self.display_ptr,
+            )),
+            raw_window_handle: RawWindowHandle::Wayland(WaylandWindowHandle::new(
+                self.surface_ptr.unwrap(),
+            )),
         };
-
         let surface = unsafe { self.render_context.instance.create_surface_unsafe(target) }?;
-
-        let mut render_surface = pollster::block_on(self.render_context.create_render_surface(
+        let mut rs = pollster::block_on(self.render_context.create_render_surface(
             surface,
-            buffer_width as u32,
-            buffer_height as u32,
+            w as u32,
+            h as u32,
             PresentMode::Fifo,
         ))?;
-
-        if render_surface.config.alpha_mode != CompositeAlphaMode::PreMultiplied {
-            render_surface.config.alpha_mode = CompositeAlphaMode::PreMultiplied;
-            render_surface.surface.configure(
-                &self.render_context.devices[render_surface.dev_id].device,
-                &render_surface.config,
-            );
-        }
-
+        rs.config.alpha_mode = CompositeAlphaMode::PreMultiplied;
         self.renderers
             .resize_with(self.render_context.devices.len(), || None);
-        self.render_surface = Some(render_surface);
+        self.render_surface = Some(rs);
         Ok(())
     }
 
@@ -318,28 +270,22 @@ impl CantusLayer {
         let Some(surface) = &mut self.render_surface else {
             return Ok(());
         };
-
         self.scene.reset();
         create_scene(
             &mut self.scene,
             &mut self.font_context,
             &mut self.layout_context,
-            f64::from(surface.config.width),
-            f64::from(surface.config.height),
+            surface.config.width.into(),
+            surface.config.height.into(),
             self.scale_factor,
         );
 
         let dev_id = surface.dev_id;
         let device_handle = &self.render_context.devices[dev_id];
-
-        if self.renderers[dev_id].is_none() {
-            let renderer = Renderer::new(&device_handle.device, RendererOptions::default())?;
-            self.renderers[dev_id] = Some(renderer);
-        }
-
-        let renderer = self.renderers[dev_id]
-            .as_mut()
-            .expect("renderer must be initialized");
+        let renderer = self.renderers[dev_id].get_or_insert(Renderer::new(
+            &device_handle.device,
+            RendererOptions::default(),
+        )?);
 
         renderer.render_to_texture(
             &device_handle.device,
@@ -354,54 +300,41 @@ impl CantusLayer {
             },
         )?;
 
-        let surface_texture = match surface.surface.get_current_texture() {
-            Ok(texture) => texture,
-            Err(SurfaceError::Outdated | SurfaceError::Lost) => {
-                self.render_surface = None;
-                return Ok(());
-            }
-            Err(SurfaceError::Timeout) => return Ok(()),
-            Err(err) => bail!("Failed to acquire surface texture: {err:?}"),
+        let Ok(tex) = surface.surface.get_current_texture() else {
+            self.render_surface = None;
+            return Ok(());
         };
-
         let mut encoder = device_handle
             .device
             .create_command_encoder(&CommandEncoderDescriptor {
-                label: Some("Cantus Surface Blit"),
+                label: Some("Cantus blit"),
             });
         surface.blitter.copy(
             &device_handle.device,
             &mut encoder,
             &surface.target_view,
-            &surface_texture
-                .texture
-                .create_view(&TextureViewDescriptor::default()),
+            &tex.texture.create_view(&TextureViewDescriptor::default()),
         );
         device_handle.queue.submit([encoder.finish()]);
-        surface_texture.present();
-
+        tex.present();
         device_handle.device.poll(PollType::Poll)?;
-
         Ok(())
     }
 
     fn update_scale_and_viewport(&self) {
-        let buffer_width = (self.logical_width * self.scale_factor).round() as u32;
-        let buffer_height = (self.logical_height * self.scale_factor).round() as u32;
+        let bw = (self.logical_width * self.scale_factor).round();
+        let bh = (self.logical_height * self.scale_factor).round();
 
-        let buffer_scale = if self.viewport.is_some() && self.fractional.is_some() {
-            1
-        } else {
-            self.scale_factor.ceil() as i32
-        };
-
-        if let Some(surface) = &self.wl_surface {
-            surface.set_buffer_scale(buffer_scale);
+        if let Some(s) = &self.wl_surface {
+            s.set_buffer_scale(if self.viewport.is_some() {
+                1
+            } else {
+                self.scale_factor.ceil() as i32
+            });
         }
-
-        if let Some(viewport) = &self.viewport {
-            viewport.set_source(0.0, 0.0, f64::from(buffer_width), f64::from(buffer_height));
-            viewport.set_destination(self.logical_width as i32, self.logical_height as i32);
+        if let Some(v) = &self.viewport {
+            v.set_source(0.0, 0.0, bw, bh);
+            v.set_destination(self.logical_width as i32, self.logical_height as i32);
         }
     }
 }
