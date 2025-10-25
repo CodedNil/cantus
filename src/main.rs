@@ -75,18 +75,16 @@ fn run_layer_shell() {
     let mut app = CantusLayer::new(display_ptr);
 
     // Initial roundtrip to get globals
-    if let Err(err) = event_queue.roundtrip(&mut app) {
-        panic!("Initial roundtrip failed: {err}");
-    }
-    let (Some(compositor), Some(layer_shell)) = (app.compositor.take(), app.layer_shell.take())
-    else {
-        panic!("Missing compositor or layer shell");
-    };
+    event_queue
+        .roundtrip(&mut app)
+        .unwrap_or_else(|err| panic!("Initial roundtrip failed: {err}"));
+    let compositor = app.compositor.take().expect("Missing compositor");
+    let layer_shell = app.layer_shell.take().expect("Missing layer shell");
     assert!(!app.outputs.is_empty(), "No Wayland outputs found");
 
-    if let Err(err) = event_queue.roundtrip(&mut app) {
-        panic!("Failed to fetch output details: {err}");
-    }
+    event_queue
+        .roundtrip(&mut app)
+        .unwrap_or_else(|err| panic!("Failed to fetch output details: {err}"));
 
     let wl_surface = compositor.create_surface(&qh, ());
     let surface_ptr = NonNull::new(wl_surface.id().as_ptr().cast::<c_void>()).unwrap();
@@ -95,41 +93,36 @@ fn run_layer_shell() {
     assert!(app.try_select_output(), "Failed to select a Wayland output");
     app.wl_surface = Some(wl_surface);
 
+    let surface = app.wl_surface.as_ref().unwrap();
     if let (Some(vp), Some(fm)) = (app.viewporter.take(), app.fractional_manager.take()) {
-        app.viewport = Some(vp.get_viewport(app.wl_surface.as_ref().unwrap(), &qh, ()));
-        app.fractional = Some(fm.get_fractional_scale(app.wl_surface.as_ref().unwrap(), &qh, ()));
+        app.viewport = Some(vp.get_viewport(surface, &qh, ()));
+        app.fractional = Some(fm.get_fractional_scale(surface, &qh, ()));
     }
 
     let layer_surface = layer_shell.get_layer_surface(
-        app.wl_surface.as_ref().unwrap(),
+        surface,
         app.output.as_ref(),
         zwlr_layer_shell_v1::Layer::Overlay,
         "cantus".into(),
         &qh,
         (),
     );
+    layer_surface.set_size(PANEL_WIDTH as u32, PANEL_HEIGHT as u32);
+    layer_surface
+        .set_anchor(zwlr_layer_surface_v1::Anchor::Top | zwlr_layer_surface_v1::Anchor::Left);
+    layer_surface.set_margin(6, 0, 0, 6);
+    layer_surface.set_exclusive_zone(0);
     app.layer_surface = Some(layer_surface);
-    let ls = app.layer_surface.as_ref().unwrap();
-    ls.set_size(PANEL_WIDTH as u32, PANEL_HEIGHT as u32);
-    ls.set_anchor(zwlr_layer_surface_v1::Anchor::Top | zwlr_layer_surface_v1::Anchor::Left);
-    ls.set_margin(6, 0, 0, 6);
-    ls.set_exclusive_zone(0);
 
-    app.wl_surface.as_ref().unwrap().commit();
-    if let Err(err) = connection.flush() {
-        panic!("Failed to flush initial commit: {err}");
-    }
-
-    while !app.is_configured && !app.should_exit {
-        if let Err(err) = event_queue.blocking_dispatch(&mut app) {
-            panic!("Error awaiting configure: {err}");
-        }
-    }
+    surface.commit();
+    connection
+        .flush()
+        .unwrap_or_else(|err| panic!("Failed to flush initial commit: {err}"));
 
     while !app.should_exit {
-        if let Err(err) = event_queue.blocking_dispatch(&mut app) {
-            panic!("Wayland dispatch error: {err}");
-        }
+        event_queue
+            .blocking_dispatch(&mut app)
+            .unwrap_or_else(|err| panic!("Wayland dispatch error: {err}"));
     }
 }
 
@@ -145,22 +138,16 @@ struct OutputInfo {
 impl OutputInfo {
     /// Check if this output metadata matches the target string.
     fn matches(&self, target: &str) -> bool {
-        if let Some(name) = &self.name
-            && name.contains(target)
-        {
-            return true;
-        }
-        if let (Some(make), Some(model)) = (&self.make, &self.model)
-            && format!("{make} {model}").contains(target)
-        {
-            return true;
-        }
-        if let Some(description) = &self.description
-            && description.contains(target)
-        {
-            return true;
-        }
-        false
+        self.name.as_ref().is_some_and(|name| name.contains(target))
+            || self
+                .make
+                .as_ref()
+                .zip(self.model.as_ref())
+                .is_some_and(|(make, model)| format!("{make} {model}").contains(target))
+            || self
+                .description
+                .as_ref()
+                .is_some_and(|description| description.contains(target))
     }
 }
 
@@ -259,8 +246,10 @@ impl CantusLayer {
 
     /// Ask Wayland for the next frame callback.
     fn request_frame(&mut self, qh: &QueueHandle<Self>) {
-        if self.frame_callback.is_none() && self.wl_surface.is_some() {
-            self.frame_callback = Some(self.wl_surface.as_ref().unwrap().frame(qh, ()));
+        if self.frame_callback.is_none()
+            && let Some(surface) = self.wl_surface.as_ref()
+        {
+            self.frame_callback = Some(surface.frame(qh, ()));
         }
     }
 
@@ -340,41 +329,24 @@ impl CantusLayer {
         }
 
         let target_monitor = env::var("TARGET_MONITOR").ok();
-        let chosen = target_monitor
+        let target = target_monitor.as_deref();
+        let selected_index = target
+            .and_then(|needle| self.outputs.iter().position(|info| info.matches(needle)))
+            .unwrap_or(0);
+        let info = &self.outputs[selected_index];
+        let matches_target = target.is_some_and(|needle| info.matches(needle));
+
+        if self
+            .output
             .as_ref()
-            .and_then(|target| self.outputs.iter().find(|i| i.matches(target)).cloned())
-            .or_else(|| self.outputs.first().cloned());
-
-        if let Some(info) = chosen {
-            let matches_target = target_monitor.as_ref().is_some_and(|t| info.matches(t));
-            if self
-                .output
-                .as_ref()
-                .map_or_else(|| true, |id| id.id() != info.handle.id())
-                || (matches_target && !self.output_matched)
-            {
-                self.output = Some(info.handle);
-                self.output_matched = matches_target;
-            }
-            return true;
-        }
-        false
-    }
-
-    /// Update cached output metadata using a helper closure.
-    fn update_output_info<F>(&mut self, output: &WlOutput, update: F)
-    where
-        F: FnOnce(&mut OutputInfo),
-    {
-        if let Some(info) = self
-            .outputs
-            .iter_mut()
-            .find(|info| info.handle.id() == output.id())
+            .is_none_or(|id| id.id() != info.handle.id())
+            || (matches_target && !self.output_matched)
         {
-            update(info);
+            self.output = Some(info.handle.clone());
+            self.output_matched = matches_target;
         }
+        true
     }
-    // New method: try_render_frame (replaces render). Returns Result<()> for error handling.
     /// Render a frame and present it if the surface is available.
     fn try_render_frame(&mut self, qh: &QueueHandle<Self>) -> Result<()> {
         // Auto-recover if surface lost
@@ -384,18 +356,14 @@ impl CantusLayer {
             self.ensure_surface(buffer_width, buffer_height)?;
         }
 
-        let Some(surface) = self.render_surface.take() else {
-            return Ok(());
-        };
+        let rendering = {
+            let Some(surface) = self.render_surface.as_mut() else {
+                return Ok(());
+            };
 
-        let dev_id = surface.dev_id;
-        let mut surface_lost = false;
-        let mut tex = None;
-        let mut command_buffer = None;
-
-        {
-            let device_handle = &self.render_context.devices[dev_id];
-            let renderer = self.renderers[dev_id].get_or_insert(Renderer::new(
+            let id = surface.dev_id;
+            let device_handle = &self.render_context.devices[id];
+            let renderer = self.renderers[id].get_or_insert(Renderer::new(
                 &device_handle.device,
                 RendererOptions::default(),
             )?);
@@ -424,50 +392,40 @@ impl CantusLayer {
                 },
             )?;
 
-            if let Ok(acquired) = surface.surface.get_current_texture() {
-                let mut encoder =
-                    device_handle
-                        .device
-                        .create_command_encoder(&CommandEncoderDescriptor {
-                            label: Some("Cantus blit"),
-                        });
-                surface.blitter.copy(
-                    &device_handle.device,
-                    &mut encoder,
-                    &surface.target_view,
-                    &acquired
-                        .texture
-                        .create_view(&TextureViewDescriptor::default()),
-                );
-                tex = Some(acquired);
-                command_buffer = Some(encoder.finish());
-            } else {
-                surface_lost = true;
+            match surface.surface.get_current_texture() {
+                Ok(acquired) => {
+                    let mut encoder =
+                        device_handle
+                            .device
+                            .create_command_encoder(&CommandEncoderDescriptor {
+                                label: Some("Cantus blit"),
+                            });
+                    surface.blitter.copy(
+                        &device_handle.device,
+                        &mut encoder,
+                        &surface.target_view,
+                        &acquired
+                            .texture
+                            .create_view(&TextureViewDescriptor::default()),
+                    );
+                    Ok((id, acquired, encoder.finish()))
+                }
+                Err(_) => Err(()),
             }
-        }
+        };
 
-        if surface_lost {
-            // Keep the surface dropped to force recreation; schedule a new frame before committing
-            // so the compositor will notify us once it is ready again.
+        let Ok((dev_id, tex, command_buffer)) = rendering else {
+            // Keep the surface dropped to force recreation; schedule a new frame before
+            // committing so the compositor will notify us once it is ready again.
             self.render_surface = None;
             self.request_frame(qh);
-            if let Some(s) = &self.wl_surface {
-                s.commit();
+            if let Some(surface) = &self.wl_surface {
+                surface.commit();
             }
             return Ok(());
-        }
-
-        let Some(tex) = tex else {
-            // Should be unreachable but bail defensively.
-            return Ok(());
         };
-        let command_buffer = command_buffer.expect("missing command buffer after successful blit");
-
-        // Put the surface back before issuing queue operations so future calls can reuse it.
-        self.render_surface = Some(surface);
 
         // Queue frame request after rendering but before presenting so the callback associates
-        // with this frame.
         self.request_frame(qh);
 
         let device_handle = &self.render_context.devices[dev_id];
@@ -483,12 +441,13 @@ impl CantusLayer {
         let bw = (self.logical_width * self.scale_factor).round();
         let bh = (self.logical_height * self.scale_factor).round();
 
-        if let Some(s) = &self.wl_surface {
-            s.set_buffer_scale(if self.viewport.is_some() {
+        if let Some(surface) = &self.wl_surface {
+            let buffer_scale = if self.viewport.is_some() {
                 1
             } else {
                 self.scale_factor.ceil() as i32
-            });
+            };
+            surface.set_buffer_scale(buffer_scale);
         }
         if let Some(v) = &self.viewport {
             v.set_source(0.0, 0.0, bw, bh);
@@ -610,7 +569,6 @@ impl Dispatch<WlCallback, ()> for CantusLayer {
     }
 }
 
-// Simplified Dispatch implementations (no changes needed)
 impl Dispatch<WlSurface, ()> for CantusLayer {
     /// Ignore surface events that need no action.
     fn event(
@@ -634,24 +592,21 @@ impl Dispatch<WlOutput, ()> for CantusLayer {
         _conn: &Connection,
         _qhandle: &QueueHandle<Self>,
     ) {
-        match event {
-            wl_output::Event::Geometry { make, model, .. } => {
-                state.update_output_info(proxy, move |info| {
+        let id = proxy.id();
+        if let Some(info) = state.outputs.iter_mut().find(|info| info.handle.id() == id) {
+            match event {
+                wl_output::Event::Geometry { make, model, .. } => {
                     info.make = Some(make);
                     info.model = Some(model);
-                });
-            }
-            wl_output::Event::Name { name } => {
-                state.update_output_info(proxy, move |info| {
+                }
+                wl_output::Event::Name { name } => {
                     info.name = Some(name);
-                });
-            }
-            wl_output::Event::Description { description } => {
-                state.update_output_info(proxy, move |info| {
+                }
+                wl_output::Event::Description { description } => {
                     info.description = Some(description);
-                });
+                }
+                _ => {}
             }
-            _ => {}
         }
         state.try_select_output();
     }
