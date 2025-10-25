@@ -60,7 +60,7 @@ async fn main() {
         ))
         .init();
 
-    spotify::init().await.unwrap();
+    spotify::init().await;
     run_layer_shell();
 }
 

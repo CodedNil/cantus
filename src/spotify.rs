@@ -1,4 +1,3 @@
-use anyhow::Result;
 use parking_lot::Mutex;
 use rspotify::{
     AuthCodeSpotify, Config, Credentials, OAuth,
@@ -48,7 +47,7 @@ where
 }
 
 /// Initializes the Spotify client and spawns the combined MPRIS and Spotify polling task.
-pub async fn init() -> Result<()> {
+pub async fn init() {
     // Initialize Spotify client with credentials and OAuth scopes
     let spotify = AuthCodeSpotify::with_config(
         Credentials::from_env()
@@ -80,8 +79,6 @@ pub async fn init() -> Result<()> {
 
     // Spawn the combined polling task
     tokio::spawn(polling_task(spotify));
-
-    Ok(())
 }
 
 /// Asynchronous task to poll MPRIS every 500ms and Spotify API every 4 seconds or on song change.
@@ -91,12 +88,12 @@ async fn polling_task(spotify_client: AuthCodeSpotify) {
 
     let connection = match Connection::session().await {
         Ok(conn) => conn,
-        Err(error) => panic!("Failed to connect to D-Bus session: {error:?}"),
+        Err(err) => panic!("Failed to connect to D-Bus session: {err}"),
     };
 
     let dbus_proxy = match DBusProxy::new(&connection).await {
         Ok(proxy) => proxy,
-        Err(error) => panic!("Failed creating D-Bus proxy: {error:?}"),
+        Err(err) => panic!("Failed creating D-Bus proxy: {err}"),
     };
 
     loop {

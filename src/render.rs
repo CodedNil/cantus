@@ -48,54 +48,41 @@ pub fn create_scene(
         ),
     );
 
-    // Draw the text for song, album, and artist
     let playback_state = PLAYBACK_STATE.lock().clone();
     let Some(PlayableItem::Track(song)) = &playback_state.currently_playing else {
         return;
     };
-    draw_text(
-        scene,
-        font_context,
-        layout_context,
-        &song.artists.first().map_or_else(
-            || song.name.clone(),
-            |artist| format!("{} • {}", song.name, artist.name),
-        ),
-        14.0 * scale_factor,
-        Color::from_rgb8(240, 240, 240),
-        FontWeight::EXTRA_BLACK,
-        scaled_panel_margin + (height - 2.0 * scaled_panel_margin) + (10.0 * scale_factor),
-        height * 0.5,
-    );
-}
 
-/// Draw a single line of text into the scene.
-fn draw_text(
-    scene: &mut Scene,
-    font_context: &mut FontContext,
-    layout_context: &mut LayoutContext<()>,
-    text: &str,
-    font_size: f64,
-    font_color: Color,
-    font_weight: FontWeight,
-    text_x: f64,
-    text_y: f64,
-) -> f64 {
-    let mut builder = layout_context.ranged_builder(font_context, text, 1.0, false);
+    let text = song.artists.first().map_or_else(
+        || song.name.clone(),
+        |artist| format!("{} • {}", song.name, artist.name),
+    );
+
+    let mut builder = layout_context.ranged_builder(font_context, &text, 1.0, false);
     builder.push_default(StyleProperty::FontStack(FontStack::Single(
         FontFamily::Named(Cow::Borrowed("epilogue")),
     )));
-    builder.push_default(StyleProperty::FontSize(font_size as f32));
-    builder.push_default(StyleProperty::FontWeight(font_weight));
+    builder.push_default(StyleProperty::FontSize((14.0 * scale_factor) as f32));
+    builder.push_default(StyleProperty::FontWeight(FontWeight::EXTRA_BLACK));
 
-    let mut layout: Layout<()> = builder.build(text);
+    let mut layout: Layout<()> = builder.build(&text);
     layout.break_all_lines(None);
-    let text_transform = Affine::translate((text_x, text_y - (f64::from(layout.height()) / 2.0)));
+    let text_transform = Affine::translate((
+        scaled_panel_margin + (height - 2.0 * scaled_panel_margin) + (10.0 * scale_factor),
+        (height * 0.5) - (f64::from(layout.height()) * 0.5),
+    ));
 
-    for item in layout.lines().flat_map(|line| line.items()) {
-        let PositionedLayoutItem::GlyphRun(glyph_run) = item else {
-            continue;
-        };
+    for glyph_run in layout
+        .lines()
+        .flat_map(|line| line.items())
+        .filter_map(|item| {
+            if let PositionedLayoutItem::GlyphRun(run) = item {
+                Some(run)
+            } else {
+                None
+            }
+        })
+    {
         let glyphs = glyph_run.positioned_glyphs().map(|g| Glyph {
             id: g.id,
             x: g.x,
@@ -108,9 +95,7 @@ fn draw_text(
             .normalized_coords(run.normalized_coords())
             .transform(text_transform)
             .hint(true)
-            .brush(font_color)
+            .brush(Color::from_rgb8(240, 240, 240))
             .draw(Fill::NonZero, glyphs);
     }
-
-    f64::from(layout.width())
 }
