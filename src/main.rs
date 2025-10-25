@@ -1,15 +1,15 @@
 use crate::spotify::CURRENT_SONGS;
 use anyhow::Result;
 use parley::{
-    FontContext, FontWeight, Layout, LayoutContext, layout::PositionedLayoutItem,
-    style::StyleProperty,
+    FontContext, FontFamily, FontStack, FontWeight, Layout, LayoutContext,
+    layout::PositionedLayoutItem, style::StyleProperty,
 };
 use raw_window_handle::{
     RawDisplayHandle, RawWindowHandle, WaylandDisplayHandle, WaylandWindowHandle,
 };
 use rspotify::model::PlayableItem;
-use std::{ffi::c_void, ptr::NonNull, sync::Arc};
-use tracing::{error, level_filters::LevelFilter};
+use std::{borrow::Cow, env, ffi::c_void, ptr::NonNull, sync::Arc};
+use tracing::{error, info, level_filters::LevelFilter, warn};
 use tracing_subscriber::EnvFilter;
 use vello::{
     AaConfig, Glyph, Renderer, RendererOptions, Scene,
@@ -94,11 +94,19 @@ fn run_layer_shell() {
         return;
     }
 
+    if let Err(err) = event_queue.roundtrip(&mut app) {
+        error!("Failed to fetch output details: {:?}", err);
+        return;
+    }
+
     let wl_surface = compositor.create_surface(&qh, ());
     let surface_ptr = NonNull::new(wl_surface.id().as_ptr().cast::<c_void>()).unwrap();
 
     app.surface_ptr = Some(surface_ptr);
-    app.output = Some(app.outputs.remove(0));
+    if !app.try_select_output() {
+        error!("Failed to select a Wayland output");
+        return;
+    }
     app.wl_surface = Some(wl_surface);
 
     if let (Some(vp), Some(fm)) = (app.viewporter.take(), app.fractional_manager.take()) {
@@ -142,6 +150,36 @@ fn run_layer_shell() {
     }
 }
 
+#[derive(Clone)]
+struct OutputInfo {
+    handle: WlOutput,
+    name: Option<String>,
+    description: Option<String>,
+    make: Option<String>,
+    model: Option<String>,
+}
+
+impl OutputInfo {
+    fn matches(&self, target: &str) -> bool {
+        if let Some(name) = &self.name
+            && name.contains(target)
+        {
+            return true;
+        }
+        if let (Some(make), Some(model)) = (&self.make, &self.model)
+            && format!("{make} {model}").contains(target)
+        {
+            return true;
+        }
+        if let Some(description) = &self.description
+            && description.contains(target)
+        {
+            return true;
+        }
+        false
+    }
+}
+
 struct CantusLayer {
     // --- Wayland globals ---
     compositor: Option<WlCompositor>,
@@ -149,7 +187,8 @@ struct CantusLayer {
     viewporter: Option<WpViewporter>,
     fractional_manager: Option<WpFractionalScaleManagerV1>,
     output: Option<WlOutput>,
-    outputs: Vec<WlOutput>,
+    outputs: Vec<OutputInfo>,
+    output_matched: bool,
 
     // --- Surface and layer resources ---
     wl_surface: Option<WlSurface>,
@@ -196,6 +235,7 @@ impl CantusLayer {
             fractional_manager: None,
             output: None,
             outputs: Vec::new(),
+            output_matched: false,
 
             // --- Surface and layer resources ---
             wl_surface: None,
@@ -260,10 +300,64 @@ impl CantusLayer {
             PresentMode::Fifo,
         ))?;
         rs.config.alpha_mode = CompositeAlphaMode::PreMultiplied;
+        rs.surface
+            .configure(&self.render_context.devices[rs.dev_id].device, &rs.config);
         self.renderers
             .resize_with(self.render_context.devices.len(), || None);
         self.render_surface = Some(rs);
         Ok(())
+    }
+
+    fn try_select_output(&mut self) -> bool {
+        if self.outputs.is_empty() {
+            return false;
+        }
+
+        let target_monitor = env::var("TARGET_MONITOR").ok();
+        let chosen = target_monitor
+            .as_ref()
+            .and_then(|target| self.outputs.iter().find(|i| i.matches(target)).cloned())
+            .or_else(|| self.outputs.first().cloned());
+
+        if let Some(info) = chosen {
+            let matches_target = target_monitor.as_ref().is_some_and(|t| info.matches(t));
+            if self
+                .output
+                .as_ref()
+                .map_or_else(|| true, |id| id.id() != info.handle.id())
+                || (matches_target && !self.output_matched)
+            {
+                let name = info
+                    .description
+                    .unwrap_or_else(|| info.handle.id().to_string());
+                if let Some(target) = target_monitor {
+                    if matches_target {
+                        info!("Selecting monitor '{name}' for TARGET_MONITOR={target}");
+                    } else {
+                        warn!("No output matching TARGET_MONITOR={target}; using '{name}'");
+                    }
+                } else {
+                    info!("Selecting default monitor '{name}'");
+                }
+                self.output = Some(info.handle);
+                self.output_matched = matches_target;
+            }
+            return true;
+        }
+        false
+    }
+
+    fn update_output_info<F>(&mut self, output: &WlOutput, update: F)
+    where
+        F: FnOnce(&mut OutputInfo),
+    {
+        if let Some(info) = self
+            .outputs
+            .iter_mut()
+            .find(|info| info.handle.id() == output.id())
+        {
+            update(info);
+        }
     }
 
     fn render(&mut self) -> Result<()> {
@@ -475,13 +569,33 @@ impl Dispatch<WlSurface, ()> for CantusLayer {
 
 impl Dispatch<WlOutput, ()> for CantusLayer {
     fn event(
-        _state: &mut Self,
-        _proxy: &WlOutput,
-        _event: wl_output::Event,
+        state: &mut Self,
+        proxy: &WlOutput,
+        event: wl_output::Event,
         _data: &(),
         _conn: &Connection,
         _qhandle: &QueueHandle<Self>,
     ) {
+        match event {
+            wl_output::Event::Geometry { make, model, .. } => {
+                state.update_output_info(proxy, move |info| {
+                    info.make = Some(make);
+                    info.model = Some(model);
+                });
+            }
+            wl_output::Event::Name { name } => {
+                state.update_output_info(proxy, move |info| {
+                    info.name = Some(name);
+                });
+            }
+            wl_output::Event::Description { description } => {
+                state.update_output_info(proxy, move |info| {
+                    info.description = Some(description);
+                });
+            }
+            _ => {}
+        }
+        state.try_select_output();
     }
 }
 
@@ -519,9 +633,13 @@ impl Dispatch<WlRegistry, ()> for CantusLayer {
                     );
                 }
                 "wl_output" => {
-                    state
-                        .outputs
-                        .push(registry.bind::<WlOutput, (), Self>(name, version, qh, ()));
+                    state.outputs.push(OutputInfo {
+                        handle: registry.bind::<WlOutput, (), Self>(name, version.min(4), qh, ()),
+                        name: None,
+                        description: None,
+                        make: None,
+                        model: None,
+                    });
                 }
                 _ => {}
             }
@@ -672,6 +790,9 @@ fn draw_text(
     text_y: f64,
 ) -> f64 {
     let mut builder = layout_context.ranged_builder(font_context, text, 1.0, false);
+    builder.push_default(StyleProperty::FontStack(FontStack::Single(
+        FontFamily::Named(Cow::Borrowed("epilogue")),
+    )));
     builder.push_default(StyleProperty::FontSize(font_size as f32));
     builder.push_default(StyleProperty::FontWeight(font_weight));
 
