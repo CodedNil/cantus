@@ -3,7 +3,6 @@ use parley::{
     FontContext, FontFamily, FontStack, FontWeight, Layout, LayoutContext,
     layout::PositionedLayoutItem, style::StyleProperty,
 };
-use rspotify::model::PlayableItem;
 use std::borrow::Cow;
 use vello::{
     Glyph, Scene,
@@ -49,13 +48,13 @@ pub fn create_scene(
     );
 
     let playback_state = PLAYBACK_STATE.lock().clone();
-    let Some(PlayableItem::Track(song)) = &playback_state.currently_playing else {
+    let Some(song) = &playback_state.currently_playing else {
         return;
     };
 
     let text = song.artists.first().map_or_else(
         || song.name.clone(),
-        |artist| format!("{} • {}", song.name, artist.name),
+        |artist| format!("{} • {}", song.name, artist),
     );
 
     let mut builder = layout_context.ranged_builder(font_context, &text, 1.0, false);

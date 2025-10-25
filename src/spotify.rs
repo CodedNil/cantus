@@ -1,7 +1,9 @@
+use dashmap::DashMap;
+use image::DynamicImage;
 use parking_lot::Mutex;
 use rspotify::{
     AuthCodeSpotify, Config, Credentials, OAuth,
-    model::{AdditionalType, PlayableItem},
+    model::{AdditionalType, FullTrack, PlayableItem},
     prelude::OAuthClient,
     scopes,
 };
@@ -27,14 +29,62 @@ const MPRIS_OBJECT_PATH: &str = "/org/mpris/MediaPlayer2";
 /// Stores the current playback state
 pub static PLAYBACK_STATE: LazyLock<Arc<Mutex<PlaybackState>>> =
     LazyLock::new(|| Arc::new(Mutex::new(PlaybackState::default())));
+pub static IMAGES_CACHE: LazyLock<DashMap<String, DynamicImage>> = LazyLock::new(DashMap::new);
 
-#[derive(Default, Clone)]
+#[derive(Default, Clone, Debug)]
 pub struct PlaybackState {
     pub playing: bool,
     pub shuffle: bool,
     pub progress: i64,
-    pub currently_playing: Option<PlayableItem>,
-    pub queue: Vec<PlayableItem>,
+    pub currently_playing: Option<Track>,
+    pub queue: Vec<Track>,
+}
+
+#[derive(Default, Clone, Debug)]
+pub struct Track {
+    pub id: String,
+    pub name: String,
+    pub artists: Vec<String>,
+    pub album_id: String,
+    pub album_name: String,
+    pub image: Image,
+    pub release_date: String,
+    pub release_date_precision: String,
+    pub milliseconds: u64,
+}
+
+#[derive(Default, Clone, Debug)]
+pub struct Image {
+    pub url: String,
+    pub width: u32,
+    pub height: u32,
+}
+
+impl Track {
+    fn from_rspotify(track: FullTrack) -> Self {
+        let image = track
+            .album
+            .images
+            .into_iter()
+            .min_by_key(|img| img.width.unwrap())
+            .map(|img| Image {
+                url: img.url,
+                width: img.width.unwrap(),
+                height: img.height.unwrap(),
+            })
+            .unwrap();
+        Self {
+            id: track.id.unwrap().to_string(),
+            name: track.name,
+            artists: track.artists.into_iter().map(|a| a.name).collect(),
+            album_id: track.album.id.unwrap().to_string(),
+            album_name: track.album.name,
+            image,
+            release_date: track.album.release_date.unwrap(),
+            release_date_precision: track.album.release_date_precision.unwrap(),
+            milliseconds: track.duration.num_milliseconds() as u64,
+        }
+    }
 }
 
 /// Mutably updates the global playback state inside the mutex.
@@ -209,11 +259,23 @@ async fn update_state_from_mpris(
 /// Pulls the current playback queue and status from the Spotify Web API and updates shared state.
 async fn update_state_from_spotify(spotify_client: &AuthCodeSpotify) {
     if let Ok(queue) = spotify_client.current_user_queue().await {
-        let currently_playing = queue.currently_playing;
-        let queue_items = queue.queue;
         update_playback_state(move |state| {
-            state.currently_playing = currently_playing;
-            state.queue = queue_items;
+            state.currently_playing = queue.currently_playing.and_then(|item| match item {
+                PlayableItem::Track(track) => Some(Track::from_rspotify(track)),
+                _ => None,
+            });
+            tracing::info!(
+                "Updated currently playing track {:?}",
+                state.currently_playing
+            );
+            state.queue = queue
+                .queue
+                .into_iter()
+                .filter_map(|item| match item {
+                    PlayableItem::Track(track) => Some(Track::from_rspotify(track)),
+                    _ => None,
+                })
+                .collect();
         });
     }
 

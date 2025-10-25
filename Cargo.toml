@@ -25,6 +25,7 @@ image = { version = "0.25.8", default-features = false, features = [
 anyhow = "1.0.100"
 pollster = "0.4.0"
 parking_lot = "0.12.5"
+dashmap = "6.1.0"
 
 [lints.clippy]
 pedantic = { level = "warn", priority = -1 }
