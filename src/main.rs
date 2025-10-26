@@ -46,7 +46,7 @@ mod background;
 mod render;
 mod spotify;
 
-const PANEL_WIDTH: f64 = 300.0;
+const PANEL_WIDTH: f64 = 500.0;
 const PANEL_HEIGHT: f64 = 40.0;
 
 /// Launch the application entry point.
@@ -111,7 +111,7 @@ fn run_layer_shell() {
     layer_surface.set_size(PANEL_WIDTH as u32, PANEL_HEIGHT as u32);
     layer_surface
         .set_anchor(zwlr_layer_surface_v1::Anchor::Top | zwlr_layer_surface_v1::Anchor::Left);
-    layer_surface.set_margin(6, 0, 0, 6);
+    layer_surface.set_margin(4, 0, 0, 4);
     layer_surface.set_exclusive_zone(-1);
 
     app.layer_surface = Some(layer_surface);

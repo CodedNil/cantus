@@ -42,7 +42,7 @@ static HTTP_CLIENT: LazyLock<Client> = LazyLock::new(Client::new);
 pub struct PlaybackState {
     pub playing: bool,
     pub shuffle: bool,
-    pub progress: i64,
+    pub progress: u64,
     pub currently_playing: Option<Track>,
     pub queue: Vec<Track>,
 }
@@ -250,7 +250,7 @@ async fn update_state_from_mpris(
                 state.playing = playing;
             }
             if let Some(progress) = progress {
-                state.progress = progress;
+                state.progress = progress as u64;
             }
         });
     }
@@ -315,7 +315,7 @@ async fn update_state_from_spotify(spotify_client: &AuthCodeSpotify) {
         update_playback_state(|state| {
             state.playing = is_playing;
             state.shuffle = shuffle;
-            state.progress = progress;
+            state.progress = progress as u64;
         });
     }
 }
