@@ -7,7 +7,7 @@ use std::borrow::Cow;
 use vello::{
     Glyph, Scene,
     kurbo::{Affine, RoundedRect},
-    peniko::{Color, Fill, ImageBrush},
+    peniko::{Color, Fill, ImageBrush, ImageData},
 };
 
 const PANEL_MARGIN: f64 = 3.0;
@@ -20,29 +20,43 @@ pub fn create_scene(
     width: f64,
     height: f64,
     scale_factor: f64,
+    background_image: Option<&ImageData>,
 ) {
     let scaled_panel_margin = PANEL_MARGIN * scale_factor;
 
-    // Draw a rectangle filling the screen
-    scene.fill(
-        Fill::NonZero,
-        Affine::IDENTITY,
-        Color::new([0.9, 0.5, 0.6, 1.0]),
-        None,
-        &RoundedRect::new(0.0, 0.0, width, height, 14.0 * scale_factor),
-    );
-
+    // Get current playback state
     let playback_state = PLAYBACK_STATE.lock().clone();
     let Some(song) = &playback_state.currently_playing else {
         return;
     };
+
+    let background_rect = RoundedRect::new(0.0, 0.0, width, height, 14.0 * scale_factor);
+
+    if let Some(image) = background_image {
+        let brush = ImageBrush::new(image.clone());
+        scene.fill(
+            Fill::NonZero,
+            Affine::IDENTITY,
+            &brush,
+            None,
+            &background_rect,
+        );
+    } else {
+        scene.fill(
+            Fill::NonZero,
+            Affine::IDENTITY,
+            Color::new([0.9, 0.5, 0.6, 1.0]),
+            None,
+            &background_rect,
+        );
+    }
 
     // Draw the album art
     if let Some(image) = IMAGES_CACHE.get(&song.image.url) {
         scene.fill(
             Fill::NonZero,
             Affine::IDENTITY,
-            &ImageBrush::new(image.clone()),
+            &ImageBrush::new(image.original.clone()),
             None,
             &RoundedRect::new(
                 scaled_panel_margin,
@@ -54,10 +68,16 @@ pub fn create_scene(
         );
     }
 
-    // Render the songs title and artist
+    // Render the songs title and artist (strip anything beyond a - or ( in the song title)
+    let song_name = song.name[..song
+        .name
+        .find(" (")
+        .or_else(|| song.name.find(" -"))
+        .unwrap_or(song.name.len())]
+        .trim();
     let text = song.artists.first().map_or_else(
-        || song.name.clone(),
-        |artist| format!("{} • {}", song.name, artist),
+        || song_name.to_string(),
+        |artist| format!("{song_name} • {artist}"),
     );
 
     let mut builder = layout_context.ranged_builder(font_context, &text, 1.0, false);

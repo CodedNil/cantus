@@ -58,19 +58,26 @@ fn fs(@builtin(position) frag_pos: vec4<f32>) -> @location(0) vec4<f32> {
     let edge_blend = clamp(radius * 1.35, 0.0, 1.0);
     warped = warped * (1.0 - edge_blend) + uv * edge_blend;
 
-    let target_aspect = resolution.x * inv_resolution.y;
-    var sample_uv = clamp(warped, vec2<f32>(0.0, 0.0), vec2<f32>(1.0, 1.0));
+    var sample_uv = warped;
+    let target_aspect = resolution.x / resolution.y;
     if texture_aspect > 0.0 && abs(texture_aspect - target_aspect) > 0.001 {
         if texture_aspect > target_aspect {
-            let scale = target_aspect / texture_aspect;
-            sample_uv.x = clamp(sample_uv.x * scale + (1.0 - scale) * 0.5, 0.0, 1.0);
+            let ratio = target_aspect / texture_aspect;
+            sample_uv.x = (sample_uv.x - 0.5) * ratio + 0.5;
         } else {
-            let scale = texture_aspect / target_aspect;
-            sample_uv.y = clamp(sample_uv.y * scale + (1.0 - scale) * 0.5, 0.0, 1.0);
+            let ratio = texture_aspect / target_aspect;
+            sample_uv.y = (sample_uv.y - 0.5) * ratio + 0.5;
         }
     }
 
+    sample_uv = clamp(sample_uv, vec2<f32>(0.0, 0.0), vec2<f32>(1.0, 1.0));
+
     var color = textureSample(background_tex, background_sampler, sample_uv).rgb;
+    let intensity = dot(color, vec3<f32>(0.2126, 0.7152, 0.0722));
+    let boosted = clamp(color * 1.35, vec3<f32>(0.0), vec3<f32>(1.0));
+    let tint = vec3<f32>(0.05, 0.05, 0.08);
+    color = mix(boosted, tint, 0.35);
+    color = mix(vec3<f32>(intensity), color, 0.85);
     let vignette = smoothstep(0.95, 0.35, radius);
     color *= mix(1.0, vignette, 0.4);
 

@@ -1,7 +1,7 @@
 use anyhow::Result;
 use dashmap::DashMap;
 use futures::future::join_all;
-use image::GenericImageView;
+use image::{GenericImageView, imageops};
 use parking_lot::Mutex;
 use reqwest::Client;
 use rspotify::{
@@ -22,7 +22,7 @@ use zbus::{
     Connection,
     fdo::{DBusProxy, PropertiesProxy},
     names::InterfaceName,
-    zvariant::{OwnedObjectPath, OwnedValue},
+    zvariant::OwnedValue,
 };
 
 const PLAYER_INTERFACE: InterfaceName<'static> =
@@ -30,14 +30,15 @@ const PLAYER_INTERFACE: InterfaceName<'static> =
 const ROOT_INTERFACE: InterfaceName<'static> =
     InterfaceName::from_static_str_unchecked("org.mpris.MediaPlayer2");
 const MPRIS_OBJECT_PATH: &str = "/org/mpris/MediaPlayer2";
+const BACKGROUND_BLUR_SIGMA: f32 = 8.0;
 
 /// Stores the current playback state
 pub static PLAYBACK_STATE: LazyLock<Arc<Mutex<PlaybackState>>> =
     LazyLock::new(|| Arc::new(Mutex::new(PlaybackState::default())));
-pub static IMAGES_CACHE: LazyLock<DashMap<String, ImageData>> = LazyLock::new(DashMap::new);
+pub static IMAGES_CACHE: LazyLock<DashMap<String, CachedImage>> = LazyLock::new(DashMap::new);
 static HTTP_CLIENT: LazyLock<Client> = LazyLock::new(Client::new);
 
-#[derive(Default, Clone, Debug)]
+#[derive(Default, Clone)]
 pub struct PlaybackState {
     pub playing: bool,
     pub shuffle: bool,
@@ -46,7 +47,7 @@ pub struct PlaybackState {
     pub queue: Vec<Track>,
 }
 
-#[derive(Default, Clone, Debug)]
+#[derive(Default, Clone)]
 pub struct Track {
     pub id: String,
     pub name: String,
@@ -59,11 +60,17 @@ pub struct Track {
     pub milliseconds: u64,
 }
 
-#[derive(Default, Clone, Debug)]
+#[derive(Default, Clone)]
 pub struct Image {
     pub url: String,
     pub width: u32,
     pub height: u32,
+}
+
+#[derive(Clone)]
+pub struct CachedImage {
+    pub original: ImageData,
+    pub blurred: ImageData,
 }
 
 impl Track {
@@ -193,14 +200,10 @@ async fn update_state_from_mpris(
         let Ok(proxy) = builder.build().await else {
             continue;
         };
-        if proxy
-            .get(ROOT_INTERFACE, "Identity")
-            .await
-            .ok()
-            .map(|value| value.to_string())
-            .as_deref()
-            == Some("Spotify")
-        {
+        let Ok(identity) = proxy.get(ROOT_INTERFACE, "Identity").await else {
+            continue;
+        };
+        if identity.to_string() == "\"Spotify\"" {
             properties_proxy = Some(proxy);
             break;
         }
@@ -209,31 +212,24 @@ async fn update_state_from_mpris(
         return false;
     };
 
-    let mut should_refresh = false;
-
-    if let Some(track_id) = properties_proxy
+    let new_track_id = properties_proxy
         .get(PLAYER_INTERFACE, "Metadata")
         .await
         .ok()
-        .and_then(|metadata| -> Option<String> {
-            let metadata = HashMap::<String, OwnedValue>::try_from(metadata).ok()?;
-            if let Some(track_id_value) = metadata.get("mpris:trackid") {
-                if let Ok(path) = OwnedObjectPath::try_from(track_id_value.clone()) {
-                    return Some(path.to_string());
-                }
-                if let Ok(track_id) = track_id_value.clone().try_into() {
-                    return Some(track_id);
-                }
-            }
-            metadata
-                .get("xesam:url")
-                .and_then(|value| value.clone().try_into().ok())
-        })
-        && last_track_id.as_ref() != Some(&track_id)
-    {
-        *last_track_id = Some(track_id);
-        should_refresh = true;
-    }
+        .and_then(|metadata| {
+            Some(
+                HashMap::<String, OwnedValue>::try_from(metadata)
+                    .ok()?
+                    .get("mpris:trackid")?
+                    .to_string(),
+            )
+        });
+    let should_refresh = new_track_id
+        .filter(|track_id| last_track_id.as_ref() != Some(track_id))
+        .is_some_and(|track_id| {
+            *last_track_id = Some(track_id);
+            true
+        });
 
     let playing = properties_proxy
         .get(PLAYER_INTERFACE, "PlaybackStatus")
@@ -332,13 +328,24 @@ async fn ensure_image_cached(url: &str) -> Result<()> {
     let response = HTTP_CLIENT.get(url).send().await?.error_for_status()?;
     let dynamic_image = image::load_from_memory(&response.bytes().await?)?;
     let (width, height) = dynamic_image.dimensions();
-    let image_data = ImageData {
-        data: Blob::from(dynamic_image.to_rgba8().into_raw()),
+    let rgba = dynamic_image.to_rgba8();
+    let blurred_rgba = imageops::blur(&rgba, BACKGROUND_BLUR_SIGMA);
+
+    let original = ImageData {
+        data: Blob::from(rgba.into_raw()),
         format: ImageFormat::Rgba8,
         alpha_type: ImageAlphaType::Alpha,
         width,
         height,
     };
-    IMAGES_CACHE.insert(url.to_string(), image_data);
+    let blurred = ImageData {
+        data: Blob::from(blurred_rgba.into_raw()),
+        format: ImageFormat::Rgba8,
+        alpha_type: ImageAlphaType::Alpha,
+        width,
+        height,
+    };
+
+    IMAGES_CACHE.insert(url.to_string(), CachedImage { original, blurred });
     Ok(())
 }

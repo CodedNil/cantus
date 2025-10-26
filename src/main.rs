@@ -1,10 +1,10 @@
-use crate::render::create_scene;
+use crate::{background::WarpBackground, render::create_scene};
 use anyhow::Result;
 use parley::{FontContext, LayoutContext};
 use raw_window_handle::{
     RawDisplayHandle, RawWindowHandle, WaylandDisplayHandle, WaylandWindowHandle,
 };
-use std::{env, ffi::c_void, ptr::NonNull, sync::Arc};
+use std::{env, ffi::c_void, ptr::NonNull, sync::Arc, time::Instant};
 use tracing::error;
 use tracing_subscriber::EnvFilter;
 use vello::{
@@ -42,6 +42,7 @@ use wayland_protocols_wlr::layer_shell::v1::client::{
     zwlr_layer_surface_v1::{self, ZwlrLayerSurfaceV1},
 };
 
+mod background;
 mod render;
 mod spotify;
 
@@ -111,7 +112,8 @@ fn run_layer_shell() {
     layer_surface
         .set_anchor(zwlr_layer_surface_v1::Anchor::Top | zwlr_layer_surface_v1::Anchor::Left);
     layer_surface.set_margin(6, 0, 0, 6);
-    layer_surface.set_exclusive_zone(0);
+    layer_surface.set_exclusive_zone(-1);
+
     app.layer_surface = Some(layer_surface);
 
     surface.commit();
@@ -172,6 +174,7 @@ struct CantusLayer {
     render_context: RenderContext,
     render_surface: Option<RenderSurface<'static>>,
     renderers: Vec<Option<Renderer>>,
+    shader_backgrounds: Vec<Option<WarpBackground>>,
     scene: Scene,
 
     // --- Text ---
@@ -186,6 +189,7 @@ struct CantusLayer {
     should_exit: bool,
     display_ptr: NonNull<c_void>,
     surface_ptr: Option<NonNull<c_void>>,
+    time_origin: Instant,
 }
 
 impl CantusLayer {
@@ -227,6 +231,7 @@ impl CantusLayer {
             render_context,
             render_surface: None,
             renderers: Vec::new(),
+            shader_backgrounds: Vec::new(),
             scene: Scene::new(),
 
             // --- Text ---
@@ -241,6 +246,7 @@ impl CantusLayer {
             should_exit: false,
             display_ptr,
             surface_ptr: None,
+            time_origin: Instant::now(),
         }
     }
 
@@ -318,6 +324,8 @@ impl CantusLayer {
         rs.surface.configure(&device_handle.device, &rs.config);
         self.renderers
             .resize_with(self.render_context.devices.len(), || None);
+        self.shader_backgrounds
+            .resize_with(self.render_context.devices.len(), || None);
         self.render_surface = Some(rs);
         Ok(())
     }
@@ -368,6 +376,29 @@ impl CantusLayer {
                 RendererOptions::default(),
             )?);
 
+            let playback_state = spotify::PLAYBACK_STATE.lock().clone();
+            let background_image = if let Some(song) = playback_state.currently_playing.as_ref() {
+                if let Some(art) = spotify::IMAGES_CACHE.get(&song.image.url) {
+                    let background = self.shader_backgrounds[id]
+                        .get_or_insert_with(|| WarpBackground::new(&device_handle.device));
+                    let result = background.update(
+                        &device_handle.device,
+                        &device_handle.queue,
+                        renderer,
+                        surface.config.width,
+                        surface.config.height,
+                        &art.blurred,
+                        self.time_origin.elapsed().as_secs_f32(),
+                    );
+                    drop(art);
+                    result
+                } else {
+                    None
+                }
+            } else {
+                None
+            };
+
             // Prepare scene (offscreen render).
             self.scene.reset();
             create_scene(
@@ -377,6 +408,7 @@ impl CantusLayer {
                 surface.config.width.into(),
                 surface.config.height.into(),
                 self.scale_factor,
+                background_image.as_ref(),
             );
 
             renderer.render_to_texture(
