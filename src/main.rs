@@ -46,8 +46,8 @@ mod background;
 mod render;
 mod spotify;
 
-const PANEL_WIDTH: f64 = 500.0;
-const PANEL_HEIGHT: f64 = 40.0;
+const PANEL_WIDTH: f64 = 800.0;
+const PANEL_HEIGHT: f64 = 50.0;
 
 /// Launch the application entry point.
 #[tokio::main]

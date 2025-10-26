@@ -1,0 +1,13 @@
+make it only pull spotify progress info if mpris didnt get
+redo the warp effect
+fix flicker when song changes, its updating progress before the queue changes
+particles as the song is playing between the dark_width
+below the current tracks bar, have buttons to set star rating, add to specific pinned playlists
+compact the artist name onto two lines
+click and drag to seek
+click songs ahead or behind to skip to that in the queue
+show previous song, somehow track that
+smoothly enter new songs into the right side, dont crop them in, have one waiting then in a smooth quick animation it pops in like a bubble
+pulse animation when play or pause like zen
+show the waveform of the song
+differentiate between the countdown vs current songs current progress - maybe make currently playing song have an animated glow outline?

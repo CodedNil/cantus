@@ -31,7 +31,7 @@ const PLAYER_INTERFACE: InterfaceName<'static> =
 const ROOT_INTERFACE: InterfaceName<'static> =
     InterfaceName::from_static_str_unchecked("org.mpris.MediaPlayer2");
 const MPRIS_OBJECT_PATH: &str = "/org/mpris/MediaPlayer2";
-const BACKGROUND_BLUR_SIGMA: f32 = 8.0;
+const BACKGROUND_BLUR_SIGMA: f32 = 3.0;
 
 /// Stores the current playback state
 pub static PLAYBACK_STATE: LazyLock<Arc<Mutex<PlaybackState>>> =
@@ -64,14 +64,11 @@ impl Default for PlaybackState {
 
 #[derive(Default, Clone)]
 pub struct Track {
-    pub id: String,
     pub name: String,
     pub artists: Vec<String>,
-    pub album_id: String,
     pub album_name: String,
     pub image: Image,
     pub release_date: String,
-    pub release_date_precision: String,
     pub milliseconds: u64,
 }
 
@@ -102,14 +99,11 @@ impl Track {
             })
             .unwrap();
         Self {
-            id: track.id.unwrap().to_string(),
             name: track.name,
             artists: track.artists.into_iter().map(|a| a.name).collect(),
-            album_id: track.album.id.unwrap().to_string(),
             album_name: track.album.name,
             image,
             release_date: track.album.release_date.unwrap(),
-            release_date_precision: track.album.release_date_precision.unwrap(),
             milliseconds: track.duration.num_milliseconds() as u64,
         }
     }
@@ -122,7 +116,6 @@ where
 {
     let mut state = PLAYBACK_STATE.lock();
     update(&mut state);
-    state.last_updated = Instant::now();
 }
 
 /// Initializes the Spotify client and spawns the combined MPRIS and Spotify polling task.
@@ -267,6 +260,7 @@ async fn update_state_from_mpris(
             }
             if let Some(progress) = progress {
                 state.progress = progress as u64;
+                state.last_updated = Instant::now();
             }
         });
     }
@@ -332,6 +326,7 @@ async fn update_state_from_spotify(spotify_client: &AuthCodeSpotify) {
             state.playing = is_playing;
             state.shuffle = shuffle;
             state.progress = progress as u64;
+            state.last_updated = Instant::now();
         });
     }
 }

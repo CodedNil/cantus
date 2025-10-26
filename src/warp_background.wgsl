@@ -70,16 +70,11 @@ fn fs(@builtin(position) frag_pos: vec4<f32>) -> @location(0) vec4<f32> {
         }
     }
 
-    sample_uv = clamp(sample_uv, vec2<f32>(0.0, 0.0), vec2<f32>(1.0, 1.0));
-
     var color = textureSample(background_tex, background_sampler, sample_uv).rgb;
-    let intensity = dot(color, vec3<f32>(0.2126, 0.7152, 0.0722));
-    let boosted = clamp(color * 1.35, vec3<f32>(0.0), vec3<f32>(1.0));
-    let tint = vec3<f32>(0.05, 0.05, 0.08);
-    color = mix(boosted, tint, 0.35);
+    let boosted = clamp(color * 1.6, vec3<f32>(0.0), vec3<f32>(1.0));
+    color = mix(boosted, vec3<f32>(0.05, 0.05, 0.05), 0.5);
+    let intensity = dot(color, vec3<f32>(0.2, 0.8, 0.1));
     color = mix(vec3<f32>(intensity), color, 0.85);
-    let vignette = smoothstep(0.95, 0.35, radius);
-    color *= mix(1.0, vignette, 0.4);
 
     return vec4<f32>(color, 1.0);
 }

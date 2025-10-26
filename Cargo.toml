@@ -17,11 +17,7 @@ vello = "0.6.0"
 parley = "0.6.0"
 rspotify = { version = "0.15.2", features = ["cli"] }
 zbus = { version = "5.12.0", default-features = false, features = ["tokio"] }
-image = { version = "0.25.8", default-features = false, features = [
-    "webp",
-    "jpeg",
-    "png",
-] }
+image = { version = "0.25.8", default-features = false, features = ["jpeg"] }
 anyhow = "1.0.100"
 pollster = "0.4.0"
 parking_lot = "0.12.5"
