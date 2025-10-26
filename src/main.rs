@@ -1,4 +1,4 @@
-use crate::{background::WarpBackground, render::create_scene};
+use crate::background::WarpBackground;
 use anyhow::Result;
 use parley::{FontContext, LayoutContext};
 use raw_window_handle::{
@@ -190,6 +190,7 @@ struct CantusLayer {
     display_ptr: NonNull<c_void>,
     surface_ptr: Option<NonNull<c_void>>,
     time_origin: Instant,
+    frame_index: u64,
 }
 
 impl CantusLayer {
@@ -247,6 +248,7 @@ impl CantusLayer {
             display_ptr,
             surface_ptr: None,
             time_origin: Instant::now(),
+            frame_index: 0,
         }
     }
 
@@ -357,6 +359,7 @@ impl CantusLayer {
     }
     /// Render a frame and present it if the surface is available.
     fn try_render_frame(&mut self, qh: &QueueHandle<Self>) -> Result<()> {
+        self.frame_index = self.frame_index.wrapping_add(1);
         // Auto-recover if surface lost
         if self.render_surface.is_none() {
             let buffer_width = (self.logical_width * self.scale_factor).round();
@@ -365,52 +368,31 @@ impl CantusLayer {
         }
 
         let rendering = {
+            if self.render_surface.is_none() {
+                return Ok(());
+            }
+
+            let id = self.render_surface.as_ref().unwrap().dev_id;
+            // Ensure the renderer exists
+            if self.renderers[id].is_none() {
+                self.renderers[id] = Some(Renderer::new(
+                    &self.render_context.devices[id].device,
+                    RendererOptions::default(),
+                )?);
+            }
+
+            // Prepare scene
+            self.scene.reset();
+            self.create_scene(id);
+
             let Some(surface) = self.render_surface.as_mut() else {
                 return Ok(());
             };
-
-            let id = surface.dev_id;
             let device_handle = &self.render_context.devices[id];
             let renderer = self.renderers[id].get_or_insert(Renderer::new(
                 &device_handle.device,
                 RendererOptions::default(),
             )?);
-
-            let playback_state = spotify::PLAYBACK_STATE.lock().clone();
-            let background_image = if let Some(song) = playback_state.currently_playing.as_ref() {
-                if let Some(art) = spotify::IMAGES_CACHE.get(&song.image.url) {
-                    let background = self.shader_backgrounds[id]
-                        .get_or_insert_with(|| WarpBackground::new(&device_handle.device));
-                    let result = background.update(
-                        &device_handle.device,
-                        &device_handle.queue,
-                        renderer,
-                        surface.config.width,
-                        surface.config.height,
-                        &art.blurred,
-                        self.time_origin.elapsed().as_secs_f32(),
-                    );
-                    drop(art);
-                    result
-                } else {
-                    None
-                }
-            } else {
-                None
-            };
-
-            // Prepare scene (offscreen render).
-            self.scene.reset();
-            create_scene(
-                &mut self.scene,
-                &mut self.font_context,
-                &mut self.layout_context,
-                surface.config.width.into(),
-                surface.config.height.into(),
-                self.scale_factor,
-                background_image.as_ref(),
-            );
-
             renderer.render_to_texture(
                 &device_handle.device,
                 &device_handle.queue,

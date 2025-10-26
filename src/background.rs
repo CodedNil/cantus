@@ -1,6 +1,6 @@
 use bytemuck::{Pod, Zeroable};
-use std::borrow::Cow;
-use vello::{Renderer, peniko::ImageData, wgpu};
+use std::{borrow::Cow, collections::HashMap};
+use vello::{Renderer, peniko::ImageData, util::DeviceHandle, wgpu};
 use wgpu::{
     BindGroup, BindGroupDescriptor, BindGroupEntry, BindGroupLayout, BindGroupLayoutDescriptor,
     BindGroupLayoutEntry, BindingResource, BindingType, BufferDescriptor, BufferUsages, Color,
@@ -39,14 +39,19 @@ struct OutputSlot {
     image: ImageData,
 }
 
+struct BackgroundSlot {
+    album: AlbumSlot,
+    output: OutputSlot,
+    last_frame: u64,
+}
+
 pub struct WarpBackground {
     pipeline: RenderPipeline,
     album_layout: BindGroupLayout,
     sampler: Sampler,
     uniform_buffer: wgpu::Buffer,
     uniform_bind_group: BindGroup,
-    album: Option<AlbumSlot>,
-    output: Option<OutputSlot>,
+    slots: HashMap<String, BackgroundSlot>,
 }
 
 impl WarpBackground {
@@ -157,120 +162,69 @@ impl WarpBackground {
             sampler,
             uniform_buffer,
             uniform_bind_group,
-            album: None,
-            output: None,
+            slots: HashMap::new(),
         }
     }
 
-    pub fn update(
+    pub fn render(
         &mut self,
-        device: &wgpu::Device,
-        queue: &wgpu::Queue,
+        key: &str,
+        device_handle: &DeviceHandle,
         renderer: &mut Renderer,
         width: u32,
         height: u32,
         album_image: &ImageData,
         elapsed_seconds: f32,
+        frame_index: u64,
     ) -> Option<ImageData> {
         if width == 0 || height == 0 || album_image.width == 0 || album_image.height == 0 {
             return None;
         }
 
-        if self
-            .output
-            .as_ref()
-            .is_none_or(|slot| slot.size != (width, height))
-        {
-            if let Some(slot) = self.output.take() {
-                renderer.unregister_texture(slot.image);
-            }
+        let slot = self.slots.entry(key.to_string()).or_insert_with(|| {
+            BackgroundSlot::new(
+                &device_handle.device,
+                renderer,
+                &self.album_layout,
+                &self.sampler,
+                width,
+                height,
+                album_image,
+            )
+        });
 
-            let texture = device.create_texture(&TextureDescriptor {
-                label: Some("cantus_warp_output_texture"),
-                size: Extent3d {
-                    width,
-                    height,
-                    depth_or_array_layers: 1,
-                },
-                mip_level_count: 1,
-                sample_count: 1,
-                dimension: TextureDimension::D2,
-                format: BACKGROUND_FORMAT,
-                usage: TextureUsages::RENDER_ATTACHMENT
-                    | TextureUsages::TEXTURE_BINDING
-                    | TextureUsages::COPY_SRC,
-                view_formats: &[],
-            });
-            let view = texture.create_view(&TextureViewDescriptor::default());
-            let image = renderer.register_texture(texture);
-
-            self.output = Some(OutputSlot {
-                view,
-                size: (width, height),
-                image,
-            });
-        }
-
-        if self
-            .album
-            .as_ref()
-            .is_none_or(|slot| slot.size != (album_image.width, album_image.height))
-        {
-            let texture = device.create_texture(&TextureDescriptor {
-                label: Some("cantus_warp_album_texture"),
-                size: Extent3d {
-                    width: album_image.width,
-                    height: album_image.height,
-                    depth_or_array_layers: 1,
-                },
-                mip_level_count: 1,
-                sample_count: 1,
-                dimension: TextureDimension::D2,
-                format: TextureFormat::Rgba8Unorm,
-                usage: TextureUsages::TEXTURE_BINDING | TextureUsages::COPY_DST,
-                view_formats: &[],
-            });
-            let view = texture.create_view(&TextureViewDescriptor::default());
-            let bind_group = device.create_bind_group(&BindGroupDescriptor {
-                label: Some("cantus_warp_album_bind_group"),
-                layout: &self.album_layout,
-                entries: &[
-                    BindGroupEntry {
-                        binding: 0,
-                        resource: BindingResource::TextureView(&view),
-                    },
-                    BindGroupEntry {
-                        binding: 1,
-                        resource: BindingResource::Sampler(&self.sampler),
-                    },
-                ],
-            });
-            self.album = Some(AlbumSlot {
-                texture,
-                bind_group,
-                size: (album_image.width, album_image.height),
-            });
-        }
-
-        if let Some(slot) = self.album.as_ref() {
-            queue.write_texture(
-                slot.texture.as_image_copy(),
-                album_image.data.data(),
-                TexelCopyBufferLayout {
-                    offset: 0,
-                    bytes_per_row: Some(4 * album_image.width),
-                    rows_per_image: Some(album_image.height),
-                },
-                Extent3d {
-                    width: album_image.width,
-                    height: album_image.height,
-                    depth_or_array_layers: 1,
-                },
+        if slot.album.size != (album_image.width, album_image.height) {
+            slot.album = BackgroundSlot::create_album_slot(
+                &device_handle.device,
+                &self.album_layout,
+                &self.sampler,
+                album_image.width,
+                album_image.height,
             );
         }
 
-        let output = self.output.as_ref()?;
-        let album = self.album.as_ref()?;
+        if slot.output.size != (width, height) {
+            renderer.unregister_texture(slot.output.image.clone());
+            slot.output =
+                BackgroundSlot::create_output_slot(&device_handle.device, renderer, width, height);
+        }
+
+        device_handle.queue.write_texture(
+            slot.album.texture.as_image_copy(),
+            album_image.data.data(),
+            TexelCopyBufferLayout {
+                offset: 0,
+                bytes_per_row: Some(4 * album_image.width),
+                rows_per_image: Some(album_image.height),
+            },
+            Extent3d {
+                width: album_image.width,
+                height: album_image.height,
+                depth_or_array_layers: 1,
+            },
+        );
+
+        slot.last_frame = frame_index;
 
         let uniforms = WarpUniforms {
             resolution: [
@@ -286,17 +240,21 @@ impl WarpBackground {
                 album_image.width as f32 / album_image.height as f32,
             ],
         };
-        queue.write_buffer(&self.uniform_buffer, 0, bytemuck::bytes_of(&uniforms));
+        device_handle
+            .queue
+            .write_buffer(&self.uniform_buffer, 0, bytemuck::bytes_of(&uniforms));
 
-        let mut encoder = device.create_command_encoder(&CommandEncoderDescriptor {
-            label: Some("cantus_warp_encoder"),
-        });
+        let mut encoder = device_handle
+            .device
+            .create_command_encoder(&CommandEncoderDescriptor {
+                label: Some("cantus_warp_encoder"),
+            });
 
         {
             let mut pass = encoder.begin_render_pass(&RenderPassDescriptor {
                 label: Some("cantus_warp_pass"),
                 color_attachments: &[Some(RenderPassColorAttachment {
-                    view: &output.view,
+                    view: &slot.output.view,
                     depth_slice: None,
                     resolve_target: None,
                     ops: Operations {
@@ -309,12 +267,122 @@ impl WarpBackground {
                 occlusion_query_set: None,
             });
             pass.set_pipeline(&self.pipeline);
-            pass.set_bind_group(0, &album.bind_group, &[]);
+            pass.set_bind_group(0, &slot.album.bind_group, &[]);
             pass.set_bind_group(1, &self.uniform_bind_group, &[]);
             pass.draw(0..3, 0..1);
         }
 
-        queue.submit(Some(encoder.finish()));
-        Some(output.image.clone())
+        device_handle.queue.submit(Some(encoder.finish()));
+        Some(slot.output.image.clone())
+    }
+
+    pub fn purge_stale(&mut self, renderer: &mut Renderer, frame_index: u64) {
+        const STALE_FRAME_BUDGET: u64 = 600;
+        self.slots.retain(|_, slot| {
+            let keep = frame_index.saturating_sub(slot.last_frame) <= STALE_FRAME_BUDGET;
+            if !keep {
+                renderer.unregister_texture(slot.output.image.clone());
+            }
+            keep
+        });
+    }
+}
+
+impl BackgroundSlot {
+    fn new(
+        device: &wgpu::Device,
+        renderer: &mut Renderer,
+        album_layout: &BindGroupLayout,
+        sampler: &Sampler,
+        width: u32,
+        height: u32,
+        album_image: &ImageData,
+    ) -> Self {
+        Self {
+            album: Self::create_album_slot(
+                device,
+                album_layout,
+                sampler,
+                album_image.width,
+                album_image.height,
+            ),
+            output: Self::create_output_slot(device, renderer, width, height),
+            last_frame: 0,
+        }
+    }
+
+    fn create_album_slot(
+        device: &wgpu::Device,
+        album_layout: &BindGroupLayout,
+        sampler: &Sampler,
+        width: u32,
+        height: u32,
+    ) -> AlbumSlot {
+        let texture = device.create_texture(&TextureDescriptor {
+            label: Some("cantus_warp_album_texture"),
+            size: Extent3d {
+                width,
+                height,
+                depth_or_array_layers: 1,
+            },
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: TextureDimension::D2,
+            format: TextureFormat::Rgba8Unorm,
+            usage: TextureUsages::TEXTURE_BINDING | TextureUsages::COPY_DST,
+            view_formats: &[],
+        });
+        let view = texture.create_view(&TextureViewDescriptor::default());
+        let bind_group = device.create_bind_group(&BindGroupDescriptor {
+            label: Some("cantus_warp_album_bind_group"),
+            layout: album_layout,
+            entries: &[
+                BindGroupEntry {
+                    binding: 0,
+                    resource: BindingResource::TextureView(&view),
+                },
+                BindGroupEntry {
+                    binding: 1,
+                    resource: BindingResource::Sampler(sampler),
+                },
+            ],
+        });
+        AlbumSlot {
+            texture,
+            bind_group,
+            size: (width, height),
+        }
+    }
+
+    fn create_output_slot(
+        device: &wgpu::Device,
+        renderer: &mut Renderer,
+        width: u32,
+        height: u32,
+    ) -> OutputSlot {
+        let texture = device.create_texture(&TextureDescriptor {
+            label: Some("cantus_warp_output_texture"),
+            size: Extent3d {
+                width,
+                height,
+                depth_or_array_layers: 1,
+            },
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: TextureDimension::D2,
+            format: BACKGROUND_FORMAT,
+            usage: TextureUsages::RENDER_ATTACHMENT
+                | TextureUsages::TEXTURE_BINDING
+                | TextureUsages::COPY_SRC,
+            view_formats: &[],
+        });
+        let view = texture.create_view(&TextureViewDescriptor::default());
+        let image = renderer.register_texture(texture);
+
+        OutputSlot {
+            view,
+            size: (width, height),
+            image,
+        }
     }
 }

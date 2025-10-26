@@ -14,6 +14,7 @@ use std::{
     collections::{HashMap, HashSet},
     convert::TryInto,
     sync::{Arc, LazyLock},
+    time::Instant,
 };
 use tokio::time::{Duration, sleep};
 use tracing::warn;
@@ -38,13 +39,27 @@ pub static PLAYBACK_STATE: LazyLock<Arc<Mutex<PlaybackState>>> =
 pub static IMAGES_CACHE: LazyLock<DashMap<String, CachedImage>> = LazyLock::new(DashMap::new);
 static HTTP_CLIENT: LazyLock<Client> = LazyLock::new(Client::new);
 
-#[derive(Default, Clone)]
+#[derive(Clone)]
 pub struct PlaybackState {
+    pub last_updated: Instant,
     pub playing: bool,
     pub shuffle: bool,
     pub progress: u64,
     pub currently_playing: Option<Track>,
     pub queue: Vec<Track>,
+}
+
+impl Default for PlaybackState {
+    fn default() -> Self {
+        Self {
+            last_updated: Instant::now(),
+            playing: false,
+            shuffle: false,
+            progress: 0,
+            currently_playing: None,
+            queue: Vec::new(),
+        }
+    }
 }
 
 #[derive(Default, Clone)]
@@ -107,6 +122,7 @@ where
 {
     let mut state = PLAYBACK_STATE.lock();
     update(&mut state);
+    state.last_updated = Instant::now();
 }
 
 /// Initializes the Spotify client and spawns the combined MPRIS and Spotify polling task.
