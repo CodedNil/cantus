@@ -127,31 +127,42 @@ impl CantusLayer {
 
             // Draw the background using the shader
             if let Some(image) = background_image {
-                let brush = ImageBrush::new(image);
+                let brush = ImageBrush::new(image.clone());
 
                 // If theres any dark width, draw a thinner rectangle behind
-                if dark_width > 0.0 {
-                    let transform = Affine::translate((pos_x, 0.0));
-                    let rect =
-                        RoundedRect::new(0.0, dark_reduction, width, dark_height, rounding_radius);
-                    self.scene
-                        .fill(Fill::NonZero, transform, &brush, None, &rect);
-                    // Darken it with a layer above
-                    self.scene.fill(
-                        Fill::NonZero,
-                        transform,
-                        Color::from_rgba8(0, 0, 0, 100),
-                        None,
-                        &rect,
-                    );
-                }
+                // if dark_width > 0.0 {
+                //     let transform = Affine::translate((pos_x, 0.0));
+                //     let rect =
+                //         RoundedRect::new(0.0, dark_reduction, width, dark_height, rounding_radius);
+                //     self.scene
+                //         .fill(Fill::NonZero, transform, &brush, None, &rect);
+                //     // Darken it with a layer above
+                //     self.scene.fill(
+                //         Fill::NonZero,
+                //         transform,
+                //         Color::from_rgba8(0, 0, 0, 100),
+                //         None,
+                //         &rect,
+                //     );
+                // }
+
+                let image_width = f64::from(image.width);
+                let image_height = f64::from(image.height);
+                let transform = Affine::translate((pos_x + dark_width, 0.0));
+                let width = width - dark_width;
+                // self.scene.push_clip_layer(
+                //     transform,
+                //     &RoundedRect::new(0.0, 0.0, width, height, rounding_radius),
+                // );
                 self.scene.fill(
                     Fill::NonZero,
-                    Affine::translate((pos_x + dark_width, 0.0)),
+                    transform
+                        * Affine::scale_non_uniform(width / image_width, height / image_height),
                     &brush,
                     None,
-                    &RoundedRect::new(0.0, 0.0, width - dark_width, height, rounding_radius),
+                    &Rect::new(0.0, 0.0, image_width, image_height),
                 );
+                // self.scene.pop_layer();
             }
         }
 

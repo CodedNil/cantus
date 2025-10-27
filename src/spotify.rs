@@ -91,7 +91,7 @@ impl Track {
             .album
             .images
             .into_iter()
-            .min_by_key(|img| img.width.unwrap())
+            .max_by_key(|img| img.width.unwrap())
             .map(|img| Image {
                 url: img.url,
                 width: img.width.unwrap(),
@@ -340,7 +340,7 @@ async fn ensure_image_cached(url: &str) -> Result<()> {
     let dynamic_image = image::load_from_memory(&response.bytes().await?)?;
     let (width, height) = dynamic_image.dimensions();
     let rgba = dynamic_image.to_rgba8();
-    let blurred_rgba = imageops::blur(&rgba, BACKGROUND_BLUR_SIGMA);
+    let blurred_rgba = dynamic_image.to_rgba8(); //imageops::blur(&rgba, BACKGROUND_BLUR_SIGMA);
 
     let original = ImageData {
         data: Blob::from(rgba.into_raw()),
