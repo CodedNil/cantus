@@ -1,10 +1,10 @@
-const WARP_STRENGTH: f32 = 0.0;
-const SWIRL_STRENGTH: f32 = 0.0;
+const WARP_STRENGTH: f32 = 2.0;
+const SWIRL_STRENGTH: f32 = 0.8;
 const WARP_TIME_SCALE: f32 = 0.8;
 const EDGE_BLEND_POWER: f32 = 1.35;
 const VIBRANCY_BOOST: f32 = 0.35;
-const DARKEN_STRENGTH: f32 = 0.18;
-const SHADOW_LIFT: f32 = 0.05;
+const DARKEN_STRENGTH: f32 = 0.15;
+const SHADOW_LIFT: f32 = 0.3;
 
 struct WarpUniforms {
     params: vec4<f32>,

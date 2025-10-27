@@ -31,7 +31,7 @@ const PLAYER_INTERFACE: InterfaceName<'static> =
 const ROOT_INTERFACE: InterfaceName<'static> =
     InterfaceName::from_static_str_unchecked("org.mpris.MediaPlayer2");
 const MPRIS_OBJECT_PATH: &str = "/org/mpris/MediaPlayer2";
-const BACKGROUND_BLUR_SIGMA: f32 = 3.0;
+const BACKGROUND_BLUR_SIGMA: f32 = 8.0;
 
 /// Stores the current playback state
 pub static PLAYBACK_STATE: LazyLock<Arc<Mutex<PlaybackState>>> =
@@ -91,7 +91,7 @@ impl Track {
             .album
             .images
             .into_iter()
-            .max_by_key(|img| img.width.unwrap())
+            .min_by_key(|img| img.width.unwrap())
             .map(|img| Image {
                 url: img.url,
                 width: img.width.unwrap(),
@@ -340,7 +340,7 @@ async fn ensure_image_cached(url: &str) -> Result<()> {
     let dynamic_image = image::load_from_memory(&response.bytes().await?)?;
     let (width, height) = dynamic_image.dimensions();
     let rgba = dynamic_image.to_rgba8();
-    let blurred_rgba = dynamic_image.to_rgba8(); //imageops::blur(&rgba, BACKGROUND_BLUR_SIGMA);
+    let blurred_rgba = imageops::blur(&rgba, BACKGROUND_BLUR_SIGMA);
 
     let original = ImageData {
         data: Blob::from(rgba.into_raw()),

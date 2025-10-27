@@ -1,5 +1,4 @@
 make it only pull spotify progress info if mpris didnt get
-redo the warp effect
 fix flicker when song changes, its updating progress before the queue changes
 particles as the song is playing between the dark_width
 below the current tracks bar, have buttons to set star rating, add to specific pinned playlists
