@@ -1,6 +1,7 @@
-use crate::background::WarpBackground;
+use crate::{background::WarpBackground, render::NowPlayingParticle};
 use anyhow::Result;
 use parley::{FontContext, LayoutContext};
+use rand::{SeedableRng, rngs::SmallRng};
 use raw_window_handle::{
     RawDisplayHandle, RawWindowHandle, WaylandDisplayHandle, WaylandWindowHandle,
 };
@@ -194,6 +195,10 @@ struct CantusLayer {
     surface_ptr: Option<NonNull<c_void>>,
     time_origin: Instant,
     frame_index: u64,
+    now_playing_particles: Vec<NowPlayingParticle>,
+    rng: SmallRng,
+    last_particle_update: Instant,
+    particle_spawn_accumulator: f32,
 }
 
 impl CantusLayer {
@@ -252,6 +257,10 @@ impl CantusLayer {
             surface_ptr: None,
             time_origin: Instant::now(),
             frame_index: 0,
+            now_playing_particles: Vec::new(),
+            rng: SmallRng::from_os_rng(),
+            last_particle_update: Instant::now(),
+            particle_spawn_accumulator: 0.0,
         }
     }
 
@@ -294,7 +303,7 @@ impl CantusLayer {
             surface,
             w as u32,
             h as u32,
-            PresentMode::Fifo,
+            PresentMode::AutoVsync,
         ))?;
         let device_handle = &self.render_context.devices[rs.dev_id];
         let alpha_modes = rs

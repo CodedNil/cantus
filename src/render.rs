@@ -6,10 +6,11 @@ use crate::{
 use parley::{
     FontFamily, FontStack, FontWeight, Layout, layout::PositionedLayoutItem, style::StyleProperty,
 };
-use std::borrow::Cow;
+use rand::Rng;
+use std::{borrow::Cow, ops::Range, time::Instant};
 use vello::{
     Glyph,
-    kurbo::{Affine, Rect, RoundedRect},
+    kurbo::{Affine, Rect, RoundedRect, RoundedRectRadii},
     peniko::{Color, Fill, ImageBrush},
 };
 
@@ -20,7 +21,25 @@ const TIMELINE_DURATION_MS: f64 = 12.0 * 60.0 * 1000.0;
 /// Starting position of the timeline in ms, if negative then it shows the history too
 const TIMELINE_START_MS: f64 = -40.0 * 1000.0;
 
-const ROUNDING_RADIUS: f64 = 10.0;
+/// Corner radius applied to rendered track pills.
+const ROUNDING_RADIUS: f64 = 14.0;
+
+/// Particles emitted per second when playback is active.
+const SPARK_EMISSION: f32 = 60.0;
+/// Downward acceleration applied to each particle (scaled by DPI).
+const SPARK_GRAVITY: f32 = 620.0;
+/// Normalized vertical spawn range along the divider (0.0 = top, 1.0 = bottom).
+const SPARK_SPAWN_Y: Range<f32> = 0.05..0.95;
+/// Horizontal velocity range applied at spawn (negative moves sparks left).
+const SPARK_VELOCITY_X: Range<f32> = -120.0..-70.0;
+/// Vertical velocity range applied at spawn (negative moves sparks upward).
+const SPARK_VELOCITY_Y: Range<f32> = -70.0..-40.0;
+/// Lifetime range for individual particles, in seconds.
+const SPARK_LIFETIME: Range<f32> = 0.5..0.8;
+/// Rendered spark segment length range, in logical pixels.
+const SPARK_LENGTH_RANGE: Range<f64> = 4.0..10.0;
+/// Rendered spark thickness range, in logical pixels.
+const SPARK_THICKNESS_RANGE: Range<f64> = 1.8..3.0;
 
 /// Build the scene for rendering.
 impl CantusLayer {
@@ -62,7 +81,9 @@ impl CantusLayer {
             let track_end_ms = track_start_ms_spaced + track.milliseconds as f64;
 
             let visible_start_ms = track_start_ms_spaced.max(TIMELINE_START_MS);
+            let start_trimmed = track_start_ms > TIMELINE_START_MS;
             let visible_end_ms = track_end_ms.min(timeline_end_ms);
+            let end_trimmed = track_end_ms < timeline_end_ms;
 
             let pos_x = (visible_start_ms - TIMELINE_START_MS) * px_per_ms;
             let width = (visible_end_ms - visible_start_ms) * px_per_ms;
@@ -82,12 +103,21 @@ impl CantusLayer {
                 width,
                 dark_width,
                 total_height,
-                track_start_ms,
+                (track_start_ms / 1000.0).abs(),
+                start_trimmed,
+                end_trimmed,
             );
 
             track_start_ms += track.milliseconds as f64;
             track_spacing += TRACK_SPACING_MS;
         }
+
+        // Draw the particles
+        self.render_playing_particles(
+            -TIMELINE_START_MS * px_per_ms,
+            total_height,
+            playback_state.playing,
+        );
 
         // Purge the stale background cache entries.
         self.shader_backgrounds[id]
@@ -104,116 +134,124 @@ impl CantusLayer {
         width: f64,
         dark_width: f64,
         height: f64,
-        track_start_ms: f64,
+        seconds_until_start: f64,
+        start_trimmed: bool,
+        end_trimmed: bool,
     ) {
-        let rounding_radius = ROUNDING_RADIUS * self.scale_factor;
+        let rounding = ROUNDING_RADIUS * self.scale_factor;
+        let left_rounding = rounding * if start_trimmed { 1.0 } else { 0.3 };
+        let right_rounding = rounding * if end_trimmed { 1.0 } else { 0.3 };
 
         // For the part rendered behind the timeline
         let dark_reduction = 5.0;
         let dark_height = height - dark_reduction;
 
-        if let Some(image) = IMAGES_CACHE.get(&track.image.url) {
-            let surface = self.render_surface.as_ref().unwrap();
-            let background_image = self.shader_backgrounds[id].as_mut().unwrap().render(
-                &track.image.url,
-                &self.render_context.devices[id],
-                self.renderers[id].as_mut().unwrap(),
-                surface.config.width,
-                surface.config.height,
-                &image.blurred,
-                self.time_origin.elapsed().as_secs_f32(),
-                self.frame_index,
-            );
+        let Some(image) = IMAGES_CACHE.get(&track.image.url) else {
+            return;
+        };
 
-            // Draw the background using the shader
-            if let Some(image) = background_image {
-                let brush = ImageBrush::new(image.clone());
+        // Make sure the background image shader is ready
+        let surface = self.render_surface.as_ref().unwrap();
+        let background_image = self.shader_backgrounds[id].as_mut().unwrap().render(
+            &track.image.url,
+            &self.render_context.devices[id],
+            self.renderers[id].as_mut().unwrap(),
+            surface.config.width,
+            surface.config.height,
+            &image.blurred,
+            self.time_origin.elapsed().as_secs_f32(),
+            self.frame_index,
+        );
 
-                // If theres any dark width, draw a thinner rectangle behind
-                if dark_width > 0.0 {
-                    let transform = Affine::translate((pos_x, 0.0));
-                    let rect =
-                        RoundedRect::new(0.0, dark_reduction, width, dark_height, rounding_radius);
-                    self.scene
-                        .fill(Fill::NonZero, transform, &brush, None, &rect);
-                    // Darken it with a layer above
-                    self.scene.fill(
-                        Fill::NonZero,
-                        transform,
-                        Color::from_rgba8(0, 0, 0, 100),
-                        None,
-                        &rect,
-                    );
-                }
+        // -- BACKGROUND --
+        if let Some(image) = background_image {
+            let brush = ImageBrush::new(image.clone());
+            let image_width = f64::from(image.width);
+            let image_height = f64::from(image.height);
 
-                let image_width = f64::from(image.width);
-                let image_height = f64::from(image.height);
-                let width = width - dark_width;
+            let image_transform = Affine::translate((pos_x, image_height * -0.5))
+                * Affine::scale_non_uniform(width / image_width, width / image_height);
+            let image_rect = Rect::new(0.0, 0.0, image_width, image_height);
+
+            // If theres any dark width, draw a thinner rectangle behind
+            if dark_width > 0.0 {
+                // Dark pill clip
                 self.scene.push_clip_layer(
-                    Affine::translate((pos_x + dark_width, 0.0)),
-                    &RoundedRect::new(0.0, 0.0, width, height, rounding_radius),
+                    Affine::translate((pos_x, 0.0)),
+                    &RoundedRect::new(
+                        0.0,
+                        dark_reduction,
+                        dark_width + rounding,
+                        dark_height,
+                        RoundedRectRadii::new(left_rounding, rounding, rounding, left_rounding),
+                    ),
                 );
+                self.scene
+                    .fill(Fill::NonZero, image_transform, &brush, None, &image_rect);
+                // Darken it with a layer above
                 self.scene.fill(
                     Fill::NonZero,
-                    Affine::translate((pos_x + dark_width, image_height * -0.5))
-                        * Affine::scale_non_uniform(width / image_width, width / image_height),
-                    &brush,
+                    image_transform,
+                    Color::from_rgba8(0, 0, 0, 80),
                     None,
-                    &Rect::new(0.0, 0.0, image_width, image_height),
+                    &image_rect,
                 );
                 self.scene.pop_layer();
             }
-        }
 
-        // Draw the album art
-        if let Some(image) = IMAGES_CACHE.get(&track.image.url) {
-            let brush = ImageBrush::new(image.original.clone());
-            let image_height = f64::from(image.original.height);
-
-            // When the album art is clipping near the end, shrink it to move it onto the dark side
-            let dark_offset = if width - dark_width < height {
-                width - dark_width - height
-            } else {
-                0.0
-            };
-            let dark_transition = (dark_offset / height).abs().clamp(0.0, 1.0);
-            let dark_reduction = dark_reduction * dark_transition;
-            let dark_height = height - dark_reduction;
-
-            // Render the primary album art
-            let transform = Affine::translate((dark_offset + dark_width + pos_x, 0.0));
-            let rect = RoundedRect::new(
-                0.0,
-                dark_reduction,
-                dark_height,
-                dark_height,
-                rounding_radius,
+            self.scene.push_clip_layer(
+                Affine::translate((pos_x + dark_width, 0.0)),
+                &RoundedRect::new(
+                    0.0,
+                    0.0,
+                    width - dark_width,
+                    height,
+                    RoundedRectRadii::new(rounding, right_rounding, right_rounding, rounding),
+                ),
             );
-            self.scene.push_clip_layer(transform, &rect);
-            self.scene.fill(
-                Fill::NonZero,
-                transform * Affine::scale(dark_height / image_height),
-                &brush,
-                None,
-                &Rect::new(0.0, 0.0, image_height, image_height),
-            );
-
-            // Darken it with a layer above
-            if dark_transition > 0.0 {
-                self.scene.fill(
-                    Fill::NonZero,
-                    transform,
-                    Color::from_rgba8(0, 0, 0, (100.0 * dark_transition).round() as u8),
-                    None,
-                    &rect,
-                );
-            }
-
-            // Release clipping mask
+            self.scene
+                .fill(Fill::NonZero, image_transform, &brush, None, &image_rect);
             self.scene.pop_layer();
         }
 
-        // Draw out text
+        // -- ALBUM ART SQUARE --
+        let brush = ImageBrush::new(image.original.clone());
+        let image_height = f64::from(image.original.height);
+
+        // When the album art is clipping near the end, shrink it to move it onto the dark side
+        let dark_offset = if width - dark_width < height {
+            width - dark_width - height
+        } else {
+            0.0
+        };
+        let dark_transition = (dark_offset / height).abs().clamp(0.0, 1.0);
+        let dark_reduction = dark_reduction * dark_transition;
+        let dark_height = height - dark_reduction;
+
+        // Render the primary album art
+        let transform = Affine::translate((dark_offset + dark_width + pos_x, 0.0));
+        let rect = RoundedRect::new(0.0, dark_reduction, dark_height, dark_height, rounding);
+        self.scene.push_clip_layer(transform, &rect);
+        self.scene.fill(
+            Fill::NonZero,
+            transform * Affine::scale(dark_height / image_height),
+            &brush,
+            None,
+            &Rect::new(0.0, 0.0, image_height, image_height),
+        );
+        if dark_transition > 0.0 {
+            // Darken it with a layer above
+            self.scene.fill(
+                Fill::NonZero,
+                transform,
+                Color::from_rgba8(0, 0, 0, (50.0 * dark_transition).round() as u8),
+                None,
+                &rect,
+            );
+        }
+        self.scene.pop_layer();
+
+        // -- TEXT --
         // Clipping mask to the edge of the background rectangle, shrunk by a margin
         let margin = 2.0 * self.scale_factor;
         self.scene.push_clip_layer(
@@ -223,7 +261,7 @@ impl CantusLayer {
                 margin,
                 width - margin * 2.0,
                 height - margin,
-                rounding_radius,
+                rounding,
             ),
         );
 
@@ -234,7 +272,7 @@ impl CantusLayer {
             .or_else(|| track.name.find(" -"))
             .unwrap_or(track.name.len())]
             .trim();
-        let text_start = dark_width + pos_x + height + (2.0 * self.scale_factor);
+        let text_start = dark_width + pos_x + height + (4.0 * self.scale_factor);
         self.draw_text(
             song_name,
             text_start,
@@ -244,7 +282,6 @@ impl CantusLayer {
         );
 
         // Draw the time until it starts
-        let seconds_until_start = (track_start_ms / 1000.0).abs();
         let time_string = if seconds_until_start >= 60.0 {
             format!(
                 "{}m {}s",
@@ -297,10 +334,7 @@ impl CantusLayer {
 
         let mut layout: Layout<()> = builder.build(text);
         layout.break_all_lines(None);
-        let text_transform = Affine::translate((
-            pos_x + (10.0 * self.scale_factor),
-            pos_y - (f64::from(layout.height()) * 0.5),
-        ));
+        let text_transform = Affine::translate((pos_x, pos_y - (f64::from(layout.height()) * 0.5)));
 
         for glyph_run in layout
             .lines()
@@ -331,4 +365,98 @@ impl CantusLayer {
 
         f64::from(layout.width())
     }
+
+    fn render_playing_particles(&mut self, x: f64, height: f64, is_playing: bool) {
+        let now = Instant::now();
+        let dt = now.duration_since(self.last_particle_update).as_secs_f32();
+        self.last_particle_update = now;
+
+        let scale = self.scale_factor as f32;
+        let height_f32 = height as f32;
+
+        // Emit new particles while playing
+        if is_playing {
+            self.particle_spawn_accumulator += dt * SPARK_EMISSION;
+            let emit_count = self.particle_spawn_accumulator.floor() as u32;
+            self.particle_spawn_accumulator -= emit_count as f32;
+            for _ in 0..emit_count {
+                self.now_playing_particles.push(NowPlayingParticle {
+                    position: [x as f32, height_f32 * self.rng.random_range(SPARK_SPAWN_Y)],
+                    velocity: [
+                        self.rng.random_range(SPARK_VELOCITY_X) * scale,
+                        self.rng.random_range(SPARK_VELOCITY_Y) * scale,
+                    ],
+                    life: 0.0,
+                    lifetime: self.rng.random_range(SPARK_LIFETIME),
+                });
+            }
+        } else {
+            self.particle_spawn_accumulator = 0.0;
+        }
+
+        // Delete dead particles, and update positions of others
+        self.now_playing_particles.retain_mut(|particle| {
+            particle.life += dt;
+            if particle.life >= particle.lifetime {
+                return false;
+            }
+
+            particle.velocity[1] += SPARK_GRAVITY * scale * dt;
+            particle.position[0] += particle.velocity[0] * dt;
+            particle.position[1] += particle.velocity[1] * dt;
+            true
+        });
+
+        // Line at the now playing position to denote the cutoff
+        let scale = self.scale_factor;
+        let line_width = 4.0 * scale;
+        self.scene.fill(
+            Fill::NonZero,
+            Affine::translate((x - line_width * 0.5, 0.0)),
+            Color::from_rgba8(255, 224, 210, if is_playing { 220 } else { 140 }),
+            None,
+            &RoundedRect::new(0.0, 0.0, line_width, height, 100.0),
+        );
+
+        for particle in &self.now_playing_particles {
+            let fade = 1.0 - (particle.life / particle.lifetime).clamp(0.0, 1.0);
+            let fade64 = f64::from(fade);
+            let length = Self::lerp_range(SPARK_LENGTH_RANGE, fade64) * scale;
+            let thickness = Self::lerp_range(SPARK_THICKNESS_RANGE, fade64) * scale;
+            self.scene.fill(
+                Fill::NonZero,
+                Affine::translate((
+                    f64::from(particle.position[0]),
+                    f64::from(particle.position[1]),
+                )) * Affine::rotate(f64::from(particle.velocity[1].atan2(particle.velocity[0])))
+                    * Affine::translate((-length * 0.5, 0.0)),
+                Color::from_rgba8(
+                    255,
+                    210,
+                    160,
+                    (fade.powf(1.1) * 235.0).round().clamp(0.0, 255.0) as u8,
+                ),
+                None,
+                &RoundedRect::new(
+                    0.0,
+                    -thickness * 0.5,
+                    length,
+                    thickness * 0.5,
+                    thickness * 0.5,
+                ),
+            );
+        }
+    }
+
+    #[inline]
+    fn lerp_range(range: Range<f64>, t: f64) -> f64 {
+        range.start + (range.end - range.start) * t.clamp(0.0, 1.0)
+    }
+}
+
+pub struct NowPlayingParticle {
+    position: [f32; 2],
+    velocity: [f32; 2],
+    life: f32,
+    lifetime: f32,
 }

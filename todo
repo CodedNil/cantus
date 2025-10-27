@@ -1,7 +1,4 @@
-fix flicker when song changes, its updating progress before the queue changes
-particles as the song is playing between the dark_width
 below the current tracks bar, have buttons to set star rating, add to specific pinned playlists
-compact the artist name onto two lines
 click and drag to seek
 click songs ahead or behind to skip to that in the queue
 show previous song, somehow track that
@@ -9,3 +6,11 @@ smoothly enter new songs into the right side, dont crop them in, have one waitin
 pulse animation when play or pause like zen
 show the waveform of the song
 maybe make currently playing song have an animated glow outline?
+
+get primary colours per song image, give the text complementary colour
+give the particles a random pick from the primary colours (exclude grayscale ones)
+
+
+shrink dependencies:
+wasm-bindgen
+wgpu optional features
