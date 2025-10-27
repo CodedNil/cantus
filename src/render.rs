@@ -245,31 +245,37 @@ impl CantusLayer {
 
         // Draw the time until it starts
         let seconds_until_start = (track_start_ms / 1000.0).abs();
-        let artist_string = track
-            .artists
-            .first()
-            .map_or_else(String::new, |artist| format!(" • {artist}"));
         let time_string = if seconds_until_start >= 60.0 {
             format!(
-                "{}m {}s{artist_string}",
+                "{}m {}s",
                 (seconds_until_start / 60.0).floor(),
                 (seconds_until_start % 60.0).floor()
             )
         } else {
-            format!("{}s{artist_string}", seconds_until_start.round())
+            format!("{}s", seconds_until_start.round())
         };
-        self.draw_text(
+        let time_width = self.draw_text(
             &time_string,
             text_start,
             height * 0.75,
             12.0,
             FontWeight::EXTRA_BLACK,
         );
+        if let Some(artist_string) = track.artists.first().map(|artist| format!(" • {artist}")) {
+            self.draw_text(
+                &artist_string,
+                text_start + ((time_width / 10.0).ceil() * 10.0),
+                height * 0.75,
+                12.0,
+                FontWeight::EXTRA_BLACK,
+            );
+        }
 
         // Release clipping mask
         self.scene.pop_layer();
     }
 
+    /// Renders out text with specified variables, returns how wide the text was.
     fn draw_text(
         &mut self,
         text: &str,
@@ -277,7 +283,7 @@ impl CantusLayer {
         pos_y: f64,
         font_size: f64,
         font_weight: FontWeight,
-    ) {
+    ) -> f64 {
         let mut builder =
             self.layout_context
                 .ranged_builder(&mut self.font_context, text, 1.0, false);
@@ -322,5 +328,7 @@ impl CantusLayer {
                 .brush(Color::from_rgb8(240, 240, 240))
                 .draw(Fill::NonZero, glyphs);
         }
+
+        f64::from(layout.width())
     }
 }

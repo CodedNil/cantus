@@ -3,8 +3,9 @@ const SWIRL_STRENGTH: f32 = 0.8;
 const WARP_TIME_SCALE: f32 = 0.8;
 const EDGE_BLEND_POWER: f32 = 1.35;
 const VIBRANCY_BOOST: f32 = 0.35;
-const DARKEN_STRENGTH: f32 = 0.15;
-const SHADOW_LIFT: f32 = 0.3;
+const DARKEN_STRENGTH: f32 = 0.1;
+const SHADOW_LIFT: f32 = 0.4;
+const HIGHLIGHT_DROP: f32 = 0.8;
 
 struct WarpUniforms {
     params: vec4<f32>,
@@ -65,7 +66,7 @@ fn fs(in: VertexOut) -> @location(0) vec4<f32> {
     warped = warped * (1.0 - edge_blend) + uv * edge_blend;
 
     var color = textureSample(background_tex, background_sampler, warped).rgb;
-    color = max(color, vec3<f32>(SHADOW_LIFT));
+    color = clamp(color, vec3<f32>(SHADOW_LIFT), vec3<f32>(HIGHLIGHT_DROP));
 
     let luma = dot(color, vec3<f32>(0.299, 0.587, 0.114));
     color = mix(vec3<f32>(luma), color, 1.0 + VIBRANCY_BOOST);

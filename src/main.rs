@@ -47,7 +47,7 @@ mod render;
 mod spotify;
 
 const PANEL_WIDTH: f64 = 800.0;
-const PANEL_HEIGHT: f64 = 50.0;
+const PANEL_HEIGHT: f64 = 45.0;
 
 /// Launch the application entry point.
 #[tokio::main]
@@ -392,10 +392,7 @@ impl CantusLayer {
                 return Ok(());
             };
             let device_handle = &self.render_context.devices[id];
-            let renderer = self.renderers[id].get_or_insert(Renderer::new(
-                &device_handle.device,
-                RendererOptions::default(),
-            )?);
+            let renderer = self.renderers[id].as_mut().unwrap();
             renderer.render_to_texture(
                 &device_handle.device,
                 &device_handle.queue,
@@ -427,7 +424,7 @@ impl CantusLayer {
                     );
                     Ok((id, acquired, encoder.finish()))
                 }
-                Err(_) => Err(()),
+                Err(err) => Err(err),
             }
         };
 

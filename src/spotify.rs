@@ -31,7 +31,7 @@ const PLAYER_INTERFACE: InterfaceName<'static> =
 const ROOT_INTERFACE: InterfaceName<'static> =
     InterfaceName::from_static_str_unchecked("org.mpris.MediaPlayer2");
 const MPRIS_OBJECT_PATH: &str = "/org/mpris/MediaPlayer2";
-const BACKGROUND_BLUR_SIGMA: f32 = 8.0;
+const BACKGROUND_BLUR_SIGMA: f32 = 0.2;
 
 /// Stores the current playback state
 pub static PLAYBACK_STATE: LazyLock<Arc<Mutex<PlaybackState>>> =
@@ -153,7 +153,7 @@ pub async fn init() {
     tokio::spawn(polling_task(spotify));
 }
 
-/// Asynchronous task to poll MPRIS every 500ms and Spotify API every 4 seconds or on song change.
+/// Asynchronous task to poll MPRIS every 500ms and Spotify API every X seconds or on song change.
 async fn polling_task(spotify_client: AuthCodeSpotify) {
     let mut last_mpris_track_id: Option<String> = None; // Local state for track ID
     let mut spotify_poll_counter = 100; // Counter for Spotify API polling
@@ -170,28 +170,28 @@ async fn polling_task(spotify_client: AuthCodeSpotify) {
 
     loop {
         // --- MPRIS Polling Logic ---
-        let should_refresh_spotify =
+        let (should_refresh_spotify, has_mpris_data) =
             update_state_from_mpris(&connection, &dbus_proxy, &mut last_mpris_track_id).await;
 
         // --- Spotify API Polling Logic ---
         spotify_poll_counter += 1;
-        if spotify_poll_counter >= 8 || should_refresh_spotify {
+        if spotify_poll_counter >= 6 || should_refresh_spotify {
             spotify_poll_counter = 0; // Reset counter
-            update_state_from_spotify(&spotify_client).await;
+            update_state_from_spotify(&spotify_client, has_mpris_data).await;
         }
 
         sleep(Duration::from_millis(500)).await;
     }
 }
 
-/// Synchronizes playback information with the MPRIS interface and returns whether Spotify data should refresh.
+/// Synchronizes playback information with the MPRIS interface and returns whether Spotify data should refresh, and whether MPRIS data was fetched.
 async fn update_state_from_mpris(
     connection: &Connection,
     dbus_proxy: &DBusProxy<'_>,
     last_track_id: &mut Option<String>,
-) -> bool {
+) -> (bool, bool) {
     let Ok(names) = dbus_proxy.list_names().await else {
-        return false;
+        return (false, false);
     };
 
     let mut properties_proxy = None;
@@ -218,7 +218,7 @@ async fn update_state_from_mpris(
         }
     }
     let Some(properties_proxy) = properties_proxy else {
-        return false;
+        return (false, false);
     };
 
     let new_track_id = properties_proxy
@@ -265,11 +265,11 @@ async fn update_state_from_mpris(
         });
     }
 
-    should_refresh
+    (should_refresh, true)
 }
 
 /// Pulls the current playback queue and status from the Spotify Web API and updates shared state.
-async fn update_state_from_spotify(spotify_client: &AuthCodeSpotify) {
+async fn update_state_from_spotify(spotify_client: &AuthCodeSpotify, has_mpris_data: bool) {
     if let Ok(queue) = spotify_client.current_user_queue().await {
         let currently_playing_track = queue.currently_playing.and_then(|item| match item {
             PlayableItem::Track(track) => Some(Track::from_rspotify(track)),
@@ -325,8 +325,10 @@ async fn update_state_from_spotify(spotify_client: &AuthCodeSpotify) {
         update_playback_state(|state| {
             state.playing = is_playing;
             state.shuffle = shuffle;
-            state.progress = progress as u64;
-            state.last_updated = Instant::now();
+            if !has_mpris_data {
+                state.progress = progress as u64;
+                state.last_updated = Instant::now();
+            }
         });
     }
 }
@@ -340,7 +342,7 @@ async fn ensure_image_cached(url: &str) -> Result<()> {
     let dynamic_image = image::load_from_memory(&response.bytes().await?)?;
     let (width, height) = dynamic_image.dimensions();
     let rgba = dynamic_image.to_rgba8();
-    let blurred_rgba = imageops::blur(&rgba, BACKGROUND_BLUR_SIGMA);
+    let blurred_rgba = imageops::blur(&rgba, BACKGROUND_BLUR_SIGMA * width as f32);
 
     let original = ImageData {
         data: Blob::from(rgba.into_raw()),
