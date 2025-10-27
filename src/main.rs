@@ -67,34 +67,39 @@ async fn main() {
 
 /// Initialize the Wayland layer shell and create a layer surface.
 fn run_layer_shell() {
-    let connection = Connection::connect_to_env().unwrap();
+    let connection = Connection::connect_to_env().expect("Failed to connect to Wayland display");
     let mut event_queue = connection.new_event_queue();
     let qh = event_queue.handle();
     connection.display().get_registry(&qh, ());
 
-    let display_ptr = NonNull::new(connection.backend().display_ptr().cast::<c_void>()).unwrap();
+    let display_ptr = NonNull::new(connection.backend().display_ptr().cast::<c_void>())
+        .expect("Failed to get display pointer");
     let mut app = CantusLayer::new(display_ptr);
 
     // Initial roundtrip to get globals
     event_queue
         .roundtrip(&mut app)
-        .unwrap_or_else(|err| panic!("Initial roundtrip failed: {err}"));
+        .expect("Initial roundtrip failed");
     let compositor = app.compositor.take().expect("Missing compositor");
     let layer_shell = app.layer_shell.take().expect("Missing layer shell");
     assert!(!app.outputs.is_empty(), "No Wayland outputs found");
 
     event_queue
         .roundtrip(&mut app)
-        .unwrap_or_else(|err| panic!("Failed to fetch output details: {err}"));
+        .expect("Failed to fetch output details");
 
     let wl_surface = compositor.create_surface(&qh, ());
-    let surface_ptr = NonNull::new(wl_surface.id().as_ptr().cast::<c_void>()).unwrap();
+    let surface_ptr = NonNull::new(wl_surface.id().as_ptr().cast::<c_void>())
+        .expect("Failed to get surface pointer");
 
     app.surface_ptr = Some(surface_ptr);
     assert!(app.try_select_output(), "Failed to select a Wayland output");
     app.wl_surface = Some(wl_surface);
 
-    let surface = app.wl_surface.as_ref().unwrap();
+    let surface = app
+        .wl_surface
+        .as_ref()
+        .expect("Wayland surface not created");
     if let (Some(vp), Some(fm)) = (app.viewporter.take(), app.fractional_manager.take()) {
         app.viewport = Some(vp.get_viewport(surface, &qh, ()));
         app.fractional = Some(fm.get_fractional_scale(surface, &qh, ()));
@@ -117,14 +122,12 @@ fn run_layer_shell() {
     app.layer_surface = Some(layer_surface);
 
     surface.commit();
-    connection
-        .flush()
-        .unwrap_or_else(|err| panic!("Failed to flush initial commit: {err}"));
+    connection.flush().expect("Failed to flush initial commit");
 
     while !app.should_exit {
         event_queue
             .blocking_dispatch(&mut app)
-            .unwrap_or_else(|err| panic!("Wayland dispatch error: {err}"));
+            .expect("Wayland dispatch error");
     }
 }
 

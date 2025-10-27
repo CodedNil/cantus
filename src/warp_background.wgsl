@@ -12,7 +12,7 @@ struct WarpUniforms {
 
 @group(0) @binding(0) var background_tex: texture_2d<f32>;
 @group(0) @binding(1) var background_sampler: sampler;
-@group(1) @binding(0) var<uniform> uniforms: WarpUniforms;
+@group(0) @binding(2) var<uniform> uniforms: WarpUniforms;
 
 struct VertexOut {
     @builtin(position) position: vec4<f32>,
