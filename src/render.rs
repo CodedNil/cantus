@@ -138,6 +138,16 @@ impl CantusLayer {
         start_trimmed: bool,
         end_trimmed: bool,
     ) {
+        self.track_hitboxes.insert(
+            track.name.clone(),
+            Rect::new(
+                pos_x / self.scale_factor,
+                0.0,
+                (pos_x + width) / self.scale_factor,
+                height / self.scale_factor,
+            ),
+        );
+
         let rounding = ROUNDING_RADIUS * self.scale_factor;
         let left_rounding = rounding * if start_trimmed { 1.0 } else { 0.3 };
         let right_rounding = rounding * if end_trimmed { 1.0 } else { 0.3 };
@@ -408,8 +418,7 @@ impl CantusLayer {
         });
 
         // Line at the now playing position to denote the cutoff
-        let scale = self.scale_factor;
-        let line_width = 4.0 * scale;
+        let line_width = 4.0 * self.scale_factor;
         self.scene.fill(
             Fill::NonZero,
             Affine::translate((x - line_width * 0.5, 0.0)),
@@ -421,8 +430,8 @@ impl CantusLayer {
         for particle in &self.now_playing_particles {
             let fade = 1.0 - (particle.life / particle.lifetime).clamp(0.0, 1.0);
             let fade64 = f64::from(fade);
-            let length = Self::lerp_range(SPARK_LENGTH_RANGE, fade64) * scale;
-            let thickness = Self::lerp_range(SPARK_THICKNESS_RANGE, fade64) * scale;
+            let length = Self::lerp_range(SPARK_LENGTH_RANGE, fade64) * self.scale_factor;
+            let thickness = Self::lerp_range(SPARK_THICKNESS_RANGE, fade64) * self.scale_factor;
             self.scene.fill(
                 Fill::NonZero,
                 Affine::translate((

@@ -1,16 +1,28 @@
 below the current tracks bar, have buttons to set star rating, add to specific pinned playlists
 click and drag to seek
 click songs ahead or behind to skip to that in the queue
+
 show previous song, somehow track that
 smoothly enter new songs into the right side, dont crop them in, have one waiting then in a smooth quick animation it pops in like a bubble
-pulse animation when play or pause like zen
+
 show the waveform of the song
-maybe make currently playing song have an animated glow outline?
+
+pulse animation when play or pause like zen
+maybe make currently playing song have an animated glow outline, when the song is changed the new one should do have a heavy pulse
+
 
 get primary colours per song image, give the text complementary colour
 give the particles a random pick from the primary colours (exclude grayscale ones)
 
 
+
+
 shrink dependencies:
 wasm-bindgen
 wgpu optional features
+
+
+
+cleanup:
+when spotify isnt open it doesnt render at all, should just ignore mpris
+tidy CantusLayer, remove the unneeded variables, try to reduce how much of it is Option<T>

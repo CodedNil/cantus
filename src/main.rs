@@ -5,11 +5,12 @@ use rand::{SeedableRng, rngs::SmallRng};
 use raw_window_handle::{
     RawDisplayHandle, RawWindowHandle, WaylandDisplayHandle, WaylandWindowHandle,
 };
-use std::{env, ffi::c_void, ptr::NonNull, sync::Arc, time::Instant};
-use tracing::error;
+use std::{collections::HashMap, env, ffi::c_void, ptr::NonNull, sync::Arc, time::Instant};
+use tracing::{error, info};
 use tracing_subscriber::EnvFilter;
 use vello::{
     AaConfig, Renderer, RendererOptions, Scene,
+    kurbo::Rect,
     peniko::{Blob, color::palette},
     util::{RenderContext, RenderSurface},
     wgpu::{
@@ -19,12 +20,14 @@ use vello::{
     },
 };
 use wayland_client::{
-    Connection, Dispatch, Proxy, QueueHandle,
+    Connection, Dispatch, Proxy, QueueHandle, WEnum,
     protocol::{
         wl_callback::{self, WlCallback},
         wl_compositor::{self, WlCompositor},
         wl_output::{self, WlOutput},
+        wl_pointer::{self, WlPointer},
         wl_registry::{self, WlRegistry},
+        wl_seat::{self, WlSeat},
         wl_surface::{self, WlSurface},
     },
 };
@@ -49,6 +52,8 @@ mod spotify;
 
 const PANEL_WIDTH: f64 = 800.0;
 const PANEL_HEIGHT: f64 = 45.0;
+
+const BTN_LEFT: u32 = 0x110;
 
 /// Launch the application entry point.
 #[tokio::main]
@@ -109,7 +114,7 @@ fn run_layer_shell() {
     let layer_surface = layer_shell.get_layer_surface(
         surface,
         app.output.as_ref(),
-        zwlr_layer_shell_v1::Layer::Overlay,
+        zwlr_layer_shell_v1::Layer::Top,
         "cantus".into(),
         &qh,
         (),
@@ -163,6 +168,8 @@ struct CantusLayer {
     layer_shell: Option<ZwlrLayerShellV1>,
     viewporter: Option<WpViewporter>,
     fractional_manager: Option<WpFractionalScaleManagerV1>,
+    seat: Option<WlSeat>,
+    pointer: Option<WlPointer>,
     output: Option<WlOutput>,
     outputs: Vec<OutputInfo>,
     output_matched: bool,
@@ -199,6 +206,8 @@ struct CantusLayer {
     rng: SmallRng,
     last_particle_update: Instant,
     particle_spawn_accumulator: f32,
+    pointer_position: (f64, f64),
+    track_hitboxes: HashMap<String, Rect>,
 }
 
 impl CantusLayer {
@@ -225,6 +234,8 @@ impl CantusLayer {
             layer_shell: None,
             viewporter: None,
             fractional_manager: None,
+            seat: None,
+            pointer: None,
             output: None,
             outputs: Vec::new(),
             output_matched: false,
@@ -257,6 +268,12 @@ impl CantusLayer {
             surface_ptr: None,
             time_origin: Instant::now(),
             frame_index: 0,
+
+            // -- Interaction --
+            pointer_position: (0.0, 0.0),
+            track_hitboxes: HashMap::new(),
+
+            // -- Particles --
             now_playing_particles: Vec::new(),
             rng: SmallRng::from_os_rng(),
             last_particle_update: Instant::now(),
@@ -369,6 +386,21 @@ impl CantusLayer {
         }
         true
     }
+
+    fn handle_pointer_click(&self) -> bool {
+        let (x, y) = self.pointer_position;
+        for (title, rect) in &self.track_hitboxes {
+            if x >= rect.x0 && x <= rect.x1 && y >= rect.y0 && y <= rect.y1 {
+                info!(
+                    "clicked track: {title} (x:{x}, y:{y}) ({},{}) ({},{})",
+                    rect.x0, rect.x1, rect.y0, rect.y1
+                );
+                return true;
+            }
+        }
+        false
+    }
+
     /// Render a frame and present it if the surface is available.
     fn try_render_frame(&mut self, qh: &QueueHandle<Self>) -> Result<()> {
         self.frame_index = self.frame_index.wrapping_add(1);
@@ -635,6 +667,81 @@ impl Dispatch<WlOutput, ()> for CantusLayer {
     }
 }
 
+impl Dispatch<WlSeat, ()> for CantusLayer {
+    /// Track seat capabilities and manage pointer objects.
+    fn event(
+        state: &mut Self,
+        proxy: &WlSeat,
+        event: wl_seat::Event,
+        _data: &(),
+        _conn: &Connection,
+        qh: &QueueHandle<Self>,
+    ) {
+        if let wl_seat::Event::Capabilities { capabilities } = event
+            && let WEnum::Value(caps) = capabilities
+        {
+            if caps.contains(wl_seat::Capability::Pointer) {
+                if state.pointer.is_none() {
+                    state.pointer = Some(proxy.get_pointer(qh, ()));
+                }
+            } else if let Some(pointer) = state.pointer.take() {
+                pointer.release();
+            }
+        }
+    }
+}
+
+impl Dispatch<WlPointer, ()> for CantusLayer {
+    /// Track pointer movement and react to button presses.
+    fn event(
+        state: &mut Self,
+        _proxy: &WlPointer,
+        event: wl_pointer::Event,
+        _data: &(),
+        _conn: &Connection,
+        _qh: &QueueHandle<Self>,
+    ) {
+        match event {
+            wl_pointer::Event::Enter {
+                surface,
+                surface_x,
+                surface_y,
+                ..
+            } => {
+                if state
+                    .wl_surface
+                    .as_ref()
+                    .is_some_and(|wl_surface| wl_surface.id() == surface.id())
+                {
+                    state.pointer_position = (surface_x, surface_y);
+                }
+            }
+            wl_pointer::Event::Motion {
+                surface_x,
+                surface_y,
+                ..
+            } => {
+                state.pointer_position = (surface_x, surface_y);
+            }
+            wl_pointer::Event::Leave { .. } => {
+                state.pointer_position = (-1.0, -1.0);
+            }
+            wl_pointer::Event::Button {
+                button,
+                state: button_state,
+                ..
+            } => {
+                if button == BTN_LEFT
+                    && matches!(button_state, WEnum::Value(wl_pointer::ButtonState::Pressed))
+                {
+                    let _ = state.handle_pointer_click();
+                }
+            }
+            _ => {}
+        }
+    }
+}
+
 impl Dispatch<WlRegistry, ()> for CantusLayer {
     /// Bind required globals when the compositor advertises them.
     fn event(
@@ -668,6 +775,10 @@ impl Dispatch<WlRegistry, ()> for CantusLayer {
                     state.fractional_manager = Some(
                         registry.bind::<WpFractionalScaleManagerV1, (), Self>(name, 1, qh, ()),
                     );
+                }
+                "wl_seat" => {
+                    state.seat =
+                        Some(registry.bind::<WlSeat, (), Self>(name, version.min(7), qh, ()));
                 }
                 "wl_output" => {
                     state.outputs.push(OutputInfo {
