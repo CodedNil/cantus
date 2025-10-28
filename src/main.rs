@@ -5,7 +5,14 @@ use rand::{SeedableRng, rngs::SmallRng};
 use raw_window_handle::{
     RawDisplayHandle, RawWindowHandle, WaylandDisplayHandle, WaylandWindowHandle,
 };
-use std::{collections::HashMap, env, ffi::c_void, ptr::NonNull, sync::Arc, time::Instant};
+use std::{
+    collections::HashMap,
+    env,
+    ffi::c_void,
+    ptr::NonNull,
+    sync::Arc,
+    time::{Duration, Instant},
+};
 use tracing::error;
 use tracing_subscriber::EnvFilter;
 use vello::{
@@ -26,6 +33,7 @@ use wayland_client::{
         wl_compositor::{self, WlCompositor},
         wl_output::{self, WlOutput},
         wl_pointer::{self, WlPointer},
+        wl_region::{self, WlRegion},
         wl_registry::{self, WlRegistry},
         wl_seat::{self, WlSeat},
         wl_surface::{self, WlSurface},
@@ -50,10 +58,10 @@ mod background;
 mod render;
 mod spotify;
 
-const PANEL_WIDTH: f64 = 800.0;
-const PANEL_HEIGHT: f64 = 45.0;
-
-const BTN_LEFT: u32 = 0x110;
+const PANEL_WIDTH: f64 = 1050.0;
+const PANEL_HEIGHT_BASE: f64 = 45.0;
+const PANEL_HEIGHT_EXTENSION: f64 = 70.0;
+const PANEL_HEIGHT: f64 = PANEL_HEIGHT_BASE + PANEL_HEIGHT_EXTENSION;
 
 /// Launch the application entry point.
 #[tokio::main]
@@ -130,6 +138,9 @@ fn run_layer_shell() {
     surface.commit();
     connection.flush().expect("Failed to flush initial commit");
 
+    // Add compositor back into app
+    app.compositor = Some(compositor);
+
     while !app.should_exit {
         event_queue
             .blocking_dispatch(&mut app)
@@ -193,8 +204,6 @@ struct CantusLayer {
     layout_context: LayoutContext<()>,
 
     // --- State ---
-    logical_width: f64,
-    logical_height: f64,
     scale_factor: f64,
     is_configured: bool,
     should_exit: bool,
@@ -202,12 +211,17 @@ struct CantusLayer {
     surface_ptr: Option<NonNull<c_void>>,
     time_origin: Instant,
     frame_index: u64,
+
+    // --- Interaction ---
+    pointer_position: (f64, f64),
+    last_hitbox_update: Instant,
+    track_hitboxes: HashMap<String, Rect>,
+
+    // --- Particles ---
     now_playing_particles: Vec<NowPlayingParticle>,
     rng: SmallRng,
     last_particle_update: Instant,
     particle_spawn_accumulator: f32,
-    pointer_position: (f64, f64),
-    track_hitboxes: HashMap<String, Rect>,
 }
 
 impl CantusLayer {
@@ -262,8 +276,6 @@ impl CantusLayer {
             layout_context: LayoutContext::new(),
 
             // --- State ---
-            logical_width: PANEL_WIDTH,
-            logical_height: PANEL_HEIGHT,
             scale_factor: 1.0,
             is_configured: false,
             should_exit: false,
@@ -275,6 +287,7 @@ impl CantusLayer {
             // -- Interaction --
             pointer_position: (0.0, 0.0),
             track_hitboxes: HashMap::new(),
+            last_hitbox_update: Instant::now(),
 
             // -- Particles --
             now_playing_particles: Vec::new(),
@@ -390,6 +403,7 @@ impl CantusLayer {
         true
     }
 
+    /// Handle pointer click events.
     fn handle_pointer_click(&self) -> bool {
         let (x, y) = self.pointer_position;
         for (id, rect) in &self.track_hitboxes {
@@ -404,13 +418,38 @@ impl CantusLayer {
         false
     }
 
+    /// Update the input region for the surface.
+    fn update_input_region(&mut self, qh: &QueueHandle<Self>) {
+        if self.last_hitbox_update.elapsed() > Duration::from_millis(500)
+            && let Some(wl_surface) = &self.wl_surface
+            && let Some(compositor) = &self.compositor
+        {
+            // Create an fill the region
+            let region = compositor.create_region(qh, ());
+            for rect in self.track_hitboxes.values() {
+                region.add(
+                    rect.x0.round() as i32,
+                    rect.y0.round() as i32,
+                    (rect.x1 - rect.x0).round() as i32,
+                    (rect.y1 - rect.y0).round() as i32,
+                );
+            }
+
+            // Set the input region on the surface
+            wl_surface.set_input_region(Some(&region));
+            wl_surface.commit();
+
+            self.last_hitbox_update = Instant::now();
+        }
+    }
+
     /// Render a frame and present it if the surface is available.
     fn try_render_frame(&mut self, qh: &QueueHandle<Self>) -> Result<()> {
         self.frame_index = self.frame_index.wrapping_add(1);
         // Auto-recover if surface lost
         if self.render_surface.is_none() {
-            let buffer_width = (self.logical_width * self.scale_factor).round();
-            let buffer_height = (self.logical_height * self.scale_factor).round();
+            let buffer_width = (PANEL_WIDTH * self.scale_factor).round();
+            let buffer_height = (PANEL_HEIGHT * self.scale_factor).round();
             self.ensure_surface(buffer_width, buffer_height)?;
         }
 
@@ -431,6 +470,9 @@ impl CantusLayer {
             // Prepare scene
             self.scene.reset();
             self.create_scene(id);
+
+            // Update input region for the surface.
+            self.update_input_region(qh);
 
             let Some(surface) = self.render_surface.as_mut() else {
                 return Ok(());
@@ -496,8 +538,8 @@ impl CantusLayer {
 
     /// Push the computed scale and viewport to Wayland objects.
     fn update_scale_and_viewport(&self) {
-        let bw = (self.logical_width * self.scale_factor).round();
-        let bh = (self.logical_height * self.scale_factor).round();
+        let bw = (PANEL_WIDTH * self.scale_factor).round();
+        let bh = (PANEL_HEIGHT * self.scale_factor).round();
 
         if let Some(surface) = &self.wl_surface {
             let buffer_scale = if self.viewport.is_some() {
@@ -509,7 +551,7 @@ impl CantusLayer {
         }
         if let Some(v) = &self.viewport {
             v.set_source(0.0, 0.0, bw, bh);
-            v.set_destination(self.logical_width as i32, self.logical_height as i32);
+            v.set_destination(PANEL_WIDTH as i32, PANEL_HEIGHT as i32);
         }
     }
 }
@@ -527,21 +569,9 @@ impl Dispatch<ZwlrLayerSurfaceV1, ()> for CantusLayer {
         match event {
             zwlr_layer_surface_v1::Event::Configure {
                 serial,
-                width,
-                height,
+                width: _,
+                height: _,
             } => {
-                // Update dimensions
-                state.logical_width = if width == 0 {
-                    PANEL_WIDTH
-                } else {
-                    f64::from(width)
-                };
-                state.logical_height = if height == 0 {
-                    PANEL_HEIGHT
-                } else {
-                    f64::from(height)
-                };
-
                 proxy.ack_configure(serial);
                 state.update_scale_and_viewport();
                 if let Some(surface) = &state.wl_surface {
@@ -549,8 +579,8 @@ impl Dispatch<ZwlrLayerSurfaceV1, ()> for CantusLayer {
                 }
                 state.is_configured = true;
 
-                let buffer_width = (state.logical_width * state.scale_factor).round();
-                let buffer_height = (state.logical_height * state.scale_factor).round();
+                let buffer_width = (PANEL_WIDTH * state.scale_factor).round();
+                let buffer_height = (PANEL_HEIGHT * state.scale_factor).round();
 
                 if let Err(err) = state.ensure_surface(buffer_width, buffer_height) {
                     error!("Failed to prepare render surface: {err}");
@@ -591,8 +621,8 @@ impl Dispatch<WpFractionalScaleV1, ()> for CantusLayer {
                     surface.commit();
                 }
 
-                let buffer_width = (state.logical_width * state.scale_factor).round();
-                let buffer_height = (state.logical_height * state.scale_factor).round();
+                let buffer_width = (PANEL_WIDTH * state.scale_factor).round();
+                let buffer_height = (PANEL_HEIGHT * state.scale_factor).round();
 
                 if let Err(err) = state.ensure_surface(buffer_width, buffer_height) {
                     error!("Failed to prepare render surface: {err}");
@@ -734,7 +764,7 @@ impl Dispatch<WlPointer, ()> for CantusLayer {
                 state: button_state,
                 ..
             } => {
-                if button == BTN_LEFT
+                if button == 0x110
                     && matches!(button_state, WEnum::Value(wl_pointer::ButtonState::Pressed))
                 {
                     let _ = state.handle_pointer_click();
@@ -856,6 +886,18 @@ impl Dispatch<WlCompositor, ()> for CantusLayer {
         _state: &mut Self,
         _registry: &WlCompositor,
         _event: wl_compositor::Event,
+        _data: &(),
+        _conn: &Connection,
+        _qh: &QueueHandle<Self>,
+    ) {
+    }
+}
+
+impl Dispatch<WlRegion, ()> for CantusLayer {
+    fn event(
+        _state: &mut Self,
+        _proxy: &WlRegion,
+        _event: wl_region::Event,
         _data: &(),
         _conn: &Connection,
         _qh: &QueueHandle<Self>,

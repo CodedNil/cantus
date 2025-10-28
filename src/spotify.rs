@@ -279,7 +279,7 @@ async fn update_state_from_spotify(has_mpris_data: bool) {
         SPOTIFY_CLIENT.current_playback(None, None::<Vec<&AdditionalType>>),
         SPOTIFY_CLIENT.current_user_queue()
     ) else {
-        error!("Failed to fetch spotify data");
+        warn!("Failed to fetch spotify data");
         return;
     };
 
@@ -324,16 +324,16 @@ async fn update_state_from_spotify(has_mpris_data: bool) {
             .chain(future_tracks.into_iter())
             .collect();
 
-        if state.current_context == current_playback.context {
-            // Queue is clean, just append any new tracks at the end
-            for track in new_queue.iter().skip(state.queue.len() - state.queue_index) {
-                state.queue.push(track.clone());
-            }
-
-            // Update index to the new current track
-            if let Some(new_index) = state.queue.iter().position(|t| t.id == current_track.id) {
-                state.queue_index = new_index;
-            }
+        if state.current_context == current_playback.context
+            && let Some(new_index) = state
+                .queue
+                .iter()
+                .position(|t| t.name == current_track.name)
+        {
+            // Delete everything past the new_index, and append the new tracks at the end
+            state.queue_index = new_index;
+            state.queue.truncate(new_index);
+            state.queue.extend(new_queue);
         } else {
             // Context switched - reset queue entirely
             info!("Context changed, resetting queue");

@@ -1,10 +1,11 @@
 use crate::{
-    CantusLayer,
+    CantusLayer, PANEL_HEIGHT_BASE, PANEL_WIDTH,
     background::WarpBackground,
     spotify::{IMAGES_CACHE, PLAYBACK_STATE, Track},
 };
 use parley::{
-    FontFamily, FontStack, FontWeight, Layout, layout::PositionedLayoutItem, style::StyleProperty,
+    Alignment, FontFamily, FontStack, FontWeight, Layout, layout::PositionedLayoutItem,
+    style::StyleProperty,
 };
 use rand::Rng;
 use std::{ops::Range, time::Instant};
@@ -44,9 +45,8 @@ const SPARK_THICKNESS_RANGE: Range<f64> = 1.8..3.0;
 /// Build the scene for rendering.
 impl CantusLayer {
     pub fn create_scene(&mut self, id: usize) {
-        let surface = self.render_surface.as_ref().unwrap();
-        let total_width = f64::from(surface.config.width);
-        let total_height = f64::from(surface.config.height);
+        let total_width = (PANEL_WIDTH * self.scale_factor).ceil();
+        let total_height = (PANEL_HEIGHT_BASE * self.scale_factor).ceil();
 
         // Get current playback state
         let playback_state = PLAYBACK_STATE.lock().clone();
@@ -164,7 +164,7 @@ impl CantusLayer {
             self.frame_index,
         );
 
-        // -- BACKGROUND --
+        // --- BACKGROUND ---
         if let Some(image) = background_image {
             let brush = ImageBrush::new(image.clone());
             let image_width = f64::from(image.width);
@@ -197,12 +197,12 @@ impl CantusLayer {
             self.scene.pop_layer();
         }
 
-        // -- ALBUM ART SQUARE --
+        // --- ALBUM ART SQUARE ---
         let brush = ImageBrush::new(image.original.clone());
         let image_height = f64::from(image.original.height);
 
         // Render the primary album art
-        let transform = Affine::translate((pos_x, 0.0));
+        let transform = Affine::translate((pos_x + width - height, 0.0));
         self.scene.push_clip_layer(
             transform,
             &RoundedRect::new(0.0, 0.0, height, height, rounding),
@@ -216,7 +216,7 @@ impl CantusLayer {
         );
         self.scene.pop_layer();
 
-        // -- TEXT --
+        // --- TEXT ---
         // Clipping mask to the edge of the background rectangle, shrunk by a margin
         let margin = 2.0 * self.scale_factor;
         self.scene.push_clip_layer(
@@ -237,45 +237,75 @@ impl CantusLayer {
             .or_else(|| track.name.find(" -"))
             .unwrap_or(track.name.len())]
             .trim();
-        let text_start = pos_x + height + (4.0 * self.scale_factor);
+        let text_start = pos_x + width - height - 6.0;
         self.draw_text(
             song_name,
             text_start,
             height * 0.35,
+            Alignment::Right,
+            Alignment::Center,
             "Epilogue",
             14.0,
-            FontWeight::EXTRA_BOLD,
+            FontWeight::BOLD,
         );
 
         // Draw the time until it starts
-        let time_string = if seconds_until_start >= 60.0 {
+        let size = 12.0;
+        let weight = FontWeight::EXTRA_BLACK;
+        let artist_width = track.artists.first().map_or(0.0, |artist_string| {
+            let artist_width = self.draw_text(
+                artist_string,
+                text_start,
+                height * 0.75,
+                Alignment::Right,
+                Alignment::Center,
+                "Epilogue",
+                size,
+                weight,
+            );
+            if is_current {
+                artist_width
+            } else {
+                self.draw_text(
+                    "•",
+                    text_start - artist_width - 3.0,
+                    height * 0.75,
+                    Alignment::Right,
+                    Alignment::Center,
+                    "SUSE Mono",
+                    size,
+                    weight,
+                ) + artist_width
+            }
+        });
+        let time_text = if seconds_until_start >= 60.0 {
             format!(
-                "{}m {}s",
+                "{}m{}s",
                 (seconds_until_start / 60.0).floor(),
                 (seconds_until_start % 60.0).floor()
             )
         } else {
             format!("{}s", seconds_until_start.round())
         };
-        let font = "SUSE Mono";
-        let size = 12.0;
-        let weight = FontWeight::EXTRA_BLACK;
-        let time_width =
-            self.draw_text(&time_string, text_start, height * 0.75, font, size, weight);
-        if let Some(artist_string) = track.artists.first() {
-            let bullet_width = self.draw_text(
-                "•",
-                text_start + time_width + 3.0,
+        if is_current {
+            self.draw_text(
+                &time_text,
+                pos_x + 12.0,
                 height * 0.75,
-                font,
+                Alignment::Left,
+                Alignment::Center,
+                "SUSE Mono",
                 size,
                 weight,
             );
+        } else {
             self.draw_text(
-                artist_string,
-                text_start + time_width + bullet_width + 6.0,
+                &time_text,
+                text_start - artist_width - 6.0,
                 height * 0.75,
-                font,
+                Alignment::Right,
+                Alignment::Center,
+                "SUSE Mono",
                 size,
                 weight,
             );
@@ -291,6 +321,8 @@ impl CantusLayer {
         text: &str,
         pos_x: f64,
         pos_y: f64,
+        horizontal_align: Alignment,
+        vertical_align: Alignment,
         font_family: &str,
         font_size: f64,
         font_weight: FontWeight,
@@ -308,7 +340,24 @@ impl CantusLayer {
 
         let mut layout: Layout<()> = builder.build(text);
         layout.break_all_lines(None);
-        let text_transform = Affine::translate((pos_x, pos_y - (f64::from(layout.height()) * 0.5)));
+        let text_transform = Affine::translate((
+            pos_x
+                - f64::from(if horizontal_align == Alignment::Right {
+                    layout.width()
+                } else if horizontal_align == Alignment::Center {
+                    layout.width() * 0.5
+                } else {
+                    0.0
+                }),
+            pos_y
+                - f64::from(if vertical_align == Alignment::End {
+                    layout.height()
+                } else if vertical_align == Alignment::Center {
+                    layout.height() * 0.5
+                } else {
+                    0.0
+                }),
+        ));
 
         for glyph_run in layout
             .lines()
