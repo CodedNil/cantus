@@ -7,6 +7,7 @@ smoothly enter new songs into the right side, dont crop them in, have one waitin
 
 show the waveform of the song
 grab the acousticness, danceability, energy etc and factor that into the animation/colours?
+lyrics along the bottom
 
 pulse animation when play or pause like zen
 maybe make currently playing song have an animated glow outline, when the song is changed the new one should do have a heavy pulse
@@ -28,3 +29,6 @@ wgpu optional features
 cleanup:
 tidy CantusLayer, remove the unneeded variables, try to reduce how much of it is Option<T>
 dont allow multiple spotify interactions concurrently to avoid bugs
+dirty the queue if its drastically changed
+
+fix weird rendering of the track bar when its really narrow

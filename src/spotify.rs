@@ -6,7 +6,7 @@ use parking_lot::Mutex;
 use reqwest::Client;
 use rspotify::{
     AuthCodeSpotify, Config, Credentials, OAuth,
-    model::{AdditionalType, FullTrack, Id, PlayableItem},
+    model::{AdditionalType, Context, FullTrack, Id, PlayableItem},
     prelude::OAuthClient,
     scopes,
 };
@@ -34,6 +34,7 @@ const MPRIS_OBJECT_PATH: &str = "/org/mpris/MediaPlayer2";
 const BACKGROUND_BLUR_SIGMA: f32 = 0.2;
 
 /// Stores the current playback state
+const MAX_HISTORY: usize = 20;
 pub static PLAYBACK_STATE: LazyLock<Arc<Mutex<PlaybackState>>> =
     LazyLock::new(|| Arc::new(Mutex::new(PlaybackState::default())));
 pub static IMAGES_CACHE: LazyLock<DashMap<String, CachedImage>> = LazyLock::new(DashMap::new);
@@ -76,8 +77,9 @@ pub struct PlaybackState {
     pub playing: bool,
     pub shuffle: bool,
     pub progress: u64,
-    pub currently_playing: Option<Track>,
     pub queue: Vec<Track>,
+    pub queue_index: usize,
+    pub current_context: Option<Context>,
 }
 
 impl Default for PlaybackState {
@@ -87,8 +89,9 @@ impl Default for PlaybackState {
             playing: false,
             shuffle: false,
             progress: 0,
-            currently_playing: None,
             queue: Vec::new(),
+            queue_index: 0,
+            current_context: None,
         }
     }
 }
@@ -231,7 +234,7 @@ async fn update_state_from_mpris(
                     .to_string(),
             )
         });
-    let should_refresh = new_track_id
+    let mut should_refresh = new_track_id
         .filter(|track_id| last_track_id.as_ref() != Some(track_id))
         .is_some_and(|track_id| {
             *last_track_id = Some(track_id);
@@ -253,12 +256,15 @@ async fn update_state_from_mpris(
 
     if playing.is_some() || progress.is_some() {
         update_playback_state(|state| {
-            if let Some(playing) = playing {
+            if let Some(playing) = playing
+                && playing != state.playing
+            {
+                should_refresh = true;
                 state.playing = playing;
-            }
-            if let Some(progress) = progress {
-                state.progress = progress as u64;
-                state.last_updated = Instant::now();
+                if let Some(progress) = progress {
+                    state.progress = progress as u64;
+                    state.last_updated = Instant::now();
+                }
             }
         });
     }
@@ -268,67 +274,89 @@ async fn update_state_from_mpris(
 
 /// Pulls the current playback queue and status from the Spotify Web API and updates shared state.
 async fn update_state_from_spotify(has_mpris_data: bool) {
-    if let Ok(queue) = SPOTIFY_CLIENT.current_user_queue().await {
-        let currently_playing_track = queue.currently_playing.and_then(|item| match item {
+    // Use futures::join_all to fetch both current playback and queue concurrently
+    let (Ok(Some(current_playback)), Ok(queue)) = futures::join!(
+        SPOTIFY_CLIENT.current_playback(None, None::<Vec<&AdditionalType>>),
+        SPOTIFY_CLIENT.current_user_queue()
+    ) else {
+        error!("Failed to fetch spotify data");
+        return;
+    };
+
+    let current_track = if let Some(PlayableItem::Track(track)) = queue.currently_playing {
+        Track::from_rspotify(track)
+    } else {
+        return;
+    };
+    let future_tracks: Vec<Track> = queue
+        .queue
+        .into_iter()
+        .filter_map(|item| match item {
             PlayableItem::Track(track) => Some(Track::from_rspotify(track)),
             _ => None,
-        });
-        let queued_tracks: Vec<Track> = queue
-            .queue
-            .into_iter()
-            .filter_map(|item| match item {
-                PlayableItem::Track(track) => Some(Track::from_rspotify(track)),
-                _ => None,
-            })
-            .collect();
+        })
+        .collect();
 
-        // Start a task to fetch missing images
-        let mut missing_urls = HashSet::new();
-        if let Some(track) = currently_playing_track.as_ref()
-            && !IMAGES_CACHE.contains_key(&track.image.url)
-        {
+    // Start a task to fetch missing images
+    let mut missing_urls = HashSet::new();
+    if !IMAGES_CACHE.contains_key(&current_track.image.url) {
+        missing_urls.insert(current_track.image.url.clone());
+    }
+    for track in &future_tracks {
+        if !IMAGES_CACHE.contains_key(&track.image.url) {
             missing_urls.insert(track.image.url.clone());
         }
-        for track in &queued_tracks {
-            if !IMAGES_CACHE.contains_key(&track.image.url) {
-                missing_urls.insert(track.image.url.clone());
-            }
-        }
-        if !missing_urls.is_empty() {
-            tokio::spawn(async move {
-                join_all(missing_urls.into_iter().map(|url| async move {
-                    if let Err(err) = ensure_image_cached(url.as_str()).await {
-                        warn!("failed to cache image {url}: {err}");
-                    }
-                }))
-                .await;
-            });
-        }
-
-        // Update the playback state
-        update_playback_state(move |state| {
-            state.currently_playing = currently_playing_track;
-            state.queue = queued_tracks;
+    }
+    if !missing_urls.is_empty() {
+        tokio::spawn(async move {
+            join_all(missing_urls.into_iter().map(|url| async move {
+                if let Err(err) = ensure_image_cached(url.as_str()).await {
+                    warn!("failed to cache image {url}: {err}");
+                }
+            }))
+            .await;
         });
     }
 
-    if let Ok(Some(playback)) = SPOTIFY_CLIENT
-        .current_playback(None, None::<Vec<&AdditionalType>>)
-        .await
-    {
-        let is_playing = playback.is_playing;
-        let shuffle = playback.shuffle_state;
-        let progress = playback.progress.map_or(0, |p| p.num_milliseconds());
+    // Update the playback state
+    update_playback_state(move |state| {
+        let new_queue: Vec<Track> = std::iter::once(current_track.clone())
+            .chain(future_tracks.into_iter())
+            .collect();
 
-        update_playback_state(|state| {
-            state.playing = is_playing;
-            state.shuffle = shuffle;
-            if !has_mpris_data {
-                state.progress = progress as u64;
-                state.last_updated = Instant::now();
+        if state.current_context == current_playback.context {
+            // Queue is clean, just append any new tracks at the end
+            for track in new_queue.iter().skip(state.queue.len() - state.queue_index) {
+                state.queue.push(track.clone());
             }
-        });
-    }
+
+            // Update index to the new current track
+            if let Some(new_index) = state.queue.iter().position(|t| t.id == current_track.id) {
+                state.queue_index = new_index;
+            }
+        } else {
+            // Context switched - reset queue entirely
+            info!("Context changed, resetting queue");
+            state.queue = new_queue;
+            state.queue_index = 0;
+            state.current_context = current_playback.context;
+        }
+
+        // Trim old history to prevent unbounded growth
+        if state.queue_index > MAX_HISTORY {
+            state.queue.drain(0..(state.queue_index - MAX_HISTORY));
+            state.queue_index = MAX_HISTORY;
+        }
+
+        state.playing = current_playback.is_playing;
+        state.shuffle = current_playback.shuffle_state;
+        if !has_mpris_data {
+            state.progress = current_playback
+                .progress
+                .map_or(0, |p| p.num_milliseconds()) as u64;
+            state.last_updated = Instant::now();
+        }
+    });
 }
 
 /// Downloads and caches an image from the given URL.

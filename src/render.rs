@@ -57,10 +57,6 @@ impl CantusLayer {
                 Some(WarpBackground::new(&self.render_context.devices[id].device));
         }
 
-        let Some(song) = &playback_state.currently_playing else {
-            return;
-        };
-
         let timeline_end_ms = TIMELINE_START_MS + TIMELINE_DURATION_MS;
         let px_per_ms = total_width / TIMELINE_DURATION_MS;
 
@@ -69,13 +65,14 @@ impl CantusLayer {
             + (u64::from(playback_state.playing)
                 * playback_state.last_updated.elapsed().as_millis() as u64);
         let mut track_start_ms = -(lerped_progress as f64);
+        for i in 0..playback_state.queue_index {
+            track_start_ms -= playback_state.queue[i].milliseconds as f64;
+        }
+
         let mut track_spacing = 0.0;
 
         // Iterate over the currently playing track followed by the queued tracks.
-        for (index, track) in std::iter::once(song)
-            .chain(playback_state.queue.iter())
-            .enumerate()
-        {
+        for (index, track) in playback_state.queue.iter().enumerate() {
             let track_start_ms_spaced = track_start_ms + track_spacing;
             if track_start_ms_spaced >= timeline_end_ms {
                 break;
@@ -102,10 +99,14 @@ impl CantusLayer {
             self.draw_track(
                 id,
                 track,
-                index == 0,
+                index == playback_state.queue_index,
                 pos_x,
                 width,
-                if index == 0 { dark_width } else { 0.0 },
+                if index == playback_state.queue_index {
+                    dark_width
+                } else {
+                    0.0
+                },
                 total_height,
                 (track_start_ms / 1000.0).abs(),
                 start_trimmed,
