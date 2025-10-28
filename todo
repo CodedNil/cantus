@@ -12,7 +12,6 @@ lyrics along the bottom
 pulse animation when play or pause like zen
 maybe make currently playing song have an animated glow outline, when the song is changed the new one should do have a heavy pulse
 
-
 get primary colours per song image, give the text complementary colour
 give the particles a random pick from the primary colours (exclude grayscale ones)
 
@@ -29,6 +28,7 @@ wgpu optional features
 cleanup:
 tidy CantusLayer, remove the unneeded variables, try to reduce how much of it is Option<T>
 dont allow multiple spotify interactions concurrently to avoid bugs
+force a spotify refresh immediately after making an interaction
 dirty the queue if its drastically changed
 
 fix weird rendering of the track bar when its really narrow

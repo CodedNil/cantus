@@ -392,14 +392,18 @@ async fn ensure_image_cached(url: &str) -> Result<()> {
 /// Skip to the specified track in the queue.
 pub async fn skip_to_track(track_id: &str) {
     // Get how many next to skip
-    let queue = PLAYBACK_STATE.lock().queue.clone();
-    if let Some(position_in_queue) = queue.iter().position(|t| t.id == track_id) {
+    let playback_state = PLAYBACK_STATE.lock().clone();
+    let queue = playback_state.queue;
+    let queue_index = playback_state.queue_index;
+    if let Some(position_in_queue) = queue.iter().position(|t| t.id == track_id)
+        && let position_difference = position_in_queue - queue_index
+        && position_difference > 0
+    {
         info!(
             "Skipping to track {}, {} skips",
-            track_id,
-            position_in_queue + 1
+            track_id, position_difference
         );
-        for _ in 0..=(position_in_queue.min(10)) {
+        for _ in 0..(position_difference.min(10)) {
             if let Err(err) = SPOTIFY_CLIENT.next_track(None).await {
                 error!("Failed to skip to track: {}", err);
             }

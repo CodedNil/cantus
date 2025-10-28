@@ -80,20 +80,13 @@ impl CantusLayer {
 
             let track_end_ms = track_start_ms_spaced + track.milliseconds as f64;
 
-            let visible_start_ms = track_start_ms_spaced.max(TIMELINE_START_MS);
-            let start_trimmed = track_start_ms > TIMELINE_START_MS;
+            let visible_start_ms = track_start_ms_spaced.max(0.0);
+            let start_trimmed = track_start_ms > 0.0;
             let visible_end_ms = track_end_ms.min(timeline_end_ms);
             let end_trimmed = track_end_ms < timeline_end_ms;
 
             let pos_x = (visible_start_ms - TIMELINE_START_MS) * px_per_ms;
             let width = (visible_end_ms - visible_start_ms) * px_per_ms;
-
-            // If it starts before the timeline, then get the starting width to render differently
-            let dark_width = if track_start_ms_spaced < 0.0 {
-                track_start_ms_spaced.max(TIMELINE_START_MS) * -px_per_ms
-            } else {
-                0.0
-            };
 
             // Draw the track, trimming to the visible window if it spills off either side.
             self.draw_track(
@@ -102,11 +95,7 @@ impl CantusLayer {
                 index == playback_state.queue_index,
                 pos_x,
                 width,
-                if index == playback_state.queue_index {
-                    dark_width
-                } else {
-                    0.0
-                },
+                (track_end_ms - track_start_ms) * px_per_ms,
                 total_height,
                 (track_start_ms / 1000.0).abs(),
                 start_trimmed,
@@ -138,7 +127,7 @@ impl CantusLayer {
         is_current: bool,
         pos_x: f64,
         width: f64,
-        dark_width: f64,
+        uncropped_width: f64,
         height: f64,
         seconds_until_start: f64,
         start_trimmed: bool,
@@ -157,10 +146,6 @@ impl CantusLayer {
         let rounding = ROUNDING_RADIUS * self.scale_factor;
         let left_rounding = rounding * if start_trimmed { 1.0 } else { 0.3 };
         let right_rounding = rounding * if end_trimmed { 1.0 } else { 0.3 };
-
-        // For the part rendered behind the timeline
-        let dark_reduction = 5.0;
-        let dark_height = height - dark_reduction;
 
         let Some(image) = IMAGES_CACHE.get(&track.image.url) else {
             return;
@@ -186,43 +171,25 @@ impl CantusLayer {
             let image_height = f64::from(image.height);
 
             let image_transform = Affine::translate((pos_x, image_height * -0.5))
-                * Affine::scale_non_uniform(width / image_width, width / image_height);
+                * Affine::scale_non_uniform(
+                    uncropped_width / image_width,
+                    uncropped_width / image_height,
+                );
             let image_rect = Rect::new(0.0, 0.0, image_width, image_height);
 
-            // If theres any dark width, draw a thinner rectangle behind
-            if dark_width > 0.0 {
-                // Dark pill clip
-                self.scene.push_clip_layer(
-                    Affine::translate((pos_x, 0.0)),
-                    &RoundedRect::new(
-                        0.0,
-                        dark_reduction,
-                        dark_width + rounding,
-                        dark_height,
-                        RoundedRectRadii::new(left_rounding, rounding, rounding, left_rounding),
-                    ),
-                );
-                self.scene
-                    .fill(Fill::NonZero, image_transform, &brush, None, &image_rect);
-                // Darken it with a layer above
-                self.scene.fill(
-                    Fill::NonZero,
-                    image_transform,
-                    Color::from_rgba8(0, 0, 0, 80),
-                    None,
-                    &image_rect,
-                );
-                self.scene.pop_layer();
-            }
-
             self.scene.push_clip_layer(
-                Affine::translate((pos_x + dark_width, 0.0)),
+                Affine::translate((pos_x, 0.0)),
                 &RoundedRect::new(
                     0.0,
                     0.0,
-                    width - dark_width,
+                    width,
                     height,
-                    RoundedRectRadii::new(rounding, right_rounding, right_rounding, rounding),
+                    RoundedRectRadii::new(
+                        left_rounding,
+                        right_rounding,
+                        right_rounding,
+                        left_rounding,
+                    ),
                 ),
             );
             self.scene
@@ -234,37 +201,19 @@ impl CantusLayer {
         let brush = ImageBrush::new(image.original.clone());
         let image_height = f64::from(image.original.height);
 
-        // When the album art is clipping near the end, shrink it to move it onto the dark side
-        let dark_offset = if is_current && width - dark_width < height {
-            width - dark_width - height
-        } else {
-            0.0
-        };
-        let dark_transition = (dark_offset / height).abs().clamp(0.0, 1.0);
-        let dark_reduction = dark_reduction * dark_transition;
-        let dark_height = height - dark_reduction;
-
         // Render the primary album art
-        let transform = Affine::translate((dark_offset + dark_width + pos_x, 0.0));
-        let rect = RoundedRect::new(0.0, dark_reduction, dark_height, dark_height, rounding);
-        self.scene.push_clip_layer(transform, &rect);
+        let transform = Affine::translate((pos_x, 0.0));
+        self.scene.push_clip_layer(
+            transform,
+            &RoundedRect::new(0.0, 0.0, height, height, rounding),
+        );
         self.scene.fill(
             Fill::NonZero,
-            transform * Affine::scale(dark_height / image_height),
+            transform * Affine::scale(height / image_height),
             &brush,
             None,
             &Rect::new(0.0, 0.0, image_height, image_height),
         );
-        if dark_transition > 0.0 {
-            // Darken it with a layer above
-            self.scene.fill(
-                Fill::NonZero,
-                transform,
-                Color::from_rgba8(0, 0, 0, (50.0 * dark_transition).round() as u8),
-                None,
-                &rect,
-            );
-        }
         self.scene.pop_layer();
 
         // -- TEXT --
@@ -288,7 +237,7 @@ impl CantusLayer {
             .or_else(|| track.name.find(" -"))
             .unwrap_or(track.name.len())]
             .trim();
-        let text_start = dark_width + pos_x + height + (4.0 * self.scale_factor);
+        let text_start = pos_x + height + (4.0 * self.scale_factor);
         self.draw_text(
             song_name,
             text_start,
