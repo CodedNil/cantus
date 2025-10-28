@@ -75,7 +75,7 @@ async fn main() {
         ))
         .init();
 
-    tokio::spawn(spotify::polling_task());
+    spotify::init().await;
     run_layer_shell();
 }
 

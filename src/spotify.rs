@@ -1,6 +1,5 @@
 use anyhow::Result;
 use dashmap::DashMap;
-use futures::future::join_all;
 use image::{GenericImageView, imageops};
 use parking_lot::Mutex;
 use reqwest::Client;
@@ -11,12 +10,17 @@ use rspotify::{
     scopes,
 };
 use std::{
+    cmp::Ordering,
     collections::{HashMap, HashSet},
     convert::TryInto,
     sync::{Arc, LazyLock},
     time::Instant,
 };
-use tokio::time::{Duration, sleep};
+use tokio::{
+    sync::OnceCell,
+    task::JoinSet,
+    time::{Duration, sleep},
+};
 use tracing::{error, info, warn};
 use vello::peniko::{Blob, ImageAlphaType, ImageData, ImageFormat};
 use zbus::{
@@ -39,44 +43,14 @@ pub static PLAYBACK_STATE: LazyLock<Arc<Mutex<PlaybackState>>> =
     LazyLock::new(|| Arc::new(Mutex::new(PlaybackState::default())));
 pub static IMAGES_CACHE: LazyLock<DashMap<String, CachedImage>> = LazyLock::new(DashMap::new);
 static HTTP_CLIENT: LazyLock<Client> = LazyLock::new(Client::new);
-static SPOTIFY_CLIENT: LazyLock<AuthCodeSpotify> = LazyLock::new(|| {
-    // Initialize Spotify client with credentials and OAuth scopes
-    let spotify = AuthCodeSpotify::with_config(
-        Credentials::from_env()
-            .expect("Missing env credentials RSPOTIFY_CLIENT_ID RSPOTIFY_CLIENT_SECRET"),
-        OAuth {
-            redirect_uri: String::from("http://127.0.0.1:7474/callback"),
-            scopes: scopes!(
-                "user-read-playback-state",
-                "user-modify-playback-state",
-                "user-read-currently-playing",
-                "playlist-read-private",
-                "playlist-read-collaborative",
-                "playlist-modify-private",
-                "playlist-modify-public",
-                "user-read-playback-position",
-                "user-read-recently-played"
-            ),
-            ..Default::default()
-        },
-        Config {
-            token_cached: true,
-            ..Default::default()
-        },
-    );
-
-    // Prompt user for authorization and get the token
-    let url = spotify.get_authorize_url(true).unwrap();
-    pollster::block_on(spotify.prompt_for_token(&url)).unwrap();
-    spotify
-});
+static SPOTIFY_CLIENT: OnceCell<AuthCodeSpotify> = OnceCell::const_new();
 
 #[derive(Debug, Clone)]
 pub struct PlaybackState {
     pub last_updated: Instant,
     pub playing: bool,
     pub shuffle: bool,
-    pub progress: u64,
+    pub progress: u32,
     pub queue: Vec<Track>,
     pub queue_index: usize,
     pub current_context: Option<Context>,
@@ -104,14 +78,14 @@ pub struct Track {
     pub album_name: String,
     pub image: Image,
     pub release_date: String,
-    pub milliseconds: u64,
+    pub milliseconds: u32,
 }
 
 #[derive(Debug, Default, Clone)]
 pub struct Image {
     pub url: String,
-    pub width: u32,
-    pub height: u32,
+    pub width: u16,
+    pub height: u16,
 }
 
 #[derive(Clone)]
@@ -129,8 +103,8 @@ impl Track {
             .min_by_key(|img| img.width.unwrap())
             .map(|img| Image {
                 url: img.url,
-                width: img.width.unwrap(),
-                height: img.height.unwrap(),
+                width: img.width.unwrap() as u16,
+                height: img.height.unwrap() as u16,
             })
             .unwrap();
         Self {
@@ -140,7 +114,7 @@ impl Track {
             album_name: track.album.name,
             image,
             release_date: track.album.release_date.unwrap(),
-            milliseconds: track.duration.num_milliseconds() as u64,
+            milliseconds: track.duration.num_milliseconds() as u32,
         }
     }
 }
@@ -154,8 +128,42 @@ where
     update(&mut state);
 }
 
+/// Init the spotify client
+pub async fn init() {
+    // Initialize Spotify client with credentials and OAuth scopes
+    let spotify = AuthCodeSpotify::with_config(
+        Credentials::from_env()
+            .expect("Missing env credentials RSPOTIFY_CLIENT_ID RSPOTIFY_CLIENT_SECRET"),
+        OAuth {
+            redirect_uri: String::from("http://127.0.0.1:7474/callback"),
+            scopes: scopes!(
+                "user-read-playback-state",
+                "user-modify-playback-state",
+                "user-read-currently-playing",
+                "playlist-read-private",
+                "playlist-read-collaborative",
+                "playlist-modify-private",
+                "playlist-modify-public"
+            ),
+            ..Default::default()
+        },
+        Config {
+            token_cached: true,
+            ..Default::default()
+        },
+    );
+
+    // Prompt user for authorization and get the token
+    let url = spotify.get_authorize_url(true).unwrap();
+    spotify.prompt_for_token(&url).await.unwrap();
+    SPOTIFY_CLIENT.set(spotify).unwrap();
+
+    // Begin polling
+    tokio::spawn(polling_task());
+}
+
 /// Asynchronous task to poll MPRIS every 500ms and Spotify API every X seconds or on song change.
-pub async fn polling_task() {
+async fn polling_task() {
     let mut last_mpris_track_id: Option<String> = None; // Local state for track ID
     let mut spotify_poll_counter = 100; // Counter for Spotify API polling
 
@@ -171,14 +179,14 @@ pub async fn polling_task() {
 
     loop {
         // --- MPRIS Polling Logic ---
-        let (should_refresh_spotify, has_mpris_data) =
+        let (should_refresh_spotify, used_mpris_progress) =
             update_state_from_mpris(&connection, &dbus_proxy, &mut last_mpris_track_id).await;
 
         // --- Spotify API Polling Logic ---
         spotify_poll_counter += 1;
         if spotify_poll_counter >= 3 || should_refresh_spotify {
             spotify_poll_counter = 0; // Reset counter
-            update_state_from_spotify(has_mpris_data).await;
+            update_state_from_spotify(used_mpris_progress).await;
         }
 
         sleep(Duration::from_millis(500)).await;
@@ -254,6 +262,7 @@ async fn update_state_from_mpris(
         .and_then(|value| value.try_into().ok())
         .map(|position: i64| position / 1_000);
 
+    let mut updated_progress = false;
     if playing.is_some() || progress.is_some() {
         update_playback_state(|state| {
             if let Some(playing) = playing
@@ -262,25 +271,43 @@ async fn update_state_from_mpris(
                 should_refresh = true;
                 state.playing = playing;
                 if let Some(progress) = progress {
-                    state.progress = progress as u64;
+                    state.progress = progress as u32;
                     state.last_updated = Instant::now();
+                    updated_progress = true;
                 }
             }
         });
     }
 
-    (should_refresh, true)
+    (should_refresh, updated_progress)
 }
 
 /// Pulls the current playback queue and status from the Spotify Web API and updates shared state.
-async fn update_state_from_spotify(has_mpris_data: bool) {
-    // Use futures::join_all to fetch both current playback and queue concurrently
-    let (Ok(Some(current_playback)), Ok(queue)) = futures::join!(
-        SPOTIFY_CLIENT.current_playback(None, None::<Vec<&AdditionalType>>),
-        SPOTIFY_CLIENT.current_user_queue()
-    ) else {
-        warn!("Failed to fetch spotify data");
-        return;
+async fn update_state_from_spotify(used_mpris_progress: bool) {
+    // Fetch current playback and queue concurrently
+    let request_start = Instant::now();
+    let spotify_client = SPOTIFY_CLIENT.get().unwrap();
+    let (current_playback, queue) = match tokio::join!(
+        spotify_client.current_playback(None, None::<Vec<&AdditionalType>>),
+        spotify_client.current_user_queue(),
+    ) {
+        (Ok(Some(playback)), Ok(queue)) => (playback, queue),
+        (Ok(None), Ok(_)) => {
+            error!("Failed to fetch current playback from Spotify API: Returned None");
+            return;
+        }
+        (Err(err), Ok(_)) => {
+            error!("Failed to fetch current playback from Spotify API: {err}");
+            return;
+        }
+        (Ok(_), Err(err)) => {
+            error!("Failed to fetch user queue from Spotify API: {err}");
+            return;
+        }
+        (Err(playback_err), Err(queue_err)) => {
+            error!("Failed to fetch Spotify data - playback: {playback_err}, queue: {queue_err}");
+            return;
+        }
     };
 
     let current_track = if let Some(PlayableItem::Track(track)) = queue.currently_playing {
@@ -309,12 +336,15 @@ async fn update_state_from_spotify(has_mpris_data: bool) {
     }
     if !missing_urls.is_empty() {
         tokio::spawn(async move {
-            join_all(missing_urls.into_iter().map(|url| async move {
-                if let Err(err) = ensure_image_cached(url.as_str()).await {
-                    warn!("failed to cache image {url}: {err}");
-                }
-            }))
-            .await;
+            let mut set = JoinSet::new();
+            for url in missing_urls {
+                set.spawn(async move {
+                    if let Err(err) = ensure_image_cached(url.as_str()).await {
+                        warn!("failed to cache image {url}: {err}");
+                    }
+                });
+            }
+            while set.join_next().await.is_some() {}
         });
     }
 
@@ -350,10 +380,12 @@ async fn update_state_from_spotify(has_mpris_data: bool) {
 
         state.playing = current_playback.is_playing;
         state.shuffle = current_playback.shuffle_state;
-        if !has_mpris_data {
-            state.progress = current_playback
+        if !used_mpris_progress {
+            let progress = current_playback
                 .progress
-                .map_or(0, |p| p.num_milliseconds()) as u64;
+                .map_or(0, |p| p.num_milliseconds()) as u32;
+            let http_delay = (request_start.elapsed().as_millis() / 2) as u32;
+            state.progress = progress + http_delay;
             state.last_updated = Instant::now();
         }
     });
@@ -391,21 +423,38 @@ async fn ensure_image_cached(url: &str) -> Result<()> {
 
 /// Skip to the specified track in the queue.
 pub async fn skip_to_track(track_id: &str) {
-    // Get how many next to skip
     let playback_state = PLAYBACK_STATE.lock().clone();
-    let queue = playback_state.queue;
     let queue_index = playback_state.queue_index;
-    if let Some(position_in_queue) = queue.iter().position(|t| t.id == track_id)
-        && let position_difference = position_in_queue - queue_index
-        && position_difference > 0
-    {
-        info!(
-            "Skipping to track {}, {} skips",
-            track_id, position_difference
-        );
-        for _ in 0..(position_difference.min(10)) {
-            if let Err(err) = SPOTIFY_CLIENT.next_track(None).await {
-                error!("Failed to skip to track: {}", err);
+    let Some(position_in_queue) = playback_state.queue.iter().position(|t| t.id == track_id) else {
+        error!("Track not found in queue");
+        return;
+    };
+    match queue_index.cmp(&position_in_queue) {
+        Ordering::Equal => {
+            info!("Already playing track {}", track_id);
+        }
+        Ordering::Greater => {
+            let position_difference = queue_index - position_in_queue;
+            info!(
+                "Rewinding to track {}, {} skips",
+                track_id, position_difference
+            );
+            for _ in 0..(position_difference.min(10)) {
+                if let Err(err) = SPOTIFY_CLIENT.get().unwrap().previous_track(None).await {
+                    error!("Failed to skip to track: {}", err);
+                }
+            }
+        }
+        Ordering::Less => {
+            let position_difference = position_in_queue - queue_index;
+            info!(
+                "Skipping to track {}, {} skips",
+                track_id, position_difference
+            );
+            for _ in 0..(position_difference.min(10)) {
+                if let Err(err) = SPOTIFY_CLIENT.get().unwrap().next_track(None).await {
+                    error!("Failed to skip to track: {}", err);
+                }
             }
         }
     }

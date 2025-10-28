@@ -18,9 +18,9 @@ use vello::{
 /// Spacing between tracks in ms
 const TRACK_SPACING_MS: f64 = 4000.0;
 /// How many ms to show in the timeline
-const TIMELINE_DURATION_MS: f64 = 12.0 * 60.0 * 1000.0;
+const TIMELINE_DURATION_MS: f64 = 15.0 * 60.0 * 1000.0;
 /// Starting position of the timeline in ms, if negative then it shows the history too
-const TIMELINE_START_MS: f64 = -40.0 * 1000.0;
+const TIMELINE_START_MS: f64 = -60.0 * 1000.0;
 
 /// Corner radius applied to rendered track pills.
 const ROUNDING_RADIUS: f64 = 14.0;
@@ -36,7 +36,7 @@ const SPARK_VELOCITY_X: Range<f32> = -120.0..-70.0;
 /// Vertical velocity range applied at spawn (negative moves sparks upward).
 const SPARK_VELOCITY_Y: Range<f32> = -70.0..-40.0;
 /// Lifetime range for individual particles, in seconds.
-const SPARK_LIFETIME: Range<f32> = 0.5..0.8;
+const SPARK_LIFETIME: Range<f32> = 0.3..0.6;
 /// Rendered spark segment length range, in logical pixels.
 const SPARK_LENGTH_RANGE: Range<f64> = 4.0..10.0;
 /// Rendered spark thickness range, in logical pixels.
@@ -61,15 +61,14 @@ impl CantusLayer {
         let px_per_ms = total_width / TIMELINE_DURATION_MS;
 
         // Track positions are relative to "now" (0 ms), negative values are in the past.
-        let lerped_progress = playback_state.progress
-            + (u64::from(playback_state.playing)
-                * playback_state.last_updated.elapsed().as_millis() as u64);
-        let mut track_start_ms = -(lerped_progress as f64);
-        for i in 0..playback_state.queue_index {
-            track_start_ms -= playback_state.queue[i].milliseconds as f64;
-        }
-
+        let lerped_progress = u32::from(playback_state.playing)
+            * playback_state.last_updated.elapsed().as_millis() as u32;
+        let mut track_start_ms = -f64::from(playback_state.progress + lerped_progress);
         let mut track_spacing = 0.0;
+        for i in 0..playback_state.queue_index {
+            track_start_ms -= f64::from(playback_state.queue[i].milliseconds);
+            track_spacing -= TRACK_SPACING_MS;
+        }
 
         // Iterate over the currently playing track followed by the queued tracks.
         for (index, track) in playback_state.queue.iter().enumerate() {
@@ -78,10 +77,10 @@ impl CantusLayer {
                 break;
             }
 
-            let track_end_ms = track_start_ms_spaced + track.milliseconds as f64;
+            let track_end_ms = track_start_ms_spaced + f64::from(track.milliseconds);
 
-            let visible_start_ms = track_start_ms_spaced.max(0.0);
-            let start_trimmed = track_start_ms > 0.0;
+            let visible_start_ms = track_start_ms_spaced.max(TIMELINE_START_MS);
+            let start_trimmed = track_start_ms_spaced > TIMELINE_START_MS;
             let visible_end_ms = track_end_ms.min(timeline_end_ms);
             let end_trimmed = track_end_ms < timeline_end_ms;
 
@@ -102,7 +101,7 @@ impl CantusLayer {
                 end_trimmed,
             );
 
-            track_start_ms += track.milliseconds as f64;
+            track_start_ms += f64::from(track.milliseconds);
             track_spacing += TRACK_SPACING_MS;
         }
 
@@ -153,7 +152,7 @@ impl CantusLayer {
 
         // Make sure the background image shader is ready
         let surface = self.render_surface.as_ref().unwrap();
-        let background_image = self.shader_backgrounds[id].as_mut().unwrap().render(
+        let Some(background_image) = self.shader_backgrounds[id].as_mut().unwrap().render(
             &track.image.url,
             &self.render_context.devices[id],
             self.renderers[id].as_mut().unwrap(),
@@ -162,46 +161,33 @@ impl CantusLayer {
             &image.blurred,
             self.time_origin.elapsed().as_secs_f32(),
             self.frame_index,
-        );
+        ) else {
+            return;
+        };
 
         // --- BACKGROUND ---
-        if let Some(image) = background_image {
-            let brush = ImageBrush::new(image.clone());
-            let image_width = f64::from(image.width);
-            let image_height = f64::from(image.height);
-
-            let image_transform = Affine::translate((pos_x, image_height * -0.5))
-                * Affine::scale_non_uniform(
-                    uncropped_width / image_width,
-                    uncropped_width / image_height,
-                );
-            let image_rect = Rect::new(0.0, 0.0, image_width, image_height);
-
-            self.scene.push_clip_layer(
-                Affine::translate((pos_x, 0.0)),
-                &RoundedRect::new(
-                    0.0,
-                    0.0,
-                    width,
-                    height,
-                    RoundedRectRadii::new(
-                        left_rounding,
-                        right_rounding,
-                        right_rounding,
-                        left_rounding,
-                    ),
-                ),
-            );
-            self.scene
-                .fill(Fill::NonZero, image_transform, &brush, None, &image_rect);
-            self.scene.pop_layer();
-        }
+        self.scene.push_clip_layer(
+            Affine::translate((pos_x, 0.0)),
+            &RoundedRect::new(
+                0.0,
+                0.0,
+                width,
+                height,
+                RoundedRectRadii::new(left_rounding, right_rounding, right_rounding, left_rounding),
+            ),
+        );
+        let image_height = f64::from(background_image.height);
+        self.scene.fill(
+            Fill::NonZero,
+            Affine::translate((pos_x, image_height * -0.5))
+                * Affine::scale(uncropped_width / image_height),
+            &ImageBrush::new(background_image),
+            None,
+            &Rect::new(0.0, 0.0, image_height, image_height),
+        );
 
         // --- ALBUM ART SQUARE ---
-        let brush = ImageBrush::new(image.original.clone());
         let image_height = f64::from(image.original.height);
-
-        // Render the primary album art
         let transform = Affine::translate((pos_x + width - height, 0.0));
         self.scene.push_clip_layer(
             transform,
@@ -210,10 +196,11 @@ impl CantusLayer {
         self.scene.fill(
             Fill::NonZero,
             transform * Affine::scale(height / image_height),
-            &brush,
+            &ImageBrush::new(image.original.clone()),
             None,
             &Rect::new(0.0, 0.0, image_height, image_height),
         );
+        self.scene.pop_layer();
         self.scene.pop_layer();
 
         // --- TEXT ---
@@ -400,8 +387,8 @@ impl CantusLayer {
         // Emit new particles while playing
         if is_playing {
             self.particle_spawn_accumulator += dt * SPARK_EMISSION;
-            let emit_count = self.particle_spawn_accumulator.floor() as u32;
-            self.particle_spawn_accumulator -= emit_count as f32;
+            let emit_count = self.particle_spawn_accumulator.floor() as u16;
+            self.particle_spawn_accumulator -= f32::from(emit_count);
             for _ in 0..emit_count {
                 self.now_playing_particles.push(NowPlayingParticle {
                     position: [x as f32, height_f32 * self.rng.random_range(SPARK_SPAWN_Y)],
