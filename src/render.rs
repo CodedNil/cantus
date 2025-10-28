@@ -7,7 +7,7 @@ use parley::{
     FontFamily, FontStack, FontWeight, Layout, layout::PositionedLayoutItem, style::StyleProperty,
 };
 use rand::Rng;
-use std::{borrow::Cow, ops::Range, time::Instant};
+use std::{ops::Range, time::Instant};
 use vello::{
     Glyph,
     kurbo::{Affine, Rect, RoundedRect, RoundedRectRadii},
@@ -72,7 +72,10 @@ impl CantusLayer {
         let mut track_spacing = 0.0;
 
         // Iterate over the currently playing track followed by the queued tracks.
-        for track in std::iter::once(song).chain(playback_state.queue.iter()) {
+        for (index, track) in std::iter::once(song)
+            .chain(playback_state.queue.iter())
+            .enumerate()
+        {
             let track_start_ms_spaced = track_start_ms + track_spacing;
             if track_start_ms_spaced >= timeline_end_ms {
                 break;
@@ -99,9 +102,10 @@ impl CantusLayer {
             self.draw_track(
                 id,
                 track,
+                index == 0,
                 pos_x,
                 width,
-                dark_width,
+                if index == 0 { dark_width } else { 0.0 },
                 total_height,
                 (track_start_ms / 1000.0).abs(),
                 start_trimmed,
@@ -130,6 +134,7 @@ impl CantusLayer {
         &mut self,
         id: usize,
         track: &Track,
+        is_current: bool,
         pos_x: f64,
         width: f64,
         dark_width: f64,
@@ -139,7 +144,7 @@ impl CantusLayer {
         end_trimmed: bool,
     ) {
         self.track_hitboxes.insert(
-            track.name.clone(),
+            track.id.clone(),
             Rect::new(
                 pos_x / self.scale_factor,
                 0.0,
@@ -229,7 +234,7 @@ impl CantusLayer {
         let image_height = f64::from(image.original.height);
 
         // When the album art is clipping near the end, shrink it to move it onto the dark side
-        let dark_offset = if width - dark_width < height {
+        let dark_offset = if is_current && width - dark_width < height {
             width - dark_width - height
         } else {
             0.0
@@ -287,8 +292,9 @@ impl CantusLayer {
             song_name,
             text_start,
             height * 0.35,
+            "Epilogue",
             14.0,
-            FontWeight::EXTRA_BLACK,
+            FontWeight::EXTRA_BOLD,
         );
 
         // Draw the time until it starts
@@ -301,20 +307,27 @@ impl CantusLayer {
         } else {
             format!("{}s", seconds_until_start.round())
         };
-        let time_width = self.draw_text(
-            &time_string,
-            text_start,
-            height * 0.75,
-            12.0,
-            FontWeight::EXTRA_BLACK,
-        );
-        if let Some(artist_string) = track.artists.first().map(|artist| format!(" • {artist}")) {
-            self.draw_text(
-                &artist_string,
-                text_start + ((time_width / 10.0).ceil() * 10.0),
+        let font = "SUSE Mono";
+        let size = 12.0;
+        let weight = FontWeight::EXTRA_BLACK;
+        let time_width =
+            self.draw_text(&time_string, text_start, height * 0.75, font, size, weight);
+        if let Some(artist_string) = track.artists.first() {
+            let bullet_width = self.draw_text(
+                "•",
+                text_start + time_width + 3.0,
                 height * 0.75,
-                12.0,
-                FontWeight::EXTRA_BLACK,
+                font,
+                size,
+                weight,
+            );
+            self.draw_text(
+                artist_string,
+                text_start + time_width + bullet_width + 6.0,
+                height * 0.75,
+                font,
+                size,
+                weight,
             );
         }
 
@@ -328,6 +341,7 @@ impl CantusLayer {
         text: &str,
         pos_x: f64,
         pos_y: f64,
+        font_family: &str,
         font_size: f64,
         font_weight: FontWeight,
     ) -> f64 {
@@ -335,7 +349,7 @@ impl CantusLayer {
             self.layout_context
                 .ranged_builder(&mut self.font_context, text, 1.0, false);
         builder.push_default(StyleProperty::FontStack(FontStack::Single(
-            FontFamily::Named(Cow::Borrowed("epilogue")),
+            FontFamily::Named(font_family.into()),
         )));
         builder.push_default(StyleProperty::FontSize(
             (font_size * self.scale_factor) as f32,
@@ -422,7 +436,7 @@ impl CantusLayer {
         self.scene.fill(
             Fill::NonZero,
             Affine::translate((x - line_width * 0.5, 0.0)),
-            Color::from_rgba8(255, 224, 210, if is_playing { 220 } else { 140 }),
+            Color::from_rgb8(255, 224, 210),
             None,
             &RoundedRect::new(0.0, 0.0, line_width, height, 100.0),
         );

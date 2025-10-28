@@ -6,7 +6,7 @@ use parking_lot::Mutex;
 use reqwest::Client;
 use rspotify::{
     AuthCodeSpotify, Config, Credentials, OAuth,
-    model::{AdditionalType, FullTrack, PlayableItem},
+    model::{AdditionalType, FullTrack, Id, PlayableItem},
     prelude::OAuthClient,
     scopes,
 };
@@ -17,7 +17,7 @@ use std::{
     time::Instant,
 };
 use tokio::time::{Duration, sleep};
-use tracing::warn;
+use tracing::{error, info, warn};
 use vello::peniko::{Blob, ImageAlphaType, ImageData, ImageFormat};
 use zbus::{
     Connection,
@@ -38,88 +38,7 @@ pub static PLAYBACK_STATE: LazyLock<Arc<Mutex<PlaybackState>>> =
     LazyLock::new(|| Arc::new(Mutex::new(PlaybackState::default())));
 pub static IMAGES_CACHE: LazyLock<DashMap<String, CachedImage>> = LazyLock::new(DashMap::new);
 static HTTP_CLIENT: LazyLock<Client> = LazyLock::new(Client::new);
-
-#[derive(Clone)]
-pub struct PlaybackState {
-    pub last_updated: Instant,
-    pub playing: bool,
-    pub shuffle: bool,
-    pub progress: u64,
-    pub currently_playing: Option<Track>,
-    pub queue: Vec<Track>,
-}
-
-impl Default for PlaybackState {
-    fn default() -> Self {
-        Self {
-            last_updated: Instant::now(),
-            playing: false,
-            shuffle: false,
-            progress: 0,
-            currently_playing: None,
-            queue: Vec::new(),
-        }
-    }
-}
-
-#[derive(Default, Clone)]
-pub struct Track {
-    pub name: String,
-    pub artists: Vec<String>,
-    pub album_name: String,
-    pub image: Image,
-    pub release_date: String,
-    pub milliseconds: u64,
-}
-
-#[derive(Default, Clone)]
-pub struct Image {
-    pub url: String,
-    pub width: u32,
-    pub height: u32,
-}
-
-#[derive(Clone)]
-pub struct CachedImage {
-    pub original: ImageData,
-    pub blurred: ImageData,
-}
-
-impl Track {
-    fn from_rspotify(track: FullTrack) -> Self {
-        let image = track
-            .album
-            .images
-            .into_iter()
-            .min_by_key(|img| img.width.unwrap())
-            .map(|img| Image {
-                url: img.url,
-                width: img.width.unwrap(),
-                height: img.height.unwrap(),
-            })
-            .unwrap();
-        Self {
-            name: track.name,
-            artists: track.artists.into_iter().map(|a| a.name).collect(),
-            album_name: track.album.name,
-            image,
-            release_date: track.album.release_date.unwrap(),
-            milliseconds: track.duration.num_milliseconds() as u64,
-        }
-    }
-}
-
-/// Mutably updates the global playback state inside the mutex.
-fn update_playback_state<F>(update: F)
-where
-    F: FnOnce(&mut PlaybackState),
-{
-    let mut state = PLAYBACK_STATE.lock();
-    update(&mut state);
-}
-
-/// Initializes the Spotify client and spawns the combined MPRIS and Spotify polling task.
-pub async fn init() {
+static SPOTIFY_CLIENT: LazyLock<AuthCodeSpotify> = LazyLock::new(|| {
     // Initialize Spotify client with credentials and OAuth scopes
     let spotify = AuthCodeSpotify::with_config(
         Credentials::from_env()
@@ -147,14 +66,93 @@ pub async fn init() {
 
     // Prompt user for authorization and get the token
     let url = spotify.get_authorize_url(true).unwrap();
-    spotify.prompt_for_token(&url).await.unwrap();
+    pollster::block_on(spotify.prompt_for_token(&url)).unwrap();
+    spotify
+});
 
-    // Spawn the combined polling task
-    tokio::spawn(polling_task(spotify));
+#[derive(Debug, Clone)]
+pub struct PlaybackState {
+    pub last_updated: Instant,
+    pub playing: bool,
+    pub shuffle: bool,
+    pub progress: u64,
+    pub currently_playing: Option<Track>,
+    pub queue: Vec<Track>,
+}
+
+impl Default for PlaybackState {
+    fn default() -> Self {
+        Self {
+            last_updated: Instant::now(),
+            playing: false,
+            shuffle: false,
+            progress: 0,
+            currently_playing: None,
+            queue: Vec::new(),
+        }
+    }
+}
+
+#[derive(Debug, Default, Clone)]
+pub struct Track {
+    pub id: String,
+    pub name: String,
+    pub artists: Vec<String>,
+    pub album_name: String,
+    pub image: Image,
+    pub release_date: String,
+    pub milliseconds: u64,
+}
+
+#[derive(Debug, Default, Clone)]
+pub struct Image {
+    pub url: String,
+    pub width: u32,
+    pub height: u32,
+}
+
+#[derive(Clone)]
+pub struct CachedImage {
+    pub original: ImageData,
+    pub blurred: ImageData,
+}
+
+impl Track {
+    fn from_rspotify(track: FullTrack) -> Self {
+        let image = track
+            .album
+            .images
+            .into_iter()
+            .min_by_key(|img| img.width.unwrap())
+            .map(|img| Image {
+                url: img.url,
+                width: img.width.unwrap(),
+                height: img.height.unwrap(),
+            })
+            .unwrap();
+        Self {
+            id: track.id.unwrap().id().to_string(),
+            name: track.name,
+            artists: track.artists.into_iter().map(|a| a.name).collect(),
+            album_name: track.album.name,
+            image,
+            release_date: track.album.release_date.unwrap(),
+            milliseconds: track.duration.num_milliseconds() as u64,
+        }
+    }
+}
+
+/// Mutably updates the global playback state inside the mutex.
+fn update_playback_state<F>(update: F)
+where
+    F: FnOnce(&mut PlaybackState),
+{
+    let mut state = PLAYBACK_STATE.lock();
+    update(&mut state);
 }
 
 /// Asynchronous task to poll MPRIS every 500ms and Spotify API every X seconds or on song change.
-async fn polling_task(spotify_client: AuthCodeSpotify) {
+pub async fn polling_task() {
     let mut last_mpris_track_id: Option<String> = None; // Local state for track ID
     let mut spotify_poll_counter = 100; // Counter for Spotify API polling
 
@@ -175,9 +173,9 @@ async fn polling_task(spotify_client: AuthCodeSpotify) {
 
         // --- Spotify API Polling Logic ---
         spotify_poll_counter += 1;
-        if spotify_poll_counter >= 6 || should_refresh_spotify {
+        if spotify_poll_counter >= 3 || should_refresh_spotify {
             spotify_poll_counter = 0; // Reset counter
-            update_state_from_spotify(&spotify_client, has_mpris_data).await;
+            update_state_from_spotify(has_mpris_data).await;
         }
 
         sleep(Duration::from_millis(500)).await;
@@ -269,8 +267,8 @@ async fn update_state_from_mpris(
 }
 
 /// Pulls the current playback queue and status from the Spotify Web API and updates shared state.
-async fn update_state_from_spotify(spotify_client: &AuthCodeSpotify, has_mpris_data: bool) {
-    if let Ok(queue) = spotify_client.current_user_queue().await {
+async fn update_state_from_spotify(has_mpris_data: bool) {
+    if let Ok(queue) = SPOTIFY_CLIENT.current_user_queue().await {
         let currently_playing_track = queue.currently_playing.and_then(|item| match item {
             PlayableItem::Track(track) => Some(Track::from_rspotify(track)),
             _ => None,
@@ -314,7 +312,7 @@ async fn update_state_from_spotify(spotify_client: &AuthCodeSpotify, has_mpris_d
         });
     }
 
-    if let Ok(Some(playback)) = spotify_client
+    if let Ok(Some(playback)) = SPOTIFY_CLIENT
         .current_playback(None, None::<Vec<&AdditionalType>>)
         .await
     {
@@ -361,4 +359,22 @@ async fn ensure_image_cached(url: &str) -> Result<()> {
 
     IMAGES_CACHE.insert(url.to_string(), CachedImage { original, blurred });
     Ok(())
+}
+
+/// Skip to the specified track in the queue.
+pub async fn skip_to_track(track_id: &str) {
+    // Get how many next to skip
+    let queue = PLAYBACK_STATE.lock().queue.clone();
+    if let Some(position_in_queue) = queue.iter().position(|t| t.id == track_id) {
+        info!(
+            "Skipping to track {}, {} skips",
+            track_id,
+            position_in_queue + 1
+        );
+        for _ in 0..=(position_in_queue.min(10)) {
+            if let Err(err) = SPOTIFY_CLIENT.next_track(None).await {
+                error!("Failed to skip to track: {}", err);
+            }
+        }
+    }
 }

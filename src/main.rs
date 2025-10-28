@@ -6,7 +6,7 @@ use raw_window_handle::{
     RawDisplayHandle, RawWindowHandle, WaylandDisplayHandle, WaylandWindowHandle,
 };
 use std::{collections::HashMap, env, ffi::c_void, ptr::NonNull, sync::Arc, time::Instant};
-use tracing::{error, info};
+use tracing::error;
 use tracing_subscriber::EnvFilter;
 use vello::{
     AaConfig, Renderer, RendererOptions, Scene,
@@ -67,7 +67,7 @@ async fn main() {
         ))
         .init();
 
-    spotify::init().await;
+    tokio::spawn(spotify::polling_task());
     run_layer_shell();
 }
 
@@ -214,12 +214,15 @@ impl CantusLayer {
     /// Create a new layer shell state container.
     fn new(display_ptr: NonNull<c_void>) -> Self {
         let mut font_context = FontContext::new();
+        // Epilogue KodeMono UbuntuSansMono GoogleSansCode ChivoMono RobotoMono Sixtyfour SUSEMono Workbench
         font_context.collection.register_fonts(
-            Blob::new(Arc::new(include_bytes!("../assets/epilogue.ttf"))),
+            Blob::new(Arc::new(include_bytes!("../assets/Epilogue.ttf"))),
             None,
         );
-        // Verify the font was added correctly
-        font_context.collection.family_id("epilogue").unwrap();
+        font_context.collection.register_fonts(
+            Blob::new(Arc::new(include_bytes!("../assets/SUSEMono.ttf"))),
+            None,
+        );
 
         // Create a RenderContext with Vulkan backend
         let mut render_context = RenderContext::new();
@@ -389,12 +392,12 @@ impl CantusLayer {
 
     fn handle_pointer_click(&self) -> bool {
         let (x, y) = self.pointer_position;
-        for (title, rect) in &self.track_hitboxes {
+        for (id, rect) in &self.track_hitboxes {
             if x >= rect.x0 && x <= rect.x1 && y >= rect.y0 && y <= rect.y1 {
-                info!(
-                    "clicked track: {title} (x:{x}, y:{y}) ({},{}) ({},{})",
-                    rect.x0, rect.x1, rect.y0, rect.y1
-                );
+                let id = id.clone();
+                tokio::spawn(async move {
+                    spotify::skip_to_track(&id).await;
+                });
                 return true;
             }
         }
