@@ -59,7 +59,7 @@ mod render;
 mod spotify;
 
 const PANEL_WIDTH: f64 = 1050.0;
-const PANEL_HEIGHT_BASE: f64 = 45.0;
+const PANEL_HEIGHT_BASE: f64 = 40.0;
 const PANEL_HEIGHT_EXTENSION: f64 = 70.0;
 const PANEL_HEIGHT: f64 = PANEL_HEIGHT_BASE + PANEL_HEIGHT_EXTENSION;
 
@@ -217,6 +217,10 @@ struct CantusLayer {
     last_hitbox_update: Instant,
     track_hitboxes: HashMap<String, Rect>,
 
+    // --- Animation ---
+    track_start_ms: f64,
+    track_spacing: f64,
+
     // --- Particles ---
     now_playing_particles: Vec<NowPlayingParticle>,
     rng: SmallRng,
@@ -279,12 +283,16 @@ impl CantusLayer {
             time_origin: Instant::now(),
             frame_index: 0,
 
-            // -- Interaction --
+            // --- Animation ---
+            track_start_ms: 0.0,
+            track_spacing: 0.0,
+
+            // --- Interaction ---
             pointer_position: (0.0, 0.0),
             track_hitboxes: HashMap::new(),
             last_hitbox_update: Instant::now(),
 
-            // -- Particles --
+            // --- Particles ---
             now_playing_particles: Vec::new(),
             rng: SmallRng::from_os_rng(),
             last_particle_update: Instant::now(),

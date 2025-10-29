@@ -13,7 +13,10 @@ use std::{
     cmp::Ordering,
     collections::{HashMap, HashSet},
     convert::TryInto,
-    sync::{Arc, LazyLock},
+    sync::{
+        Arc, LazyLock,
+        atomic::{AtomicBool, Ordering as AtomicOrdering},
+    },
     time::Instant,
 };
 use tokio::{
@@ -44,6 +47,33 @@ pub static PLAYBACK_STATE: LazyLock<Arc<Mutex<PlaybackState>>> =
 pub static IMAGES_CACHE: LazyLock<DashMap<String, CachedImage>> = LazyLock::new(DashMap::new);
 static HTTP_CLIENT: LazyLock<Client> = LazyLock::new(Client::new);
 static SPOTIFY_CLIENT: OnceCell<AuthCodeSpotify> = OnceCell::const_new();
+static SPOTIFY_INTERACTION_ACTIVE: AtomicBool = AtomicBool::new(false);
+
+struct SpotifyInteractionGuard;
+
+impl SpotifyInteractionGuard {
+    fn try_acquire() -> Option<Self> {
+        if SPOTIFY_INTERACTION_ACTIVE
+            .compare_exchange(
+                false,
+                true,
+                AtomicOrdering::Acquire,
+                AtomicOrdering::Relaxed,
+            )
+            .is_ok()
+        {
+            Some(Self)
+        } else {
+            None
+        }
+    }
+}
+
+impl Drop for SpotifyInteractionGuard {
+    fn drop(&mut self) {
+        SPOTIFY_INTERACTION_ACTIVE.store(false, AtomicOrdering::Release);
+    }
+}
 
 #[derive(Debug, Clone)]
 pub struct PlaybackState {
@@ -165,17 +195,15 @@ pub async fn init() {
 /// Asynchronous task to poll MPRIS every 500ms and Spotify API every X seconds or on song change.
 async fn polling_task() {
     let mut last_mpris_track_id: Option<String> = None; // Local state for track ID
-    let mut spotify_poll_counter = 100; // Counter for Spotify API polling
-
     let connection = match Connection::session().await {
         Ok(conn) => conn,
         Err(err) => panic!("Failed to connect to D-Bus session: {err}"),
     };
-
     let dbus_proxy = match DBusProxy::new(&connection).await {
         Ok(proxy) => proxy,
         Err(err) => panic!("Failed creating D-Bus proxy: {err}"),
     };
+    let mut spotify_poll_counter = 100; // Counter for Spotify API polling
 
     loop {
         // --- MPRIS Polling Logic ---
@@ -415,6 +443,11 @@ async fn ensure_image_cached(url: &str) -> Result<()> {
 
 /// Skip to the specified track in the queue.
 pub async fn skip_to_track(track_id: &str) {
+    let Some(_interaction_guard) = SpotifyInteractionGuard::try_acquire() else {
+        warn!("Spotify interaction already in progress; skip_to_track returning early");
+        return;
+    };
+
     let playback_state = PLAYBACK_STATE.lock().clone();
     let queue_index = playback_state.queue_index;
     let Some(position_in_queue) = playback_state.queue.iter().position(|t| t.id == track_id) else {
@@ -450,4 +483,6 @@ pub async fn skip_to_track(track_id: &str) {
             }
         }
     }
+
+    update_state_from_spotify(false).await;
 }

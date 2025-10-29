@@ -72,6 +72,16 @@ impl CantusLayer {
             track_spacing -= TRACK_SPACING_MS;
         }
 
+        // Lerp the track_start_ms with the global state
+        if (track_start_ms - self.track_start_ms).abs() > 200.0 {
+            track_start_ms = self.track_start_ms + (track_start_ms - self.track_start_ms) * 0.1;
+        }
+        self.track_start_ms = track_start_ms;
+        if (track_spacing - self.track_spacing).abs() > 200.0 {
+            track_spacing = self.track_spacing + (track_spacing - self.track_spacing) * 0.1;
+        }
+        self.track_spacing = track_spacing;
+
         // Iterate over the currently playing track followed by the queued tracks.
         for (index, track) in playback_state.queue.iter().enumerate() {
             let track_start_ms_spaced = track_start_ms + track_spacing;
@@ -181,7 +191,7 @@ impl CantusLayer {
             &RoundedRect::new(
                 0.0,
                 0.0,
-                width,
+                width - height * 0.5, // Don't need to render all the way to the edge since the album art
                 height,
                 RoundedRectRadii::new(left_rounding, right_rounding, right_rounding, left_rounding),
             ),
@@ -195,6 +205,7 @@ impl CantusLayer {
             None,
             &Rect::new(0.0, 0.0, image_height, image_height),
         );
+        self.scene.pop_layer();
 
         // --- ALBUM ART SQUARE ---
         let image_height = f64::from(image.original.height);
@@ -217,7 +228,6 @@ impl CantusLayer {
             &Rect::new(0.0, 0.0, image_height, image_height),
         );
         self.scene.pop_layer();
-        self.scene.pop_layer();
 
         // --- TEXT ---
         // Clipping mask to the edge of the background rectangle, shrunk by a margin
@@ -239,7 +249,7 @@ impl CantusLayer {
             .trim();
         let font_size = 13.0;
         let font_weight = FontWeight::BOLD;
-        let text_height = (height * 0.3).floor();
+        let text_height = (height * 0.25).floor();
         let brush = Color::from_rgb8(240, 240, 240);
         let layout = self.layout_text(song_name, font_size, font_weight);
         let width_ratio = available_width / f64::from(layout.width());
