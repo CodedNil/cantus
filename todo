@@ -21,8 +21,6 @@ songs to test: Everytime Britney (Should be blue and gold)
 
 animations:
 switching from the lower to full rounded corner when its cropped
-hide text with a fade out when the bar is too narrow
-scale the text size to fit the pill, unless its severely too small then fade it out
 smoothly lerp large position changes, the track_start_ms should be lerped from the last stored one
 smoothly enter new songs into the right side, dont crop them in, have one waiting then in a smooth quick animation it pops in like a bubble
 
@@ -43,7 +41,6 @@ tidy CantusLayer, remove the unneeded variables, try to reduce how much of it is
 dont allow multiple spotify interactions concurrently to avoid bugs
 force a spotify refresh immediately after making an interaction
 dirty the queue if its drastically changed
-re-add limiting text to the track bar left
 darken the track to the left of the playback bar
 
 fix weird rendering of the track bar when its really narrow

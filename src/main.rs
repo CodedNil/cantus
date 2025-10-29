@@ -228,13 +228,8 @@ impl CantusLayer {
     /// Create a new layer shell state container.
     fn new(display_ptr: NonNull<c_void>) -> Self {
         let mut font_context = FontContext::new();
-        // Epilogue KodeMono UbuntuSansMono GoogleSansCode ChivoMono RobotoMono Sixtyfour SUSEMono Workbench
         font_context.collection.register_fonts(
-            Blob::new(Arc::new(include_bytes!("../assets/Epilogue.ttf"))),
-            None,
-        );
-        font_context.collection.register_fonts(
-            Blob::new(Arc::new(include_bytes!("../assets/SUSEMono.ttf"))),
+            Blob::new(Arc::new(include_bytes!("../assets/NotoSans.ttf"))),
             None,
         );
 

@@ -35,7 +35,7 @@ const PLAYER_INTERFACE: InterfaceName<'static> =
 const ROOT_INTERFACE: InterfaceName<'static> =
     InterfaceName::from_static_str_unchecked("org.mpris.MediaPlayer2");
 const MPRIS_OBJECT_PATH: &str = "/org/mpris/MediaPlayer2";
-const BACKGROUND_BLUR_SIGMA: f32 = 0.2;
+const BACKGROUND_BLUR_SIGMA: f32 = 0.1;
 
 /// Stores the current playback state
 const MAX_HISTORY: usize = 20;

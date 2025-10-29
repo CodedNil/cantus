@@ -201,7 +201,13 @@ impl CantusLayer {
         let transform = Affine::translate((pos_x + width - height, 0.0));
         self.scene.push_clip_layer(
             transform,
-            &RoundedRect::new(0.0, 0.0, height, height, rounding),
+            &RoundedRect::new(
+                0.0,
+                0.0,
+                height,
+                height,
+                RoundedRectRadii::new(rounding, right_rounding, right_rounding, rounding),
+            ),
         );
         self.scene.fill(
             Fill::NonZero,
@@ -215,66 +221,59 @@ impl CantusLayer {
 
         // --- TEXT ---
         // Clipping mask to the edge of the background rectangle, shrunk by a margin
-        let margin = 2.0 * self.scale_factor;
         self.scene.push_clip_layer(
             Affine::translate((pos_x, 0.0)),
-            &RoundedRect::new(
-                margin,
-                margin,
-                width - margin * 2.0,
-                height - margin,
-                rounding,
-            ),
+            &RoundedRect::new(4.0, 4.0, width - height - 4.0, height - 4.0, rounding),
         );
+        // Get available width for text
+        let text_start_left = pos_x + dark_width + 12.0;
+        let text_start_right = pos_x + width - height - 8.0;
+        let available_width = (text_start_right - text_start_left).max(0.0);
 
-        // Render the songs title and artist (strip anything beyond a - or ( in the song title)
+        // Render the songs title (strip anything beyond a - or ( in the song title)
         let song_name = track.name[..track
             .name
             .find(" (")
             .or_else(|| track.name.find(" -"))
             .unwrap_or(track.name.len())]
             .trim();
-        let text_start = pos_x + width - height - 6.0;
-        self.draw_text(
-            song_name,
-            text_start,
-            height * 0.35,
-            Alignment::Right,
-            Alignment::Center,
-            "Epilogue",
-            14.0,
-            FontWeight::BOLD,
-        );
-
-        // Draw the time until it starts
-        let size = 12.0;
-        let weight = FontWeight::EXTRA_BLACK;
-        let artist_width = track.artists.first().map_or(0.0, |artist_string| {
-            let artist_width = self.draw_text(
-                artist_string,
-                text_start,
-                height * 0.75,
+        let font_size = 13.0;
+        let font_weight = FontWeight::BOLD;
+        let text_height = (height * 0.3).floor();
+        let brush = Color::from_rgb8(240, 240, 240);
+        let layout = self.layout_text(song_name, font_size, font_weight);
+        let width_ratio = available_width / f64::from(layout.width());
+        if width_ratio <= 1.0 {
+            let layout = self.layout_text(song_name, font_size * width_ratio.max(0.8), font_weight);
+            self.draw_text(
+                &layout,
+                text_start_left,
+                text_height,
+                Alignment::Left,
+                Alignment::Center,
+                // Fade out when it gets too small, 0.6-0.4
+                brush.with_alpha(((width_ratio - 0.4) / 0.2) as f32),
+            );
+        } else {
+            self.draw_text(
+                &layout,
+                text_start_right,
+                text_height,
                 Alignment::Right,
                 Alignment::Center,
-                "Epilogue",
-                size,
-                weight,
+                brush,
             );
-            if is_current {
-                artist_width
-            } else {
-                self.draw_text(
-                    "•",
-                    text_start - artist_width - 3.0,
-                    height * 0.75,
-                    Alignment::Right,
-                    Alignment::Center,
-                    "SUSE Mono",
-                    size,
-                    weight,
-                ) + artist_width
-            }
-        });
+        }
+
+        // Get text layouts for bottom row of text
+        let font_size = 11.0;
+        let font_weight = FontWeight::BOLD;
+        let text_height = (height * 0.65).floor();
+
+        let artist_text = track.artists.first().unwrap();
+        let artist_layout = self.layout_text(artist_text, font_size, font_weight);
+        let dot_text = "\u{2004}•\u{2004}"; // Use thin spaces on either side of the bullet point
+        let dot_layout = self.layout_text(dot_text, font_size, font_weight);
         let time_text = if seconds_until_start >= 60.0 {
             format!(
                 "{}m{}s",
@@ -284,27 +283,49 @@ impl CantusLayer {
         } else {
             format!("{}s", seconds_until_start.round())
         };
-        if is_current {
+        let time_layout = self.layout_text(&time_text, font_size, font_weight);
+
+        let width_ratio = available_width
+            / f64::from(artist_layout.width() + dot_layout.width() + time_layout.width());
+        if width_ratio <= 1.0 || !is_current {
+            let layout = self.layout_text(
+                &format!("{time_text}{dot_text}{artist_text}"),
+                font_size * width_ratio.clamp(0.8, 1.0),
+                font_weight,
+            );
             self.draw_text(
-                &time_text,
-                pos_x + dark_width + 12.0,
-                height * 0.75,
-                Alignment::Left,
+                &layout,
+                if width_ratio > 1.0 {
+                    text_start_right
+                } else {
+                    text_start_left
+                },
+                text_height,
+                if width_ratio > 1.0 {
+                    Alignment::Right
+                } else {
+                    Alignment::Left
+                },
                 Alignment::Center,
-                "SUSE Mono",
-                size,
-                weight,
+                // Fade out when it gets too small, 0.6-0.4
+                brush.with_alpha(((width_ratio - 0.4) / 0.2) as f32),
             );
         } else {
             self.draw_text(
-                &time_text,
-                text_start - artist_width - 6.0,
-                height * 0.75,
+                &time_layout,
+                pos_x + dark_width + 12.0,
+                text_height,
+                Alignment::Left,
+                Alignment::Center,
+                brush,
+            );
+            self.draw_text(
+                &artist_layout,
+                text_start_right,
+                text_height,
                 Alignment::Right,
                 Alignment::Center,
-                "SUSE Mono",
-                size,
-                weight,
+                brush,
             );
         }
 
@@ -312,23 +333,13 @@ impl CantusLayer {
         self.scene.pop_layer();
     }
 
-    /// Renders out text with specified variables, returns how wide the text was.
-    fn draw_text(
-        &mut self,
-        text: &str,
-        pos_x: f64,
-        pos_y: f64,
-        horizontal_align: Alignment,
-        vertical_align: Alignment,
-        font_family: &str,
-        font_size: f64,
-        font_weight: FontWeight,
-    ) -> f64 {
+    /// Creates the text layout based on font properties.
+    fn layout_text(&mut self, text: &str, font_size: f64, font_weight: FontWeight) -> Layout<()> {
         let mut builder =
             self.layout_context
                 .ranged_builder(&mut self.font_context, text, 1.0, false);
         builder.push_default(StyleProperty::FontStack(FontStack::Single(
-            FontFamily::Named(font_family.into()),
+            FontFamily::Named("Noto Sans".into()),
         )));
         builder.push_default(StyleProperty::FontSize(
             (font_size * self.scale_factor) as f32,
@@ -337,6 +348,19 @@ impl CantusLayer {
 
         let mut layout: Layout<()> = builder.build(text);
         layout.break_all_lines(None);
+        layout
+    }
+
+    /// Draw the text layout onto the scene.
+    fn draw_text(
+        &mut self,
+        layout: &Layout<()>,
+        pos_x: f64,
+        pos_y: f64,
+        horizontal_align: Alignment,
+        vertical_align: Alignment,
+        brush: Color,
+    ) {
         let text_transform = Affine::translate((
             pos_x
                 - f64::from(if horizontal_align == Alignment::Right {
@@ -379,11 +403,9 @@ impl CantusLayer {
                 .normalized_coords(run.normalized_coords())
                 .transform(text_transform)
                 .hint(true)
-                .brush(Color::from_rgb8(240, 240, 240))
+                .brush(brush)
                 .draw(Fill::NonZero, glyphs);
         }
-
-        f64::from(layout.width())
     }
 
     fn render_playing_particles(&mut self, x: f64, height: f64, is_playing: bool) {
