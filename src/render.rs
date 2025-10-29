@@ -341,6 +341,27 @@ impl CantusLayer {
 
         // Release clipping mask
         self.scene.pop_layer();
+
+        // Temporary color render
+        self.scene.fill(
+            Fill::NonZero,
+            Affine::translate((pos_x + width - height - 40.0, 0.0)),
+            Color::from_rgb8(100, 100, 100),
+            None,
+            &Rect::new(0.0, 0.0, 40.0, height),
+        );
+        let mut drop = 0.0;
+        for [r, g, b, coverage] in &image.primary_colors {
+            let coverage = f64::from(*coverage) / 100.0;
+            self.scene.fill(
+                Fill::NonZero,
+                Affine::translate((pos_x + width - height - 20.0, drop)),
+                Color::from_rgb8(*r, *g, *b),
+                None,
+                &Rect::new(0.0, 0.0, 20.0, height * coverage),
+            );
+            drop += height * coverage;
+        }
     }
 
     /// Creates the text layout based on font properties.
