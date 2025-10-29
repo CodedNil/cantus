@@ -195,8 +195,8 @@ struct CantusLayer {
     // --- Rendering ---
     render_context: RenderContext,
     render_surface: Option<RenderSurface<'static>>,
-    renderers: Vec<Option<Renderer>>,
-    shader_backgrounds: Vec<Option<WarpBackground>>,
+    renderers: HashMap<usize, Renderer>,
+    shader_backgrounds: HashMap<usize, WarpBackground>,
     scene: Scene,
 
     // --- Text ---
@@ -267,8 +267,8 @@ impl CantusLayer {
             // --- Rendering ---
             render_context,
             render_surface: None,
-            renderers: Vec::new(),
-            shader_backgrounds: Vec::new(),
+            renderers: HashMap::new(),
+            shader_backgrounds: HashMap::new(),
             scene: Scene::new(),
 
             // --- Text ---
@@ -369,10 +369,6 @@ impl CantusLayer {
                 .build();
         }
         rs.surface.configure(&device_handle.device, &rs.config);
-        self.renderers
-            .resize_with(self.render_context.devices.len(), || None);
-        self.shader_backgrounds
-            .resize_with(self.render_context.devices.len(), || None);
         self.render_surface = Some(rs);
         Ok(())
     }
@@ -460,11 +456,14 @@ impl CantusLayer {
 
             let id = self.render_surface.as_ref().unwrap().dev_id;
             // Ensure the renderer exists
-            if self.renderers[id].is_none() {
-                self.renderers[id] = Some(Renderer::new(
-                    &self.render_context.devices[id].device,
-                    RendererOptions::default(),
-                )?);
+            if !self.renderers.contains_key(&id) {
+                self.renderers.insert(
+                    id,
+                    Renderer::new(
+                        &self.render_context.devices[id].device,
+                        RendererOptions::default(),
+                    )?,
+                );
             }
 
             // Prepare scene
@@ -478,7 +477,7 @@ impl CantusLayer {
                 return Ok(());
             };
             let device_handle = &self.render_context.devices[id];
-            let renderer = self.renderers[id].as_mut().unwrap();
+            let renderer = self.renderers.get_mut(&id).unwrap();
             renderer.render_to_texture(
                 &device_handle.device,
                 &device_handle.queue,

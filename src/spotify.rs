@@ -287,25 +287,17 @@ async fn update_state_from_spotify(used_mpris_progress: bool) {
     // Fetch current playback and queue concurrently
     let request_start = Instant::now();
     let spotify_client = SPOTIFY_CLIENT.get().unwrap();
-    let (current_playback, queue) = match tokio::join!(
+    let (current_playback, queue) = match tokio::try_join!(
         spotify_client.current_playback(None, None::<Vec<&AdditionalType>>),
         spotify_client.current_user_queue(),
     ) {
-        (Ok(Some(playback)), Ok(queue)) => (playback, queue),
-        (Ok(None), Ok(_)) => {
+        Ok((Some(playback), queue)) => (playback, queue),
+        Ok((None, _)) => {
             error!("Failed to fetch current playback from Spotify API: Returned None");
             return;
         }
-        (Err(err), Ok(_)) => {
-            error!("Failed to fetch current playback from Spotify API: {err}");
-            return;
-        }
-        (Ok(_), Err(err)) => {
-            error!("Failed to fetch user queue from Spotify API: {err}");
-            return;
-        }
-        (Err(playback_err), Err(queue_err)) => {
-            error!("Failed to fetch Spotify data - playback: {playback_err}, queue: {queue_err}");
+        Err(err) => {
+            error!("Failed to fetch current playback and queue: {}", err);
             return;
         }
     };

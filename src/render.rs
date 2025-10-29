@@ -52,9 +52,11 @@ impl CantusLayer {
         let playback_state = PLAYBACK_STATE.lock().clone();
 
         // Ensure the background provider exists
-        if self.shader_backgrounds[id].is_none() {
-            self.shader_backgrounds[id] =
-                Some(WarpBackground::new(&self.render_context.devices[id].device));
+        if !self.shader_backgrounds.contains_key(&id) {
+            self.shader_backgrounds.insert(
+                id,
+                WarpBackground::new(&self.render_context.devices[id].device),
+            );
         }
 
         let timeline_end_ms = TIMELINE_START_MS + TIMELINE_DURATION_MS;
@@ -86,6 +88,12 @@ impl CantusLayer {
 
             let pos_x = (visible_start_ms - TIMELINE_START_MS) * px_per_ms;
             let width = (visible_end_ms - visible_start_ms) * px_per_ms;
+            // How much of the width is to the left of the current position
+            let dark_width = if track_start_ms_spaced < 0.0 {
+                track_start_ms_spaced.max(TIMELINE_START_MS) * -px_per_ms
+            } else {
+                0.0
+            };
 
             // Draw the track, trimming to the visible window if it spills off either side.
             self.draw_track(
@@ -94,6 +102,7 @@ impl CantusLayer {
                 index == playback_state.queue_index,
                 pos_x,
                 width,
+                dark_width,
                 (track_end_ms - track_start_ms) * px_per_ms,
                 total_height,
                 (track_start_ms / 1000.0).abs(),
@@ -113,10 +122,10 @@ impl CantusLayer {
         );
 
         // Purge the stale background cache entries.
-        self.shader_backgrounds[id]
-            .as_mut()
+        self.shader_backgrounds
+            .get_mut(&id)
             .unwrap()
-            .purge_stale(self.renderers[id].as_mut().unwrap(), self.frame_index);
+            .purge_stale(self.renderers.get_mut(&id).unwrap(), self.frame_index);
     }
 
     fn draw_track(
@@ -126,6 +135,7 @@ impl CantusLayer {
         is_current: bool,
         pos_x: f64,
         width: f64,
+        dark_width: f64,
         uncropped_width: f64,
         height: f64,
         seconds_until_start: f64,
@@ -152,10 +162,10 @@ impl CantusLayer {
 
         // Make sure the background image shader is ready
         let surface = self.render_surface.as_ref().unwrap();
-        let Some(background_image) = self.shader_backgrounds[id].as_mut().unwrap().render(
+        let Some(background_image) = self.shader_backgrounds.get_mut(&id).unwrap().render(
             &track.image.url,
             &self.render_context.devices[id],
-            self.renderers[id].as_mut().unwrap(),
+            self.renderers.get_mut(&id).unwrap(),
             surface.config.width,
             surface.config.height,
             &image.blurred,
@@ -277,7 +287,7 @@ impl CantusLayer {
         if is_current {
             self.draw_text(
                 &time_text,
-                pos_x + 12.0,
+                pos_x + dark_width + 12.0,
                 height * 0.75,
                 Alignment::Left,
                 Alignment::Center,
@@ -390,31 +400,45 @@ impl CantusLayer {
             let emit_count = self.particle_spawn_accumulator.floor() as u16;
             self.particle_spawn_accumulator -= f32::from(emit_count);
             for _ in 0..emit_count {
-                self.now_playing_particles.push(NowPlayingParticle {
-                    position: [x as f32, height_f32 * self.rng.random_range(SPARK_SPAWN_Y)],
-                    velocity: [
-                        self.rng.random_range(SPARK_VELOCITY_X) * scale,
-                        self.rng.random_range(SPARK_VELOCITY_Y) * scale,
-                    ],
-                    life: 0.0,
-                    lifetime: self.rng.random_range(SPARK_LIFETIME),
-                });
+                // Try to take over an existing dead particle before inserting a new one
+                let position = [x as f32, height_f32 * self.rng.random_range(SPARK_SPAWN_Y)];
+                let velocity = [
+                    self.rng.random_range(SPARK_VELOCITY_X) * scale,
+                    self.rng.random_range(SPARK_VELOCITY_Y) * scale,
+                ];
+                let life = self.rng.random_range(SPARK_LIFETIME);
+                if let Some(dead_particle) =
+                    self.now_playing_particles.iter_mut().find(|p| !p.alive)
+                {
+                    dead_particle.alive = true;
+                    dead_particle.position = position;
+                    dead_particle.velocity = velocity;
+                    dead_particle.life = life;
+                } else {
+                    self.now_playing_particles.push(NowPlayingParticle {
+                        alive: true,
+                        position,
+                        velocity,
+                        life,
+                    });
+                }
             }
         } else {
             self.particle_spawn_accumulator = 0.0;
         }
 
         // Delete dead particles, and update positions of others
-        self.now_playing_particles.retain_mut(|particle| {
-            particle.life += dt;
-            if particle.life >= particle.lifetime {
-                return false;
-            }
+        self.now_playing_particles.iter_mut().for_each(|particle| {
+            if particle.alive {
+                particle.life -= dt;
+                if particle.life <= 0.0 {
+                    particle.alive = false;
+                }
 
-            particle.velocity[1] += SPARK_GRAVITY * scale * dt;
-            particle.position[0] += particle.velocity[0] * dt;
-            particle.position[1] += particle.velocity[1] * dt;
-            true
+                particle.velocity[1] += SPARK_GRAVITY * scale * dt;
+                particle.position[0] += particle.velocity[0] * dt;
+                particle.position[1] += particle.velocity[1] * dt;
+            }
         });
 
         // Line at the now playing position to denote the cutoff
@@ -428,7 +452,7 @@ impl CantusLayer {
         );
 
         for particle in &self.now_playing_particles {
-            let fade = 1.0 - (particle.life / particle.lifetime).clamp(0.0, 1.0);
+            let fade = (particle.life / 0.6).clamp(0.0, 1.0);
             let fade64 = f64::from(fade);
             let length = Self::lerp_range(SPARK_LENGTH_RANGE, fade64) * self.scale_factor;
             let thickness = Self::lerp_range(SPARK_THICKNESS_RANGE, fade64) * self.scale_factor;
@@ -464,8 +488,8 @@ impl CantusLayer {
 }
 
 pub struct NowPlayingParticle {
+    alive: bool,
     position: [f32; 2],
     velocity: [f32; 2],
     life: f32,
-    lifetime: f32,
 }
