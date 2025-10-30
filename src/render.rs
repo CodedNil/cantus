@@ -352,7 +352,7 @@ impl CantusLayer {
         );
         let mut drop = 0.0;
         for [r, g, b, coverage] in &image.primary_colors {
-            let coverage = f64::from(*coverage) / 100.0;
+            let coverage = f64::from(*coverage) / 255.0;
             self.scene.fill(
                 Fill::NonZero,
                 Affine::translate((pos_x + width - height - 20.0, drop)),
