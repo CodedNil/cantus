@@ -6,7 +6,7 @@ use parking_lot::Mutex;
 use reqwest::Client;
 use rspotify::{
     AuthCodeSpotify, Config, Credentials, OAuth,
-    model::{AdditionalType, ArtistId, Context, FullTrack, Id, PlayableItem, artist},
+    model::{AdditionalType, ArtistId, Context, FullTrack, Id, PlayableItem},
     prelude::{BaseClient, OAuthClient},
     scopes,
 };
@@ -565,12 +565,10 @@ fn update_color_palettes() -> Result<()> {
                 .iter()
                 .map(|s| {
                     let rgb = s.color().to_rgb();
-                    [
-                        rgb.r,
-                        rgb.g,
-                        rgb.b,
-                        ((s.ratio() / total_ratio_sum) * 255.0).round() as u8,
-                    ]
+                    // Sometimes ratios can be tiny like 0.05%, this brings them a little closer to even
+                    let lerped_ratio =
+                        ((s.ratio() / total_ratio_sum) + (1.0 / swatches.len() as f64)) * 0.5;
+                    [rgb.r, rgb.g, rgb.b, (lerped_ratio * 255.0).round() as u8]
                 })
                 .collect::<Vec<_>>();
             primary_colors.sort_by(|a, b| b[3].cmp(&a[3]));

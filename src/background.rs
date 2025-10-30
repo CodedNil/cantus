@@ -153,45 +153,46 @@ impl WarpBackground {
         elapsed_seconds: f32,
         frame_index: u64,
     ) -> Option<ImageData> {
-        if width == 0 || height == 0 || image.width == 0 || image.height == 0 {
+        if [width, height, image.width, image.height]
+            .into_iter()
+            .any(|dim| dim == 0)
+        {
             return None;
         }
 
-        let slot = self
-            .slots
-            .entry(key.to_string())
-            .and_modify(|slot| {
-                if slot.texture_size != (image.width, image.height)
-                    || slot.output_size != (width, height)
-                {
-                    // Dimensions changed, recreate the slot
-                    renderer.unregister_texture(slot.output_image.clone()); // Unregister old texture
-                    *slot = BackgroundSlot::new(
-                        &device_handle.device,
-                        renderer,
-                        &self.bind_group_layout,
-                        &self.sampler,
-                        &self.uniform_buffer,
-                        width,
-                        height,
-                        image,
-                    );
-                }
-            })
-            .or_insert_with(|| {
-                BackgroundSlot::new(
-                    &device_handle.device,
-                    renderer,
-                    &self.bind_group_layout,
-                    &self.sampler,
-                    &self.uniform_buffer,
-                    width,
-                    height,
-                    image,
-                )
-            });
+        let device = &device_handle.device;
+        let queue = &device_handle.queue;
+        let image_size = (image.width, image.height);
+        let output_size = (width, height);
 
-        device_handle.queue.write_texture(
+        let slot = self.slots.entry(key.to_string()).or_insert_with(|| {
+            BackgroundSlot::new(
+                device,
+                renderer,
+                &self.bind_group_layout,
+                &self.sampler,
+                &self.uniform_buffer,
+                width,
+                height,
+                image,
+            )
+        });
+
+        if slot.texture_size != image_size || slot.output_size != output_size {
+            renderer.unregister_texture(slot.output_image.clone());
+            *slot = BackgroundSlot::new(
+                device,
+                renderer,
+                &self.bind_group_layout,
+                &self.sampler,
+                &self.uniform_buffer,
+                width,
+                height,
+                image,
+            );
+        }
+
+        queue.write_texture(
             slot.texture.as_image_copy(),
             image.data.data(),
             TexelCopyBufferLayout {
@@ -211,15 +212,11 @@ impl WarpBackground {
         let uniforms = WarpUniforms {
             params: [elapsed_seconds, 0.0, 0.0, 0.0],
         };
-        device_handle
-            .queue
-            .write_buffer(&self.uniform_buffer, 0, bytemuck::bytes_of(&uniforms));
+        queue.write_buffer(&self.uniform_buffer, 0, bytemuck::bytes_of(&uniforms));
 
-        let mut encoder = device_handle
-            .device
-            .create_command_encoder(&CommandEncoderDescriptor {
-                label: Some("cantus_warp_encoder"),
-            });
+        let mut encoder = device.create_command_encoder(&CommandEncoderDescriptor {
+            label: Some("cantus_warp_encoder"),
+        });
 
         {
             let mut pass = encoder.begin_render_pass(&RenderPassDescriptor {
@@ -242,7 +239,7 @@ impl WarpBackground {
             pass.draw(0..3, 0..1);
         }
 
-        device_handle.queue.submit(Some(encoder.finish()));
+        queue.submit(Some(encoder.finish()));
         Some(slot.output_image.clone())
     }
 
