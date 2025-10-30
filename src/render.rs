@@ -1,7 +1,7 @@
 use crate::{
     CantusLayer, PANEL_HEIGHT_BASE, PANEL_WIDTH,
     background::WarpBackground,
-    spotify::{IMAGES_CACHE, PLAYBACK_STATE, Track},
+    spotify::{IMAGES_CACHE, PLAYBACK_STATE, TRACK_DATA_CACHE, Track},
 };
 use parley::{
     Alignment, FontFamily, FontStack, FontWeight, Layout, layout::PositionedLayoutItem,
@@ -241,11 +241,11 @@ impl CantusLayer {
         let available_width = (text_start_right - text_start_left).max(0.0);
 
         // Render the songs title (strip anything beyond a - or ( in the song title)
-        let song_name = track.name[..track
-            .name
+        let song_name = track.title[..track
+            .title
             .find(" (")
-            .or_else(|| track.name.find(" -"))
-            .unwrap_or(track.name.len())]
+            .or_else(|| track.title.find(" -"))
+            .unwrap_or(track.title.len())]
             .trim();
         let font_size = 13.0;
         let font_weight = FontWeight::BOLD;
@@ -280,7 +280,7 @@ impl CantusLayer {
         let font_weight = FontWeight::BOLD;
         let text_height = (height * 0.65).floor();
 
-        let artist_text = track.artists.first().unwrap();
+        let artist_text = &track.artist_name;
         let artist_layout = self.layout_text(artist_text, font_size, font_weight);
         let dot_text = "\u{2004}•\u{2004}"; // Use thin spaces on either side of the bullet point
         let dot_layout = self.layout_text(dot_text, font_size, font_weight);
@@ -343,24 +343,26 @@ impl CantusLayer {
         self.scene.pop_layer();
 
         // Temporary color render
-        self.scene.fill(
-            Fill::NonZero,
-            Affine::translate((pos_x + width - height - 40.0, 0.0)),
-            Color::from_rgb8(100, 100, 100),
-            None,
-            &Rect::new(0.0, 0.0, 40.0, height),
-        );
-        let mut drop = 0.0;
-        for [r, g, b, coverage] in &image.primary_colors {
-            let coverage = f64::from(*coverage) / 255.0;
+        if let Some(track_data) = TRACK_DATA_CACHE.get(&track.id) {
             self.scene.fill(
                 Fill::NonZero,
-                Affine::translate((pos_x + width - height - 20.0, drop)),
-                Color::from_rgb8(*r, *g, *b),
+                Affine::translate((pos_x + width - height - 40.0, 0.0)),
+                Color::from_rgb8(100, 100, 100),
                 None,
-                &Rect::new(0.0, 0.0, 20.0, height * coverage),
+                &Rect::new(0.0, 0.0, 40.0, height),
             );
-            drop += height * coverage;
+            let mut drop = 0.0;
+            for [r, g, b, coverage] in &track_data.primary_colors {
+                let coverage = f64::from(*coverage) / 255.0;
+                self.scene.fill(
+                    Fill::NonZero,
+                    Affine::translate((pos_x + width - height - 20.0, drop)),
+                    Color::from_rgb8(*r, *g, *b),
+                    None,
+                    &Rect::new(0.0, 0.0, 20.0, height * coverage),
+                );
+                drop += height * coverage;
+            }
         }
     }
 

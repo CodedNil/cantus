@@ -1,13 +1,13 @@
 use anyhow::Result;
 use auto_palette::Palette;
 use dashmap::DashMap;
-use image::{GenericImageView, imageops};
+use image::{GenericImageView, RgbaImage, imageops};
 use parking_lot::Mutex;
 use reqwest::Client;
 use rspotify::{
     AuthCodeSpotify, Config, Credentials, OAuth,
-    model::{AdditionalType, Context, FullTrack, Id, PlayableItem},
-    prelude::OAuthClient,
+    model::{AdditionalType, ArtistId, Context, FullTrack, Id, PlayableItem, artist},
+    prelude::{BaseClient, OAuthClient},
     scopes,
 };
 use std::{
@@ -39,6 +39,9 @@ const BACKGROUND_BLUR_SIGMA: f32 = 0.1;
 /// Number of swatches to use in colour palette generation.
 const NUM_SWATCHES: usize = 4;
 
+/// Maximum number of historical tracks to keep before trimming.
+const MAX_HISTORY: usize = 20;
+
 /// MPRIS interface identifier used for playback control.
 const PLAYER_INTERFACE: InterfaceName<'static> =
     InterfaceName::from_static_str_unchecked("org.mpris.MediaPlayer2.Player");
@@ -48,18 +51,13 @@ const ROOT_INTERFACE: InterfaceName<'static> =
 /// Object path for the Spotify MPRIS instance on D-Bus.
 const MPRIS_OBJECT_PATH: &str = "/org/mpris/MediaPlayer2";
 
-/// Maximum number of historical tracks to keep before trimming.
-const MAX_HISTORY: usize = 20;
-/// Shared playback state guarded by a mutex for renderer access.
 pub static PLAYBACK_STATE: LazyLock<Arc<Mutex<PlaybackState>>> =
     LazyLock::new(|| Arc::new(Mutex::new(PlaybackState::default())));
-/// Cache of album art (original, blurred, palette) keyed by URL.
 pub static IMAGES_CACHE: LazyLock<DashMap<String, CachedImage>> = LazyLock::new(DashMap::new);
-/// Shared HTTP client reused across Spotify API and image download requests.
+pub static ARTIST_IMAGES_CACHE: LazyLock<DashMap<String, Image>> = LazyLock::new(DashMap::new);
+pub static TRACK_DATA_CACHE: LazyLock<DashMap<String, TrackData>> = LazyLock::new(DashMap::new);
 static HTTP_CLIENT: LazyLock<Client> = LazyLock::new(Client::new);
-/// Lazily initialised Spotify Web API client authenticated via OAuth.
 static SPOTIFY_CLIENT: OnceCell<AuthCodeSpotify> = OnceCell::const_new();
-/// Flag preventing concurrent Spotify interaction calls that would conflict.
 static SPOTIFY_INTERACTION_ACTIVE: AtomicBool = AtomicBool::new(false);
 
 struct SpotifyInteractionGuard;
@@ -116,12 +114,19 @@ impl Default for PlaybackState {
 #[derive(Debug, Default, Clone)]
 pub struct Track {
     pub id: String,
-    pub name: String,
-    pub artists: Vec<String>,
+    pub title: String,
+    pub artist_id: String,
+    pub artist_name: String,
     pub album_name: String,
     pub image: Image,
     pub release_date: String,
     pub milliseconds: u32,
+}
+
+#[derive(Debug, Default, Clone)]
+pub struct TrackData {
+    /// Simplified color palette (RGBA, alpha = percentage 0-100).
+    pub primary_colors: Vec<[u8; 4]>,
 }
 
 #[derive(Debug, Default, Clone)]
@@ -135,8 +140,6 @@ pub struct Image {
 pub struct CachedImage {
     pub original: ImageData,
     pub blurred: ImageData,
-    /// Simplified color palette (RGBA, alpha = percentage 0-100).
-    pub primary_colors: Vec<[u8; 4]>,
 }
 
 impl Track {
@@ -154,20 +157,17 @@ impl Track {
             .into_iter()
             .min_by_key(|img| img.width.unwrap())
             .unwrap();
-        let (image_url, image_width, image_height) = (
-            album_image.url,
-            album_image.width.unwrap() as u16,
-            album_image.height.unwrap() as u16,
-        );
         let image = Image {
-            url: image_url,
-            width: image_width,
-            height: image_height,
+            url: album_image.url,
+            width: album_image.width.unwrap() as u16,
+            height: album_image.height.unwrap() as u16,
         };
+        let artist = artists.first().unwrap();
         Self {
             id: id.unwrap().id().to_string(),
-            name,
-            artists: artists.into_iter().map(|a| a.name).collect(),
+            title: name,
+            artist_id: artist.id.clone().unwrap().id().to_string(),
+            artist_name: artist.name.clone(),
             album_name: album.name,
             image,
             release_date: album.release_date.unwrap(),
@@ -362,27 +362,45 @@ async fn update_state_from_spotify(used_mpris_progress: bool) {
     } else {
         return;
     };
-    let future_tracks: Vec<Track> = queue
-        .queue
-        .into_iter()
-        .filter_map(|item| match item {
+
+    let new_queue: Vec<Track> = std::iter::once(current_track.clone())
+        .chain(queue.queue.into_iter().filter_map(|item| match item {
             PlayableItem::Track(track) => Some(Track::from_rspotify(track)),
             _ => None,
-        })
+        }))
         .collect();
 
-    // Start a task to fetch missing images
-    let mut missing_urls = HashSet::new();
-    if !IMAGES_CACHE.contains_key(&current_track.image.url) {
-        missing_urls.insert(current_track.image.url.clone());
-    }
-    for track in &future_tracks {
-        if !IMAGES_CACHE.contains_key(&track.image.url) {
-            missing_urls.insert(track.image.url.clone());
-        }
-    }
-    if !missing_urls.is_empty() {
+    // Start a task to fetch missing artists & images
+    let missing_urls = new_queue
+        .iter()
+        .filter(|track| !IMAGES_CACHE.contains_key(&track.image.url))
+        .map(|track| track.image.url.clone())
+        .collect::<HashSet<_>>();
+    let missing_artists = new_queue
+        .iter()
+        .filter_map(|track| {
+            if ARTIST_IMAGES_CACHE.contains_key(&track.artist_id) {
+                None
+            } else {
+                Some(track.artist_id.clone())
+            }
+        })
+        .collect::<HashSet<_>>();
+    if !missing_urls.is_empty() || !missing_artists.is_empty() {
         tokio::spawn(async move {
+            // Grab artists in one go from spotify
+            let Ok(artists) = spotify_client
+                .artists(
+                    missing_artists
+                        .iter()
+                        .map(|id| ArtistId::from_id(id).unwrap()),
+                )
+                .await
+            else {
+                return;
+            };
+
+            // Start downloading missing album images
             let mut set = JoinSet::new();
             for url in missing_urls {
                 set.spawn(async move {
@@ -391,21 +409,47 @@ async fn update_state_from_spotify(used_mpris_progress: bool) {
                     }
                 });
             }
+
+            // Cache artists, and download images
+            for artist in artists {
+                let artist_image = artist
+                    .images
+                    .into_iter()
+                    .min_by_key(|img| img.width.unwrap())
+                    .unwrap();
+                ARTIST_IMAGES_CACHE.insert(
+                    artist.id.id().to_string(),
+                    Image {
+                        url: artist_image.url.clone(),
+                        width: artist_image.width.unwrap() as u16,
+                        height: artist_image.height.unwrap() as u16,
+                    },
+                );
+                set.spawn(async move {
+                    let url = artist_image.url.clone();
+                    if let Err(err) = ensure_image_cached(url.as_str()).await {
+                        warn!("failed to cache image {url}: {err}");
+                    }
+                });
+            }
+
+            // Concurrently run all tasks
             while set.join_next().await.is_some() {}
+
+            // Now that we have both the album and artist images downloaded, update track color palette
+            if let Err(err) = update_color_palettes() {
+                warn!("failed to update color palettes: {err}");
+            }
         });
     }
 
     // Update the playback state
     update_playback_state(move |state| {
-        let new_queue: Vec<Track> = std::iter::once(current_track.clone())
-            .chain(future_tracks.into_iter())
-            .collect();
-
         if state.current_context == current_playback.context
             && let Some(new_index) = state
                 .queue
                 .iter()
-                .position(|t| t.name == current_track.name)
+                .position(|t| t.title == current_track.title)
         {
             // Delete everything past the new_index, and append the new tracks at the end
             state.queue_index = new_index;
@@ -449,31 +493,6 @@ async fn ensure_image_cached(url: &str) -> Result<()> {
     let rgba = dynamic_image.to_rgba8();
     let blurred_rgba = imageops::blur(&rgba, BACKGROUND_BLUR_SIGMA * width as f32);
 
-    // Get palette
-    let image_data = auto_palette::ImageData::new(width, height, &rgba)?;
-    let palette: Palette<f64> = Palette::builder()
-        .algorithm(auto_palette::Algorithm::KMeans)
-        .filter(ChromaFilter::new(40))
-        .build(&image_data)?;
-    let swatches = palette
-        .find_swatches_with_theme(NUM_SWATCHES, auto_palette::Theme::Colorful)
-        .or_else(|_| palette.find_swatches_with_theme(NUM_SWATCHES, auto_palette::Theme::Light))
-        .or_else(|_| palette.find_swatches(NUM_SWATCHES))?;
-    let total_ratio_sum: f64 = swatches.iter().map(auto_palette::Swatch::ratio).sum();
-    let mut primary_colors = swatches
-        .iter()
-        .map(|s| {
-            let rgb = s.color().to_rgb();
-            [
-                rgb.r,
-                rgb.g,
-                rgb.b,
-                ((s.ratio() / total_ratio_sum) * 255.0).round() as u8,
-            ]
-        })
-        .collect::<Vec<_>>();
-    primary_colors.sort_by(|a, b| b[3].cmp(&a[3]));
-
     let original = ImageData {
         data: Blob::from(rgba.into_raw()),
         format: ImageFormat::Rgba8,
@@ -489,14 +508,78 @@ async fn ensure_image_cached(url: &str) -> Result<()> {
         height,
     };
 
-    IMAGES_CACHE.insert(
-        url.to_string(),
-        CachedImage {
-            original,
-            blurred,
-            primary_colors,
-        },
-    );
+    IMAGES_CACHE.insert(url.to_string(), CachedImage { original, blurred });
+    Ok(())
+}
+
+/// Downloads and caches an image from the given URL.
+fn update_color_palettes() -> Result<()> {
+    let state = PLAYBACK_STATE.lock().clone();
+    for track in &state.queue {
+        if !TRACK_DATA_CACHE.contains_key(&track.id)
+            && let Some(image) = IMAGES_CACHE.get(&track.image.url)
+            && let Some(artist_image_ref) = ARTIST_IMAGES_CACHE.get(&track.artist_id)
+            && let Some(artist_image) = IMAGES_CACHE.get(&artist_image_ref.url)
+        {
+            // Merge the images side by side
+            let width = image.original.width;
+            let height = image.original.height;
+            let artist_new_width = (width as f32 * 0.25).round() as u32;
+            let mut new_img = RgbaImage::new(width + artist_new_width, height);
+            image::imageops::overlay(
+                &mut new_img,
+                &RgbaImage::from_raw(width, height, image.original.data.data().to_vec()).unwrap(),
+                0,
+                0,
+            );
+            let artist_img_resized = image::imageops::resize(
+                &image::RgbaImage::from_raw(
+                    artist_image.original.width,
+                    artist_image.original.height,
+                    artist_image.original.data.data().to_vec(),
+                )
+                .unwrap(),
+                artist_new_width,
+                height,
+                image::imageops::FilterType::Triangle,
+            );
+            image::imageops::overlay(&mut new_img, &artist_img_resized, i64::from(width), 0);
+
+            // Get palette
+            let palette: Palette<f64> = Palette::builder()
+                .algorithm(auto_palette::Algorithm::KMeans)
+                .filter(ChromaFilter::new(30))
+                .build(&auto_palette::ImageData::new(
+                    width + artist_new_width,
+                    height,
+                    &new_img.into_vec(),
+                )?)?;
+            let swatches = palette
+                .find_swatches_with_theme(NUM_SWATCHES, auto_palette::Theme::Colorful)
+                .or_else(|_| {
+                    palette.find_swatches_with_theme(NUM_SWATCHES, auto_palette::Theme::Light)
+                })
+                .or_else(|_| palette.find_swatches(NUM_SWATCHES))?;
+            let total_ratio_sum: f64 = swatches.iter().map(auto_palette::Swatch::ratio).sum();
+            let mut primary_colors = swatches
+                .iter()
+                .map(|s| {
+                    let rgb = s.color().to_rgb();
+                    [
+                        rgb.r,
+                        rgb.g,
+                        rgb.b,
+                        ((s.ratio() / total_ratio_sum) * 255.0).round() as u8,
+                    ]
+                })
+                .collect::<Vec<_>>();
+            primary_colors.sort_by(|a, b| b[3].cmp(&a[3]));
+
+            TRACK_DATA_CACHE.insert(track.id.clone(), TrackData { primary_colors });
+        }
+    }
+    drop(state);
+
     Ok(())
 }
 
