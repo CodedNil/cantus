@@ -1,18 +1,8 @@
 interaction:
 below the current tracks bar, have buttons to set star rating, add to specific pinned playlists
 click and drag to seek
-show previous song, click to go back to it
+stack previous songs so a bit of each is visible up to like 6 songs
 click current song to seek to that position in it
-
-
-colours:
-valence (0-1) - positivity - vibrancy boost to the colours, use lighter colour theme too
-tempo (50-200) - for animation speed
-acousticness (0-1)
-danceability (0-1)
-energy (0-1)
-instrumentalness (0-1)
-loudness (-60-0db)
 
 
 animations:
@@ -25,7 +15,7 @@ maybe make currently playing song have an animated glow outline, when the song i
 particles:
 pulse emission based on songs current analysis (loudness etc at that point)
 entry particles for songs on the right that are growing (very subtle in comparison)
-give the particles a random pick from the primary colours (exclude grayscale ones)
+particles colors more vivid
 
 
 shrink dependencies:
@@ -38,8 +28,21 @@ tidy CantusLayer, remove the unneeded variables, try to reduce how much of it is
 dirty the queue if its drastically changed
 darken the track to the left of the playback bar
 fix weird rendering of the track bar when its really narrow
+instead of recomputing ratios in the palette texture generation, and having for x in max strokes, just divide up the strokes by which colours need it
 
 
 misc:
-show the waveform of the song
 lyrics along the bottom
+
+
+
+todo when audio analysis is possible again:
+show the waveform of the song
+particles emit faster based on the tempo
+valence (0-1) - positivity - vibrancy boost to the colours, use lighter colour theme too
+tempo (50-200) - for animation speed
+acousticness (0-1)
+danceability (0-1)
+energy (0-1)
+instrumentalness (0-1)
+loudness (-60-0db)

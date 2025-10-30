@@ -38,9 +38,9 @@ const SPARK_VELOCITY_Y: Range<f32> = -70.0..-40.0;
 /// Lifetime range for individual particles, in seconds.
 const SPARK_LIFETIME: Range<f32> = 0.3..0.6;
 /// Rendered spark segment length range, in logical pixels.
-const SPARK_LENGTH_RANGE: Range<f64> = 4.0..10.0;
+const SPARK_LENGTH_RANGE: Range<f64> = 6.0..10.0;
 /// Rendered spark thickness range, in logical pixels.
-const SPARK_THICKNESS_RANGE: Range<f64> = 1.8..3.0;
+const SPARK_THICKNESS_RANGE: Range<f64> = 2.0..4.0;
 
 /// Build the scene for rendering.
 impl CantusLayer {
@@ -50,6 +50,9 @@ impl CantusLayer {
 
         // Get current playback state
         let playback_state = PLAYBACK_STATE.lock().clone();
+        if playback_state.queue.is_empty() {
+            return;
+        }
 
         // Ensure the background provider exists
         if !self.shader_backgrounds.contains_key(&id) {
@@ -126,6 +129,7 @@ impl CantusLayer {
 
         // Draw the particles
         self.render_playing_particles(
+            &playback_state.queue[playback_state.queue_index],
             -TIMELINE_START_MS * px_per_ms,
             total_height,
             playback_state.playing,
@@ -170,6 +174,14 @@ impl CantusLayer {
             return;
         };
 
+        let track_data_entry = TRACK_DATA_CACHE.get(&track.id);
+        let Some(palette_image) = track_data_entry
+            .as_ref()
+            .map(|data| data.palette_image.clone())
+        else {
+            return;
+        };
+
         // Make sure the background image shader is ready
         let surface = self.render_surface.as_ref().unwrap();
         let Some(background_image) = self.shader_backgrounds.get_mut(&id).unwrap().render(
@@ -178,7 +190,7 @@ impl CantusLayer {
             self.renderers.get_mut(&id).unwrap(),
             surface.config.width,
             surface.config.height,
-            &image,
+            &palette_image,
             self.time_origin.elapsed().as_secs_f32(),
             self.frame_index,
         ) else {
@@ -342,27 +354,26 @@ impl CantusLayer {
         // Release clipping mask
         self.scene.pop_layer();
 
-        // Temporary color render
-        if let Some(track_data) = TRACK_DATA_CACHE.get(&track.id) {
+        // --- Add a dark overlay for the dark_width ---
+        if dark_width > 0.0 {
             self.scene.fill(
                 Fill::NonZero,
-                Affine::translate((pos_x + width - height - 40.0, 0.0)),
-                Color::from_rgb8(100, 100, 100),
+                Affine::translate((pos_x, 0.0)),
+                Color::from_rgba8(0, 0, 0, 140),
                 None,
-                &Rect::new(0.0, 0.0, 40.0, height),
+                &RoundedRect::new(
+                    0.0,
+                    0.0,
+                    dark_width,
+                    height,
+                    RoundedRectRadii::new(
+                        left_rounding,
+                        right_rounding,
+                        right_rounding,
+                        left_rounding,
+                    ),
+                ),
             );
-            let mut drop = 0.0;
-            for [r, g, b, coverage] in &track_data.primary_colors {
-                let coverage = f64::from(*coverage) / 255.0;
-                self.scene.fill(
-                    Fill::NonZero,
-                    Affine::translate((pos_x + width - height - 20.0, drop)),
-                    Color::from_rgb8(*r, *g, *b),
-                    None,
-                    &Rect::new(0.0, 0.0, 20.0, height * coverage),
-                );
-                drop += height * coverage;
-            }
         }
     }
 
@@ -441,13 +452,31 @@ impl CantusLayer {
         }
     }
 
-    fn render_playing_particles(&mut self, x: f64, height: f64, is_playing: bool) {
+    fn render_playing_particles(&mut self, track: &Track, x: f64, height: f64, is_playing: bool) {
         let now = Instant::now();
         let dt = now.duration_since(self.last_particle_update).as_secs_f32();
         self.last_particle_update = now;
 
         let scale = self.scale_factor as f32;
         let height_f32 = height as f32;
+
+        // Get particle colors from the track palette
+        let lightness_boost = 50.0;
+        let primary_colors = match TRACK_DATA_CACHE.get(&track.id) {
+            Some(track_data) => track_data
+                .primary_colors
+                .clone()
+                .iter()
+                .map(|[r, g, b, _]| {
+                    [
+                        (lerp(0.3, f32::from(*r), 255.0) + lightness_boost).min(255.0) as u8,
+                        (lerp(0.3, f32::from(*g), 210.0) + lightness_boost).min(255.0) as u8,
+                        (lerp(0.3, f32::from(*b), 160.0) + lightness_boost).min(255.0) as u8,
+                    ]
+                })
+                .collect::<Vec<_>>(),
+            None => return,
+        };
 
         // Emit new particles while playing
         if is_playing {
@@ -474,6 +503,7 @@ impl CantusLayer {
                         alive: true,
                         position,
                         velocity,
+                        color: self.rng.random_range(0..primary_colors.len()),
                         life,
                     });
                 }
@@ -506,11 +536,13 @@ impl CantusLayer {
             &RoundedRect::new(0.0, 0.0, line_width, height, 100.0),
         );
 
+        // Render out the particles
         for particle in &self.now_playing_particles {
             let fade = (particle.life / 0.6).clamp(0.0, 1.0);
             let fade64 = f64::from(fade);
-            let length = Self::lerp_range(SPARK_LENGTH_RANGE, fade64) * self.scale_factor;
-            let thickness = Self::lerp_range(SPARK_THICKNESS_RANGE, fade64) * self.scale_factor;
+            let length = lerp_range(SPARK_LENGTH_RANGE, fade64) * self.scale_factor;
+            let thickness = lerp_range(SPARK_THICKNESS_RANGE, fade64) * self.scale_factor;
+            let rgb = primary_colors[particle.color];
             self.scene.fill(
                 Fill::NonZero,
                 Affine::translate((
@@ -519,9 +551,9 @@ impl CantusLayer {
                 )) * Affine::rotate(f64::from(particle.velocity[1].atan2(particle.velocity[0])))
                     * Affine::translate((-length * 0.5, 0.0)),
                 Color::from_rgba8(
-                    255,
-                    210,
-                    160,
+                    rgb[0],
+                    rgb[1],
+                    rgb[2],
                     (fade.powf(1.1) * 235.0).round().clamp(0.0, 255.0) as u8,
                 ),
                 None,
@@ -535,16 +567,20 @@ impl CantusLayer {
             );
         }
     }
+}
 
-    #[inline]
-    fn lerp_range(range: Range<f64>, t: f64) -> f64 {
-        range.start + (range.end - range.start) * t.clamp(0.0, 1.0)
-    }
+fn lerp_range(range: Range<f64>, t: f64) -> f64 {
+    range.start + (range.end - range.start) * t.clamp(0.0, 1.0)
+}
+
+fn lerp(t: f32, v0: f32, v1: f32) -> f32 {
+    (1.0 - t) * v0 + t * v1
 }
 
 pub struct NowPlayingParticle {
     alive: bool,
     position: [f32; 2],
     velocity: [f32; 2],
+    color: usize,
     life: f32,
 }

@@ -3,6 +3,7 @@ use auto_palette::Palette;
 use dashmap::DashMap;
 use image::{GenericImageView, RgbaImage};
 use parking_lot::Mutex;
+use rand::{Rng, SeedableRng, rngs::SmallRng};
 use reqwest::Client;
 use rspotify::{
     AuthCodeSpotify, Config, Credentials, OAuth,
@@ -12,8 +13,9 @@ use rspotify::{
 };
 use std::{
     cmp::Ordering,
-    collections::{HashMap, HashSet},
+    collections::{HashMap, HashSet, hash_map::DefaultHasher},
     convert::TryInto,
+    hash::{Hash, Hasher},
     sync::{
         Arc, LazyLock,
         atomic::{AtomicBool, Ordering as AtomicOrdering},
@@ -40,6 +42,15 @@ const NUM_SWATCHES: usize = 4;
 /// Maximum number of historical tracks to keep before trimming.
 const MAX_HISTORY: usize = 20;
 
+/// Dimensions of the generated palette-based textures.
+const PALETTE_IMAGE_HEIGHT: u32 = 40;
+const PALETTE_IMAGE_WIDTH: u32 = PALETTE_IMAGE_HEIGHT * 4;
+
+/// Number of refinement passes when synthesising the background texture.
+const PALETTE_PASS_COUNT: usize = 4;
+/// Maximum number of brush placements per pass.
+const PALETTE_STROKES_PER_PASS: usize = 20;
+
 /// MPRIS interface identifier used for playback control.
 const PLAYER_INTERFACE: InterfaceName<'static> =
     InterfaceName::from_static_str_unchecked("org.mpris.MediaPlayer2.Player");
@@ -56,6 +67,25 @@ pub static TRACK_DATA_CACHE: LazyLock<DashMap<TrackId<'static>, TrackData>> =
     LazyLock::new(DashMap::new);
 pub static ARTIST_DATA_CACHE: LazyLock<DashMap<ArtistId<'static>, ArtistData>> =
     LazyLock::new(DashMap::new);
+static BRUSHES: LazyLock<Vec<RgbaImage>> = LazyLock::new(|| {
+    vec![
+        image::load_from_memory(include_bytes!("../brushes/brush1.png"))
+            .unwrap()
+            .to_rgba8(),
+        image::load_from_memory(include_bytes!("../brushes/brush2.png"))
+            .unwrap()
+            .to_rgba8(),
+        image::load_from_memory(include_bytes!("../brushes/brush3.png"))
+            .unwrap()
+            .to_rgba8(),
+        image::load_from_memory(include_bytes!("../brushes/brush4.png"))
+            .unwrap()
+            .to_rgba8(),
+        image::load_from_memory(include_bytes!("../brushes/brush5.png"))
+            .unwrap()
+            .to_rgba8(),
+    ]
+});
 
 static HTTP_CLIENT: LazyLock<Client> = LazyLock::new(Client::new);
 static SPOTIFY_CLIENT: OnceCell<AuthCodeSpotify> = OnceCell::const_new();
@@ -128,6 +158,8 @@ pub struct Track {
 pub struct TrackData {
     /// Simplified color palette (RGBA, alpha = percentage 0-100).
     pub primary_colors: Vec<[u8; 4]>,
+    /// Generated texture derived from the palette for shader backgrounds.
+    pub palette_image: ImageData,
 }
 
 pub struct ArtistData {
@@ -539,8 +571,8 @@ fn update_color_palettes() -> Result<()> {
 
             // Get palette
             let palette: Palette<f64> = Palette::builder()
-                .algorithm(auto_palette::Algorithm::KMeans)
-                .filter(ChromaFilter::new(30))
+                .algorithm(auto_palette::Algorithm::SLIC)
+                .filter(ChromaFilter::new(20))
                 .build(&auto_palette::ImageData::new(
                     width + artist_new_width,
                     height,
@@ -565,7 +597,27 @@ fn update_color_palettes() -> Result<()> {
                 .collect::<Vec<_>>();
             primary_colors.sort_by(|a, b| b[3].cmp(&a[3]));
 
-            TRACK_DATA_CACHE.insert(track.id.clone(), TrackData { primary_colors });
+            let palette_seed = {
+                let mut hasher = DefaultHasher::new();
+                track.id.hash(&mut hasher);
+                hasher.finish()
+            };
+
+            let palette_image = ImageData {
+                data: Blob::from(generate_palette_image(&primary_colors, palette_seed)),
+                format: ImageFormat::Rgba8,
+                alpha_type: ImageAlphaType::Alpha,
+                width: PALETTE_IMAGE_WIDTH,
+                height: PALETTE_IMAGE_HEIGHT,
+            };
+
+            TRACK_DATA_CACHE.insert(
+                track.id.clone(),
+                TrackData {
+                    primary_colors,
+                    palette_image,
+                },
+            );
         }
     }
     drop(state);
@@ -631,4 +683,148 @@ impl auto_palette::Filter for ChromaFilter {
         let min = pixel[0].min(pixel[1]).min(pixel[2]);
         (max - min) > self.threshold
     }
+}
+
+fn generate_palette_image(colors: &[[u8; 4]], seed: u64) -> Vec<u8> {
+    let mut canvas = RgbaImage::from_pixel(
+        PALETTE_IMAGE_WIDTH,
+        PALETTE_IMAGE_HEIGHT,
+        image::Rgba([12, 14, 18, 255]),
+    );
+
+    if colors.is_empty() {
+        return canvas.into_raw();
+    }
+
+    let mut rng = SmallRng::seed_from_u64(seed);
+
+    let mut targets = colors
+        .iter()
+        .map(|c| f32::from(c[3]).max(1.0))
+        .collect::<Vec<_>>();
+    let total_target: f32 = targets.iter().copied().sum::<f32>().max(1.0);
+    for weight in &mut targets {
+        *weight /= total_target;
+    }
+
+    let base = colors[0];
+    for pixel in canvas.pixels_mut() {
+        pixel.0 = [base[0], base[1], base[2], 255];
+    }
+
+    // Fill with the first colour; refinement passes will rebalance ratios.
+    let total_pixels = (PALETTE_IMAGE_WIDTH * PALETTE_IMAGE_HEIGHT) as f32;
+    let tolerance = 0.005;
+
+    let compute_ratios = |image: &RgbaImage| {
+        let mut counts = vec![0u32; colors.len()];
+        for pixel in image.pixels() {
+            let mut best_index = 0usize;
+            let mut best_distance = f32::MAX;
+            for (index, color) in colors.iter().enumerate() {
+                let dr = f32::from(pixel[0]) - f32::from(color[0]);
+                let dg = f32::from(pixel[1]) - f32::from(color[1]);
+                let db = f32::from(pixel[2]) - f32::from(color[2]);
+                let distance = dr * dr + dg * dg + db * db;
+                if distance < best_distance {
+                    best_distance = distance;
+                    best_index = index;
+                }
+            }
+            counts[best_index] += 1;
+        }
+        counts
+            .into_iter()
+            .map(|count| count as f32 / total_pixels)
+            .collect::<Vec<_>>()
+    };
+
+    let mut coverage = compute_ratios(&canvas);
+
+    let mut strokes_total = 0usize;
+    for pass in 0..PALETTE_PASS_COUNT {
+        let pass_scale = 0.72_f32.powi(pass as i32);
+        let base_height = (PALETTE_IMAGE_HEIGHT as f32 * 1.2 * pass_scale).clamp(
+            PALETTE_IMAGE_HEIGHT as f32 * 0.18,
+            PALETTE_IMAGE_HEIGHT as f32 * 1.4,
+        );
+
+        let mut strokes_this_pass = 0usize;
+        let mut applied = false;
+        let total_pass_limit = PALETTE_PASS_COUNT * PALETTE_STROKES_PER_PASS;
+
+        for color_index in 0..colors.len() {
+            let mut diff = targets[color_index] - coverage[color_index];
+            while diff > tolerance
+                && strokes_this_pass < PALETTE_STROKES_PER_PASS
+                && strokes_total < total_pass_limit
+            {
+                let template = BRUSHES[rng.random_range(0..BRUSHES.len())].clone();
+                let size_variation = rng.random_range(0.75..1.2);
+                let brush_height = (base_height * size_variation)
+                    .round()
+                    .clamp(6.0, PALETTE_IMAGE_HEIGHT as f32)
+                    as u32;
+                let brush_width = {
+                    let aspect = template.width().max(1) as f32 / template.height().max(1) as f32;
+                    (brush_height as f32 * aspect)
+                        .round()
+                        .clamp(6.0, PALETTE_IMAGE_WIDTH as f32) as u32
+                };
+
+                let mut stamp =
+                    if template.width() == brush_width && template.height() == brush_height {
+                        template
+                    } else {
+                        image::imageops::resize(
+                            &template,
+                            brush_width.max(1),
+                            brush_height.max(1),
+                            image::imageops::FilterType::CatmullRom,
+                        )
+                    };
+
+                let color = colors[color_index];
+                for pixel in stamp.pixels_mut() {
+                    let alpha = pixel[3];
+                    if alpha == 0 {
+                        continue;
+                    }
+                    let faded_alpha = ((f32::from(alpha) * rng.random_range(0.55..0.9))
+                        .round()
+                        .clamp(1.0, 255.0)) as u8;
+                    pixel[0] = color[0];
+                    pixel[1] = color[1];
+                    pixel[2] = color[2];
+                    pixel[3] = faded_alpha;
+                }
+
+                let offset_x = i64::from(rng.random_range(0..=PALETTE_IMAGE_WIDTH))
+                    - i64::from(brush_width / 2);
+                let offset_y = i64::from(rng.random_range(0..=PALETTE_IMAGE_HEIGHT))
+                    - i64::from(brush_height / 2);
+
+                image::imageops::overlay(&mut canvas, &stamp, offset_x, offset_y);
+
+                coverage = compute_ratios(&canvas);
+                diff = targets[color_index] - coverage[color_index];
+                strokes_this_pass += 1;
+                strokes_total += 1;
+                applied = true;
+
+                if strokes_this_pass >= PALETTE_STROKES_PER_PASS
+                    || strokes_total >= total_pass_limit
+                {
+                    break;
+                }
+            }
+        }
+
+        if !applied {
+            break;
+        }
+    }
+
+    // Blur the image
+    image::imageops::blur(&canvas, 6.0).into_raw()
 }
