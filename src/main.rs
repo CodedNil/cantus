@@ -5,6 +5,7 @@ use rand::{SeedableRng, rngs::SmallRng};
 use raw_window_handle::{
     RawDisplayHandle, RawWindowHandle, WaylandDisplayHandle, WaylandWindowHandle,
 };
+use rspotify::model::TrackId;
 use std::{
     collections::HashMap,
     env,
@@ -215,7 +216,7 @@ struct CantusLayer {
     // --- Interaction ---
     pointer_position: (f64, f64),
     last_hitbox_update: Instant,
-    track_hitboxes: HashMap<String, Rect>,
+    track_hitboxes: HashMap<TrackId<'static>, Rect>,
 
     // --- Animation ---
     track_start_ms: f64,
@@ -409,7 +410,7 @@ impl CantusLayer {
             if x >= rect.x0 && x <= rect.x1 && y >= rect.y0 && y <= rect.y1 {
                 let id = id.clone();
                 tokio::spawn(async move {
-                    spotify::skip_to_track(&id).await;
+                    spotify::skip_to_track(id).await;
                 });
                 return true;
             }

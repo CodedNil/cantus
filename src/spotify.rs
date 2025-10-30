@@ -1,12 +1,12 @@
 use anyhow::Result;
 use auto_palette::Palette;
 use dashmap::DashMap;
-use image::{GenericImageView, RgbaImage, imageops};
+use image::{GenericImageView, RgbaImage};
 use parking_lot::Mutex;
 use reqwest::Client;
 use rspotify::{
     AuthCodeSpotify, Config, Credentials, OAuth,
-    model::{AdditionalType, ArtistId, Context, FullTrack, Id, PlayableItem},
+    model::{AdditionalType, ArtistId, Context, FullTrack, PlayableItem, TrackId},
     prelude::{BaseClient, OAuthClient},
     scopes,
 };
@@ -34,8 +34,6 @@ use zbus::{
     zvariant::OwnedValue,
 };
 
-/// Blur sigma applied to album artwork when generating the shader background.
-const BACKGROUND_BLUR_SIGMA: f32 = 0.1;
 /// Number of swatches to use in colour palette generation.
 const NUM_SWATCHES: usize = 4;
 
@@ -53,9 +51,12 @@ const MPRIS_OBJECT_PATH: &str = "/org/mpris/MediaPlayer2";
 
 pub static PLAYBACK_STATE: LazyLock<Arc<Mutex<PlaybackState>>> =
     LazyLock::new(|| Arc::new(Mutex::new(PlaybackState::default())));
-pub static IMAGES_CACHE: LazyLock<DashMap<String, CachedImage>> = LazyLock::new(DashMap::new);
-pub static ARTIST_IMAGES_CACHE: LazyLock<DashMap<String, Image>> = LazyLock::new(DashMap::new);
-pub static TRACK_DATA_CACHE: LazyLock<DashMap<String, TrackData>> = LazyLock::new(DashMap::new);
+pub static IMAGES_CACHE: LazyLock<DashMap<String, ImageData>> = LazyLock::new(DashMap::new);
+pub static TRACK_DATA_CACHE: LazyLock<DashMap<TrackId<'static>, TrackData>> =
+    LazyLock::new(DashMap::new);
+pub static ARTIST_DATA_CACHE: LazyLock<DashMap<ArtistId<'static>, ArtistData>> =
+    LazyLock::new(DashMap::new);
+
 static HTTP_CLIENT: LazyLock<Client> = LazyLock::new(Client::new);
 static SPOTIFY_CLIENT: OnceCell<AuthCodeSpotify> = OnceCell::const_new();
 static SPOTIFY_INTERACTION_ACTIVE: AtomicBool = AtomicBool::new(false);
@@ -111,11 +112,11 @@ impl Default for PlaybackState {
     }
 }
 
-#[derive(Debug, Default, Clone)]
+#[derive(Debug, Clone)]
 pub struct Track {
-    pub id: String,
+    pub id: TrackId<'static>,
     pub title: String,
-    pub artist_id: String,
+    pub artist_id: ArtistId<'static>,
     pub artist_name: String,
     pub album_name: String,
     pub image: Image,
@@ -123,23 +124,24 @@ pub struct Track {
     pub milliseconds: u32,
 }
 
-#[derive(Debug, Default, Clone)]
+#[derive(Debug, Clone)]
 pub struct TrackData {
     /// Simplified color palette (RGBA, alpha = percentage 0-100).
     pub primary_colors: Vec<[u8; 4]>,
 }
 
-#[derive(Debug, Default, Clone)]
+pub struct ArtistData {
+    pub name: String,
+    pub genres: Vec<String>,
+    pub popularity: u8,
+    pub image: Image,
+}
+
+#[derive(Debug, Clone)]
 pub struct Image {
     pub url: String,
     pub width: u16,
     pub height: u16,
-}
-
-#[derive(Clone)]
-pub struct CachedImage {
-    pub original: ImageData,
-    pub blurred: ImageData,
 }
 
 impl Track {
@@ -164,9 +166,9 @@ impl Track {
         };
         let artist = artists.first().unwrap();
         Self {
-            id: id.unwrap().id().to_string(),
+            id: id.unwrap(),
             title: name,
-            artist_id: artist.id.clone().unwrap().id().to_string(),
+            artist_id: artist.id.clone().unwrap(),
             artist_name: artist.name.clone(),
             album_name: album.name,
             image,
@@ -379,7 +381,7 @@ async fn update_state_from_spotify(used_mpris_progress: bool) {
     let missing_artists = new_queue
         .iter()
         .filter_map(|track| {
-            if ARTIST_IMAGES_CACHE.contains_key(&track.artist_id) {
+            if ARTIST_DATA_CACHE.contains_key(&track.artist_id) {
                 None
             } else {
                 Some(track.artist_id.clone())
@@ -389,14 +391,7 @@ async fn update_state_from_spotify(used_mpris_progress: bool) {
     if !missing_urls.is_empty() || !missing_artists.is_empty() {
         tokio::spawn(async move {
             // Grab artists in one go from spotify
-            let Ok(artists) = spotify_client
-                .artists(
-                    missing_artists
-                        .iter()
-                        .map(|id| ArtistId::from_id(id).unwrap()),
-                )
-                .await
-            else {
+            let Ok(artists) = spotify_client.artists(missing_artists).await else {
                 return;
             };
 
@@ -417,12 +412,17 @@ async fn update_state_from_spotify(used_mpris_progress: bool) {
                     .into_iter()
                     .min_by_key(|img| img.width.unwrap())
                     .unwrap();
-                ARTIST_IMAGES_CACHE.insert(
-                    artist.id.id().to_string(),
-                    Image {
-                        url: artist_image.url.clone(),
-                        width: artist_image.width.unwrap() as u16,
-                        height: artist_image.height.unwrap() as u16,
+                ARTIST_DATA_CACHE.insert(
+                    artist.id,
+                    ArtistData {
+                        name: artist.name.clone(),
+                        genres: artist.genres.clone(),
+                        popularity: artist.popularity as u8,
+                        image: Image {
+                            url: artist_image.url.clone(),
+                            width: artist_image.width.unwrap() as u16,
+                            height: artist_image.height.unwrap() as u16,
+                        },
                     },
                 );
                 set.spawn(async move {
@@ -491,24 +491,16 @@ async fn ensure_image_cached(url: &str) -> Result<()> {
     let dynamic_image = image::load_from_memory(&response.bytes().await?)?;
     let (width, height) = dynamic_image.dimensions();
     let rgba = dynamic_image.to_rgba8();
-    let blurred_rgba = imageops::blur(&rgba, BACKGROUND_BLUR_SIGMA * width as f32);
-
-    let original = ImageData {
-        data: Blob::from(rgba.into_raw()),
-        format: ImageFormat::Rgba8,
-        alpha_type: ImageAlphaType::Alpha,
-        width,
-        height,
-    };
-    let blurred = ImageData {
-        data: Blob::from(blurred_rgba.into_raw()),
-        format: ImageFormat::Rgba8,
-        alpha_type: ImageAlphaType::Alpha,
-        width,
-        height,
-    };
-
-    IMAGES_CACHE.insert(url.to_string(), CachedImage { original, blurred });
+    IMAGES_CACHE.insert(
+        url.to_string(),
+        ImageData {
+            data: Blob::from(rgba.into_raw()),
+            format: ImageFormat::Rgba8,
+            alpha_type: ImageAlphaType::Alpha,
+            width,
+            height,
+        },
+    );
     Ok(())
 }
 
@@ -518,25 +510,25 @@ fn update_color_palettes() -> Result<()> {
     for track in &state.queue {
         if !TRACK_DATA_CACHE.contains_key(&track.id)
             && let Some(image) = IMAGES_CACHE.get(&track.image.url)
-            && let Some(artist_image_ref) = ARTIST_IMAGES_CACHE.get(&track.artist_id)
-            && let Some(artist_image) = IMAGES_CACHE.get(&artist_image_ref.url)
+            && let Some(artist_image_ref) = ARTIST_DATA_CACHE.get(&track.artist_id)
+            && let Some(artist_image) = IMAGES_CACHE.get(&artist_image_ref.image.url)
         {
             // Merge the images side by side
-            let width = image.original.width;
-            let height = image.original.height;
+            let width = image.width;
+            let height = image.height;
             let artist_new_width = (width as f32 * 0.25).round() as u32;
             let mut new_img = RgbaImage::new(width + artist_new_width, height);
             image::imageops::overlay(
                 &mut new_img,
-                &RgbaImage::from_raw(width, height, image.original.data.data().to_vec()).unwrap(),
+                &RgbaImage::from_raw(width, height, image.data.data().to_vec()).unwrap(),
                 0,
                 0,
             );
             let artist_img_resized = image::imageops::resize(
                 &image::RgbaImage::from_raw(
-                    artist_image.original.width,
-                    artist_image.original.height,
-                    artist_image.original.data.data().to_vec(),
+                    artist_image.width,
+                    artist_image.height,
+                    artist_image.data.data().to_vec(),
                 )
                 .unwrap(),
                 artist_new_width,
@@ -582,7 +574,7 @@ fn update_color_palettes() -> Result<()> {
 }
 
 /// Skip to the specified track in the queue.
-pub async fn skip_to_track(track_id: &str) {
+pub async fn skip_to_track(track_id: TrackId<'static>) {
     let Some(_interaction_guard) = SpotifyInteractionGuard::try_acquire() else {
         warn!("Spotify interaction already in progress; skip_to_track returning early");
         return;

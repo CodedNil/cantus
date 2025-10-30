@@ -178,7 +178,7 @@ impl CantusLayer {
             self.renderers.get_mut(&id).unwrap(),
             surface.config.width,
             surface.config.height,
-            &image.blurred,
+            &image,
             self.time_origin.elapsed().as_secs_f32(),
             self.frame_index,
         ) else {
@@ -208,7 +208,7 @@ impl CantusLayer {
         self.scene.pop_layer();
 
         // --- ALBUM ART SQUARE ---
-        let image_height = f64::from(image.original.height);
+        let image_height = f64::from(image.height);
         let transform = Affine::translate((pos_x + width - height, 0.0));
         self.scene.push_clip_layer(
             transform,
@@ -223,7 +223,7 @@ impl CantusLayer {
         self.scene.fill(
             Fill::NonZero,
             transform * Affine::scale(height / image_height),
-            &ImageBrush::new(image.original.clone()),
+            &ImageBrush::new(image.clone()),
             None,
             &Rect::new(0.0, 0.0, image_height, image_height),
         );

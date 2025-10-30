@@ -6,11 +6,13 @@ click current song to seek to that position in it
 
 
 colours:
-get primary colours per song image, give the text complementary colour
-pull artist image to use in addition to the albums (maybe half and half?), will fix grayscale albums
-grab the acousticness, danceability, energy etc and factor that into the animation/colours?
-
-songs to test: Everytime Britney (Should be blue and gold)
+valence (0-1) - positivity - vibrancy boost to the colours, use lighter colour theme too
+tempo (50-200) - for animation speed
+acousticness (0-1)
+danceability (0-1)
+energy (0-1)
+instrumentalness (0-1)
+loudness (-60-0db)
 
 
 animations:
