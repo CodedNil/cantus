@@ -44,7 +44,7 @@ const SPARK_THICKNESS_RANGE: Range<f64> = 2.0..4.0;
 
 /// Build the scene for rendering.
 impl CantusLayer {
-    pub fn create_scene(&mut self, device_id: usize, surface_size: (u32, u32)) {
+    pub fn create_scene(&mut self, device_id: usize) {
         let total_width = (PANEL_WIDTH * self.scale_factor).ceil();
         let total_height = (PANEL_HEIGHT_BASE * self.scale_factor).ceil();
 
@@ -114,15 +114,15 @@ impl CantusLayer {
             };
 
             // Draw the track, trimming to the visible window if it spills off either side.
+            let uncropped_width = (track_end_ms - track_start_ms) * px_per_ms;
             self.draw_track(
                 device_id,
-                surface_size,
                 track,
                 index == current_index,
                 pos_x,
                 width,
                 dark_width,
-                (track_end_ms - track_start_ms) * px_per_ms,
+                uncropped_width,
                 total_height,
                 (track_start_ms / 1000.0).abs(),
                 start_trimmed,
@@ -153,7 +153,6 @@ impl CantusLayer {
     fn draw_track(
         &mut self,
         device_id: usize,
-        surface_size: (u32, u32),
         track: &Track,
         is_current: bool,
         pos_x: f64,
@@ -182,6 +181,8 @@ impl CantusLayer {
         let rounding = ROUNDING_RADIUS * self.scale_factor;
         let left_rounding = rounding * if start_trimmed { 1.0 } else { 0.3 };
         let right_rounding = rounding * if end_trimmed { 1.0 } else { 0.3 };
+        let radii =
+            RoundedRectRadii::new(left_rounding, right_rounding, right_rounding, left_rounding);
 
         let Some(image) = IMAGES_CACHE.get(&track.image.url) else {
             return;
@@ -192,11 +193,7 @@ impl CantusLayer {
         };
         let palette_image = track_data.palette_image.clone();
 
-        let Some(background_image) =
-            self.render_background(device_id, surface_size, &track.image.url, &palette_image)
-        else {
-            return;
-        };
+        let background_image = self.render_background(device_id, &track.image.url, &palette_image);
 
         // --- BACKGROUND ---
         self.scene.push_clip_layer(
@@ -206,17 +203,18 @@ impl CantusLayer {
                 0.0,
                 width - height * 0.5, // Don't need to render all the way to the edge since the album art
                 height,
-                RoundedRectRadii::new(left_rounding, right_rounding, right_rounding, left_rounding),
+                radii,
             ),
         );
+        let image_width = f64::from(background_image.width);
         let image_height = f64::from(background_image.height);
         self.scene.fill(
             Fill::NonZero,
-            Affine::translate((pos_x, image_height * -0.5))
-                * Affine::scale(uncropped_width / image_height),
+            Affine::translate((pos_x, 0.0))
+                * Affine::scale((uncropped_width - height * 0.5) / image_width),
             &ImageBrush::new(background_image),
             None,
-            &Rect::new(0.0, 0.0, image_height, image_height),
+            &Rect::new(0.0, 0.0, image_width, image_height),
         );
         self.scene.pop_layer();
 
@@ -357,47 +355,37 @@ impl CantusLayer {
 
         // --- Add a dark overlay for the dark_width ---
         if dark_width > 0.0 {
+            self.scene.push_clip_layer(
+                Affine::translate((pos_x, 0.0)),
+                &RoundedRect::new(0.0, 0.0, width, height, radii),
+            );
             self.scene.fill(
                 Fill::NonZero,
                 Affine::translate((pos_x, 0.0)),
                 Color::from_rgba8(0, 0, 0, 140),
                 None,
-                &RoundedRect::new(
-                    0.0,
-                    0.0,
-                    dark_width,
-                    height,
-                    RoundedRectRadii::new(
-                        left_rounding,
-                        right_rounding,
-                        right_rounding,
-                        left_rounding,
-                    ),
-                ),
+                &Rect::new(0.0, 0.0, dark_width, height),
             );
+            self.scene.pop_layer();
         }
     }
 
     fn render_background(
         &mut self,
         device_id: usize,
-        surface_size: (u32, u32),
         key: &str,
         palette_image: &ImageData,
-    ) -> Option<ImageData> {
-        let (surface_width, surface_height) = surface_size;
+    ) -> ImageData {
         let device_handle = &self.render_context.devices[device_id];
         let shader = self
             .shader_backgrounds
             .entry(device_id)
             .or_insert_with(|| WarpBackground::new(&device_handle.device));
-        let renderer = self.renderers.get_mut(&device_id)?;
+        let renderer = self.renderers.get_mut(&device_id).unwrap();
         shader.render(
             key,
             device_handle,
             renderer,
-            surface_width,
-            surface_height,
             palette_image,
             self.time_origin.elapsed().as_secs_f32(),
             self.frame_index,

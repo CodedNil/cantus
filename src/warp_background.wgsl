@@ -1,5 +1,5 @@
 const WARP_STRENGTH: f32 = 2.0;
-const SWIRL_STRENGTH: f32 = 0.8;
+const SWIRL_STRENGTH: f32 = 0.3;
 const WARP_TIME_SCALE: f32 = 0.8;
 const EDGE_BLEND_POWER: f32 = 1.35;
 const VIBRANCY_BOOST: f32 = 0.35;

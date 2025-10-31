@@ -28,7 +28,6 @@ struct BackgroundSlot {
     texture_size: (u32, u32),
     bind_group: BindGroup,
     output_view: TextureView,
-    output_size: (u32, u32),
     output_image: ImageData,
     last_frame: u64,
 }
@@ -147,21 +146,13 @@ impl WarpBackground {
         key: &str,
         device_handle: &DeviceHandle,
         renderer: &mut Renderer,
-        width: u32,
-        height: u32,
         image: &ImageData,
         elapsed_seconds: f32,
         frame_index: u64,
-    ) -> Option<ImageData> {
-        if width == 0 || height == 0 || image.width == 0 || image.height == 0 {
-            return None;
-        }
-
+    ) -> ImageData {
         let device = &device_handle.device;
         let queue = &device_handle.queue;
         let image_size = (image.width, image.height);
-        let output_size = (width, height);
-
         let slot = self.slots.entry(key.to_owned()).or_insert_with(|| {
             BackgroundSlot::new(
                 device,
@@ -169,13 +160,11 @@ impl WarpBackground {
                 &self.bind_group_layout,
                 &self.sampler,
                 &self.uniform_buffer,
-                width,
-                height,
                 image,
             )
         });
 
-        let needs_resize = slot.texture_size != image_size || slot.output_size != output_size;
+        let needs_resize = slot.texture_size != image_size;
         if needs_resize {
             renderer.unregister_texture(slot.output_image.clone());
             *slot = BackgroundSlot::new(
@@ -184,8 +173,6 @@ impl WarpBackground {
                 &self.bind_group_layout,
                 &self.sampler,
                 &self.uniform_buffer,
-                width,
-                height,
                 image,
             );
         }
@@ -238,7 +225,7 @@ impl WarpBackground {
         }
 
         queue.submit(Some(encoder.finish()));
-        Some(slot.output_image.clone())
+        slot.output_image.clone()
     }
 
     pub fn purge_stale(&mut self, renderer: &mut Renderer, frame_index: u64) {
@@ -260,8 +247,6 @@ impl BackgroundSlot {
         bind_group_layout: &BindGroupLayout,
         sampler: &Sampler,
         uniform_buffer: &wgpu::Buffer,
-        width: u32,
-        height: u32,
         image: &ImageData,
     ) -> Self {
         let texture = device.create_texture(&TextureDescriptor {
@@ -301,8 +286,8 @@ impl BackgroundSlot {
         let output_texture = device.create_texture(&TextureDescriptor {
             label: Some("cantus_warp_output_texture"),
             size: Extent3d {
-                width,
-                height,
+                width: image.width,
+                height: image.height,
                 depth_or_array_layers: 1,
             },
             mip_level_count: 1,
@@ -322,7 +307,6 @@ impl BackgroundSlot {
             bind_group,
             texture_size: (image.width, image.height),
             output_view,
-            output_size: (width, height),
             output_image,
             last_frame: 0,
         }

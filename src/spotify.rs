@@ -1,3 +1,4 @@
+use crate::PANEL_HEIGHT_BASE;
 use anyhow::Result;
 use auto_palette::Palette;
 use dashmap::DashMap;
@@ -43,11 +44,11 @@ const NUM_SWATCHES: usize = 4;
 const MAX_HISTORY: usize = 20;
 
 /// Dimensions of the generated palette-based textures.
-const PALETTE_IMAGE_HEIGHT: u32 = 40;
+const PALETTE_IMAGE_HEIGHT: u32 = PANEL_HEIGHT_BASE as u32;
 const PALETTE_IMAGE_WIDTH: u32 = PALETTE_IMAGE_HEIGHT * 4;
 
 /// Number of refinement passes when synthesising the background texture.
-const PALETTE_PASS_COUNT: usize = 4;
+const PALETTE_PASS_COUNT: usize = 10;
 /// Maximum number of brush placements per pass.
 const PALETTE_STROKES_PER_PASS: usize = 20;
 
@@ -67,23 +68,20 @@ pub static TRACK_DATA_CACHE: LazyLock<DashMap<TrackId<'static>, TrackData>> =
     LazyLock::new(DashMap::new);
 pub static ARTIST_DATA_CACHE: LazyLock<DashMap<ArtistId<'static>, ArtistData>> =
     LazyLock::new(DashMap::new);
-static BRUSHES: LazyLock<Vec<RgbaImage>> = LazyLock::new(|| {
-    vec![
-        image::load_from_memory(include_bytes!("../brushes/brush1.png"))
-            .unwrap()
-            .to_rgba8(),
-        image::load_from_memory(include_bytes!("../brushes/brush2.png"))
-            .unwrap()
-            .to_rgba8(),
-        image::load_from_memory(include_bytes!("../brushes/brush3.png"))
-            .unwrap()
-            .to_rgba8(),
-        image::load_from_memory(include_bytes!("../brushes/brush4.png"))
-            .unwrap()
-            .to_rgba8(),
-        image::load_from_memory(include_bytes!("../brushes/brush5.png"))
-            .unwrap()
-            .to_rgba8(),
+static BRUSHES: LazyLock<[RgbaImage; 5]> = LazyLock::new(|| {
+    let bytes = (
+        include_bytes!("../brushes/brush1.png"),
+        include_bytes!("../brushes/brush2.png"),
+        include_bytes!("../brushes/brush3.png"),
+        include_bytes!("../brushes/brush4.png"),
+        include_bytes!("../brushes/brush5.png"),
+    );
+    [
+        image::load_from_memory(bytes.0).unwrap().to_rgba8(),
+        image::load_from_memory(bytes.1).unwrap().to_rgba8(),
+        image::load_from_memory(bytes.2).unwrap().to_rgba8(),
+        image::load_from_memory(bytes.3).unwrap().to_rgba8(),
+        image::load_from_memory(bytes.4).unwrap().to_rgba8(),
     ]
 });
 
@@ -586,8 +584,11 @@ fn update_color_palettes() -> Result<()> {
                 .map(|s| {
                     let rgb = s.color().to_rgb();
                     // Sometimes ratios can be tiny like 0.05%, this brings them a little closer to even
-                    let lerped_ratio =
-                        ((s.ratio() / total_ratio_sum) + (1.0 / swatches.len() as f64)) * 0.5;
+                    let lerped_ratio = lerp(
+                        0.5,
+                        (s.ratio() / total_ratio_sum) as f32,
+                        1.0 / swatches.len() as f32,
+                    );
                     [rgb.r, rgb.g, rgb.b, (lerped_ratio * 255.0).round() as u8]
                 })
                 .collect::<Vec<_>>();
@@ -710,7 +711,6 @@ fn generate_palette_image(colors: &[[u8; 4]], seed: u64) -> Vec<u8> {
 
     // Fill with the first colour; refinement passes will rebalance ratios.
     let total_pixels = (PALETTE_IMAGE_WIDTH * PALETTE_IMAGE_HEIGHT) as f32;
-    let tolerance = 0.005;
 
     let compute_ratios = |image: &RgbaImage| {
         let mut counts = vec![0u32; colors.len()];
@@ -735,92 +735,94 @@ fn generate_palette_image(colors: &[[u8; 4]], seed: u64) -> Vec<u8> {
             .collect::<Vec<_>>()
     };
 
-    let mut coverage = compute_ratios(&canvas);
-
-    let mut strokes_total = 0usize;
     for pass in 0..PALETTE_PASS_COUNT {
-        let pass_scale = 0.72_f32.powi(pass as i32);
-        let base_height = (PALETTE_IMAGE_HEIGHT as f32 * 1.2 * pass_scale).clamp(
-            PALETTE_IMAGE_HEIGHT as f32 * 0.18,
-            PALETTE_IMAGE_HEIGHT as f32 * 1.4,
+        let base_height = lerp(
+            pass as f32 / PALETTE_PASS_COUNT as f32,
+            PALETTE_IMAGE_HEIGHT as f32 * 0.7,
+            PALETTE_IMAGE_HEIGHT as f32 * 0.3,
         );
 
-        let mut strokes_this_pass = 0usize;
-        let mut applied = false;
-        let total_pass_limit = PALETTE_PASS_COUNT * PALETTE_STROKES_PER_PASS;
-
-        for color_index in 0..colors.len() {
-            let mut diff = targets[color_index] - coverage[color_index];
-            while diff > tolerance
-                && strokes_this_pass < PALETTE_STROKES_PER_PASS
-                && strokes_total < total_pass_limit
-            {
-                let template = BRUSHES[rng.random_range(0..BRUSHES.len())].clone();
-                let size_variation = rng.random_range(0.75..1.2);
-                let brush_height = (base_height * size_variation)
-                    .round()
-                    .clamp(6.0, PALETTE_IMAGE_HEIGHT as f32)
-                    as u32;
-                let brush_width = {
-                    let aspect = template.width().max(1) as f32 / template.height().max(1) as f32;
-                    (brush_height as f32 * aspect)
-                        .round()
-                        .clamp(6.0, PALETTE_IMAGE_WIDTH as f32) as u32
-                };
-
-                let mut stamp =
-                    if template.width() == brush_width && template.height() == brush_height {
-                        template
-                    } else {
-                        image::imageops::resize(
-                            &template,
-                            brush_width.max(1),
-                            brush_height.max(1),
-                            image::imageops::FilterType::CatmullRom,
-                        )
-                    };
-
-                let color = colors[color_index];
-                for pixel in stamp.pixels_mut() {
-                    let alpha = pixel[3];
-                    if alpha == 0 {
-                        continue;
-                    }
-                    let faded_alpha = ((f32::from(alpha) * rng.random_range(0.55..0.9))
-                        .round()
-                        .clamp(1.0, 255.0)) as u8;
-                    pixel[0] = color[0];
-                    pixel[1] = color[1];
-                    pixel[2] = color[2];
-                    pixel[3] = faded_alpha;
+        // Get how far we are off in total
+        let coverage = compute_ratios(&canvas);
+        let total_coverage_diff = coverage
+            .iter()
+            .zip(targets.iter())
+            .map(|(&c, &t)| (c - t).abs())
+            .sum::<f32>()
+            .abs();
+        // Divvy out a portion of the PALETTE_STROKES_PER_PASS per color
+        let mut per_color_strokes: Vec<u8> = coverage
+            .iter()
+            .zip(targets.iter())
+            .map(|(&c, &t)| {
+                if total_coverage_diff == 0.0 {
+                    // Handle division by zero case (e.g., if we are perfectly covered)
+                    0
+                } else {
+                    // Calculate proportional strokes and use floor to ensure we don't exceed the pass limit
+                    (((c - t).abs() / total_coverage_diff) * PALETTE_STROKES_PER_PASS as f32)
+                        .floor() as u8
                 }
+            })
+            .collect();
 
-                let offset_x = i64::from(rng.random_range(0..=PALETTE_IMAGE_WIDTH))
-                    - i64::from(brush_width / 2);
-                let offset_y = i64::from(rng.random_range(0..=PALETTE_IMAGE_HEIGHT))
-                    - i64::from(brush_height / 2);
-
-                image::imageops::overlay(&mut canvas, &stamp, offset_x, offset_y);
-
-                coverage = compute_ratios(&canvas);
-                diff = targets[color_index] - coverage[color_index];
-                strokes_this_pass += 1;
-                strokes_total += 1;
-                applied = true;
-
-                if strokes_this_pass >= PALETTE_STROKES_PER_PASS
-                    || strokes_total >= total_pass_limit
-                {
-                    break;
-                }
+        for _ in 0..PALETTE_STROKES_PER_PASS {
+            // Collect all indices of colors that still need strokes (c > 0)
+            let available_indices: Vec<usize> = per_color_strokes
+                .iter()
+                .enumerate()
+                .filter_map(|(i, &c)| (c > 0).then_some(i))
+                .collect();
+            if available_indices.is_empty() {
+                break;
             }
-        }
 
-        if !applied {
-            break;
+            // Randomly select an index from the available candidates
+            let index_to_pick = rng.random_range(0..available_indices.len());
+            let color_index = available_indices[index_to_pick];
+            per_color_strokes[color_index] -= 1;
+            let color = colors[color_index];
+
+            // Pick a random brush
+            let template = BRUSHES[rng.random_range(0..BRUSHES.len())].clone();
+            let brush_size = (base_height * rng.random_range(0.75..1.2))
+                .round()
+                .clamp(6.0, PALETTE_IMAGE_HEIGHT as f32) as u32;
+
+            let mut stamp = image::imageops::resize(
+                &template,
+                brush_size,
+                brush_size,
+                image::imageops::FilterType::Triangle,
+            );
+
+            for pixel in stamp.pixels_mut() {
+                let alpha = pixel[3];
+                if alpha == 0 {
+                    continue;
+                }
+                let faded_alpha = ((f32::from(alpha) * rng.random_range(0.55..0.9))
+                    .round()
+                    .clamp(1.0, 255.0)) as u8;
+                pixel[0] = color[0];
+                pixel[1] = color[1];
+                pixel[2] = color[2];
+                pixel[3] = faded_alpha;
+            }
+
+            let offset_x =
+                i64::from(rng.random_range(0..=PALETTE_IMAGE_WIDTH)) - i64::from(brush_size / 2);
+            let offset_y =
+                i64::from(rng.random_range(0..=PALETTE_IMAGE_HEIGHT)) - i64::from(brush_size / 2);
+
+            image::imageops::overlay(&mut canvas, &stamp, offset_x, offset_y);
         }
     }
 
     // Blur the image
-    image::imageops::blur(&canvas, 6.0).into_raw()
+    image::imageops::blur(&canvas, 10.0).into_raw()
+}
+
+fn lerp(t: f32, v0: f32, v1: f32) -> f32 {
+    (1.0 - t) * v0 + t * v1
 }

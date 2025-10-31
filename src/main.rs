@@ -455,10 +455,7 @@ impl CantusLayer {
         }
 
         self.scene.reset();
-        self.create_scene(
-            dev_id,
-            (render_surface.config.width, render_surface.config.height),
-        );
+        self.create_scene(dev_id);
         self.update_input_region(qhandle);
 
         let renderer = self
