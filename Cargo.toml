@@ -46,6 +46,13 @@ cast-precision-loss = "allow"
 cast-sign-loss = "allow"
 suboptimal_flops = "allow"
 
+separated_literal_suffix = "warn"
+wildcard_enum_match_arm = "warn"
+renamed_function_params = "warn"
+str_to_string = "warn"
+if_then_some_else_none = "warn"
+redundant-type-annotations = "warn"
+
 [profile.release]
 opt-level = 3
 lto = true

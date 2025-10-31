@@ -95,7 +95,7 @@ struct SpotifyInteractionGuard;
 
 impl SpotifyInteractionGuard {
     fn try_acquire() -> Option<Self> {
-        if SPOTIFY_INTERACTION_ACTIVE
+        SPOTIFY_INTERACTION_ACTIVE
             .compare_exchange(
                 false,
                 true,
@@ -103,11 +103,7 @@ impl SpotifyInteractionGuard {
                 AtomicOrdering::Relaxed,
             )
             .is_ok()
-        {
-            Some(Self)
-        } else {
-            None
-        }
+            .then(|| Self)
     }
 }
 
@@ -400,7 +396,7 @@ async fn update_state_from_spotify(used_mpris_progress: bool) {
     let new_queue: Vec<Track> = std::iter::once(current_track.clone())
         .chain(queue.queue.into_iter().filter_map(|item| match item {
             PlayableItem::Track(track) => Some(Track::from_rspotify(track)),
-            _ => None,
+            PlayableItem::Episode(_) | PlayableItem::Unknown(_) => None,
         }))
         .collect();
 
@@ -481,7 +477,7 @@ async fn update_state_from_spotify(used_mpris_progress: bool) {
             && let Some(new_index) = state
                 .queue
                 .iter()
-                .position(|t| t.title == current_track.title)
+                .position(|track| track.title == current_track.title)
         {
             // Delete everything past the new_index, and append the new tracks at the end
             state.queue_index = new_index;
@@ -524,7 +520,7 @@ async fn ensure_image_cached(url: &str) -> Result<()> {
     let (width, height) = dynamic_image.dimensions();
     let rgba = dynamic_image.to_rgba8();
     IMAGES_CACHE.insert(
-        url.to_string(),
+        url.to_owned(),
         ImageData {
             data: Blob::from(rgba.into_raw()),
             format: ImageFormat::Rgba8,
@@ -702,7 +698,7 @@ fn generate_palette_image(colors: &[[u8; 4]], seed: u64) -> Vec<u8> {
         .iter()
         .map(|c| f32::from(c[3]).max(1.0))
         .collect::<Vec<_>>();
-    let total_target: f32 = targets.iter().copied().sum::<f32>().max(1.0);
+    let total_target = targets.iter().copied().sum::<f32>().max(1.0);
     for weight in &mut targets {
         *weight /= total_target;
     }

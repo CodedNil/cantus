@@ -165,7 +165,7 @@ impl WarpBackground {
         let image_size = (image.width, image.height);
         let output_size = (width, height);
 
-        let slot = self.slots.entry(key.to_string()).or_insert_with(|| {
+        let slot = self.slots.entry(key.to_owned()).or_insert_with(|| {
             BackgroundSlot::new(
                 device,
                 renderer,

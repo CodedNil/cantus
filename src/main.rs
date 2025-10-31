@@ -68,7 +68,7 @@ const PANEL_HEIGHT: f64 = PANEL_HEIGHT_BASE + PANEL_HEIGHT_EXTENSION;
 #[tokio::main]
 async fn main() {
     #[cfg(debug_assertions)]
-    dotenvy::dotenv().ok();
+    dotenvy::dotenv().unwrap();
 
     tracing_subscriber::fmt()
         .with_env_filter(EnvFilter::new(
@@ -302,26 +302,25 @@ impl CantusLayer {
     }
 
     /// Ask Wayland for the next frame callback.
-    fn request_frame(&mut self, qh: &QueueHandle<Self>) {
+    fn request_frame(&mut self, qhandle: &QueueHandle<Self>) {
         if self.frame_callback.is_none()
             && let Some(surface) = self.wl_surface.as_ref()
         {
-            self.frame_callback = Some(surface.frame(qh, ()));
+            self.frame_callback = Some(surface.frame(qhandle, ()));
         }
     }
 
     /// Make sure the GPU surface matches the requested size.
-    fn ensure_surface(&mut self, w: f64, h: f64) -> Result<()> {
+    fn ensure_surface(&mut self, width: f64, height: f64) -> Result<()> {
         // Ignore requests while the surface is not ready or has zero size.
-        if w == 0.0 || h == 0.0 || !self.is_configured {
+        if width == 0.0 || height == 0.0 || !self.is_configured {
             return Ok(());
         }
 
         // Reuse the existing surface if dimensions already match.
-        let recreate = self
-            .render_surface
-            .as_ref()
-            .is_none_or(|s| s.config.width != w as u32 || s.config.height != h as u32);
+        let recreate = self.render_surface.as_ref().is_none_or(|surface| {
+            surface.config.width != width as u32 || surface.config.height != height as u32
+        });
         if !recreate {
             return Ok(());
         }
@@ -338,8 +337,8 @@ impl CantusLayer {
         let surface = unsafe { self.render_context.instance.create_surface_unsafe(target) }?;
         let mut rs = pollster::block_on(self.render_context.create_render_surface(
             surface,
-            w as u32,
-            h as u32,
+            width as u32,
+            height as u32,
             PresentMode::AutoVsync,
         ))?;
         let device_handle = &self.render_context.devices[rs.dev_id];
@@ -552,9 +551,9 @@ impl CantusLayer {
             };
             surface.set_buffer_scale(buffer_scale);
         }
-        if let Some(v) = &self.viewport {
-            v.set_source(0.0, 0.0, bw, bh);
-            v.set_destination(PANEL_WIDTH as i32, PANEL_HEIGHT as i32);
+        if let Some(viewport) = &self.viewport {
+            viewport.set_source(0.0, 0.0, bw, bh);
+            viewport.set_destination(PANEL_WIDTH as i32, PANEL_HEIGHT as i32);
         }
     }
 }
@@ -696,7 +695,10 @@ impl Dispatch<WlOutput, ()> for CantusLayer {
                 wl_output::Event::Description { description } => {
                     info.description = Some(description);
                 }
-                _ => {}
+                wl_output::Event::Mode { .. }
+                | wl_output::Event::Done
+                | wl_output::Event::Scale { .. }
+                | _ => {}
             }
         }
         state.try_select_output();
@@ -711,14 +713,14 @@ impl Dispatch<WlSeat, ()> for CantusLayer {
         event: wl_seat::Event,
         _data: &(),
         _conn: &Connection,
-        qh: &QueueHandle<Self>,
+        qhandle: &QueueHandle<Self>,
     ) {
         if let wl_seat::Event::Capabilities { capabilities } = event
             && let WEnum::Value(caps) = capabilities
         {
             if caps.contains(wl_seat::Capability::Pointer) {
                 if state.pointer.is_none() {
-                    state.pointer = Some(proxy.get_pointer(qh, ()));
+                    state.pointer = Some(proxy.get_pointer(qhandle, ()));
                 }
             } else if let Some(pointer) = state.pointer.take() {
                 pointer.release();
@@ -735,7 +737,7 @@ impl Dispatch<WlPointer, ()> for CantusLayer {
         event: wl_pointer::Event,
         _data: &(),
         _conn: &Connection,
-        _qh: &QueueHandle<Self>,
+        _qhandle: &QueueHandle<Self>,
     ) {
         match event {
             wl_pointer::Event::Enter {
@@ -773,7 +775,14 @@ impl Dispatch<WlPointer, ()> for CantusLayer {
                     let _ = state.handle_pointer_click();
                 }
             }
-            _ => {}
+            wl_pointer::Event::Axis { .. }
+            | wl_pointer::Event::Frame
+            | wl_pointer::Event::AxisSource { .. }
+            | wl_pointer::Event::AxisStop { .. }
+            | wl_pointer::Event::AxisDiscrete { .. }
+            | wl_pointer::Event::AxisValue120 { .. }
+            | wl_pointer::Event::AxisRelativeDirection { .. }
+            | _ => {}
         }
     }
 }
@@ -782,11 +791,11 @@ impl Dispatch<WlRegistry, ()> for CantusLayer {
     /// Bind required globals when the compositor advertises them.
     fn event(
         state: &mut Self,
-        registry: &WlRegistry,
+        proxy: &WlRegistry,
         event: wl_registry::Event,
         _data: &(),
         _conn: &Connection,
-        qh: &QueueHandle<Self>,
+        qhandle: &QueueHandle<Self>,
     ) {
         if let wl_registry::Event::Global {
             name,
@@ -797,28 +806,28 @@ impl Dispatch<WlRegistry, ()> for CantusLayer {
             match interface.as_ref() {
                 "wl_compositor" => {
                     state.compositor =
-                        Some(registry.bind::<WlCompositor, (), Self>(name, version, qh, ()));
+                        Some(proxy.bind::<WlCompositor, (), Self>(name, version, qhandle, ()));
                 }
                 "zwlr_layer_shell_v1" => {
                     state.layer_shell =
-                        Some(registry.bind::<ZwlrLayerShellV1, (), Self>(name, 4, qh, ()));
+                        Some(proxy.bind::<ZwlrLayerShellV1, (), Self>(name, 4, qhandle, ()));
                 }
                 "wp_viewporter" => {
                     state.viewporter =
-                        Some(registry.bind::<WpViewporter, (), Self>(name, 1, qh, ()));
+                        Some(proxy.bind::<WpViewporter, (), Self>(name, 1, qhandle, ()));
                 }
                 "wp_fractional_scale_manager_v1" => {
                     state.fractional_manager = Some(
-                        registry.bind::<WpFractionalScaleManagerV1, (), Self>(name, 1, qh, ()),
+                        proxy.bind::<WpFractionalScaleManagerV1, (), Self>(name, 1, qhandle, ()),
                     );
                 }
                 "wl_seat" => {
                     state.seat =
-                        Some(registry.bind::<WlSeat, (), Self>(name, version.min(7), qh, ()));
+                        Some(proxy.bind::<WlSeat, (), Self>(name, version.min(7), qhandle, ()));
                 }
                 "wl_output" => {
                     state.outputs.push(OutputInfo {
-                        handle: registry.bind::<WlOutput, (), Self>(name, version.min(4), qh, ()),
+                        handle: proxy.bind::<WlOutput, (), Self>(name, version.min(4), qhandle, ()),
                         name: None,
                         description: None,
                         make: None,
@@ -835,11 +844,11 @@ impl Dispatch<ZwlrLayerShellV1, ()> for CantusLayer {
     /// Ignore global layer shell events not used by the client.
     fn event(
         _state: &mut Self,
-        _registry: &ZwlrLayerShellV1,
+        _proxy: &ZwlrLayerShellV1,
         _event: zwlr_layer_shell_v1::Event,
         _data: &(),
         _conn: &Connection,
-        _qh: &QueueHandle<Self>,
+        _qhandle: &QueueHandle<Self>,
     ) {
     }
 }
@@ -848,11 +857,11 @@ impl Dispatch<WpFractionalScaleManagerV1, ()> for CantusLayer {
     /// Ignore fractional scale manager events we do not use.
     fn event(
         _state: &mut Self,
-        _registry: &WpFractionalScaleManagerV1,
+        _proxy: &WpFractionalScaleManagerV1,
         _event: wp_fractional_scale_manager_v1::Event,
         _data: &(),
         _conn: &Connection,
-        _qh: &QueueHandle<Self>,
+        _qhandle: &QueueHandle<Self>,
     ) {
     }
 }
@@ -861,11 +870,11 @@ impl Dispatch<WpViewporter, ()> for CantusLayer {
     /// Ignore viewporter global events that need no handling.
     fn event(
         _state: &mut Self,
-        _registry: &WpViewporter,
+        _proxy: &WpViewporter,
         _event: wp_viewporter::Event,
         _data: &(),
         _conn: &Connection,
-        _qh: &QueueHandle<Self>,
+        _qhandle: &QueueHandle<Self>,
     ) {
     }
 }
@@ -874,11 +883,11 @@ impl Dispatch<WpViewport, ()> for CantusLayer {
     /// Ignore viewport events because configuration is static.
     fn event(
         _state: &mut Self,
-        _registry: &WpViewport,
+        _proxy: &WpViewport,
         _event: wp_viewport::Event,
         _data: &(),
         _conn: &Connection,
-        _qh: &QueueHandle<Self>,
+        _qhandle: &QueueHandle<Self>,
     ) {
     }
 }
@@ -887,11 +896,11 @@ impl Dispatch<WlCompositor, ()> for CantusLayer {
     /// Ignore compositor events that are not actionable for the client.
     fn event(
         _state: &mut Self,
-        _registry: &WlCompositor,
+        _proxy: &WlCompositor,
         _event: wl_compositor::Event,
         _data: &(),
         _conn: &Connection,
-        _qh: &QueueHandle<Self>,
+        _qhandle: &QueueHandle<Self>,
     ) {
     }
 }
@@ -903,7 +912,7 @@ impl Dispatch<WlRegion, ()> for CantusLayer {
         _event: wl_region::Event,
         _data: &(),
         _conn: &Connection,
-        _qh: &QueueHandle<Self>,
+        _qhandle: &QueueHandle<Self>,
     ) {
     }
 }
