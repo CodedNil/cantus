@@ -182,16 +182,17 @@ impl CantusLayer {
         let radii =
             RoundedRectRadii::new(left_rounding, right_rounding, right_rounding, left_rounding);
 
-        let Some(image) = IMAGES_CACHE.get(&track.image.url) else {
+        let Some(image) = IMAGES_CACHE.get(&track.image_url) else {
             return;
         };
-
         let Some(track_data) = TRACK_DATA_CACHE.get(&track.id) else {
             return;
         };
-        let palette_image = track_data.palette_image.clone();
-
-        let background_image = self.render_background(device_id, &track.image.url, &palette_image);
+        let background_image = self.render_background(
+            device_id,
+            &track.image_url,
+            &track_data.palette_image.clone(),
+        );
 
         // --- BACKGROUND ---
         self.scene.push_clip_layer(

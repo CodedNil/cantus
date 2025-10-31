@@ -232,6 +232,7 @@ dependencies = [
  "chrono",
  "dashmap",
  "dotenvy",
+ "futures",
  "image",
  "parking_lot",
  "parley",

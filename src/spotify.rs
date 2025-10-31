@@ -3,6 +3,7 @@ use anyhow::Result;
 use auto_palette::Palette;
 use chrono::TimeDelta;
 use dashmap::DashMap;
+use futures::future::try_join_all;
 use image::{GenericImageView, RgbaImage};
 use parking_lot::Mutex;
 use rand::{Rng, SeedableRng, rngs::SmallRng};
@@ -10,7 +11,7 @@ use rayon::prelude::*;
 use reqwest::Client;
 use rspotify::{
     AuthCodeSpotify, Config, Credentials, OAuth,
-    model::{AdditionalType, ArtistId, Context, FullTrack, PlayableItem, TrackId},
+    model::{AdditionalType, ArtistId, Context, FullTrack, PlayableItem, PlaylistId, TrackId},
     prelude::{BaseClient, OAuthClient},
     scopes,
 };
@@ -18,6 +19,7 @@ use std::{
     cmp::Ordering,
     collections::{HashMap, HashSet, hash_map::DefaultHasher},
     convert::TryInto,
+    env,
     hash::{Hash, Hasher},
     sync::{
         Arc, LazyLock,
@@ -66,8 +68,19 @@ const ROOT_INTERFACE: InterfaceName<'static> =
 /// Object path for the Spotify MPRIS instance on D-Bus.
 const MPRIS_OBJECT_PATH: &str = "/org/mpris/MediaPlayer2";
 
-pub static PLAYBACK_STATE: LazyLock<Arc<Mutex<PlaybackState>>> =
-    LazyLock::new(|| Arc::new(Mutex::new(PlaybackState::default())));
+pub static PLAYBACK_STATE: LazyLock<Arc<Mutex<PlaybackState>>> = LazyLock::new(|| {
+    Arc::new(Mutex::new(PlaybackState {
+        last_updated: Instant::now(),
+        playing: false,
+        shuffle: false,
+        progress: 0,
+        queue: Vec::new(),
+        queue_index: 0,
+        current_context: None,
+        playlists: Vec::new(),
+        current_playlist_idx: 0,
+    }))
+});
 pub static IMAGES_CACHE: LazyLock<DashMap<String, ImageData>> = LazyLock::new(DashMap::new);
 pub static TRACK_DATA_CACHE: LazyLock<DashMap<TrackId<'static>, TrackData>> =
     LazyLock::new(DashMap::new);
@@ -95,7 +108,6 @@ static SPOTIFY_CLIENT: OnceCell<AuthCodeSpotify> = OnceCell::const_new();
 static SPOTIFY_INTERACTION_ACTIVE: AtomicBool = AtomicBool::new(false);
 
 struct SpotifyInteractionGuard;
-
 impl SpotifyInteractionGuard {
     fn try_acquire() -> Option<Self> {
         SPOTIFY_INTERACTION_ACTIVE
@@ -109,7 +121,6 @@ impl SpotifyInteractionGuard {
             .then(|| Self)
     }
 }
-
 impl Drop for SpotifyInteractionGuard {
     fn drop(&mut self) {
         SPOTIFY_INTERACTION_ACTIVE.store(false, AtomicOrdering::Release);
@@ -125,20 +136,8 @@ pub struct PlaybackState {
     pub queue: Vec<Track>,
     pub queue_index: usize,
     pub current_context: Option<Context>,
-}
-
-impl Default for PlaybackState {
-    fn default() -> Self {
-        Self {
-            last_updated: Instant::now(),
-            playing: false,
-            shuffle: false,
-            progress: 0,
-            queue: Vec::new(),
-            queue_index: 0,
-            current_context: None,
-        }
-    }
+    pub playlists: Vec<Playlist>,
+    pub current_playlist_idx: usize,
 }
 
 #[derive(Debug, Clone)]
@@ -148,7 +147,7 @@ pub struct Track {
     pub artist_id: ArtistId<'static>,
     pub artist_name: String,
     pub album_name: String,
-    pub image: Image,
+    pub image_url: String,
     pub release_date: String,
     pub milliseconds: u32,
 }
@@ -165,46 +164,36 @@ pub struct ArtistData {
     pub name: String,
     pub genres: Vec<String>,
     pub popularity: u8,
-    pub image: Image,
+    pub image_url: String,
 }
 
 #[derive(Debug, Clone)]
-pub struct Image {
-    pub url: String,
-    pub width: u16,
-    pub height: u16,
+pub struct Playlist {
+    pub id: PlaylistId<'static>,
+    pub name: String,
+    pub image_url: String,
+    pub tracks: Vec<TrackId<'static>>,
+    pub tracks_total: u32,
 }
 
 impl Track {
     fn from_rspotify(track: FullTrack) -> Self {
-        let FullTrack {
-            id,
-            name,
-            artists,
-            album,
-            duration,
-            ..
-        } = track;
-        let album_image = album
-            .images
-            .into_iter()
-            .min_by_key(|img| img.width.unwrap())
-            .unwrap();
-        let image = Image {
-            url: album_image.url,
-            width: album_image.width.unwrap() as u16,
-            height: album_image.height.unwrap() as u16,
-        };
-        let artist = artists.first().unwrap();
+        let artist = track.artists.first().unwrap();
         Self {
-            id: id.unwrap(),
-            title: name,
+            id: track.id.unwrap(),
+            title: track.name,
             artist_id: artist.id.clone().unwrap(),
             artist_name: artist.name.clone(),
-            album_name: album.name,
-            image,
-            release_date: album.release_date.unwrap(),
-            milliseconds: duration.num_milliseconds() as u32,
+            album_name: track.album.name,
+            image_url: track
+                .album
+                .images
+                .into_iter()
+                .min_by_key(|img| img.width.unwrap())
+                .map(|img| img.url)
+                .unwrap(),
+            release_date: track.album.release_date.unwrap(),
+            milliseconds: track.duration.num_milliseconds() as u32,
         }
     }
 }
@@ -264,6 +253,41 @@ async fn polling_task() {
         Err(err) => panic!("Failed creating D-Bus proxy: {err}"),
     };
     let mut spotify_poll_counter = 100; // Counter for Spotify API polling
+
+    // Get initial playlist data
+    let playlists_env = env::var("PLAYLISTS").unwrap_or_default();
+    let target_playlists = playlists_env.split(',').collect::<Vec<_>>();
+    let rating_playlists = [
+        "0.0", "0.5", "1.0", "1.5", "2.0", "2.5", "3.0", "3.5", "4.0", "4.5", "5.0",
+    ];
+    let playlists = SPOTIFY_CLIENT
+        .get()
+        .unwrap()
+        .current_user_playlists_manual(Some(50), None)
+        .await
+        .unwrap();
+    update_playback_state(move |state| {
+        for playlist in playlists.items {
+            if !target_playlists.contains(&playlist.name.as_str())
+                && !rating_playlists.contains(&playlist.name.as_str())
+            {
+                continue;
+            }
+            state.playlists.push(Playlist {
+                id: playlist.id.clone(),
+                name: playlist.name.clone(),
+                image_url: playlist
+                    .images
+                    .iter()
+                    .min_by_key(|img| img.width.unwrap_or_default())
+                    .unwrap()
+                    .url
+                    .clone(),
+                tracks: Vec::new(),
+                tracks_total: playlist.tracks.total,
+            });
+        }
+    });
 
     loop {
         // --- MPRIS Polling Logic ---
@@ -375,12 +399,45 @@ async fn update_state_from_spotify(used_mpris_progress: bool) {
     // Fetch current playback and queue concurrently
     let request_start = Instant::now();
     let spotify_client = SPOTIFY_CLIENT.get().unwrap();
-    let (current_playback, queue) = match tokio::try_join!(
+
+    // Get one playlists tracks per loop to keep them fresh
+    let (current_playlist_id, current_playlist_total, current_playlist_idx) = {
+        let mut state = PLAYBACK_STATE.lock();
+        let idx = state.current_playlist_idx;
+        state.current_playlist_idx = (state.current_playlist_idx + 1) % state.playlists.len();
+        (
+            state.playlists[idx].id.clone(),
+            state.playlists[idx].tracks_total,
+            idx,
+        )
+    };
+    let chunk_size = 50;
+    let num_pages = current_playlist_total.div_ceil(chunk_size) as usize;
+    let mut fetches = Vec::with_capacity(num_pages);
+    for p in 0..num_pages {
+        let id = current_playlist_id.clone();
+        fetches.push(async move {
+            spotify_client
+                .playlist_items_manual(
+                    id,
+                    Some("href,limit,offset,total,items(is_local,track(id))"),
+                    None,
+                    Some(chunk_size),
+                    Some((p as u32) * chunk_size),
+                )
+                .await
+        });
+    }
+    let pages_future = try_join_all(fetches);
+
+    // Grab all data concurrently
+    let (current_playback, queue, pages) = match tokio::try_join!(
         spotify_client.current_playback(None, None::<Vec<&AdditionalType>>),
         spotify_client.current_user_queue(),
+        pages_future
     ) {
-        Ok((Some(playback), queue)) => (playback, queue),
-        Ok((None, _)) => {
+        Ok((Some(playback), queue, pages)) => (playback, queue, pages),
+        Ok((None, _, _)) => {
             error!("Failed to fetch current playback from Spotify API: Returned None");
             return;
         }
@@ -390,12 +447,32 @@ async fn update_state_from_spotify(used_mpris_progress: bool) {
         }
     };
 
+    // Sort through playlist items and push them into the dat
+    let mut playlist_track_ids = Vec::with_capacity(current_playlist_total as usize);
+    let mut new_total: u32 = current_playlist_total;
+    for page in pages {
+        for item in &page.items {
+            // Track returned will be unknown since we add the filter
+            if let Some(PlayableItem::Unknown(track)) = &item.track {
+                let id = track.get("id").unwrap().as_str().unwrap();
+                playlist_track_ids.push(TrackId::from_id(id).unwrap().into_static());
+            }
+        }
+        new_total = page.total;
+    }
+    update_playback_state(move |state| {
+        state.playlists[current_playlist_idx]
+            .tracks
+            .clone_from(&playlist_track_ids);
+        state.playlists[current_playlist_idx].tracks_total = new_total;
+    });
+
+    // Get current track and the upcoming queue
     let current_track = if let Some(PlayableItem::Track(track)) = queue.currently_playing {
         Track::from_rspotify(track)
     } else {
         return;
     };
-
     let new_queue: Vec<Track> = std::iter::once(current_track.clone())
         .chain(queue.queue.into_iter().filter_map(|item| match item {
             PlayableItem::Track(track) => Some(Track::from_rspotify(track)),
@@ -406,8 +483,8 @@ async fn update_state_from_spotify(used_mpris_progress: bool) {
     // Start a task to fetch missing artists & images
     let missing_urls = new_queue
         .iter()
-        .filter(|track| !IMAGES_CACHE.contains_key(&track.image.url))
-        .map(|track| track.image.url.clone())
+        .filter(|track| !IMAGES_CACHE.contains_key(&track.image_url))
+        .map(|track| track.image_url.clone())
         .collect::<HashSet<_>>();
     let missing_artists = new_queue
         .iter()
@@ -449,11 +526,7 @@ async fn update_state_from_spotify(used_mpris_progress: bool) {
                         name: artist.name.clone(),
                         genres: artist.genres.clone(),
                         popularity: artist.popularity as u8,
-                        image: Image {
-                            url: artist_image.url.clone(),
-                            width: artist_image.width.unwrap() as u16,
-                            height: artist_image.height.unwrap() as u16,
-                        },
+                        image_url: artist_image.url.clone(),
                     },
                 );
                 set.spawn(async move {
@@ -537,14 +610,13 @@ async fn ensure_image_cached(url: &str) -> Result<()> {
 
 /// Downloads and caches an image from the given URL.
 fn update_color_palettes() -> Result<()> {
-    let start = Instant::now();
     let state = PLAYBACK_STATE.lock().clone();
     let mut pending_palettes = Vec::new();
     for track in &state.queue {
         if !TRACK_DATA_CACHE.contains_key(&track.id)
-            && let Some(image) = IMAGES_CACHE.get(&track.image.url)
+            && let Some(image) = IMAGES_CACHE.get(&track.image_url)
             && let Some(artist_image_ref) = ARTIST_DATA_CACHE.get(&track.artist_id)
-            && let Some(artist_image) = IMAGES_CACHE.get(&artist_image_ref.image.url)
+            && let Some(artist_image) = IMAGES_CACHE.get(&artist_image_ref.image_url)
         {
             // Merge the images side by side
             let width = image.width;
@@ -649,7 +721,6 @@ fn update_color_palettes() -> Result<()> {
     for (track_id, track_data) in generated_data {
         TRACK_DATA_CACHE.insert(track_id, track_data);
     }
-    tracing::info!("passes took {:?}", start.elapsed());
 
     Ok(())
 }
