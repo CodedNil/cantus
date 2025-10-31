@@ -99,34 +99,18 @@ impl CantusLayer {
                 continue;
             }
 
-            let visible_start_ms = track_start_ms_spaced.max(TIMELINE_START_MS);
-            let start_trimmed = track_start_ms_spaced > TIMELINE_START_MS;
-            let visible_end_ms = track_end_ms.min(timeline_end_ms);
-            let end_trimmed = track_end_ms < timeline_end_ms;
-
-            let pos_x = (visible_start_ms - TIMELINE_START_MS) * px_per_ms;
-            let width = (visible_end_ms - visible_start_ms) * px_per_ms;
-            // How much of the width is to the left of the current position
-            let dark_width = if track_start_ms_spaced < 0.0 {
-                track_start_ms_spaced.max(TIMELINE_START_MS) * -px_per_ms
-            } else {
-                0.0
-            };
-
             // Draw the track, trimming to the visible window if it spills off either side.
-            let uncropped_width = (track_end_ms - track_start_ms) * px_per_ms;
             self.draw_track(
                 device_id,
                 track,
                 index == current_index,
-                pos_x,
-                width,
-                dark_width,
-                uncropped_width,
+                track_start_ms_spaced,
+                track_start_ms,
+                track_end_ms,
+                timeline_end_ms,
+                px_per_ms,
                 total_height,
                 (track_start_ms / 1000.0).abs(),
-                start_trimmed,
-                end_trimmed,
             );
 
             track_start_ms += f64::from(track.milliseconds);
@@ -155,18 +139,33 @@ impl CantusLayer {
         device_id: usize,
         track: &Track,
         is_current: bool,
-        pos_x: f64,
-        width: f64,
-        dark_width: f64,
-        uncropped_width: f64,
+        track_start_ms_spaced: f64,
+        track_start_ms: f64,
+        track_end_ms: f64,
+        timeline_end_ms: f64,
+        px_per_ms: f64,
         height: f64,
         seconds_until_start: f64,
-        start_trimmed: bool,
-        end_trimmed: bool,
     ) {
+        let visible_start_ms = track_start_ms_spaced.max(TIMELINE_START_MS);
+        let visible_end_ms = track_end_ms.min(timeline_end_ms);
+        let start_trimmed = track_start_ms_spaced > TIMELINE_START_MS;
+        let end_trimmed = track_end_ms < timeline_end_ms;
+
+        let pos_x = (visible_start_ms - TIMELINE_START_MS) * px_per_ms;
+        let width = (visible_end_ms - visible_start_ms) * px_per_ms;
         if width <= 0.0 {
+            self.track_hitboxes.remove(&track.id);
             return;
         }
+        let uncropped_width = (track_end_ms - track_start_ms) * px_per_ms;
+
+        // How much of the width is to the left of the current position
+        let dark_width = if track_start_ms_spaced < 0.0 {
+            track_start_ms_spaced.max(TIMELINE_START_MS) * -px_per_ms
+        } else {
+            0.0
+        };
 
         self.track_hitboxes.insert(
             track.id.clone(),

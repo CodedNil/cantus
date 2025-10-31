@@ -542,7 +542,7 @@ fn update_color_palettes() -> Result<()> {
             // Merge the images side by side
             let width = image.width;
             let height = image.height;
-            let artist_new_width = (width as f32 * 0.25).round() as u32;
+            let artist_new_width = (width as f32 * 0.1).round() as u32;
             let mut new_img = RgbaImage::new(width + artist_new_width, height);
             image::imageops::overlay(
                 &mut new_img,
@@ -565,18 +565,15 @@ fn update_color_palettes() -> Result<()> {
 
             // Get palette
             let palette: Palette<f64> = Palette::builder()
-                .algorithm(auto_palette::Algorithm::SLIC)
-                .filter(ChromaFilter::new(20))
+                .algorithm(auto_palette::Algorithm::KMeans)
+                .filter(ChromaFilter { threshold: 20 })
                 .build(&auto_palette::ImageData::new(
                     width + artist_new_width,
                     height,
                     &new_img.into_vec(),
                 )?)?;
             let swatches = palette
-                .find_swatches_with_theme(NUM_SWATCHES, auto_palette::Theme::Colorful)
-                .or_else(|_| {
-                    palette.find_swatches_with_theme(NUM_SWATCHES, auto_palette::Theme::Light)
-                })
+                .find_swatches_with_theme(NUM_SWATCHES, auto_palette::Theme::Light)
                 .or_else(|_| palette.find_swatches(NUM_SWATCHES))?;
             let total_ratio_sum: f64 = swatches.iter().map(auto_palette::Swatch::ratio).sum();
             let mut primary_colors = swatches
@@ -667,13 +664,6 @@ pub async fn skip_to_track(track_id: TrackId<'static>) {
 pub struct ChromaFilter {
     threshold: u8,
 }
-
-impl ChromaFilter {
-    const fn new(threshold: u8) -> Self {
-        Self { threshold }
-    }
-}
-
 impl auto_palette::Filter for ChromaFilter {
     fn test(&self, pixel: &auto_palette::Rgba) -> bool {
         let max = pixel[0].max(pixel[1]).max(pixel[2]);
@@ -820,7 +810,7 @@ fn generate_palette_image(colors: &[[u8; 4]], seed: u64) -> Vec<u8> {
     }
 
     // Blur the image
-    image::imageops::blur(&canvas, 10.0).into_raw()
+    image::imageops::blur(&canvas, 16.0).into_raw()
 }
 
 fn lerp(t: f32, v0: f32, v1: f32) -> f32 {

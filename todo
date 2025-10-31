@@ -15,7 +15,6 @@ maybe make currently playing song have an animated glow outline, when the song i
 particles:
 pulse emission based on songs current analysis (loudness etc at that point)
 entry particles for songs on the right that are growing (very subtle in comparison)
-particles colors more vivid
 
 
 shrink dependencies:
@@ -24,18 +23,13 @@ wgpu optional features
 
 
 cleanup:
-tidy CantusLayer, remove the unneeded variables, try to reduce how much of it is Option<T>
 dirty the queue if its drastically changed
-darken the track to the left of the playback bar
-fix weird rendering of the track bar when its really narrow
-instead of recomputing ratios in the palette texture generation, and having for x in max strokes, just divide up the strokes by which colours need it
 only use the artist image palette in addition to the album, if the album didnt have a good spectrum
 
 
 misc:
 lyrics along the bottom
 compile feature to run as a winit window instead of a layer_shell bar
-
 
 
 todo when audio analysis is possible again:
