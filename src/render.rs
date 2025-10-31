@@ -12,7 +12,7 @@ use std::{ops::Range, time::Instant};
 use vello::{
     Glyph,
     kurbo::{Affine, Rect, RoundedRect, RoundedRectRadii},
-    peniko::{Color, Fill, ImageBrush},
+    peniko::{Color, Fill, ImageBrush, ImageData},
 };
 
 /// Spacing between tracks in ms
@@ -44,55 +44,60 @@ const SPARK_THICKNESS_RANGE: Range<f64> = 2.0..4.0;
 
 /// Build the scene for rendering.
 impl CantusLayer {
-    pub fn create_scene(&mut self, id: usize) {
+    pub fn create_scene(&mut self, device_id: usize, surface_size: (u32, u32)) {
         let total_width = (PANEL_WIDTH * self.scale_factor).ceil();
         let total_height = (PANEL_HEIGHT_BASE * self.scale_factor).ceil();
 
-        // Get current playback state
         let playback_state = PLAYBACK_STATE.lock().clone();
-        if playback_state.queue.is_empty() {
+        let queue = &playback_state.queue;
+        if queue.is_empty() {
             return;
-        }
-
-        // Ensure the background provider exists
-        if !self.shader_backgrounds.contains_key(&id) {
-            self.shader_backgrounds.insert(
-                id,
-                WarpBackground::new(&self.render_context.devices[id].device),
-            );
         }
 
         let timeline_end_ms = TIMELINE_START_MS + TIMELINE_DURATION_MS;
         let px_per_ms = total_width / TIMELINE_DURATION_MS;
+        let current_index = playback_state.queue_index.min(queue.len() - 1);
 
-        // Track positions are relative to "now" (0 ms), negative values are in the past.
-        let lerped_progress = u32::from(playback_state.playing)
-            * playback_state.last_updated.elapsed().as_millis() as u32;
-        let mut track_start_ms = -f64::from(playback_state.progress + lerped_progress);
-        let mut track_spacing = 0.0;
-        for i in 0..playback_state.queue_index {
-            track_start_ms -= f64::from(playback_state.queue[i].milliseconds);
-            track_spacing -= TRACK_SPACING_MS;
-        }
+        let playback_elapsed = if playback_state.playing {
+            playback_state.last_updated.elapsed().as_millis() as f64
+        } else {
+            0.0
+        };
+        let mut track_start_target = -f64::from(playback_state.progress) - playback_elapsed;
+        track_start_target -= queue[..current_index]
+            .iter()
+            .map(|track| f64::from(track.milliseconds))
+            .sum::<f64>();
+        let mut track_spacing_target = -TRACK_SPACING_MS * current_index as f64;
 
-        // Lerp the track_start_ms with the global state
-        if (track_start_ms - self.track_start_ms).abs() > 200.0 {
-            track_start_ms = self.track_start_ms + (track_start_ms - self.track_start_ms) * 0.1;
+        if (track_start_target - self.track_start_ms).abs() > 200.0 {
+            track_start_target =
+                self.track_start_ms + (track_start_target - self.track_start_ms) * 0.1;
         }
-        self.track_start_ms = track_start_ms;
-        if (track_spacing - self.track_spacing).abs() > 200.0 {
-            track_spacing = self.track_spacing + (track_spacing - self.track_spacing) * 0.1;
+        self.track_start_ms = track_start_target;
+
+        if (track_spacing_target - self.track_spacing).abs() > 200.0 {
+            track_spacing_target =
+                self.track_spacing + (track_spacing_target - self.track_spacing) * 0.1;
         }
-        self.track_spacing = track_spacing;
+        self.track_spacing = track_spacing_target;
+
+        let mut track_start_ms = self.track_start_ms;
+        let mut track_spacing = self.track_spacing;
 
         // Iterate over the currently playing track followed by the queued tracks.
-        for (index, track) in playback_state.queue.iter().enumerate() {
+        for (index, track) in queue.iter().enumerate() {
             let track_start_ms_spaced = track_start_ms + track_spacing;
             if track_start_ms_spaced >= timeline_end_ms {
                 break;
             }
 
             let track_end_ms = track_start_ms_spaced + f64::from(track.milliseconds);
+            if track_end_ms <= TIMELINE_START_MS {
+                track_start_ms += f64::from(track.milliseconds);
+                track_spacing += TRACK_SPACING_MS;
+                continue;
+            }
 
             let visible_start_ms = track_start_ms_spaced.max(TIMELINE_START_MS);
             let start_trimmed = track_start_ms_spaced > TIMELINE_START_MS;
@@ -110,9 +115,10 @@ impl CantusLayer {
 
             // Draw the track, trimming to the visible window if it spills off either side.
             self.draw_track(
-                id,
+                device_id,
+                surface_size,
                 track,
-                index == playback_state.queue_index,
+                index == current_index,
                 pos_x,
                 width,
                 dark_width,
@@ -129,22 +135,25 @@ impl CantusLayer {
 
         // Draw the particles
         self.render_playing_particles(
-            &playback_state.queue[playback_state.queue_index],
+            &queue[current_index],
             -TIMELINE_START_MS * px_per_ms,
             total_height,
             playback_state.playing,
         );
 
         // Purge the stale background cache entries.
-        self.shader_backgrounds
-            .get_mut(&id)
-            .unwrap()
-            .purge_stale(self.renderers.get_mut(&id).unwrap(), self.frame_index);
+        if let (Some(shader), Some(renderer)) = (
+            self.shader_backgrounds.get_mut(&device_id),
+            self.renderers.get_mut(&device_id),
+        ) {
+            shader.purge_stale(renderer, self.frame_index);
+        }
     }
 
     fn draw_track(
         &mut self,
-        id: usize,
+        device_id: usize,
+        surface_size: (u32, u32),
         track: &Track,
         is_current: bool,
         pos_x: f64,
@@ -156,6 +165,10 @@ impl CantusLayer {
         start_trimmed: bool,
         end_trimmed: bool,
     ) {
+        if width <= 0.0 {
+            return;
+        }
+
         self.track_hitboxes.insert(
             track.id.clone(),
             Rect::new(
@@ -174,26 +187,14 @@ impl CantusLayer {
             return;
         };
 
-        let track_data_entry = TRACK_DATA_CACHE.get(&track.id);
-        let Some(palette_image) = track_data_entry
-            .as_ref()
-            .map(|data| data.palette_image.clone())
-        else {
+        let Some(track_data) = TRACK_DATA_CACHE.get(&track.id) else {
             return;
         };
+        let palette_image = track_data.palette_image.clone();
 
-        // Make sure the background image shader is ready
-        let surface = self.render_surface.as_ref().unwrap();
-        let Some(background_image) = self.shader_backgrounds.get_mut(&id).unwrap().render(
-            &track.image.url,
-            &self.render_context.devices[id],
-            self.renderers.get_mut(&id).unwrap(),
-            surface.config.width,
-            surface.config.height,
-            &palette_image,
-            self.time_origin.elapsed().as_secs_f32(),
-            self.frame_index,
-        ) else {
+        let Some(background_image) =
+            self.render_background(device_id, surface_size, &track.image.url, &palette_image)
+        else {
             return;
         };
 
@@ -377,6 +378,32 @@ impl CantusLayer {
         }
     }
 
+    fn render_background(
+        &mut self,
+        device_id: usize,
+        surface_size: (u32, u32),
+        key: &str,
+        palette_image: &ImageData,
+    ) -> Option<ImageData> {
+        let (surface_width, surface_height) = surface_size;
+        let device_handle = &self.render_context.devices[device_id];
+        let shader = self
+            .shader_backgrounds
+            .entry(device_id)
+            .or_insert_with(|| WarpBackground::new(&device_handle.device));
+        let renderer = self.renderers.get_mut(&device_id)?;
+        shader.render(
+            key,
+            device_handle,
+            renderer,
+            surface_width,
+            surface_height,
+            palette_image,
+            self.time_origin.elapsed().as_secs_f32(),
+            self.frame_index,
+        )
+    }
+
     /// Creates the text layout based on font properties.
     fn layout_text(&mut self, text: &str, font_size: f64, font_weight: FontWeight) -> Layout<()> {
         let mut builder =
@@ -405,35 +432,26 @@ impl CantusLayer {
         vertical_align: Alignment,
         brush: Color,
     ) {
-        let text_transform = Affine::translate((
-            pos_x
-                - f64::from(if horizontal_align == Alignment::Right {
-                    layout.width()
-                } else if horizontal_align == Alignment::Center {
-                    layout.width() * 0.5
-                } else {
-                    0.0
-                }),
-            pos_y
-                - f64::from(if vertical_align == Alignment::End {
-                    layout.height()
-                } else if vertical_align == Alignment::Center {
-                    layout.height() * 0.5
-                } else {
-                    0.0
-                }),
-        ));
+        let offset_x = match horizontal_align {
+            Alignment::Right => f64::from(layout.width()),
+            Alignment::Center => f64::from(layout.width()) * 0.5,
+            Alignment::Start | Alignment::End | Alignment::Left | Alignment::Justify => 0.0,
+        };
+        let offset_y = match vertical_align {
+            Alignment::End => f64::from(layout.height()),
+            Alignment::Center => f64::from(layout.height()) * 0.5,
+            Alignment::Start | Alignment::Left | Alignment::Right | Alignment::Justify => 0.0,
+        };
+        let text_transform = Affine::translate((pos_x - offset_x, pos_y - offset_y));
 
-        for glyph_run in layout
-            .lines()
-            .flat_map(|line| line.items())
-            .filter_map(|item| {
-                if let PositionedLayoutItem::GlyphRun(run) = item {
-                    Some(run)
-                } else {
-                    None
-                }
-            })
+        for glyph_run in
+            layout
+                .lines()
+                .flat_map(|line| line.items())
+                .filter_map(|item| match item {
+                    PositionedLayoutItem::GlyphRun(run) => Some(run),
+                    PositionedLayoutItem::InlineBox(_) => None,
+                })
         {
             let glyphs = glyph_run.positioned_glyphs().map(|g| Glyph {
                 id: g.id,
@@ -460,23 +478,24 @@ impl CantusLayer {
         let scale = self.scale_factor as f32;
         let height_f32 = height as f32;
 
-        // Get particle colors from the track palette
         let lightness_boost = 50.0;
-        let primary_colors = match TRACK_DATA_CACHE.get(&track.id) {
-            Some(track_data) => track_data
-                .primary_colors
-                .clone()
-                .iter()
-                .map(|[r, g, b, _]| {
-                    [
-                        (lerp(0.3, f32::from(*r), 255.0) + lightness_boost).min(255.0) as u8,
-                        (lerp(0.3, f32::from(*g), 210.0) + lightness_boost).min(255.0) as u8,
-                        (lerp(0.3, f32::from(*b), 160.0) + lightness_boost).min(255.0) as u8,
-                    ]
-                })
-                .collect::<Vec<_>>(),
-            None => return,
+        let Some(track_data) = TRACK_DATA_CACHE.get(&track.id) else {
+            return;
         };
+        let primary_colors: Vec<_> = track_data
+            .primary_colors
+            .iter()
+            .map(|[r, g, b, _]| {
+                [
+                    (lerp(0.3, f32::from(*r), 255.0) + lightness_boost).min(255.0) as u8,
+                    (lerp(0.3, f32::from(*g), 210.0) + lightness_boost).min(255.0) as u8,
+                    (lerp(0.3, f32::from(*b), 160.0) + lightness_boost).min(255.0) as u8,
+                ]
+            })
+            .collect();
+        if primary_colors.is_empty() {
+            return;
+        }
 
         // Emit new particles while playing
         if is_playing {
@@ -484,20 +503,22 @@ impl CantusLayer {
             let emit_count = self.particle_spawn_accumulator.floor() as u16;
             self.particle_spawn_accumulator -= f32::from(emit_count);
             for _ in 0..emit_count {
-                // Try to take over an existing dead particle before inserting a new one
                 let position = [x as f32, height_f32 * self.rng.random_range(SPARK_SPAWN_Y)];
                 let velocity = [
                     self.rng.random_range(SPARK_VELOCITY_X) * scale,
                     self.rng.random_range(SPARK_VELOCITY_Y) * scale,
                 ];
                 let life = self.rng.random_range(SPARK_LIFETIME);
-                if let Some(dead_particle) =
-                    self.now_playing_particles.iter_mut().find(|p| !p.alive)
+                if let Some(dead_particle) = self
+                    .now_playing_particles
+                    .iter_mut()
+                    .find(|particle| !particle.alive)
                 {
                     dead_particle.alive = true;
                     dead_particle.position = position;
                     dead_particle.velocity = velocity;
                     dead_particle.life = life;
+                    dead_particle.color = self.rng.random_range(0..primary_colors.len());
                 } else {
                     self.now_playing_particles.push(NowPlayingParticle {
                         alive: true,
@@ -513,18 +534,21 @@ impl CantusLayer {
         }
 
         // Delete dead particles, and update positions of others
-        self.now_playing_particles.iter_mut().for_each(|particle| {
-            if particle.alive {
-                particle.life -= dt;
-                if particle.life <= 0.0 {
-                    particle.alive = false;
-                }
-
-                particle.velocity[1] += SPARK_GRAVITY * scale * dt;
-                particle.position[0] += particle.velocity[0] * dt;
-                particle.position[1] += particle.velocity[1] * dt;
+        for particle in &mut self.now_playing_particles {
+            if !particle.alive {
+                continue;
             }
-        });
+
+            particle.life -= dt;
+            if particle.life <= 0.0 {
+                particle.alive = false;
+                continue;
+            }
+
+            particle.velocity[1] += SPARK_GRAVITY * scale * dt;
+            particle.position[0] += particle.velocity[0] * dt;
+            particle.position[1] += particle.velocity[1] * dt;
+        }
 
         // Line at the now playing position to denote the cutoff
         let line_width = 4.0 * self.scale_factor;
@@ -539,23 +563,19 @@ impl CantusLayer {
         // Render out the particles
         for particle in &self.now_playing_particles {
             let fade = (particle.life / 0.6).clamp(0.0, 1.0);
-            let fade64 = f64::from(fade);
-            let length = lerp_range(SPARK_LENGTH_RANGE, fade64) * self.scale_factor;
-            let thickness = lerp_range(SPARK_THICKNESS_RANGE, fade64) * self.scale_factor;
+            let length = lerp_range(SPARK_LENGTH_RANGE, f64::from(fade)) * self.scale_factor;
+            let thickness = lerp_range(SPARK_THICKNESS_RANGE, f64::from(fade)) * self.scale_factor;
             let rgb = primary_colors[particle.color];
+            let angle = f64::from(particle.velocity[1].atan2(particle.velocity[0]));
+            let opacity = (fade.powf(1.1) * 235.0).round().clamp(0.0, 255.0) as u8;
             self.scene.fill(
                 Fill::NonZero,
                 Affine::translate((
                     f64::from(particle.position[0]),
                     f64::from(particle.position[1]),
-                )) * Affine::rotate(f64::from(particle.velocity[1].atan2(particle.velocity[0])))
+                )) * Affine::rotate(angle)
                     * Affine::translate((-length * 0.5, 0.0)),
-                Color::from_rgba8(
-                    rgb[0],
-                    rgb[1],
-                    rgb[2],
-                    (fade.powf(1.1) * 235.0).round().clamp(0.0, 255.0) as u8,
-                ),
+                Color::from_rgba8(rgb[0], rgb[1], rgb[2], opacity),
                 None,
                 &RoundedRect::new(
                     0.0,

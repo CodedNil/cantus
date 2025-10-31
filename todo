@@ -29,10 +29,12 @@ dirty the queue if its drastically changed
 darken the track to the left of the playback bar
 fix weird rendering of the track bar when its really narrow
 instead of recomputing ratios in the palette texture generation, and having for x in max strokes, just divide up the strokes by which colours need it
+only use the artist image palette in addition to the album, if the album didnt have a good spectrum
 
 
 misc:
 lyrics along the bottom
+compile feature to run as a winit window instead of a layer_shell bar
 
 
 

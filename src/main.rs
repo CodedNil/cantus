@@ -7,18 +7,18 @@ use raw_window_handle::{
 };
 use rspotify::model::TrackId;
 use std::{
-    collections::HashMap,
+    collections::{HashMap, hash_map},
     env,
     ffi::c_void,
     ptr::NonNull,
     sync::Arc,
     time::{Duration, Instant},
 };
-use tracing::error;
+use tracing::{debug, error};
 use tracing_subscriber::EnvFilter;
 use vello::{
     AaConfig, Renderer, RendererOptions, Scene,
-    kurbo::Rect,
+    kurbo::{Point, Rect},
     peniko::{Blob, color::palette},
     util::{RenderContext, RenderSurface},
     wgpu::{
@@ -84,8 +84,8 @@ async fn main() {
 fn run_layer_shell() {
     let connection = Connection::connect_to_env().expect("Failed to connect to Wayland display");
     let mut event_queue = connection.new_event_queue();
-    let qh = event_queue.handle();
-    connection.display().get_registry(&qh, ());
+    let qhandle = event_queue.handle();
+    connection.display().get_registry(&qhandle, ());
 
     let display_ptr = NonNull::new(connection.backend().display_ptr().cast::<c_void>())
         .expect("Failed to get display pointer");
@@ -103,29 +103,24 @@ fn run_layer_shell() {
         .roundtrip(&mut app)
         .expect("Failed to fetch output details");
 
-    let wl_surface = compositor.create_surface(&qh, ());
+    let wl_surface = compositor.create_surface(&qhandle, ());
     let surface_ptr = NonNull::new(wl_surface.id().as_ptr().cast::<c_void>())
         .expect("Failed to get surface pointer");
-
+    let surface = app.wl_surface.insert(wl_surface).clone();
     app.surface_ptr = Some(surface_ptr);
     assert!(app.try_select_output(), "Failed to select a Wayland output");
-    app.wl_surface = Some(wl_surface);
 
-    let surface = app
-        .wl_surface
-        .as_ref()
-        .expect("Wayland surface not created");
     if let (Some(vp), Some(fm)) = (app.viewporter.take(), app.fractional_manager.take()) {
-        app.viewport = Some(vp.get_viewport(surface, &qh, ()));
-        app.fractional = Some(fm.get_fractional_scale(surface, &qh, ()));
+        app.viewport = Some(vp.get_viewport(&surface, &qhandle, ()));
+        app.fractional = Some(fm.get_fractional_scale(&surface, &qhandle, ()));
     }
 
     let layer_surface = layer_shell.get_layer_surface(
-        surface,
-        app.output.as_ref(),
+        &surface,
+        app.outputs.get(app.active_output).map(|info| &info.handle),
         zwlr_layer_shell_v1::Layer::Top,
         "cantus".into(),
-        &qh,
+        &qhandle,
         (),
     );
     layer_surface.set_size(PANEL_WIDTH as u32, PANEL_HEIGHT as u32);
@@ -133,8 +128,6 @@ fn run_layer_shell() {
         .set_anchor(zwlr_layer_surface_v1::Anchor::Top | zwlr_layer_surface_v1::Anchor::Left);
     layer_surface.set_margin(4, 0, 0, 4);
     layer_surface.set_exclusive_zone(-1);
-
-    app.layer_surface = Some(layer_surface);
 
     surface.commit();
     connection.flush().expect("Failed to flush initial commit");
@@ -182,13 +175,12 @@ struct CantusLayer {
     fractional_manager: Option<WpFractionalScaleManagerV1>,
     seat: Option<WlSeat>,
     pointer: Option<WlPointer>,
-    output: Option<WlOutput>,
     outputs: Vec<OutputInfo>,
+    active_output: usize,
     output_matched: bool,
 
     // --- Surface and layer resources ---
     wl_surface: Option<WlSurface>,
-    layer_surface: Option<ZwlrLayerSurfaceV1>,
     viewport: Option<WpViewport>,
     fractional: Option<WpFractionalScaleV1>,
     frame_callback: Option<WlCallback>,
@@ -253,13 +245,12 @@ impl CantusLayer {
             fractional_manager: None,
             seat: None,
             pointer: None,
-            output: None,
             outputs: Vec::new(),
+            active_output: 0,
             output_matched: false,
 
             // --- Surface and layer resources ---
             wl_surface: None,
-            layer_surface: None,
             viewport: None,
             fractional: None,
             frame_callback: None,
@@ -326,13 +317,14 @@ impl CantusLayer {
         }
 
         // Build a raw Wayland surface handle for wgpu.
+        let Some(surface_ptr) = self.surface_ptr else {
+            return Ok(());
+        };
         let target = SurfaceTargetUnsafe::RawHandle {
             raw_display_handle: RawDisplayHandle::Wayland(WaylandDisplayHandle::new(
                 self.display_ptr,
             )),
-            raw_window_handle: RawWindowHandle::Wayland(WaylandWindowHandle::new(
-                self.surface_ptr.unwrap(),
-            )),
+            raw_window_handle: RawWindowHandle::Wayland(WaylandWindowHandle::new(surface_ptr)),
         };
         let surface = unsafe { self.render_context.instance.create_surface_unsafe(target) }?;
         let mut rs = pollster::block_on(self.render_context.create_render_surface(
@@ -382,177 +374,160 @@ impl CantusLayer {
             return false;
         }
 
-        let target_monitor = env::var("TARGET_MONITOR").ok();
-        let target = target_monitor.as_deref();
-        let selected_index = target
-            .and_then(|needle| self.outputs.iter().position(|info| info.matches(needle)))
-            .unwrap_or(0);
-        let info = &self.outputs[selected_index];
-        let matches_target = target.is_some_and(|needle| info.matches(needle));
+        let target = env::var("TARGET_MONITOR").ok();
+        let (index, matched_target) = target
+            .as_deref()
+            .and_then(|needle| {
+                self.outputs
+                    .iter()
+                    .position(|info| info.matches(needle))
+                    .map(|idx| (idx, true))
+            })
+            .unwrap_or((0, false));
 
-        if self
-            .output
-            .as_ref()
-            .is_none_or(|id| id.id() != info.handle.id())
-            || (matches_target && !self.output_matched)
-        {
-            self.output = Some(info.handle.clone());
-            self.output_matched = matches_target;
+        if self.active_output != index || (matched_target && !self.output_matched) {
+            self.active_output = index;
+            self.output_matched = matched_target;
         }
         true
     }
 
     /// Handle pointer click events.
     fn handle_pointer_click(&self) -> bool {
-        let (x, y) = self.pointer_position;
-        for (id, rect) in &self.track_hitboxes {
-            if x >= rect.x0 && x <= rect.x1 && y >= rect.y0 && y <= rect.y1 {
-                let id = id.clone();
-                tokio::spawn(async move {
-                    spotify::skip_to_track(id).await;
-                });
-                return true;
-            }
+        let point = Point::new(self.pointer_position.0, self.pointer_position.1);
+        if let Some((id, _)) = self
+            .track_hitboxes
+            .iter()
+            .find(|(_, rect)| rect.contains(point))
+        {
+            let id = id.clone();
+            tokio::spawn(async move {
+                spotify::skip_to_track(id).await;
+            });
+            return true;
         }
         false
     }
 
     /// Update the input region for the surface.
-    fn update_input_region(&mut self, qh: &QueueHandle<Self>) {
-        if self.last_hitbox_update.elapsed() > Duration::from_millis(500)
-            && let Some(wl_surface) = &self.wl_surface
-            && let Some(compositor) = &self.compositor
-        {
-            // Create an fill the region
-            let region = compositor.create_region(qh, ());
-            for rect in self.track_hitboxes.values() {
-                region.add(
-                    rect.x0.round() as i32,
-                    rect.y0.round() as i32,
-                    (rect.x1 - rect.x0).round() as i32,
-                    (rect.y1 - rect.y0).round() as i32,
-                );
-            }
-
-            // Set the input region on the surface
-            wl_surface.set_input_region(Some(&region));
-            wl_surface.commit();
-
-            self.last_hitbox_update = Instant::now();
+    fn update_input_region(&mut self, qhandle: &QueueHandle<Self>) {
+        if self.last_hitbox_update.elapsed() <= Duration::from_millis(500) {
+            return;
         }
+
+        let (Some(wl_surface), Some(compositor)) = (&self.wl_surface, &self.compositor) else {
+            return;
+        };
+
+        let region = compositor.create_region(qhandle, ());
+        for rect in self.track_hitboxes.values() {
+            region.add(
+                rect.x0.round() as i32,
+                rect.y0.round() as i32,
+                (rect.x1 - rect.x0).round() as i32,
+                (rect.y1 - rect.y0).round() as i32,
+            );
+        }
+
+        wl_surface.set_input_region(Some(&region));
+        wl_surface.commit();
+        self.last_hitbox_update = Instant::now();
     }
 
     /// Render a frame and present it if the surface is available.
-    fn try_render_frame(&mut self, qh: &QueueHandle<Self>) -> Result<()> {
+    fn try_render_frame(&mut self, qhandle: &QueueHandle<Self>) -> Result<()> {
         self.frame_index = self.frame_index.wrapping_add(1);
-        // Auto-recover if surface lost
         if self.render_surface.is_none() {
             let buffer_width = (PANEL_WIDTH * self.scale_factor).round();
             let buffer_height = (PANEL_HEIGHT * self.scale_factor).round();
             self.ensure_surface(buffer_width, buffer_height)?;
         }
 
-        let rendering = {
-            if self.render_surface.is_none() {
-                return Ok(());
-            }
-
-            let id = self.render_surface.as_ref().unwrap().dev_id;
-            // Ensure the renderer exists
-            if !self.renderers.contains_key(&id) {
-                self.renderers.insert(
-                    id,
-                    Renderer::new(
-                        &self.render_context.devices[id].device,
-                        RendererOptions::default(),
-                    )?,
-                );
-            }
-
-            // Prepare scene
-            self.scene.reset();
-            self.create_scene(id);
-
-            // Update input region for the surface.
-            self.update_input_region(qh);
-
-            let Some(surface) = self.render_surface.as_mut() else {
-                return Ok(());
-            };
-            let device_handle = &self.render_context.devices[id];
-            let renderer = self.renderers.get_mut(&id).unwrap();
-            renderer.render_to_texture(
-                &device_handle.device,
-                &device_handle.queue,
-                &self.scene,
-                &surface.target_view,
-                &vello::RenderParams {
-                    base_color: palette::css::TRANSPARENT,
-                    width: surface.config.width,
-                    height: surface.config.height,
-                    antialiasing_method: AaConfig::Area,
-                },
-            )?;
-
-            match surface.surface.get_current_texture() {
-                Ok(acquired) => {
-                    let mut encoder =
-                        device_handle
-                            .device
-                            .create_command_encoder(&CommandEncoderDescriptor {
-                                label: Some("Cantus blit"),
-                            });
-                    surface.blitter.copy(
-                        &device_handle.device,
-                        &mut encoder,
-                        &surface.target_view,
-                        &acquired
-                            .texture
-                            .create_view(&TextureViewDescriptor::default()),
-                    );
-                    Ok((id, acquired, encoder.finish()))
-                }
-                Err(err) => Err(err),
-            }
-        };
-
-        let Ok((dev_id, tex, command_buffer)) = rendering else {
-            // Keep the surface dropped to force recreation; schedule a new frame before
-            // committing so the compositor will notify us once it is ready again.
-            self.render_surface = None;
-            self.request_frame(qh);
-            if let Some(surface) = &self.wl_surface {
-                surface.commit();
-            }
+        let Some(render_surface) = self.render_surface.take() else {
             return Ok(());
         };
+        let dev_id = render_surface.dev_id;
+        let handle = &self.render_context.devices[dev_id];
+        let device = handle.device.clone();
+        let queue = handle.queue.clone();
+        if let hash_map::Entry::Vacant(entry) = self.renderers.entry(dev_id) {
+            entry.insert(Renderer::new(&device, RendererOptions::default())?);
+        }
 
-        // Queue frame request after rendering but before presenting so the callback associates
-        self.request_frame(qh);
+        self.scene.reset();
+        self.create_scene(
+            dev_id,
+            (render_surface.config.width, render_surface.config.height),
+        );
+        self.update_input_region(qhandle);
 
-        let device_handle = &self.render_context.devices[dev_id];
-        device_handle.queue.submit([command_buffer]);
-        tex.present();
-        device_handle.device.poll(PollType::Poll)?;
+        let renderer = self
+            .renderers
+            .get_mut(&dev_id)
+            .expect("renderer for device must exist");
+        renderer.render_to_texture(
+            &device,
+            &queue,
+            &self.scene,
+            &render_surface.target_view,
+            &vello::RenderParams {
+                base_color: palette::css::TRANSPARENT,
+                width: render_surface.config.width,
+                height: render_surface.config.height,
+                antialiasing_method: AaConfig::Area,
+            },
+        )?;
 
+        let acquired = match render_surface.surface.get_current_texture() {
+            Ok(acquired) => acquired,
+            Err(err) => {
+                debug!("Surface acquisition failed: {err}");
+                self.render_surface = None;
+                self.request_frame(qhandle);
+                if let Some(surface) = &self.wl_surface {
+                    surface.commit();
+                }
+                return Ok(());
+            }
+        };
+
+        let mut encoder = device.create_command_encoder(&CommandEncoderDescriptor {
+            label: Some("Cantus blit"),
+        });
+        render_surface.blitter.copy(
+            &device,
+            &mut encoder,
+            &render_surface.target_view,
+            &acquired
+                .texture
+                .create_view(&TextureViewDescriptor::default()),
+        );
+
+        self.request_frame(qhandle);
+        queue.submit([encoder.finish()]);
+        acquired.present();
+        device.poll(PollType::Poll)?;
+
+        self.render_surface = Some(render_surface);
         Ok(())
     }
 
     /// Push the computed scale and viewport to Wayland objects.
     fn update_scale_and_viewport(&self) {
-        let bw = (PANEL_WIDTH * self.scale_factor).round();
-        let bh = (PANEL_HEIGHT * self.scale_factor).round();
-
         if let Some(surface) = &self.wl_surface {
-            let buffer_scale = if self.viewport.is_some() {
+            surface.set_buffer_scale(if self.viewport.is_some() {
                 1
             } else {
                 self.scale_factor.ceil() as i32
-            };
-            surface.set_buffer_scale(buffer_scale);
+            });
         }
         if let Some(viewport) = &self.viewport {
-            viewport.set_source(0.0, 0.0, bw, bh);
+            viewport.set_source(
+                0.0,
+                0.0,
+                (PANEL_WIDTH * self.scale_factor).round(),
+                (PANEL_HEIGHT * self.scale_factor).round(),
+            );
             viewport.set_destination(PANEL_WIDTH as i32, PANEL_HEIGHT as i32);
         }
     }
