@@ -105,7 +105,6 @@ impl CantusLayer {
                 track,
                 index == current_index,
                 track_start_ms_spaced,
-                track_start_ms,
                 track_end_ms,
                 timeline_end_ms,
                 px_per_ms,
@@ -139,7 +138,6 @@ impl CantusLayer {
         device_id: usize,
         track: &Track,
         is_current: bool,
-        track_start_ms_spaced: f64,
         track_start_ms: f64,
         track_end_ms: f64,
         timeline_end_ms: f64,
@@ -147,10 +145,10 @@ impl CantusLayer {
         height: f64,
         seconds_until_start: f64,
     ) {
-        let visible_start_ms = track_start_ms_spaced.max(TIMELINE_START_MS);
+        let visible_start_ms = track_start_ms.max(TIMELINE_START_MS);
         let visible_end_ms = track_end_ms.min(timeline_end_ms);
-        let start_trimmed = track_start_ms_spaced > TIMELINE_START_MS;
-        let end_trimmed = track_end_ms < timeline_end_ms;
+        let start_trimmed = track_start_ms >= TIMELINE_START_MS;
+        let end_trimmed = track_end_ms <= timeline_end_ms;
 
         let pos_x = (visible_start_ms - TIMELINE_START_MS) * px_per_ms;
         let width = (visible_end_ms - visible_start_ms) * px_per_ms;
@@ -161,18 +159,19 @@ impl CantusLayer {
         let uncropped_width = (track_end_ms - track_start_ms) * px_per_ms;
 
         // How much of the width is to the left of the current position
-        let dark_width = if track_start_ms_spaced < 0.0 {
-            track_start_ms_spaced.max(TIMELINE_START_MS) * -px_per_ms
+        let dark_width = if track_start_ms < 0.0 {
+            track_start_ms.max(TIMELINE_START_MS) * -px_per_ms
         } else {
             0.0
         };
 
+        // Add hitbox
         self.track_hitboxes.insert(
             track.id.clone(),
             Rect::new(
-                pos_x / self.scale_factor,
+                ((track_start_ms - TIMELINE_START_MS) * px_per_ms) / self.scale_factor,
                 0.0,
-                (pos_x + width) / self.scale_factor,
+                ((track_end_ms - TIMELINE_START_MS) * px_per_ms) / self.scale_factor,
                 height / self.scale_factor,
             ),
         );
@@ -552,7 +551,9 @@ impl CantusLayer {
             let fade = (particle.life / 0.6).clamp(0.0, 1.0);
             let length = lerp_range(SPARK_LENGTH_RANGE, f64::from(fade)) * self.scale_factor;
             let thickness = lerp_range(SPARK_THICKNESS_RANGE, f64::from(fade)) * self.scale_factor;
-            let rgb = primary_colors[particle.color];
+            let rgb = primary_colors
+                .get(particle.color)
+                .unwrap_or(&[255, 210, 160]);
             let angle = f64::from(particle.velocity[1].atan2(particle.velocity[0]));
             let opacity = (fade.powf(1.1) * 235.0).round().clamp(0.0, 255.0) as u8;
             self.scene.fill(

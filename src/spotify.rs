@@ -1,6 +1,7 @@
 use crate::PANEL_HEIGHT_BASE;
 use anyhow::Result;
 use auto_palette::Palette;
+use chrono::TimeDelta;
 use dashmap::DashMap;
 use image::{GenericImageView, RgbaImage};
 use parking_lot::Mutex;
@@ -29,7 +30,10 @@ use tokio::{
     time::{Duration, sleep},
 };
 use tracing::{error, info, warn};
-use vello::peniko::{Blob, ImageAlphaType, ImageData, ImageFormat};
+use vello::{
+    kurbo::{Point, Rect},
+    peniko::{Blob, ImageAlphaType, ImageData, ImageFormat},
+};
 use zbus::{
     Connection,
     fdo::{DBusProxy, PropertiesProxy},
@@ -620,7 +624,7 @@ fn update_color_palettes() -> Result<()> {
 }
 
 /// Skip to the specified track in the queue.
-pub async fn skip_to_track(track_id: TrackId<'static>) {
+pub async fn skip_to_track(track_id: TrackId<'static>, point: Point, rect: Rect) {
     let Some(_interaction_guard) = SpotifyInteractionGuard::try_acquire() else {
         warn!("Spotify interaction already in progress; skip_to_track returning early");
         return;
@@ -634,7 +638,26 @@ pub async fn skip_to_track(track_id: TrackId<'static>) {
     };
     match queue_index.cmp(&position_in_queue) {
         Ordering::Equal => {
-            info!("Already playing track {track_id}");
+            let position = (point.x - rect.x0) / rect.width();
+            let song_ms = playback_state.queue[position_in_queue].milliseconds;
+            // If click is near the very left, reset to the start of the song, else seek to clicked position
+            let milliseconds = if point.x < 20.0 || position < 0.05 {
+                0.0
+            } else {
+                f64::from(song_ms) * position
+            };
+            info!(
+                "Seeking track {track_id} to {}%",
+                (milliseconds / f64::from(song_ms) * 100.0).round()
+            );
+            if let Err(err) = SPOTIFY_CLIENT
+                .get()
+                .unwrap()
+                .seek_track(TimeDelta::milliseconds(milliseconds as i64), None)
+                .await
+            {
+                error!("Failed to seek track: {err}");
+            }
         }
         Ordering::Greater => {
             let position_difference = queue_index - position_in_queue;

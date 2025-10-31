@@ -395,14 +395,15 @@ impl CantusLayer {
     /// Handle pointer click events.
     fn handle_pointer_click(&self) -> bool {
         let point = Point::new(self.pointer_position.0, self.pointer_position.1);
-        if let Some((id, _)) = self
+        if let Some((id, rect)) = self
             .track_hitboxes
             .iter()
             .find(|(_, rect)| rect.contains(point))
         {
             let id = id.clone();
+            let rect = *rect;
             tokio::spawn(async move {
-                spotify::skip_to_track(id).await;
+                spotify::skip_to_track(id, point, rect).await;
             });
             return true;
         }

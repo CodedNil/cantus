@@ -229,6 +229,7 @@ dependencies = [
  "anyhow",
  "auto-palette",
  "bytemuck",
+ "chrono",
  "dashmap",
  "dotenvy",
  "image",
