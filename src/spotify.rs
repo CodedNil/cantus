@@ -546,39 +546,58 @@ fn update_color_palettes() -> Result<()> {
             // Merge the images side by side
             let width = image.width;
             let height = image.height;
-            let artist_new_width = (width as f32 * 0.1).round() as u32;
-            let mut new_img = RgbaImage::new(width + artist_new_width, height);
-            image::imageops::overlay(
-                &mut new_img,
-                &RgbaImage::from_raw(width, height, image.data.data().to_vec()).unwrap(),
-                0,
-                0,
-            );
-            let artist_img_resized = image::imageops::resize(
-                &image::RgbaImage::from_raw(
-                    artist_image.width,
-                    artist_image.height,
-                    artist_image.data.data().to_vec(),
-                )
-                .unwrap(),
-                artist_new_width,
-                height,
-                image::imageops::FilterType::Triangle,
-            );
-            image::imageops::overlay(&mut new_img, &artist_img_resized, i64::from(width), 0);
+            let album_image =
+                RgbaImage::from_raw(width, height, image.data.data().to_vec()).unwrap();
 
-            // Get palette
-            let palette: Palette<f64> = Palette::builder()
-                .algorithm(auto_palette::Algorithm::KMeans)
-                .filter(ChromaFilter { threshold: 20 })
-                .build(&auto_palette::ImageData::new(
-                    width + artist_new_width,
-                    height,
-                    &new_img.into_vec(),
-                )?)?;
-            let swatches = palette
-                .find_swatches_with_theme(NUM_SWATCHES, auto_palette::Theme::Light)
-                .or_else(|_| palette.find_swatches(NUM_SWATCHES))?;
+            // Get palette, try on the album image or if that doesn't get enough colours include the artist image
+            let swatches = {
+                let palette: Palette<f64> = Palette::builder()
+                    .algorithm(auto_palette::Algorithm::SLIC)
+                    .filter(ChromaFilter { threshold: 20 })
+                    .build(&auto_palette::ImageData::new(width, height, &album_image)?)?;
+                let swatches = palette
+                    .find_swatches_with_theme(NUM_SWATCHES, auto_palette::Theme::Light)
+                    .or_else(|_| palette.find_swatches(NUM_SWATCHES))?;
+                if swatches.len() < NUM_SWATCHES {
+                    // Generate a new image with the artist image
+                    let artist_new_width = (width as f32 * 0.1).round() as u32;
+                    let mut new_img = RgbaImage::new(width + artist_new_width, height);
+                    image::imageops::overlay(&mut new_img, &album_image, 0, 0);
+                    let artist_img_resized = image::imageops::resize(
+                        &image::RgbaImage::from_raw(
+                            artist_image.width,
+                            artist_image.height,
+                            artist_image.data.data().to_vec(),
+                        )
+                        .unwrap(),
+                        artist_new_width,
+                        height,
+                        image::imageops::FilterType::Triangle,
+                    );
+                    image::imageops::overlay(
+                        &mut new_img,
+                        &artist_img_resized,
+                        i64::from(width),
+                        0,
+                    );
+
+                    let palette: Palette<f64> = Palette::builder()
+                        .algorithm(auto_palette::Algorithm::SLIC)
+                        .filter(ChromaFilter { threshold: 20 })
+                        .build(&auto_palette::ImageData::new(
+                            width + artist_new_width,
+                            height,
+                            &new_img,
+                        )?)?;
+                    palette
+                        .find_swatches_with_theme(NUM_SWATCHES, auto_palette::Theme::Light)
+                        .or_else(|_| palette.find_swatches(NUM_SWATCHES))?
+                } else {
+                    swatches
+                }
+            };
+
+            // Sort out the ratios
             let total_ratio_sum: f64 = swatches.iter().map(auto_palette::Swatch::ratio).sum();
             let mut primary_colors = swatches
                 .iter()
@@ -833,7 +852,7 @@ fn generate_palette_image(colors: &[[u8; 4]], seed: u64) -> Vec<u8> {
     }
 
     // Blur the image
-    image::imageops::blur(&canvas, 16.0).into_raw()
+    image::imageops::blur(&canvas, 10.0).into_raw()
 }
 
 fn lerp(t: f32, v0: f32, v1: f32) -> f32 {

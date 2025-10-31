@@ -23,7 +23,6 @@ wgpu optional features
 
 cleanup:
 dirty the queue if its drastically changed
-only use the artist image palette in addition to the album, if the album didnt have a good spectrum
 for very short songs they dont fit the whole height with background
 
 
