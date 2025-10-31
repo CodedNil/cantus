@@ -6,6 +6,7 @@ use dashmap::DashMap;
 use image::{GenericImageView, RgbaImage};
 use parking_lot::Mutex;
 use rand::{Rng, SeedableRng, rngs::SmallRng};
+use rayon::prelude::*;
 use reqwest::Client;
 use rspotify::{
     AuthCodeSpotify, Config, Credentials, OAuth,
@@ -49,12 +50,12 @@ const MAX_HISTORY: usize = 20;
 
 /// Dimensions of the generated palette-based textures.
 const PALETTE_IMAGE_HEIGHT: u32 = PANEL_HEIGHT_BASE as u32;
-const PALETTE_IMAGE_WIDTH: u32 = PALETTE_IMAGE_HEIGHT * 4;
+const PALETTE_IMAGE_WIDTH: u32 = PALETTE_IMAGE_HEIGHT * 3;
 
 /// Number of refinement passes when synthesising the background texture.
-const PALETTE_PASS_COUNT: usize = 10;
+const PALETTE_PASS_COUNT: usize = 8;
 /// Maximum number of brush placements per pass.
-const PALETTE_STROKES_PER_PASS: usize = 20;
+const PALETTE_STROKES_PER_PASS: usize = 16;
 
 /// MPRIS interface identifier used for playback control.
 const PLAYER_INTERFACE: InterfaceName<'static> =
@@ -536,7 +537,9 @@ async fn ensure_image_cached(url: &str) -> Result<()> {
 
 /// Downloads and caches an image from the given URL.
 fn update_color_palettes() -> Result<()> {
+    let start = Instant::now();
     let state = PLAYBACK_STATE.lock().clone();
+    let mut pending_palettes = Vec::new();
     for track in &state.queue {
         if !TRACK_DATA_CACHE.contains_key(&track.id)
             && let Some(image) = IMAGES_CACHE.get(&track.image.url)
@@ -619,7 +622,14 @@ fn update_color_palettes() -> Result<()> {
                 track.id.hash(&mut hasher);
                 hasher.finish()
             };
+            pending_palettes.push((track.id.clone(), primary_colors, palette_seed));
+        }
+    }
+    drop(state);
 
+    let generated_data: Vec<_> = pending_palettes
+        .into_par_iter()
+        .map(|(track_id, primary_colors, palette_seed)| {
             let palette_image = ImageData {
                 data: Blob::from(generate_palette_image(&primary_colors, palette_seed)),
                 format: ImageFormat::Rgba8,
@@ -627,17 +637,19 @@ fn update_color_palettes() -> Result<()> {
                 width: PALETTE_IMAGE_WIDTH,
                 height: PALETTE_IMAGE_HEIGHT,
             };
-
-            TRACK_DATA_CACHE.insert(
-                track.id.clone(),
+            (
+                track_id,
                 TrackData {
                     primary_colors,
                     palette_image,
                 },
-            );
-        }
+            )
+        })
+        .collect();
+    for (track_id, track_data) in generated_data {
+        TRACK_DATA_CACHE.insert(track_id, track_data);
     }
-    drop(state);
+    tracing::info!("passes took {:?}", start.elapsed());
 
     Ok(())
 }
@@ -736,6 +748,11 @@ fn generate_palette_image(colors: &[[u8; 4]], seed: u64) -> Vec<u8> {
         *weight /= total_target;
     }
 
+    let color_vectors = colors
+        .iter()
+        .map(|[r, g, b, _]| [f32::from(*r), f32::from(*g), f32::from(*b)])
+        .collect::<Vec<_>>();
+
     let base = colors[0];
     for pixel in canvas.pixels_mut() {
         pixel.0 = [base[0], base[1], base[2], 255];
@@ -744,28 +761,10 @@ fn generate_palette_image(colors: &[[u8; 4]], seed: u64) -> Vec<u8> {
     // Fill with the first colour; refinement passes will rebalance ratios.
     let total_pixels = (PALETTE_IMAGE_WIDTH * PALETTE_IMAGE_HEIGHT) as f32;
 
-    let compute_ratios = |image: &RgbaImage| {
-        let mut counts = vec![0u32; colors.len()];
-        for pixel in image.pixels() {
-            let mut best_index = 0usize;
-            let mut best_distance = f32::MAX;
-            for (index, color) in colors.iter().enumerate() {
-                let dr = f32::from(pixel[0]) - f32::from(color[0]);
-                let dg = f32::from(pixel[1]) - f32::from(color[1]);
-                let db = f32::from(pixel[2]) - f32::from(color[2]);
-                let distance = dr * dr + dg * dg + db * db;
-                if distance < best_distance {
-                    best_distance = distance;
-                    best_index = index;
-                }
-            }
-            counts[best_index] += 1;
-        }
-        counts
-            .into_iter()
-            .map(|count| count as f32 / total_pixels)
-            .collect::<Vec<_>>()
-    };
+    let mut counts = vec![0u32; colors.len()];
+    let mut coverage = vec![0.0f32; colors.len()];
+    let mut per_color_strokes = vec![0u8; colors.len()];
+    let mut available_indices = Vec::with_capacity(colors.len());
 
     for pass in 0..PALETTE_PASS_COUNT {
         let base_height = lerp(
@@ -774,37 +773,55 @@ fn generate_palette_image(colors: &[[u8; 4]], seed: u64) -> Vec<u8> {
             PALETTE_IMAGE_HEIGHT as f32 * 0.3,
         );
 
+        // Count pixels for each color, to get ratios
+        counts.fill(0);
+        for pixel in canvas.pixels() {
+            let pr = f32::from(pixel[0]);
+            let pg = f32::from(pixel[1]);
+            let pb = f32::from(pixel[2]);
+            let mut best_index = 0usize;
+            let mut best_distance = f32::MAX;
+            for (index, color) in color_vectors.iter().enumerate() {
+                let dr = pr - color[0];
+                let dg = pg - color[1];
+                let db = pb - color[2];
+                let distance = dr * dr + dg * dg + db * db;
+                if distance < best_distance {
+                    best_distance = distance;
+                    best_index = index;
+                }
+            }
+            counts[best_index] += 1;
+        }
+        for (index, ratio) in coverage.iter_mut().enumerate() {
+            *ratio = counts[index] as f32 / total_pixels;
+        }
+
         // Get how far we are off in total
-        let coverage = compute_ratios(&canvas);
         let total_coverage_diff = coverage
             .iter()
             .zip(targets.iter())
             .map(|(&c, &t)| (c - t).abs())
             .sum::<f32>()
             .abs();
-        // Divvy out a portion of the PALETTE_STROKES_PER_PASS per color
-        let mut per_color_strokes: Vec<u8> = coverage
-            .iter()
-            .zip(targets.iter())
-            .map(|(&c, &t)| {
-                if total_coverage_diff == 0.0 {
-                    // Handle division by zero case (e.g., if we are perfectly covered)
-                    0
-                } else {
-                    // Calculate proportional strokes and use floor to ensure we don't exceed the pass limit
-                    (((c - t).abs() / total_coverage_diff) * PALETTE_STROKES_PER_PASS as f32)
-                        .floor() as u8
-                }
-            })
-            .collect();
+        if total_coverage_diff <= f32::EPSILON {
+            per_color_strokes.fill(0);
+        } else {
+            for (index, strokes) in per_color_strokes.iter_mut().enumerate() {
+                *strokes = (((coverage[index] - targets[index]).abs() / total_coverage_diff)
+                    * PALETTE_STROKES_PER_PASS as f32)
+                    .floor() as u8;
+            }
+        }
+
+        available_indices.clear();
+        for (index, &count) in per_color_strokes.iter().enumerate() {
+            if count > 0 {
+                available_indices.push(index);
+            }
+        }
 
         for _ in 0..PALETTE_STROKES_PER_PASS {
-            // Collect all indices of colors that still need strokes (c > 0)
-            let available_indices: Vec<usize> = per_color_strokes
-                .iter()
-                .enumerate()
-                .filter_map(|(i, &c)| (c > 0).then_some(i))
-                .collect();
             if available_indices.is_empty() {
                 break;
             }
@@ -812,30 +829,35 @@ fn generate_palette_image(colors: &[[u8; 4]], seed: u64) -> Vec<u8> {
             // Randomly select an index from the available candidates
             let index_to_pick = rng.random_range(0..available_indices.len());
             let color_index = available_indices[index_to_pick];
-            per_color_strokes[color_index] -= 1;
+            let strokes_left = &mut per_color_strokes[color_index];
+            *strokes_left = strokes_left.saturating_sub(1);
+            if *strokes_left == 0 {
+                available_indices.swap_remove(index_to_pick);
+            }
             let color = colors[color_index];
 
             // Pick a random brush
-            let template = BRUSHES[rng.random_range(0..BRUSHES.len())].clone();
-            let brush_size = (base_height * rng.random_range(0.75..1.2))
+            let template = &BRUSHES[rng.random_range(0..BRUSHES.len())];
+            let brush_factor = rng.random_range(0.75..1.2);
+            let brush_size = (base_height * brush_factor)
                 .round()
                 .clamp(6.0, PALETTE_IMAGE_HEIGHT as f32) as u32;
 
             let mut stamp = image::imageops::resize(
-                &template,
+                template,
                 brush_size,
                 brush_size,
                 image::imageops::FilterType::Triangle,
             );
 
+            let fade_factor = rng.random_range(0.55..0.9);
             for pixel in stamp.pixels_mut() {
                 let alpha = pixel[3];
                 if alpha == 0 {
                     continue;
                 }
-                let faded_alpha = ((f32::from(alpha) * rng.random_range(0.55..0.9))
-                    .round()
-                    .clamp(1.0, 255.0)) as u8;
+                let faded_alpha =
+                    ((f32::from(alpha) * fade_factor).round().clamp(1.0, 255.0)) as u8;
                 pixel[0] = color[0];
                 pixel[1] = color[1];
                 pixel[2] = color[2];
