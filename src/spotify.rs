@@ -88,11 +88,11 @@ pub static ARTIST_DATA_CACHE: LazyLock<DashMap<ArtistId<'static>, ArtistData>> =
     LazyLock::new(DashMap::new);
 static BRUSHES: LazyLock<[RgbaImage; 5]> = LazyLock::new(|| {
     let bytes = (
-        include_bytes!("../brushes/brush1.png"),
-        include_bytes!("../brushes/brush2.png"),
-        include_bytes!("../brushes/brush3.png"),
-        include_bytes!("../brushes/brush4.png"),
-        include_bytes!("../brushes/brush5.png"),
+        include_bytes!("../assets/brushes/brush1.png"),
+        include_bytes!("../assets/brushes/brush2.png"),
+        include_bytes!("../assets/brushes/brush3.png"),
+        include_bytes!("../assets/brushes/brush4.png"),
+        include_bytes!("../assets/brushes/brush5.png"),
     );
     [
         image::load_from_memory(bytes.0).unwrap().to_rgba8(),
@@ -102,6 +102,10 @@ static BRUSHES: LazyLock<[RgbaImage; 5]> = LazyLock::new(|| {
         image::load_from_memory(bytes.4).unwrap().to_rgba8(),
     ]
 });
+
+pub const RATING_PLAYLISTS: [&str; 11] = [
+    "0.0", "0.5", "1.0", "1.5", "2.0", "2.5", "3.0", "3.5", "4.0", "4.5", "5.0",
+];
 
 static HTTP_CLIENT: LazyLock<Client> = LazyLock::new(Client::new);
 static SPOTIFY_CLIENT: OnceCell<AuthCodeSpotify> = OnceCell::const_new();
@@ -172,7 +176,7 @@ pub struct Playlist {
     pub id: PlaylistId<'static>,
     pub name: String,
     pub image_url: String,
-    pub tracks: Vec<TrackId<'static>>,
+    pub tracks: HashSet<TrackId<'static>>,
     pub tracks_total: u32,
 }
 
@@ -252,14 +256,10 @@ async fn polling_task() {
         Ok(proxy) => proxy,
         Err(err) => panic!("Failed creating D-Bus proxy: {err}"),
     };
-    let mut spotify_poll_counter = 100; // Counter for Spotify API polling
 
     // Get initial playlist data
     let playlists_env = env::var("PLAYLISTS").unwrap_or_default();
     let target_playlists = playlists_env.split(',').collect::<Vec<_>>();
-    let rating_playlists = [
-        "0.0", "0.5", "1.0", "1.5", "2.0", "2.5", "3.0", "3.5", "4.0", "4.5", "5.0",
-    ];
     let playlists = SPOTIFY_CLIENT
         .get()
         .unwrap()
@@ -269,7 +269,7 @@ async fn polling_task() {
     update_playback_state(move |state| {
         for playlist in playlists.items {
             if !target_playlists.contains(&playlist.name.as_str())
-                && !rating_playlists.contains(&playlist.name.as_str())
+                && !RATING_PLAYLISTS.contains(&playlist.name.as_str())
             {
                 continue;
             }
@@ -283,12 +283,77 @@ async fn polling_task() {
                     .unwrap()
                     .url
                     .clone(),
-                tracks: Vec::new(),
+                tracks: HashSet::new(),
                 tracks_total: playlist.tracks.total,
             });
         }
     });
+    // Spawn loop to collect spotify playlist tracks
+    tokio::spawn(async move {
+        loop {
+            let spotify_client = SPOTIFY_CLIENT.get().unwrap();
+            let (current_playlist_id, current_playlist_total, current_playlist_idx) = {
+                let mut state = PLAYBACK_STATE.lock();
+                let idx = state.current_playlist_idx;
+                state.current_playlist_idx =
+                    (state.current_playlist_idx + 1) % state.playlists.len();
+                (
+                    state.playlists[idx].id.clone(),
+                    state.playlists[idx].tracks_total,
+                    idx,
+                )
+            };
+            let chunk_size = 50;
+            let num_pages = current_playlist_total.div_ceil(chunk_size) as usize;
+            let mut fetches = Vec::with_capacity(num_pages);
+            for p in 0..num_pages {
+                let id = current_playlist_id.clone();
+                fetches.push(async move {
+                    spotify_client
+                        .playlist_items_manual(
+                            id,
+                            Some("href,limit,offset,total,items(is_local,track(id))"),
+                            None,
+                            Some(chunk_size),
+                            Some((p as u32) * chunk_size),
+                        )
+                        .await
+                });
+            }
 
+            // Grab all data concurrently
+            match try_join_all(fetches).await {
+                Ok(pages) => {
+                    // Sort through playlist items and push them into the dat
+                    let mut playlist_track_ids =
+                        HashSet::with_capacity(current_playlist_total as usize);
+                    for item in pages.iter().flat_map(|page| &page.items) {
+                        // Track returned will be unknown since we add the filter
+                        if let Some(PlayableItem::Unknown(track)) = &item.track {
+                            let id = track.get("id").unwrap().as_str().unwrap();
+                            playlist_track_ids.insert(TrackId::from_id(id).unwrap().into_static());
+                        }
+                    }
+                    let new_total = pages
+                        .first()
+                        .map_or(current_playlist_total, |page| page.total);
+                    update_playback_state(move |state| {
+                        state.playlists[current_playlist_idx]
+                            .tracks
+                            .clone_from(&playlist_track_ids);
+                        state.playlists[current_playlist_idx].tracks_total = new_total;
+                    });
+                }
+                Err(err) => {
+                    error!("Failed to fetch current playback and queue: {}", err);
+                }
+            }
+
+            sleep(Duration::from_secs(8)).await;
+        }
+    });
+
+    let mut spotify_poll_counter = 100; // Counter for Spotify API polling
     loop {
         // --- MPRIS Polling Logic ---
         let (should_refresh_spotify, used_mpris_progress) =
@@ -296,7 +361,7 @@ async fn polling_task() {
 
         // --- Spotify API Polling Logic ---
         spotify_poll_counter += 1;
-        if spotify_poll_counter >= 3 || should_refresh_spotify {
+        if spotify_poll_counter >= 6 || should_refresh_spotify {
             spotify_poll_counter = 0; // Reset counter
             update_state_from_spotify(used_mpris_progress).await;
         }
@@ -401,43 +466,12 @@ async fn update_state_from_spotify(used_mpris_progress: bool) {
     let spotify_client = SPOTIFY_CLIENT.get().unwrap();
 
     // Get one playlists tracks per loop to keep them fresh
-    let (current_playlist_id, current_playlist_total, current_playlist_idx) = {
-        let mut state = PLAYBACK_STATE.lock();
-        let idx = state.current_playlist_idx;
-        state.current_playlist_idx = (state.current_playlist_idx + 1) % state.playlists.len();
-        (
-            state.playlists[idx].id.clone(),
-            state.playlists[idx].tracks_total,
-            idx,
-        )
-    };
-    let chunk_size = 50;
-    let num_pages = current_playlist_total.div_ceil(chunk_size) as usize;
-    let mut fetches = Vec::with_capacity(num_pages);
-    for p in 0..num_pages {
-        let id = current_playlist_id.clone();
-        fetches.push(async move {
-            spotify_client
-                .playlist_items_manual(
-                    id,
-                    Some("href,limit,offset,total,items(is_local,track(id))"),
-                    None,
-                    Some(chunk_size),
-                    Some((p as u32) * chunk_size),
-                )
-                .await
-        });
-    }
-    let pages_future = try_join_all(fetches);
-
-    // Grab all data concurrently
-    let (current_playback, queue, pages) = match tokio::try_join!(
+    let (current_playback, queue) = match tokio::try_join!(
         spotify_client.current_playback(None, None::<Vec<&AdditionalType>>),
         spotify_client.current_user_queue(),
-        pages_future
     ) {
-        Ok((Some(playback), queue, pages)) => (playback, queue, pages),
-        Ok((None, _, _)) => {
+        Ok((Some(playback), queue)) => (playback, queue),
+        Ok((None, _)) => {
             error!("Failed to fetch current playback from Spotify API: Returned None");
             return;
         }
@@ -446,26 +480,6 @@ async fn update_state_from_spotify(used_mpris_progress: bool) {
             return;
         }
     };
-
-    // Sort through playlist items and push them into the dat
-    let mut playlist_track_ids = Vec::with_capacity(current_playlist_total as usize);
-    let mut new_total: u32 = current_playlist_total;
-    for page in pages {
-        for item in &page.items {
-            // Track returned will be unknown since we add the filter
-            if let Some(PlayableItem::Unknown(track)) = &item.track {
-                let id = track.get("id").unwrap().as_str().unwrap();
-                playlist_track_ids.push(TrackId::from_id(id).unwrap().into_static());
-            }
-        }
-        new_total = page.total;
-    }
-    update_playback_state(move |state| {
-        state.playlists[current_playlist_idx]
-            .tracks
-            .clone_from(&playlist_track_ids);
-        state.playlists[current_playlist_idx].tracks_total = new_total;
-    });
 
     // Get current track and the upcoming queue
     let current_track = if let Some(PlayableItem::Track(track)) = queue.currently_playing {
@@ -627,7 +641,7 @@ fn update_color_palettes() -> Result<()> {
             // Get palette, try on the album image or if that doesn't get enough colours include the artist image
             let swatches = {
                 let palette: Palette<f64> = Palette::builder()
-                    .algorithm(auto_palette::Algorithm::SLIC)
+                    .algorithm(auto_palette::Algorithm::SNIC)
                     .filter(ChromaFilter { threshold: 20 })
                     .build(&auto_palette::ImageData::new(width, height, &album_image)?)?;
                 let swatches = palette

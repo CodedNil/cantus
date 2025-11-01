@@ -19,6 +19,7 @@ entry particles for songs on the right that are growing (very subtle in comparis
 shrink dependencies:
 wasm-bindgen
 wgpu optional features
+remove parley, manually layout text
 
 
 cleanup:
