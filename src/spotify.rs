@@ -19,7 +19,7 @@ use std::{
     cmp::Ordering,
     collections::{HashMap, HashSet, hash_map::DefaultHasher},
     convert::TryInto,
-    env,
+    env, fs,
     hash::{Hash, Hasher},
     sync::{
         Arc, LazyLock,
@@ -86,6 +86,7 @@ pub static TRACK_DATA_CACHE: LazyLock<DashMap<TrackId<'static>, TrackData>> =
     LazyLock::new(DashMap::new);
 pub static ARTIST_DATA_CACHE: LazyLock<DashMap<ArtistId<'static>, ArtistData>> =
     LazyLock::new(DashMap::new);
+const PLAYLIST_CACHE_PATH: &str = "/tmp/cantus_playlist_tracks.json";
 static BRUSHES: LazyLock<[RgbaImage; 5]> = LazyLock::new(|| {
     let bytes = (
         include_bytes!("../assets/brushes/brush1.png"),
@@ -211,6 +212,57 @@ where
     update(&mut state);
 }
 
+fn load_cached_playlist_tracks() -> HashMap<PlaylistId<'static>, HashSet<TrackId<'static>>> {
+    let bytes = match fs::read(PLAYLIST_CACHE_PATH) {
+        Ok(bytes) => bytes,
+        Err(err) => {
+            warn!("Failed to read playlist cache at {PLAYLIST_CACHE_PATH}: {err}");
+            return HashMap::new();
+        }
+    };
+
+    match serde_json::from_slice::<HashMap<PlaylistId<'static>, HashSet<TrackId<'static>>>>(&bytes)
+    {
+        Ok(map) => map,
+        Err(err) => {
+            warn!("Failed to parse playlist cache at {PLAYLIST_CACHE_PATH}: {err}");
+            HashMap::new()
+        }
+    }
+}
+
+fn persist_playlist_cache() {
+    let state = PLAYBACK_STATE.lock();
+    if state.playlists.is_empty() {
+        return;
+    }
+    let cache_payload: HashMap<PlaylistId<'static>, HashSet<TrackId<'static>>> = state
+        .playlists
+        .iter()
+        .map(|playlist| {
+            (
+                playlist.id.clone_static(),
+                playlist.tracks.iter().map(TrackId::clone_static).collect(),
+            )
+        })
+        .collect();
+    drop(state);
+
+    match serde_json::to_vec(&cache_payload) {
+        Ok(serialized) => {
+            if let Err(err) = fs::write(PLAYLIST_CACHE_PATH, serialized) {
+                warn!("Failed to write playlist cache at {PLAYLIST_CACHE_PATH}: {err}");
+            }
+        }
+        Err(err) => {
+            warn!(
+                "Failed to serialise playlist cache for {} playlists: {err}",
+                cache_payload.len(),
+            );
+        }
+    }
+}
+
 /// Init the spotify client
 pub async fn init() {
     // Initialize Spotify client with credentials and OAuth scopes
@@ -260,6 +312,7 @@ async fn polling_task() {
     // Get initial playlist data
     let playlists_env = env::var("PLAYLISTS").unwrap_or_default();
     let target_playlists = playlists_env.split(',').collect::<Vec<_>>();
+    let mut cached_playlist_tracks = load_cached_playlist_tracks();
     let playlists = SPOTIFY_CLIENT
         .get()
         .unwrap()
@@ -283,7 +336,9 @@ async fn polling_task() {
                     .unwrap()
                     .url
                     .clone(),
-                tracks: HashSet::new(),
+                tracks: cached_playlist_tracks
+                    .remove(&playlist.id)
+                    .unwrap_or_default(),
                 tracks_total: playlist.tracks.total,
             });
         }
@@ -343,6 +398,7 @@ async fn polling_task() {
                             .clone_from(&playlist_track_ids);
                         state.playlists[current_playlist_idx].tracks_total = new_total;
                     });
+                    persist_playlist_cache();
                 }
                 Err(err) => {
                     error!("Failed to fetch current playback and queue: {}", err);

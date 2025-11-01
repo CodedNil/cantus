@@ -9,6 +9,7 @@ switching from the lower to full rounded corner when its cropped
 smoothly enter new songs into the right side, dont crop them in, have one waiting then in a smooth quick animation it pops in like a bubble
 pulse animation when play or pause like zen
 maybe make currently playing song have an animated glow outline, when the song is changed the new one should do have a heavy pulse
+for the background animation, make it take into account the playlists too, ratings + others, make the function creating them cached based on included artwork so it regenerates as playlists are pulled/changed
 
 
 particles:
