@@ -180,7 +180,9 @@ where
     update(&mut state);
 }
 
-fn load_cached_playlist_tracks() -> HashMap<PlaylistId<'static>, HashSet<TrackId<'static>>> {
+type PlaylistCache = HashMap<PlaylistId<'static>, (String, HashSet<TrackId<'static>>)>;
+
+fn load_cached_playlist_tracks() -> PlaylistCache {
     let bytes = match fs::read(PLAYLIST_CACHE_PATH) {
         Ok(bytes) => bytes,
         Err(err) => {
@@ -189,8 +191,7 @@ fn load_cached_playlist_tracks() -> HashMap<PlaylistId<'static>, HashSet<TrackId
         }
     };
 
-    match serde_json::from_slice::<HashMap<PlaylistId<'static>, HashSet<TrackId<'static>>>>(&bytes)
-    {
+    match serde_json::from_slice::<PlaylistCache>(&bytes) {
         Ok(map) => map,
         Err(err) => {
             warn!("Failed to parse playlist cache at {PLAYLIST_CACHE_PATH}: {err}");
@@ -204,13 +205,16 @@ fn persist_playlist_cache() {
     if state.playlists.is_empty() {
         return;
     }
-    let cache_payload: HashMap<PlaylistId<'static>, HashSet<TrackId<'static>>> = state
+    let cache_payload: PlaylistCache = state
         .playlists
         .iter()
         .map(|playlist| {
             (
                 playlist.id.clone_static(),
-                playlist.tracks.iter().map(TrackId::clone_static).collect(),
+                (
+                    playlist.snapshot_id.clone(),
+                    playlist.tracks.iter().map(TrackId::clone_static).collect(),
+                ),
             )
         })
         .collect();
@@ -623,21 +627,24 @@ async fn poll_playlists() {
             target_playlists.contains(&playlist.name.as_str())
                 || RATING_PLAYLISTS.contains(&playlist.name.as_str())
         })
-        .map(|playlist| Playlist {
-            id: playlist.id.clone(),
-            name: playlist.name,
-            image_url: playlist
-                .images
-                .iter()
-                .min_by_key(|img| img.width)
-                .unwrap()
-                .url
-                .clone(),
-            tracks: cached_playlist_tracks
+        .map(|playlist| {
+            let cached = cached_playlist_tracks
                 .remove(&playlist.id)
-                .unwrap_or_default(),
-            tracks_total: playlist.tracks.total,
-            snapshot_id: playlist.snapshot_id.clone(),
+                .unwrap_or_default();
+            Playlist {
+                id: playlist.id.clone(),
+                name: playlist.name,
+                image_url: playlist
+                    .images
+                    .iter()
+                    .min_by_key(|img| img.width)
+                    .unwrap()
+                    .url
+                    .clone(),
+                tracks: cached.1,
+                tracks_total: playlist.tracks.total,
+                snapshot_id: cached.0,
+            }
         })
         .collect();
     // Push the data to the global state
