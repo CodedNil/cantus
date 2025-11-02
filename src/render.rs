@@ -419,16 +419,20 @@ impl CantusLayer {
                     .is_some_and(|playlist| playlist.tracks.contains(&track.id))
             })
             .map_or(0, |index| index);
-        let non_rating_playlists: Vec<Playlist> = if is_current {
-            playlists
-                .iter()
-                .filter(|&(key, _)| (!RATING_PLAYLISTS.contains(&key.as_str())))
-                .map(|(_, playlist)| playlist.clone())
-                .sorted_by(|a, b| a.name.cmp(&b.name))
-                .collect()
-        } else {
-            Vec::new()
-        };
+        let non_rating_playlists: Vec<(Playlist, bool)> = playlists
+            .iter()
+            .filter_map(|(key, playlist)| {
+                let is_rating = RATING_PLAYLISTS.contains(&key.as_str());
+                let contained = playlist.tracks.contains(&track.id);
+                let should_include = if is_current {
+                    !is_rating
+                } else {
+                    !is_rating && contained
+                };
+                should_include.then(|| (playlist.clone(), contained))
+            })
+            .sorted_by(|(a, _), (b, _)| a.name.cmp(&b.name))
+            .collect();
         let full_stars = track_rating_index / 2;
         let has_half = track_rating_index % 2 == 1;
 
@@ -471,17 +475,32 @@ impl CantusLayer {
                     self.scene
                         .append(&STAR_IMAGES[3], Some(transform * transform_scale));
                 }
-            } else if let Some(playlist_image) =
-                IMAGES_CACHE.get(&non_rating_playlists[i - 5].image_url)
+            } else if let Some((playlist, is_contained)) = non_rating_playlists.get(i - 5)
+                && let Some(playlist_image) = IMAGES_CACHE.get(&playlist.image_url)
             {
                 let image_height = f64::from(playlist_image.width);
+                self.scene.push_clip_layer(
+                    transform,
+                    &RoundedRect::new(0.0, 0.0, icon_size, icon_size, 10.0),
+                );
                 self.scene.fill(
                     Fill::NonZero,
                     transform * Affine::scale(icon_size / image_height),
                     &ImageBrush::new(playlist_image.clone()),
                     None,
-                    &RoundedRect::new(0.0, 0.0, image_height, image_height, 6.0),
+                    &Rect::new(0.0, 0.0, image_height, image_height),
                 );
+                if !is_contained {
+                    // If not contained, grey it out
+                    self.scene.fill(
+                        Fill::NonZero,
+                        transform,
+                        Color::from_rgba8(60, 60, 60, 180),
+                        None,
+                        &Rect::new(0.0, 0.0, icon_size, icon_size),
+                    );
+                }
+                self.scene.pop_layer();
             }
         }
     }
