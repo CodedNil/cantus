@@ -1,22 +1,17 @@
 use crate::{
     CantusLayer, PANEL_HEIGHT_BASE, PANEL_WIDTH,
     background::WarpBackground,
-    spotify::{IMAGES_CACHE, PLAYBACK_STATE, RATING_PLAYLISTS, TRACK_DATA_CACHE, Track},
+    spotify::{IMAGES_CACHE, PLAYBACK_STATE, Playlist, RATING_PLAYLISTS, TRACK_DATA_CACHE, Track},
 };
+use itertools::Itertools;
 use parley::{
     Alignment, FontFamily, FontStack, FontWeight, Layout, layout::PositionedLayoutItem,
     style::StyleProperty,
 };
 use rand::Rng;
-use rspotify::model::TrackId;
-use std::{
-    collections::{HashMap, HashSet},
-    ops::Range,
-    sync::LazyLock,
-    time::Instant,
-};
+use std::{collections::HashMap, ops::Range, sync::LazyLock, time::Instant};
 use vello::{
-    Glyph,
+    Glyph, Scene,
     kurbo::{Affine, Rect, RoundedRect, RoundedRectRadii},
     peniko::{Color, Fill, ImageBrush, ImageData},
 };
@@ -50,20 +45,33 @@ const SPARK_LENGTH_RANGE: Range<f64> = 6.0..10.0;
 const SPARK_THICKNESS_RANGE: Range<f64> = 2.0..4.0;
 
 /// Star images
-static STAR_IMAGES: LazyLock<[usvg::Tree; 3]> = LazyLock::new(|| {
+static STAR_IMAGES: LazyLock<[Scene; 4]> = LazyLock::new(|| {
     let full_svg = include_str!("../assets/star.svg");
     let half_svg = include_str!("../assets/star-half.svg");
     let options = usvg::Options::default();
 
-    let full_gray_svg = full_svg.replace("fill=\"none\"", "fill=\"#444444\"");
-    let full_yellow_svg = full_svg.replace("fill=\"none\"", "fill=\"#ffff99\"");
-    let half_yellow_svg = half_svg.replace("fill=\"none\"", "fill=\"#ffff99\"");
+    let full_gray = full_svg.replace("fill=\"none\"", "fill=\"#555555\"");
+    let full_border = full_svg.replace("fill=\"none\"", "fill=\"#000000\"");
+    let full_yellow = full_svg.replace("fill=\"none\"", "fill=\"#dcb400\"");
+    let half_yellow = half_svg.replace("fill=\"none\"", "fill=\"#dcb400\"");
 
     [
-        usvg::Tree::from_data(full_gray_svg.as_bytes(), &options).unwrap(),
-        usvg::Tree::from_data(full_yellow_svg.as_bytes(), &options).unwrap(),
-        usvg::Tree::from_data(half_yellow_svg.as_bytes(), &options).unwrap(),
+        vello_svg::render_tree(&usvg::Tree::from_data(full_gray.as_bytes(), &options).unwrap()),
+        vello_svg::render_tree(&usvg::Tree::from_data(full_border.as_bytes(), &options).unwrap()),
+        vello_svg::render_tree(&usvg::Tree::from_data(full_yellow.as_bytes(), &options).unwrap()),
+        vello_svg::render_tree(&usvg::Tree::from_data(half_yellow.as_bytes(), &options).unwrap()),
     ]
+});
+static STAR_IMAGE_SIZE: LazyLock<f64> = LazyLock::new(|| {
+    f64::from(
+        usvg::Tree::from_data(
+            include_bytes!("../assets/star-half.svg"),
+            &usvg::Options::default(),
+        )
+        .unwrap()
+        .size()
+        .width(),
+    )
 });
 
 /// Build the scene for rendering.
@@ -83,10 +91,10 @@ impl CantusLayer {
         let current_index = playback_state.queue_index.min(queue.len() - 1);
 
         // Get playlists data as a HashMap
-        let playlists: HashMap<String, HashSet<TrackId<'static>>> = playback_state
+        let playlists: HashMap<String, Playlist> = playback_state
             .playlists
             .into_iter()
-            .map(|p| (p.name.clone(), p.tracks))
+            .map(|p| (p.name.clone(), p))
             .collect();
 
         // Lerp the progress based on when the data was last updated, get the start time of the current track
@@ -179,7 +187,7 @@ impl CantusLayer {
         px_per_ms: f64,
         height: f64,
         seconds_until_start: f64,
-        playlists: &HashMap<String, HashSet<TrackId<'static>>>,
+        playlists: &HashMap<String, Playlist>,
     ) {
         let visible_start_ms = track_start_ms.max(TIMELINE_START_MS);
         let visible_end_ms = track_end_ms.min(timeline_end_ms);
@@ -324,7 +332,7 @@ impl CantusLayer {
         // Get text layouts for bottom row of text
         let font_size = 10.5;
         let font_weight = FontWeight::BOLD;
-        let text_height = (height * 0.6).floor();
+        let text_height = (height * 0.57).floor();
 
         let artist_text = &track.artist_name;
         let artist_layout = self.layout_text(artist_text, font_size, font_weight);
@@ -405,44 +413,77 @@ impl CantusLayer {
         }
 
         // --- Star ratings and favourite playlists ---
-        let track_ratings: Vec<f32> = RATING_PLAYLISTS
+        let track_rating_index = RATING_PLAYLISTS
             .iter()
-            .filter_map(|&rating_key| {
-                let is_rated = playlists
+            .position(|&rating_key| {
+                playlists
                     .get(rating_key)
-                    .is_some_and(|playlist| playlist.contains(&track.id));
-                if is_rated {
-                    rating_key.parse::<f32>().ok()
-                } else {
-                    None
-                }
+                    .is_some_and(|playlist| playlist.tracks.contains(&track.id))
             })
-            .collect();
-        let max_rating = track_ratings.iter().copied().fold(0.0f32, f32::max);
-        let full_stars = max_rating.floor() as usize;
-        let has_half = max_rating.fract() >= 0.5;
+            .map_or(0, |index| index);
+        let non_rating_playlists: Vec<Playlist> = if is_current {
+            playlists
+                .iter()
+                .filter(|&(key, _)| (!RATING_PLAYLISTS.contains(&key.as_str())))
+                .map(|(_, playlist)| playlist.clone())
+                .sorted_by(|a, b| a.name.cmp(&b.name))
+                .collect()
+        } else {
+            Vec::new()
+        };
+        let full_stars = track_rating_index / 2;
+        let has_half = track_rating_index % 2 == 1;
 
-        let star_size = 12.0 * self.scale_factor;
-        let star_spacing = 2.0 * self.scale_factor;
-        let svg_base_size = f64::from(STAR_IMAGES[0].size().width());
+        let icon_size = 14.0 * self.scale_factor;
+        let star_size_border = 1.0 * self.scale_factor;
+        let icon_spacing = 2.0 * self.scale_factor;
+        let num_icons = 5 + non_rating_playlists.len();
 
-        for i in 0..5 {
+        for i in 0..num_icons {
             let transform = Affine::translate((
                 // Horizontally align to the center of the track canvas
-                pos_x + width * 0.5 + ((i as f64 - 2.5) * (star_size + star_spacing)),
-                height * 0.75,
-            )) * Affine::scale(star_size / svg_base_size);
+                pos_x
+                    + width * 0.5
+                    + ((i as f64 - (num_icons as f64 / 2.0)) * (icon_size + icon_spacing)),
+                height * 0.8,
+            ));
+            if i < 5 {
+                // Border white star
+                self.scene.append(
+                    &STAR_IMAGES[1],
+                    Some(
+                        transform
+                            * Affine::translate((-star_size_border, -star_size_border))
+                            * Affine::scale(
+                                (icon_size + star_size_border * 2.0) / *STAR_IMAGE_SIZE,
+                            ),
+                    ),
+                );
 
-            if i < full_stars {
-                self.scene
-                    .append(&vello_svg::render_tree(&STAR_IMAGES[1]), Some(transform));
-            } else {
-                self.scene
-                    .append(&vello_svg::render_tree(&STAR_IMAGES[0]), Some(transform));
-            }
-            if (i == full_stars) && has_half {
-                self.scene
-                    .append(&vello_svg::render_tree(&STAR_IMAGES[2]), Some(transform));
+                // Foreground grey/yellow star
+                let transform_scale = Affine::scale(icon_size / *STAR_IMAGE_SIZE);
+                if i < full_stars {
+                    self.scene
+                        .append(&STAR_IMAGES[2], Some(transform * transform_scale));
+                } else {
+                    self.scene
+                        .append(&STAR_IMAGES[0], Some(transform * transform_scale));
+                }
+                if (i == full_stars) && has_half {
+                    self.scene
+                        .append(&STAR_IMAGES[3], Some(transform * transform_scale));
+                }
+            } else if let Some(playlist_image) =
+                IMAGES_CACHE.get(&non_rating_playlists[i - 5].image_url)
+            {
+                let image_height = f64::from(playlist_image.width);
+                self.scene.fill(
+                    Fill::NonZero,
+                    transform * Affine::scale(icon_size / image_height),
+                    &ImageBrush::new(playlist_image.clone()),
+                    None,
+                    &RoundedRect::new(0.0, 0.0, image_height, image_height, 6.0),
+                );
             }
         }
     }

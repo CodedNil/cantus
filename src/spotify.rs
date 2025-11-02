@@ -5,6 +5,7 @@ use chrono::TimeDelta;
 use dashmap::DashMap;
 use futures::future::try_join_all;
 use image::{GenericImageView, RgbaImage};
+use itertools::Itertools;
 use parking_lot::Mutex;
 use rand::{Rng, SeedableRng, rngs::SmallRng};
 use rayon::prelude::*;
@@ -313,36 +314,52 @@ async fn polling_task() {
     let playlists_env = env::var("PLAYLISTS").unwrap_or_default();
     let target_playlists = playlists_env.split(',').collect::<Vec<_>>();
     let mut cached_playlist_tracks = load_cached_playlist_tracks();
-    let playlists = SPOTIFY_CLIENT
+    let new_playlists: Vec<Playlist> = SPOTIFY_CLIENT
         .get()
         .unwrap()
         .current_user_playlists_manual(Some(50), None)
         .await
-        .unwrap();
-    update_playback_state(move |state| {
-        for playlist in playlists.items {
-            if !target_playlists.contains(&playlist.name.as_str())
-                && !RATING_PLAYLISTS.contains(&playlist.name.as_str())
-            {
-                continue;
-            }
-            state.playlists.push(Playlist {
-                id: playlist.id.clone(),
-                name: playlist.name.clone(),
-                image_url: playlist
-                    .images
-                    .iter()
-                    .min_by_key(|img| img.width.unwrap_or_default())
-                    .unwrap()
-                    .url
-                    .clone(),
-                tracks: cached_playlist_tracks
-                    .remove(&playlist.id)
-                    .unwrap_or_default(),
-                tracks_total: playlist.tracks.total,
+        .unwrap()
+        .items
+        .into_iter()
+        .filter(|playlist| {
+            target_playlists.contains(&playlist.name.as_str())
+                || RATING_PLAYLISTS.contains(&playlist.name.as_str())
+        })
+        .map(|playlist| Playlist {
+            id: playlist.id.clone(),
+            name: playlist.name,
+            image_url: playlist
+                .images
+                .iter()
+                .min_by_key(|img| img.width.unwrap_or_default())
+                .unwrap()
+                .url
+                .clone(),
+            tracks: cached_playlist_tracks
+                .remove(&playlist.id)
+                .unwrap_or_default(),
+            tracks_total: playlist.tracks.total,
+        })
+        .collect();
+    update_playback_state(|state| {
+        state.playlists.clone_from(&new_playlists);
+    });
+
+    // Download all the playlist images
+    tokio::spawn(async move {
+        let mut set = JoinSet::new();
+        for url in new_playlists.iter().map(|p| p.image_url.clone()) {
+            set.spawn(async move {
+                if let Err(err) = ensure_image_cached(url.as_str()).await {
+                    warn!("failed to cache image {url}: {err}");
+                }
             });
         }
+        // Concurrently run all tasks
+        while set.join_next().await.is_some() {}
     });
+
     // Spawn loop to collect spotify playlist tracks
     tokio::spawn(async move {
         loop {
@@ -405,7 +422,7 @@ async fn polling_task() {
                 }
             }
 
-            sleep(Duration::from_secs(8)).await;
+            sleep(Duration::from_secs(12)).await;
         }
     });
 
@@ -417,7 +434,7 @@ async fn polling_task() {
 
         // --- Spotify API Polling Logic ---
         spotify_poll_counter += 1;
-        if spotify_poll_counter >= 6 || should_refresh_spotify {
+        if spotify_poll_counter >= 8 || should_refresh_spotify {
             spotify_poll_counter = 0; // Reset counter
             update_state_from_spotify(used_mpris_progress).await;
         }
@@ -744,7 +761,7 @@ fn update_color_palettes() -> Result<()> {
 
             // Sort out the ratios
             let total_ratio_sum: f64 = swatches.iter().map(auto_palette::Swatch::ratio).sum();
-            let mut primary_colors = swatches
+            let primary_colors = swatches
                 .iter()
                 .map(|s| {
                     let rgb = s.color().to_rgb();
@@ -756,8 +773,8 @@ fn update_color_palettes() -> Result<()> {
                     );
                     [rgb.r, rgb.g, rgb.b, (lerped_ratio * 255.0).round() as u8]
                 })
+                .sorted_by(|a, b| b[3].cmp(&a[3]))
                 .collect::<Vec<_>>();
-            primary_colors.sort_by(|a, b| b[3].cmp(&a[3]));
 
             let palette_seed = {
                 let mut hasher = DefaultHasher::new();
