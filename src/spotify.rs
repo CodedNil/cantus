@@ -1,14 +1,9 @@
-use crate::PANEL_HEIGHT_BASE;
 use anyhow::Result;
-use auto_palette::Palette;
 use chrono::TimeDelta;
 use dashmap::DashMap;
 use futures::future::try_join_all;
-use image::{GenericImageView, RgbaImage};
-use itertools::Itertools;
+use image::GenericImageView;
 use parking_lot::Mutex;
-use rand::{Rng, SeedableRng, rngs::SmallRng};
-use rayon::prelude::*;
 use reqwest::Client;
 use rspotify::{
     AuthCodeSpotify, Config, Credentials, OAuth,
@@ -18,10 +13,9 @@ use rspotify::{
 };
 use std::{
     cmp::Ordering,
-    collections::{HashMap, HashSet, hash_map::DefaultHasher},
+    collections::{HashMap, HashSet},
     convert::TryInto,
     env, fs,
-    hash::{Hash, Hasher},
     sync::{
         Arc, LazyLock,
         atomic::{AtomicBool, Ordering as AtomicOrdering},
@@ -45,20 +39,10 @@ use zbus::{
     zvariant::OwnedValue,
 };
 
-/// Number of swatches to use in colour palette generation.
-const NUM_SWATCHES: usize = 4;
+use crate::background::update_color_palettes;
 
 /// Maximum number of historical tracks to keep before trimming.
 const MAX_HISTORY: usize = 20;
-
-/// Dimensions of the generated palette-based textures.
-const PALETTE_IMAGE_HEIGHT: u32 = PANEL_HEIGHT_BASE as u32;
-const PALETTE_IMAGE_WIDTH: u32 = PALETTE_IMAGE_HEIGHT * 3;
-
-/// Number of refinement passes when synthesising the background texture.
-const PALETTE_PASS_COUNT: usize = 8;
-/// Maximum number of brush placements per pass.
-const PALETTE_STROKES_PER_PASS: usize = 16;
 
 /// MPRIS interface identifier used for playback control.
 const PLAYER_INTERFACE: InterfaceName<'static> =
@@ -79,7 +63,6 @@ pub static PLAYBACK_STATE: LazyLock<Arc<Mutex<PlaybackState>>> = LazyLock::new(|
         queue_index: 0,
         current_context: None,
         playlists: Vec::new(),
-        current_playlist_idx: 0,
     }))
 });
 pub static IMAGES_CACHE: LazyLock<DashMap<String, ImageData>> = LazyLock::new(DashMap::new);
@@ -88,22 +71,6 @@ pub static TRACK_DATA_CACHE: LazyLock<DashMap<TrackId<'static>, TrackData>> =
 pub static ARTIST_DATA_CACHE: LazyLock<DashMap<ArtistId<'static>, ArtistData>> =
     LazyLock::new(DashMap::new);
 const PLAYLIST_CACHE_PATH: &str = "/tmp/cantus_playlist_tracks.json";
-static BRUSHES: LazyLock<[RgbaImage; 5]> = LazyLock::new(|| {
-    let bytes = (
-        include_bytes!("../assets/brushes/brush1.png"),
-        include_bytes!("../assets/brushes/brush2.png"),
-        include_bytes!("../assets/brushes/brush3.png"),
-        include_bytes!("../assets/brushes/brush4.png"),
-        include_bytes!("../assets/brushes/brush5.png"),
-    );
-    [
-        image::load_from_memory(bytes.0).unwrap().to_rgba8(),
-        image::load_from_memory(bytes.1).unwrap().to_rgba8(),
-        image::load_from_memory(bytes.2).unwrap().to_rgba8(),
-        image::load_from_memory(bytes.3).unwrap().to_rgba8(),
-        image::load_from_memory(bytes.4).unwrap().to_rgba8(),
-    ]
-});
 
 pub const RATING_PLAYLISTS: [&str; 11] = [
     "0.0", "0.5", "1.0", "1.5", "2.0", "2.5", "3.0", "3.5", "4.0", "4.5", "5.0",
@@ -143,7 +110,6 @@ pub struct PlaybackState {
     pub queue_index: usize,
     pub current_context: Option<Context>,
     pub playlists: Vec<Playlist>,
-    pub current_playlist_idx: usize,
 }
 
 #[derive(Debug, Clone)]
@@ -180,6 +146,7 @@ pub struct Playlist {
     pub image_url: String,
     pub tracks: HashSet<TrackId<'static>>,
     pub tracks_total: u32,
+    snapshot_id: String,
 }
 
 impl Track {
@@ -195,7 +162,7 @@ impl Track {
                 .album
                 .images
                 .into_iter()
-                .min_by_key(|img| img.width.unwrap())
+                .min_by_key(|img| img.width)
                 .map(|img| img.url)
                 .unwrap(),
             release_date: track.album.release_date.unwrap(),
@@ -310,120 +277,8 @@ async fn polling_task() {
         Err(err) => panic!("Failed creating D-Bus proxy: {err}"),
     };
 
-    // Get initial playlist data
-    let playlists_env = env::var("PLAYLISTS").unwrap_or_default();
-    let target_playlists = playlists_env.split(',').collect::<Vec<_>>();
-    let mut cached_playlist_tracks = load_cached_playlist_tracks();
-    let new_playlists: Vec<Playlist> = SPOTIFY_CLIENT
-        .get()
-        .unwrap()
-        .current_user_playlists_manual(Some(50), None)
-        .await
-        .unwrap()
-        .items
-        .into_iter()
-        .filter(|playlist| {
-            target_playlists.contains(&playlist.name.as_str())
-                || RATING_PLAYLISTS.contains(&playlist.name.as_str())
-        })
-        .map(|playlist| Playlist {
-            id: playlist.id.clone(),
-            name: playlist.name,
-            image_url: playlist
-                .images
-                .iter()
-                .min_by_key(|img| img.width.unwrap_or_default())
-                .unwrap()
-                .url
-                .clone(),
-            tracks: cached_playlist_tracks
-                .remove(&playlist.id)
-                .unwrap_or_default(),
-            tracks_total: playlist.tracks.total,
-        })
-        .collect();
-    update_playback_state(|state| {
-        state.playlists.clone_from(&new_playlists);
-    });
-
-    // Download all the playlist images
     tokio::spawn(async move {
-        let mut set = JoinSet::new();
-        for url in new_playlists.iter().map(|p| p.image_url.clone()) {
-            set.spawn(async move {
-                if let Err(err) = ensure_image_cached(url.as_str()).await {
-                    warn!("failed to cache image {url}: {err}");
-                }
-            });
-        }
-        // Concurrently run all tasks
-        while set.join_next().await.is_some() {}
-    });
-
-    // Spawn loop to collect spotify playlist tracks
-    tokio::spawn(async move {
-        loop {
-            let spotify_client = SPOTIFY_CLIENT.get().unwrap();
-            let (current_playlist_id, current_playlist_total, current_playlist_idx) = {
-                let mut state = PLAYBACK_STATE.lock();
-                let idx = state.current_playlist_idx;
-                state.current_playlist_idx =
-                    (state.current_playlist_idx + 1) % state.playlists.len();
-                (
-                    state.playlists[idx].id.clone(),
-                    state.playlists[idx].tracks_total,
-                    idx,
-                )
-            };
-            let chunk_size = 50;
-            let num_pages = current_playlist_total.div_ceil(chunk_size) as usize;
-            let mut fetches = Vec::with_capacity(num_pages);
-            for p in 0..num_pages {
-                let id = current_playlist_id.clone();
-                fetches.push(async move {
-                    spotify_client
-                        .playlist_items_manual(
-                            id,
-                            Some("href,limit,offset,total,items(is_local,track(id))"),
-                            None,
-                            Some(chunk_size),
-                            Some((p as u32) * chunk_size),
-                        )
-                        .await
-                });
-            }
-
-            // Grab all data concurrently
-            match try_join_all(fetches).await {
-                Ok(pages) => {
-                    // Sort through playlist items and push them into the dat
-                    let mut playlist_track_ids =
-                        HashSet::with_capacity(current_playlist_total as usize);
-                    for item in pages.iter().flat_map(|page| &page.items) {
-                        // Track returned will be unknown since we add the filter
-                        if let Some(PlayableItem::Unknown(track)) = &item.track {
-                            let id = track.get("id").unwrap().as_str().unwrap();
-                            playlist_track_ids.insert(TrackId::from_id(id).unwrap().into_static());
-                        }
-                    }
-                    let new_total = pages
-                        .first()
-                        .map_or(current_playlist_total, |page| page.total);
-                    update_playback_state(move |state| {
-                        state.playlists[current_playlist_idx]
-                            .tracks
-                            .clone_from(&playlist_track_ids);
-                        state.playlists[current_playlist_idx].tracks_total = new_total;
-                    });
-                    persist_playlist_cache();
-                }
-                Err(err) => {
-                    error!("Failed to fetch current playback and queue: {}", err);
-                }
-            }
-
-            sleep(Duration::from_secs(12)).await;
-        }
+        poll_playlists().await;
     });
 
     let mut spotify_poll_counter = 100; // Counter for Spotify API polling
@@ -575,13 +430,8 @@ async fn update_state_from_spotify(used_mpris_progress: bool) {
         .collect::<HashSet<_>>();
     let missing_artists = new_queue
         .iter()
-        .filter_map(|track| {
-            if ARTIST_DATA_CACHE.contains_key(&track.artist_id) {
-                None
-            } else {
-                Some(track.artist_id.clone())
-            }
-        })
+        .filter(|&track| !ARTIST_DATA_CACHE.contains_key(&track.artist_id))
+        .map(|track| track.artist_id.clone())
         .collect::<HashSet<_>>();
     if !missing_urls.is_empty() || !missing_artists.is_empty() {
         tokio::spawn(async move {
@@ -605,7 +455,7 @@ async fn update_state_from_spotify(used_mpris_progress: bool) {
                 let artist_image = artist
                     .images
                     .into_iter()
-                    .min_by_key(|img| img.width.unwrap())
+                    .min_by_key(|img| img.width)
                     .unwrap();
                 ARTIST_DATA_CACHE.insert(
                     artist.id,
@@ -635,7 +485,7 @@ async fn update_state_from_spotify(used_mpris_progress: bool) {
     }
 
     // Update the playback state
-    update_playback_state(move |state| {
+    update_playback_state(|state| {
         if state.current_context == current_playback.context
             && let Some(new_index) = state
                 .queue
@@ -692,123 +542,6 @@ async fn ensure_image_cached(url: &str) -> Result<()> {
             height,
         },
     );
-    Ok(())
-}
-
-/// Downloads and caches an image from the given URL.
-fn update_color_palettes() -> Result<()> {
-    let state = PLAYBACK_STATE.lock().clone();
-    let mut pending_palettes = Vec::new();
-    for track in &state.queue {
-        if !TRACK_DATA_CACHE.contains_key(&track.id)
-            && let Some(image) = IMAGES_CACHE.get(&track.image_url)
-            && let Some(artist_image_ref) = ARTIST_DATA_CACHE.get(&track.artist_id)
-            && let Some(artist_image) = IMAGES_CACHE.get(&artist_image_ref.image_url)
-        {
-            // Merge the images side by side
-            let width = image.width;
-            let height = image.height;
-            let album_image =
-                RgbaImage::from_raw(width, height, image.data.data().to_vec()).unwrap();
-
-            // Get palette, try on the album image or if that doesn't get enough colours include the artist image
-            let swatches = {
-                let palette: Palette<f64> = Palette::builder()
-                    .algorithm(auto_palette::Algorithm::SNIC)
-                    .filter(ChromaFilter { threshold: 20 })
-                    .build(&auto_palette::ImageData::new(width, height, &album_image)?)?;
-                let swatches = palette
-                    .find_swatches_with_theme(NUM_SWATCHES, auto_palette::Theme::Light)
-                    .or_else(|_| palette.find_swatches(NUM_SWATCHES))?;
-                if swatches.len() < NUM_SWATCHES {
-                    // Generate a new image with the artist image
-                    let artist_new_width = (width as f32 * 0.1).round() as u32;
-                    let mut new_img = RgbaImage::new(width + artist_new_width, height);
-                    image::imageops::overlay(&mut new_img, &album_image, 0, 0);
-                    let artist_img_resized = image::imageops::resize(
-                        &image::RgbaImage::from_raw(
-                            artist_image.width,
-                            artist_image.height,
-                            artist_image.data.data().to_vec(),
-                        )
-                        .unwrap(),
-                        artist_new_width,
-                        height,
-                        image::imageops::FilterType::Triangle,
-                    );
-                    image::imageops::overlay(
-                        &mut new_img,
-                        &artist_img_resized,
-                        i64::from(width),
-                        0,
-                    );
-
-                    let palette: Palette<f64> = Palette::builder()
-                        .algorithm(auto_palette::Algorithm::SLIC)
-                        .filter(ChromaFilter { threshold: 20 })
-                        .build(&auto_palette::ImageData::new(
-                            width + artist_new_width,
-                            height,
-                            &new_img,
-                        )?)?;
-                    palette
-                        .find_swatches_with_theme(NUM_SWATCHES, auto_palette::Theme::Light)
-                        .or_else(|_| palette.find_swatches(NUM_SWATCHES))?
-                } else {
-                    swatches
-                }
-            };
-
-            // Sort out the ratios
-            let total_ratio_sum: f64 = swatches.iter().map(auto_palette::Swatch::ratio).sum();
-            let primary_colors = swatches
-                .iter()
-                .map(|s| {
-                    let rgb = s.color().to_rgb();
-                    // Sometimes ratios can be tiny like 0.05%, this brings them a little closer to even
-                    let lerped_ratio = lerp(
-                        0.5,
-                        (s.ratio() / total_ratio_sum) as f32,
-                        1.0 / swatches.len() as f32,
-                    );
-                    [rgb.r, rgb.g, rgb.b, (lerped_ratio * 255.0).round() as u8]
-                })
-                .sorted_by(|a, b| b[3].cmp(&a[3]))
-                .collect::<Vec<_>>();
-
-            let palette_seed = {
-                let mut hasher = DefaultHasher::new();
-                track.id.hash(&mut hasher);
-                hasher.finish()
-            };
-            pending_palettes.push((track.id.clone(), primary_colors, palette_seed));
-        }
-    }
-    drop(state);
-
-    let generated_data: Vec<_> = pending_palettes
-        .into_par_iter()
-        .map(|(track_id, primary_colors, palette_seed)| {
-            let palette_image = ImageData {
-                data: Blob::from(generate_palette_image(&primary_colors, palette_seed)),
-                format: ImageFormat::Rgba8,
-                alpha_type: ImageAlphaType::Alpha,
-                width: PALETTE_IMAGE_WIDTH,
-                height: PALETTE_IMAGE_HEIGHT,
-            };
-            (
-                track_id,
-                TrackData {
-                    primary_colors,
-                    palette_image,
-                },
-            )
-        })
-        .collect();
-    for (track_id, track_data) in generated_data {
-        TRACK_DATA_CACHE.insert(track_id, track_data);
-    }
-
     Ok(())
 }
 
@@ -871,170 +604,141 @@ pub async fn skip_to_track(track_id: TrackId<'static>, point: Point, rect: Rect)
     update_state_from_spotify(false).await;
 }
 
-/// A filter that filters chroma values.
-#[derive(Debug)]
-pub struct ChromaFilter {
-    threshold: u8,
-}
-impl auto_palette::Filter for ChromaFilter {
-    fn test(&self, pixel: &auto_palette::Rgba) -> bool {
-        let max = pixel[0].max(pixel[1]).max(pixel[2]);
-        let min = pixel[0].min(pixel[1]).min(pixel[2]);
-        (max - min) > self.threshold
-    }
-}
+async fn poll_playlists() {
+    // Get initial playlist data
+    let playlists_env = env::var("PLAYLISTS").unwrap_or_default();
+    let target_playlists = playlists_env.split(',').collect::<Vec<_>>();
+    let mut cached_playlist_tracks = load_cached_playlist_tracks();
 
-fn generate_palette_image(colors: &[[u8; 4]], seed: u64) -> Vec<u8> {
-    let mut canvas = RgbaImage::from_pixel(
-        PALETTE_IMAGE_WIDTH,
-        PALETTE_IMAGE_HEIGHT,
-        image::Rgba([12, 14, 18, 255]),
-    );
+    // Grab the current users playlists from spotify
+    let playlists: Vec<Playlist> = SPOTIFY_CLIENT
+        .get()
+        .unwrap()
+        .current_user_playlists_manual(Some(50), None)
+        .await
+        .unwrap()
+        .items
+        .into_iter()
+        .filter(|playlist| {
+            target_playlists.contains(&playlist.name.as_str())
+                || RATING_PLAYLISTS.contains(&playlist.name.as_str())
+        })
+        .map(|playlist| Playlist {
+            id: playlist.id.clone(),
+            name: playlist.name,
+            image_url: playlist
+                .images
+                .iter()
+                .min_by_key(|img| img.width)
+                .unwrap()
+                .url
+                .clone(),
+            tracks: cached_playlist_tracks
+                .remove(&playlist.id)
+                .unwrap_or_default(),
+            tracks_total: playlist.tracks.total,
+            snapshot_id: playlist.snapshot_id.clone(),
+        })
+        .collect();
+    // Push the data to the global state
+    update_playback_state(|state| {
+        state.playlists.clone_from(&playlists);
+    });
 
-    if colors.is_empty() {
-        return canvas.into_raw();
-    }
-
-    let mut rng = SmallRng::seed_from_u64(seed);
-
-    let mut targets = colors
-        .iter()
-        .map(|c| f32::from(c[3]).max(1.0))
-        .collect::<Vec<_>>();
-    let total_target = targets.iter().copied().sum::<f32>().max(1.0);
-    for weight in &mut targets {
-        *weight /= total_target;
-    }
-
-    let color_vectors = colors
-        .iter()
-        .map(|[r, g, b, _]| [f32::from(*r), f32::from(*g), f32::from(*b)])
-        .collect::<Vec<_>>();
-
-    let base = colors[0];
-    for pixel in canvas.pixels_mut() {
-        pixel.0 = [base[0], base[1], base[2], 255];
-    }
-
-    // Fill with the first colour; refinement passes will rebalance ratios.
-    let total_pixels = (PALETTE_IMAGE_WIDTH * PALETTE_IMAGE_HEIGHT) as f32;
-
-    let mut counts = vec![0u32; colors.len()];
-    let mut coverage = vec![0.0f32; colors.len()];
-    let mut per_color_strokes = vec![0u8; colors.len()];
-    let mut available_indices = Vec::with_capacity(colors.len());
-
-    for pass in 0..PALETTE_PASS_COUNT {
-        let base_height = lerp(
-            pass as f32 / PALETTE_PASS_COUNT as f32,
-            PALETTE_IMAGE_HEIGHT as f32 * 0.7,
-            PALETTE_IMAGE_HEIGHT as f32 * 0.3,
-        );
-
-        // Count pixels for each color, to get ratios
-        counts.fill(0);
-        for pixel in canvas.pixels() {
-            let pr = f32::from(pixel[0]);
-            let pg = f32::from(pixel[1]);
-            let pb = f32::from(pixel[2]);
-            let mut best_index = 0usize;
-            let mut best_distance = f32::MAX;
-            for (index, color) in color_vectors.iter().enumerate() {
-                let dr = pr - color[0];
-                let dg = pg - color[1];
-                let db = pb - color[2];
-                let distance = dr * dr + dg * dg + db * db;
-                if distance < best_distance {
-                    best_distance = distance;
-                    best_index = index;
+    // Download all the playlist images
+    tokio::spawn(async move {
+        let mut set = JoinSet::new();
+        for url in playlists.iter().map(|p| p.image_url.clone()) {
+            set.spawn(async move {
+                if let Err(err) = ensure_image_cached(url.as_str()).await {
+                    warn!("failed to cache image {url}: {err}");
                 }
-            }
-            counts[best_index] += 1;
+            });
         }
-        for (index, ratio) in coverage.iter_mut().enumerate() {
-            *ratio = counts[index] as f32 / total_pixels;
-        }
+        // Concurrently run all tasks
+        while set.join_next().await.is_some() {}
+    });
 
-        // Get how far we are off in total
-        let total_coverage_diff = coverage
-            .iter()
-            .zip(targets.iter())
-            .map(|(&c, &t)| (c - t).abs())
-            .sum::<f32>()
-            .abs();
-        if total_coverage_diff <= f32::EPSILON {
-            per_color_strokes.fill(0);
-        } else {
-            for (index, strokes) in per_color_strokes.iter_mut().enumerate() {
-                *strokes = (((coverage[index] - targets[index]).abs() / total_coverage_diff)
-                    * PALETTE_STROKES_PER_PASS as f32)
-                    .floor() as u8;
+    // Spawn loop to collect spotify playlist tracks
+    loop {
+        let spotify_client = SPOTIFY_CLIENT.get().unwrap();
+        let state = PLAYBACK_STATE.lock().clone();
+
+        // Find playlists which have changed
+        let mut changed_playlists = Vec::new();
+        for (playlist_idx, playlist) in spotify_client
+            .current_user_playlists_manual(Some(50), None)
+            .await
+            .unwrap()
+            .items
+            .into_iter()
+            .filter(|playlist| {
+                target_playlists.contains(&playlist.name.as_str())
+                    || RATING_PLAYLISTS.contains(&playlist.name.as_str())
+            })
+            .enumerate()
+        {
+            if let Some(state_playlist) = state.playlists.iter().find(|p| p.id == playlist.id)
+                && playlist.snapshot_id != state_playlist.snapshot_id
+            {
+                changed_playlists.push((playlist_idx, playlist));
             }
         }
 
-        available_indices.clear();
-        for (index, &count) in per_color_strokes.iter().enumerate() {
-            if count > 0 {
-                available_indices.push(index);
-            }
-        }
+        // Fetch all new tracks in one go for changed playlists
+        for (playlist_idx, playlist) in changed_playlists {
+            let chunk_size = 50;
+            let num_pages = playlist.tracks.total.div_ceil(chunk_size) as usize;
+            info!("Fetching {num_pages} pages from playlist {}", playlist.name);
+            let fetch_futures = (0..num_pages)
+                .map(|p| {
+                    let playlist_id = playlist.id.clone();
+                    async move {
+                        spotify_client
+                            .playlist_items_manual(
+                                playlist_id,
+                                Some("href,limit,offset,total,items(is_local,track(id))"),
+                                None,
+                                Some(chunk_size),
+                                Some((p as u32) * chunk_size),
+                            )
+                            .await
+                    }
+                })
+                .collect::<Vec<_>>();
 
-        for _ in 0..PALETTE_STROKES_PER_PASS {
-            if available_indices.is_empty() {
-                break;
-            }
-
-            // Randomly select an index from the available candidates
-            let index_to_pick = rng.random_range(0..available_indices.len());
-            let color_index = available_indices[index_to_pick];
-            let strokes_left = &mut per_color_strokes[color_index];
-            *strokes_left = strokes_left.saturating_sub(1);
-            if *strokes_left == 0 {
-                available_indices.swap_remove(index_to_pick);
-            }
-            let color = colors[color_index];
-
-            // Pick a random brush
-            let template = &BRUSHES[rng.random_range(0..BRUSHES.len())];
-            let brush_factor = rng.random_range(0.75..1.2);
-            let brush_size = (base_height * brush_factor)
-                .round()
-                .clamp(6.0, PALETTE_IMAGE_HEIGHT as f32) as u32;
-
-            let mut stamp = image::imageops::resize(
-                template,
-                brush_size,
-                brush_size,
-                image::imageops::FilterType::Triangle,
-            );
-
-            let fade_factor = rng.random_range(0.55..0.9);
-            for pixel in stamp.pixels_mut() {
-                let alpha = pixel[3];
-                if alpha == 0 {
-                    continue;
+            // Await all futures, stopping and returning on the first error
+            let pages = match try_join_all(fetch_futures).await {
+                Ok(p) => p,
+                Err(e) => {
+                    error!("Failed to fetch one or more playlist pages: {:?}", e);
+                    return;
                 }
-                let faded_alpha =
-                    ((f32::from(alpha) * fade_factor).round().clamp(1.0, 255.0)) as u8;
-                pixel[0] = color[0];
-                pixel[1] = color[1];
-                pixel[2] = color[2];
-                pixel[3] = faded_alpha;
-            }
+            };
 
-            let offset_x =
-                i64::from(rng.random_range(0..=PALETTE_IMAGE_WIDTH)) - i64::from(brush_size / 2);
-            let offset_y =
-                i64::from(rng.random_range(0..=PALETTE_IMAGE_HEIGHT)) - i64::from(brush_size / 2);
+            // Process the collected pages into a single track ID set and get the total
+            let new_total = pages.first().map_or(0, |p| p.total);
+            let playlist_track_ids: HashSet<TrackId> = pages
+                .into_iter()
+                .flat_map(|page| page.items)
+                .filter_map(|item| {
+                    let Some(PlayableItem::Unknown(track)) = &item.track else {
+                        return None;
+                    };
+                    TrackId::from_id(track.get("id")?.as_str()?)
+                        .ok()
+                        .map(TrackId::into_static)
+                })
+                .collect();
 
-            image::imageops::overlay(&mut canvas, &stamp, offset_x, offset_y);
+            update_playback_state(|state| {
+                state.playlists[playlist_idx].tracks = playlist_track_ids;
+                state.playlists[playlist_idx].tracks_total = new_total;
+                state.playlists[playlist_idx].snapshot_id = playlist.snapshot_id;
+            });
         }
+        persist_playlist_cache();
+
+        sleep(Duration::from_secs(20)).await;
     }
-
-    // Blur the image
-    image::imageops::blur(&canvas, 10.0).into_raw()
-}
-
-fn lerp(t: f32, v0: f32, v1: f32) -> f32 {
-    (1.0 - t) * v0 + t * v1
 }
