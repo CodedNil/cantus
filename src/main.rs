@@ -20,7 +20,7 @@ use vello::{
     AaConfig, Renderer, RendererOptions, Scene,
     kurbo::{Point, Rect},
     peniko::{Blob, color::palette},
-    util::{RenderContext, RenderSurface},
+    util::{DeviceHandle, RenderContext, RenderSurface},
     wgpu::{
         BlendComponent, BlendFactor, BlendOperation, BlendState, CommandEncoderDescriptor,
         CompositeAlphaMode, InstanceDescriptor, PollType, PresentMode, SurfaceTargetUnsafe,
@@ -188,8 +188,7 @@ struct CantusLayer {
     // --- Rendering ---
     render_context: RenderContext,
     render_surface: Option<RenderSurface<'static>>,
-    renderers: HashMap<usize, Renderer>,
-    shader_backgrounds: HashMap<usize, WarpBackground>,
+    render_devices: HashMap<usize, RenderDevice>,
     scene: Scene,
 
     // --- Text ---
@@ -258,8 +257,7 @@ impl CantusLayer {
             // --- Rendering ---
             render_context,
             render_surface: None,
-            renderers: HashMap::new(),
-            shader_backgrounds: HashMap::new(),
+            render_devices: HashMap::new(),
             scene: Scene::new(),
 
             // --- Text ---
@@ -368,6 +366,21 @@ impl CantusLayer {
         Ok(())
     }
 
+    fn refresh_surface(&mut self, qhandle: &QueueHandle<Self>) {
+        let buffer_width = (PANEL_WIDTH * self.scale_factor).round();
+        let buffer_height = (PANEL_HEIGHT * self.scale_factor).round();
+
+        if let Err(err) = self.ensure_surface(buffer_width, buffer_height) {
+            error!("Failed to prepare render surface: {err}");
+            self.should_exit = true;
+            return;
+        }
+
+        if let Err(err) = self.try_render_frame(qhandle) {
+            error!("Rendering step failed: {err}");
+        }
+    }
+
     /// Choose an output for the layer surface if possible.
     fn try_select_output(&mut self) -> bool {
         if self.outputs.is_empty() {
@@ -451,19 +464,19 @@ impl CantusLayer {
         let handle = &self.render_context.devices[dev_id];
         let device = handle.device.clone();
         let queue = handle.queue.clone();
-        if let hash_map::Entry::Vacant(entry) = self.renderers.entry(dev_id) {
-            entry.insert(Renderer::new(&device, RendererOptions::default())?);
+        if let hash_map::Entry::Vacant(entry) = self.render_devices.entry(dev_id) {
+            entry.insert(RenderDevice::new(handle)?);
         }
 
         self.scene.reset();
         self.create_scene(dev_id);
         self.update_input_region(qhandle);
 
-        let renderer = self
-            .renderers
+        let bundle = self
+            .render_devices
             .get_mut(&dev_id)
-            .expect("renderer for device must exist");
-        renderer.render_to_texture(
+            .expect("render device must exist");
+        bundle.renderer.render_to_texture(
             &device,
             &queue,
             &self.scene,
@@ -531,6 +544,20 @@ impl CantusLayer {
     }
 }
 
+struct RenderDevice {
+    renderer: Renderer,
+    background: WarpBackground,
+}
+
+impl RenderDevice {
+    fn new(handle: &DeviceHandle) -> Result<Self> {
+        Ok(Self {
+            renderer: Renderer::new(&handle.device, RendererOptions::default())?,
+            background: WarpBackground::new(&handle.device),
+        })
+    }
+}
+
 impl Dispatch<ZwlrLayerSurfaceV1, ()> for CantusLayer {
     /// Handle layer surface protocol events.
     fn event(
@@ -554,19 +581,7 @@ impl Dispatch<ZwlrLayerSurfaceV1, ()> for CantusLayer {
                 }
                 state.is_configured = true;
 
-                let buffer_width = (PANEL_WIDTH * state.scale_factor).round();
-                let buffer_height = (PANEL_HEIGHT * state.scale_factor).round();
-
-                if let Err(err) = state.ensure_surface(buffer_width, buffer_height) {
-                    error!("Failed to prepare render surface: {err}");
-                    state.should_exit = true;
-                    return;
-                }
-
-                // Render first frame and request next.
-                if let Err(err) = state.try_render_frame(qhandle) {
-                    error!("Initial rendering failed: {err}");
-                }
+                state.refresh_surface(qhandle);
             }
             zwlr_layer_surface_v1::Event::Closed => {
                 state.should_exit = true;
@@ -596,18 +611,7 @@ impl Dispatch<WpFractionalScaleV1, ()> for CantusLayer {
                     surface.commit();
                 }
 
-                let buffer_width = (PANEL_WIDTH * state.scale_factor).round();
-                let buffer_height = (PANEL_HEIGHT * state.scale_factor).round();
-
-                if let Err(err) = state.ensure_surface(buffer_width, buffer_height) {
-                    error!("Failed to prepare render surface: {err}");
-                    state.should_exit = true;
-                    return;
-                }
-
-                if let Err(err) = state.try_render_frame(qhandle) {
-                    error!("Rendering failed after scale change: {err}");
-                }
+                state.refresh_surface(qhandle);
             }
         }
     }
@@ -629,19 +633,6 @@ impl Dispatch<WlCallback, ()> for CantusLayer {
         {
             error!("Rendering failed: {err}");
         }
-    }
-}
-
-impl Dispatch<WlSurface, ()> for CantusLayer {
-    /// Ignore surface events that need no action.
-    fn event(
-        _state: &mut Self,
-        _proxy: &WlSurface,
-        _event: wl_surface::Event,
-        _data: &(),
-        _conn: &Connection,
-        _qhandle: &QueueHandle<Self>,
-    ) {
     }
 }
 
@@ -813,79 +804,30 @@ impl Dispatch<WlRegistry, ()> for CantusLayer {
     }
 }
 
-impl Dispatch<ZwlrLayerShellV1, ()> for CantusLayer {
-    /// Ignore global layer shell events not used by the client.
-    fn event(
-        _state: &mut Self,
-        _proxy: &ZwlrLayerShellV1,
-        _event: zwlr_layer_shell_v1::Event,
-        _data: &(),
-        _conn: &Connection,
-        _qhandle: &QueueHandle<Self>,
-    ) {
-    }
+// No-op dispatch implementations for events the client does not handle.
+macro_rules! impl_noop_dispatch {
+    ($ty:ty, $event:ty) => {
+        impl Dispatch<$ty, ()> for CantusLayer {
+            fn event(
+                _state: &mut Self,
+                _proxy: &$ty,
+                _event: $event,
+                _data: &(),
+                _conn: &Connection,
+                _qhandle: &QueueHandle<Self>,
+            ) {
+            }
+        }
+    };
 }
 
-impl Dispatch<WpFractionalScaleManagerV1, ()> for CantusLayer {
-    /// Ignore fractional scale manager events we do not use.
-    fn event(
-        _state: &mut Self,
-        _proxy: &WpFractionalScaleManagerV1,
-        _event: wp_fractional_scale_manager_v1::Event,
-        _data: &(),
-        _conn: &Connection,
-        _qhandle: &QueueHandle<Self>,
-    ) {
-    }
-}
-
-impl Dispatch<WpViewporter, ()> for CantusLayer {
-    /// Ignore viewporter global events that need no handling.
-    fn event(
-        _state: &mut Self,
-        _proxy: &WpViewporter,
-        _event: wp_viewporter::Event,
-        _data: &(),
-        _conn: &Connection,
-        _qhandle: &QueueHandle<Self>,
-    ) {
-    }
-}
-
-impl Dispatch<WpViewport, ()> for CantusLayer {
-    /// Ignore viewport events because configuration is static.
-    fn event(
-        _state: &mut Self,
-        _proxy: &WpViewport,
-        _event: wp_viewport::Event,
-        _data: &(),
-        _conn: &Connection,
-        _qhandle: &QueueHandle<Self>,
-    ) {
-    }
-}
-
-impl Dispatch<WlCompositor, ()> for CantusLayer {
-    /// Ignore compositor events that are not actionable for the client.
-    fn event(
-        _state: &mut Self,
-        _proxy: &WlCompositor,
-        _event: wl_compositor::Event,
-        _data: &(),
-        _conn: &Connection,
-        _qhandle: &QueueHandle<Self>,
-    ) {
-    }
-}
-
-impl Dispatch<WlRegion, ()> for CantusLayer {
-    fn event(
-        _state: &mut Self,
-        _proxy: &WlRegion,
-        _event: wl_region::Event,
-        _data: &(),
-        _conn: &Connection,
-        _qhandle: &QueueHandle<Self>,
-    ) {
-    }
-}
+impl_noop_dispatch!(WlSurface, wl_surface::Event);
+impl_noop_dispatch!(ZwlrLayerShellV1, zwlr_layer_shell_v1::Event);
+impl_noop_dispatch!(
+    WpFractionalScaleManagerV1,
+    wp_fractional_scale_manager_v1::Event
+);
+impl_noop_dispatch!(WpViewporter, wp_viewporter::Event);
+impl_noop_dispatch!(WpViewport, wp_viewport::Event);
+impl_noop_dispatch!(WlCompositor, wl_compositor::Event);
+impl_noop_dispatch!(WlRegion, wl_region::Event);

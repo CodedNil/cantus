@@ -1,6 +1,5 @@
 use crate::{
     CantusLayer, PANEL_HEIGHT_BASE, PANEL_WIDTH,
-    background::WarpBackground,
     spotify::{IMAGES_CACHE, PLAYBACK_STATE, Playlist, RATING_PLAYLISTS, TRACK_DATA_CACHE, Track},
 };
 use itertools::Itertools;
@@ -168,11 +167,10 @@ impl CantusLayer {
         );
 
         // Purge the stale background cache entries.
-        if let (Some(shader), Some(renderer)) = (
-            self.shader_backgrounds.get_mut(&device_id),
-            self.renderers.get_mut(&device_id),
-        ) {
-            shader.purge_stale(renderer, self.frame_index);
+        if let Some(bundle) = self.render_devices.get_mut(&device_id) {
+            bundle
+                .background
+                .purge_stale(&mut bundle.renderer, self.frame_index);
         }
     }
 
@@ -495,15 +493,14 @@ impl CantusLayer {
         palette_image: &ImageData,
     ) -> ImageData {
         let device_handle = &self.render_context.devices[device_id];
-        let shader = self
-            .shader_backgrounds
-            .entry(device_id)
-            .or_insert_with(|| WarpBackground::new(&device_handle.device));
-        let renderer = self.renderers.get_mut(&device_id).unwrap();
-        shader.render(
+        let bundle = self
+            .render_devices
+            .get_mut(&device_id)
+            .expect("render device must exist");
+        bundle.background.render(
             key,
             device_handle,
-            renderer,
+            &mut bundle.renderer,
             palette_image,
             self.time_origin.elapsed().as_secs_f32(),
             self.frame_index,
