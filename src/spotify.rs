@@ -1,3 +1,4 @@
+use crate::background::update_color_palettes;
 use anyhow::Result;
 use chrono::TimeDelta;
 use dashmap::DashMap;
@@ -16,6 +17,7 @@ use std::{
     collections::{HashMap, HashSet},
     convert::TryInto,
     env, fs,
+    path::PathBuf,
     sync::{
         Arc, LazyLock,
         atomic::{AtomicBool, Ordering as AtomicOrdering},
@@ -38,8 +40,6 @@ use zbus::{
     names::InterfaceName,
     zvariant::OwnedValue,
 };
-
-use crate::background::update_color_palettes;
 
 /// Maximum number of historical tracks to keep before trimming.
 const MAX_HISTORY: usize = 20;
@@ -70,7 +70,11 @@ pub static TRACK_DATA_CACHE: LazyLock<DashMap<TrackId<'static>, TrackData>> =
     LazyLock::new(DashMap::new);
 pub static ARTIST_DATA_CACHE: LazyLock<DashMap<ArtistId<'static>, ArtistData>> =
     LazyLock::new(DashMap::new);
-const PLAYLIST_CACHE_PATH: &str = "/tmp/cantus_playlist_tracks.json";
+static PLAYLIST_CACHE_PATH: LazyLock<PathBuf> = LazyLock::new(|| {
+    dirs::config_dir()
+        .unwrap()
+        .join("cantus/cantus_playlist_tracks.json")
+});
 
 pub const RATING_PLAYLISTS: [&str; 11] = [
     "0.0", "0.5", "1.0", "1.5", "2.0", "2.5", "3.0", "3.5", "4.0", "4.5", "5.0",
@@ -183,10 +187,13 @@ where
 type PlaylistCache = HashMap<PlaylistId<'static>, (String, HashSet<TrackId<'static>>)>;
 
 fn load_cached_playlist_tracks() -> PlaylistCache {
-    let bytes = match fs::read(PLAYLIST_CACHE_PATH) {
+    let bytes = match fs::read(PLAYLIST_CACHE_PATH.clone()) {
         Ok(bytes) => bytes,
         Err(err) => {
-            warn!("Failed to read playlist cache at {PLAYLIST_CACHE_PATH}: {err}");
+            warn!(
+                "Failed to read playlist cache at {}: {err}",
+                PLAYLIST_CACHE_PATH.display()
+            );
             return HashMap::new();
         }
     };
@@ -194,7 +201,10 @@ fn load_cached_playlist_tracks() -> PlaylistCache {
     match serde_json::from_slice::<PlaylistCache>(&bytes) {
         Ok(map) => map,
         Err(err) => {
-            warn!("Failed to parse playlist cache at {PLAYLIST_CACHE_PATH}: {err}");
+            warn!(
+                "Failed to parse playlist cache at {}: {err}",
+                PLAYLIST_CACHE_PATH.display()
+            );
             HashMap::new()
         }
     }
@@ -222,8 +232,11 @@ fn persist_playlist_cache() {
 
     match serde_json::to_vec(&cache_payload) {
         Ok(serialized) => {
-            if let Err(err) = fs::write(PLAYLIST_CACHE_PATH, serialized) {
-                warn!("Failed to write playlist cache at {PLAYLIST_CACHE_PATH}: {err}");
+            if let Err(err) = fs::write(PLAYLIST_CACHE_PATH.clone(), serialized) {
+                warn!(
+                    "Failed to write playlist cache at {}: {err}",
+                    PLAYLIST_CACHE_PATH.display()
+                );
             }
         }
         Err(err) => {
@@ -237,6 +250,12 @@ fn persist_playlist_cache() {
 
 /// Init the spotify client
 pub async fn init() {
+    // Make sure the cantus directory exists
+    let cantus_dir = dirs::config_dir().unwrap().join("cantus");
+    if !cantus_dir.exists() {
+        std::fs::create_dir(&cantus_dir).unwrap();
+    }
+
     // Initialize Spotify client with credentials and OAuth scopes
     let spotify = AuthCodeSpotify::with_config(
         Credentials::from_env()
@@ -256,6 +275,9 @@ pub async fn init() {
         },
         Config {
             token_cached: true,
+            cache_path: dirs::config_dir()
+                .unwrap()
+                .join("cantus/spotify_cache.json"),
             ..Default::default()
         },
     );
