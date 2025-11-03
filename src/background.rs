@@ -7,8 +7,8 @@ use auto_palette::Palette;
 use bytemuck::{Pod, Zeroable};
 use image::RgbaImage;
 use itertools::Itertools;
+use orx_parallel::{IntoParIter, ParIter};
 use rand::{Rng, SeedableRng, rngs::SmallRng};
-use rayon::prelude::*;
 use std::{
     collections::{HashMap, hash_map::DefaultHasher},
     hash::{Hash, Hasher},
@@ -453,7 +453,7 @@ pub fn update_color_palettes() -> Result<()> {
     drop(state);
 
     let generated_data: Vec<_> = pending_palettes
-        .into_par_iter()
+        .into_par()
         .map(|(track_id, primary_colors, palette_seed)| {
             let palette_image = ImageData {
                 data: Blob::from(generate_palette_image(&primary_colors, palette_seed)),

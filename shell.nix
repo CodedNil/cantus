@@ -8,6 +8,7 @@ pkgs.mkShell rec {
     cargo
     rustfmt
     clippy
+    mold
   ];
 
   buildInputs = with pkgs; [

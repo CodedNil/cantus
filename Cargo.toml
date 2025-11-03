@@ -37,7 +37,7 @@ reqwest = { version = "0.12.24", default-features = false, features = [
     "rustls-tls",
 ] }
 bytemuck = { version = "1.24.0", features = ["derive"] }
-rayon = "1.11.0"
+orx-parallel = "3.4.0"
 futures = "0.3.31"
 serde = { version = "1.0.228", features = ["derive"] }
 serde_json = "1.0.145"
@@ -64,6 +64,8 @@ redundant-type-annotations = "warn"
 [profile.release]
 opt-level = 3
 lto = true
+strip = true
+panic = "abort"
 
 [profile.dev.package."*"]
 opt-level = 2
