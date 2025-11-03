@@ -215,7 +215,7 @@ impl CantusLayer {
             &RoundedRect::new(
                 0.0,
                 0.0,
-                width - height * 0.5, // Don't need to render all the way to the edge since the album art
+                width - height * 0.25, // Don't need to render all the way to the edge since the album art
                 height,
                 radii,
             ),
@@ -224,7 +224,7 @@ impl CantusLayer {
         self.scene.fill(
             Fill::NonZero,
             Affine::translate((pos_x, 0.0))
-                * Affine::scale((uncropped_width - height * 0.5) / image_width),
+                * Affine::scale((uncropped_width - height * 0.25) / image_width),
             &ImageBrush::new(background_image),
             None,
             &Rect::new(0.0, 0.0, image_width, image_width * background_aspect_ratio),

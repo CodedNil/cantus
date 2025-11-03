@@ -1,6 +1,5 @@
 use crate::background::update_color_palettes;
 use anyhow::Result;
-use chrono::TimeDelta;
 use dashmap::DashMap;
 use futures::future::try_join_all;
 use image::GenericImageView;
@@ -13,15 +12,11 @@ use rspotify::{
     scopes,
 };
 use std::{
-    cmp::Ordering,
     collections::{HashMap, HashSet},
     convert::TryInto,
     env, fs,
     path::PathBuf,
-    sync::{
-        Arc, LazyLock,
-        atomic::{AtomicBool, Ordering as AtomicOrdering},
-    },
+    sync::{Arc, LazyLock},
     time::Instant,
 };
 use tokio::{
@@ -30,10 +25,7 @@ use tokio::{
     time::{Duration, sleep},
 };
 use tracing::{error, info, warn};
-use vello::{
-    kurbo::{Point, Rect},
-    peniko::{Blob, ImageAlphaType, ImageData, ImageFormat},
-};
+use vello::peniko::{Blob, ImageAlphaType, ImageData, ImageFormat};
 use zbus::{
     Connection,
     fdo::{DBusProxy, PropertiesProxy},
@@ -81,28 +73,7 @@ pub const RATING_PLAYLISTS: [&str; 11] = [
 ];
 
 static HTTP_CLIENT: LazyLock<Client> = LazyLock::new(Client::new);
-static SPOTIFY_CLIENT: OnceCell<AuthCodeSpotify> = OnceCell::const_new();
-static SPOTIFY_INTERACTION_ACTIVE: AtomicBool = AtomicBool::new(false);
-
-struct SpotifyInteractionGuard;
-impl SpotifyInteractionGuard {
-    fn try_acquire() -> Option<Self> {
-        SPOTIFY_INTERACTION_ACTIVE
-            .compare_exchange(
-                false,
-                true,
-                AtomicOrdering::Acquire,
-                AtomicOrdering::Relaxed,
-            )
-            .is_ok()
-            .then(|| Self)
-    }
-}
-impl Drop for SpotifyInteractionGuard {
-    fn drop(&mut self) {
-        SPOTIFY_INTERACTION_ACTIVE.store(false, AtomicOrdering::Release);
-    }
-}
+pub static SPOTIFY_CLIENT: OnceCell<AuthCodeSpotify> = OnceCell::const_new();
 
 #[derive(Debug, Clone)]
 pub struct PlaybackState {
@@ -414,7 +385,7 @@ async fn update_state_from_mpris(
 }
 
 /// Pulls the current playback queue and status from the Spotify Web API and updates shared state.
-async fn update_state_from_spotify(used_mpris_progress: bool) {
+pub async fn update_state_from_spotify(used_mpris_progress: bool) {
     // Fetch current playback and queue concurrently
     let request_start = Instant::now();
     let spotify_client = SPOTIFY_CLIENT.get().unwrap();
@@ -569,65 +540,6 @@ async fn ensure_image_cached(url: &str) -> Result<()> {
         },
     );
     Ok(())
-}
-
-/// Skip to the specified track in the queue.
-pub async fn skip_to_track(track_id: TrackId<'static>, point: Point, rect: Rect) {
-    let Some(_interaction_guard) = SpotifyInteractionGuard::try_acquire() else {
-        warn!("Spotify interaction already in progress; skip_to_track returning early");
-        return;
-    };
-
-    let playback_state = PLAYBACK_STATE.lock().clone();
-    let queue_index = playback_state.queue_index;
-    let Some(position_in_queue) = playback_state.queue.iter().position(|t| t.id == track_id) else {
-        error!("Track not found in queue");
-        return;
-    };
-    match queue_index.cmp(&position_in_queue) {
-        Ordering::Equal => {
-            let position = (point.x - rect.x0) / rect.width();
-            let song_ms = playback_state.queue[position_in_queue].milliseconds;
-            // If click is near the very left, reset to the start of the song, else seek to clicked position
-            let milliseconds = if point.x < 20.0 || position < 0.05 {
-                0.0
-            } else {
-                f64::from(song_ms) * position
-            };
-            info!(
-                "Seeking track {track_id} to {}%",
-                (milliseconds / f64::from(song_ms) * 100.0).round()
-            );
-            if let Err(err) = SPOTIFY_CLIENT
-                .get()
-                .unwrap()
-                .seek_track(TimeDelta::milliseconds(milliseconds as i64), None)
-                .await
-            {
-                error!("Failed to seek track: {err}");
-            }
-        }
-        Ordering::Greater => {
-            let position_difference = queue_index - position_in_queue;
-            info!("Rewinding to track {track_id}, {position_difference} skips");
-            for _ in 0..(position_difference.min(10)) {
-                if let Err(err) = SPOTIFY_CLIENT.get().unwrap().previous_track(None).await {
-                    error!("Failed to skip to track: {err}");
-                }
-            }
-        }
-        Ordering::Less => {
-            let position_difference = position_in_queue - queue_index;
-            info!("Skipping to track {track_id}, {position_difference} skips");
-            for _ in 0..(position_difference.min(10)) {
-                if let Err(err) = SPOTIFY_CLIENT.get().unwrap().next_track(None).await {
-                    error!("Failed to skip to track: {err}");
-                }
-            }
-        }
-    }
-
-    update_state_from_spotify(false).await;
 }
 
 async fn poll_playlists() {

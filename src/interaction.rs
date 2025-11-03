@@ -1,14 +1,23 @@
 use crate::{
     CantusLayer,
-    spotify::{self, IMAGES_CACHE, Playlist, RATING_PLAYLISTS, Track},
+    spotify::{
+        IMAGES_CACHE, PLAYBACK_STATE, Playlist, RATING_PLAYLISTS, SPOTIFY_CLIENT, Track,
+        update_state_from_spotify,
+    },
 };
+use chrono::TimeDelta;
 use itertools::Itertools;
-use rspotify::model::{PlaylistId, TrackId};
+use rspotify::{
+    model::{PlaylistId, TrackId},
+    prelude::OAuthClient,
+};
 use std::{
+    cmp::Ordering,
     collections::HashMap,
-    sync::LazyLock,
+    sync::{LazyLock, atomic::AtomicBool},
     time::{Duration, Instant},
 };
+use tracing::{error, info, warn};
 use vello::{
     Scene,
     kurbo::{Affine, Point, Rect, RoundedRect},
@@ -16,6 +25,28 @@ use vello::{
 };
 use vello_svg::usvg;
 use wayland_client::QueueHandle;
+
+static SPOTIFY_INTERACTION_ACTIVE: AtomicBool = AtomicBool::new(false);
+
+struct SpotifyInteractionGuard;
+impl SpotifyInteractionGuard {
+    fn try_acquire() -> Option<Self> {
+        SPOTIFY_INTERACTION_ACTIVE
+            .compare_exchange(
+                false,
+                true,
+                std::sync::atomic::Ordering::Acquire,
+                std::sync::atomic::Ordering::Relaxed,
+            )
+            .is_ok()
+            .then(|| Self)
+    }
+}
+impl Drop for SpotifyInteractionGuard {
+    fn drop(&mut self) {
+        SPOTIFY_INTERACTION_ACTIVE.store(false, std::sync::atomic::Ordering::Release);
+    }
+}
 
 #[derive(Clone, Debug)]
 pub struct IconHitbox {
@@ -98,7 +129,7 @@ impl CantusLayer {
             let id = id.clone();
             let rect = *rect;
             tokio::spawn(async move {
-                spotify::skip_to_track(id, point, rect).await;
+                skip_to_track(id, point, rect).await;
             });
             return true;
         }
@@ -182,10 +213,12 @@ impl CantusLayer {
                 }),
         );
         let num_icons = icon_entries.len();
+        if width < icon_size * num_icons as f64 {
+            return;
+        }
 
         let mut hover_rating_index: Option<usize> = None;
-        let scale = self.scale_factor;
-        let inv_scale = 1.0 / scale;
+        let inv_scale = 1.0 / self.scale_factor;
         let base_y = height * 0.8;
         let icon_center_y = base_y - star_size_border + icon_total_size * 0.5;
         let center_x = pos_x + width * 0.5;
@@ -316,4 +349,63 @@ impl CantusLayer {
             }
         }
     }
+}
+
+/// Skip to the specified track in the queue.
+pub async fn skip_to_track(track_id: TrackId<'static>, point: Point, rect: Rect) {
+    let Some(_interaction_guard) = SpotifyInteractionGuard::try_acquire() else {
+        warn!("Spotify interaction already in progress; skip_to_track returning early");
+        return;
+    };
+
+    let playback_state = PLAYBACK_STATE.lock().clone();
+    let queue_index = playback_state.queue_index;
+    let Some(position_in_queue) = playback_state.queue.iter().position(|t| t.id == track_id) else {
+        error!("Track not found in queue");
+        return;
+    };
+    match queue_index.cmp(&position_in_queue) {
+        Ordering::Equal => {
+            let position = (point.x - rect.x0) / rect.width();
+            let song_ms = playback_state.queue[position_in_queue].milliseconds;
+            // If click is near the very left, reset to the start of the song, else seek to clicked position
+            let milliseconds = if point.x < 20.0 || position < 0.05 {
+                0.0
+            } else {
+                f64::from(song_ms) * position
+            };
+            info!(
+                "Seeking track {track_id} to {}%",
+                (milliseconds / f64::from(song_ms) * 100.0).round()
+            );
+            if let Err(err) = SPOTIFY_CLIENT
+                .get()
+                .unwrap()
+                .seek_track(TimeDelta::milliseconds(milliseconds as i64), None)
+                .await
+            {
+                error!("Failed to seek track: {err}");
+            }
+        }
+        Ordering::Greater => {
+            let position_difference = queue_index - position_in_queue;
+            info!("Rewinding to track {track_id}, {position_difference} skips");
+            for _ in 0..(position_difference.min(10)) {
+                if let Err(err) = SPOTIFY_CLIENT.get().unwrap().previous_track(None).await {
+                    error!("Failed to skip to track: {err}");
+                }
+            }
+        }
+        Ordering::Less => {
+            let position_difference = position_in_queue - queue_index;
+            info!("Skipping to track {track_id}, {position_difference} skips");
+            for _ in 0..(position_difference.min(10)) {
+                if let Err(err) = SPOTIFY_CLIENT.get().unwrap().next_track(None).await {
+                    error!("Failed to skip to track: {err}");
+                }
+            }
+        }
+    }
+
+    update_state_from_spotify(false).await;
 }
