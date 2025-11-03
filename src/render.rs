@@ -44,6 +44,7 @@ const SPARK_THICKNESS_RANGE: Range<f64> = 2.0..4.0;
 /// Build the scene for rendering.
 impl CantusLayer {
     pub fn create_scene(&mut self, device_id: usize) {
+        let start = Instant::now();
         let total_width = (PANEL_WIDTH * self.scale_factor).ceil();
         let total_height = (PANEL_HEIGHT_BASE * self.scale_factor).ceil();
 
@@ -143,6 +144,7 @@ impl CantusLayer {
                 .background
                 .purge_stale(&mut bundle.renderer, self.frame_index);
         }
+        tracing::info!("Render took {:?}", start.elapsed());
     }
 
     fn draw_track(

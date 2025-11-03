@@ -369,7 +369,7 @@ pub fn update_color_palettes() -> Result<()> {
         if !TRACK_DATA_CACHE.contains_key(&track.id)
             && let Some(image) = IMAGES_CACHE.get(&track.image_url)
             && let Some(artist_image_ref) = ARTIST_DATA_CACHE.get(&track.artist_id)
-            && let Some(artist_image) = IMAGES_CACHE.get(&artist_image_ref.image_url)
+            && let Some(artist_image) = IMAGES_CACHE.get(&*artist_image_ref)
         {
             // Merge the images side by side
             let width = image.width;

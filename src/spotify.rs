@@ -18,7 +18,6 @@ use std::{
     collections::{HashMap, HashSet},
     convert::TryInto,
     env, fs,
-    path::PathBuf,
     sync::{Arc, LazyLock},
     time::Instant,
 };
@@ -63,13 +62,8 @@ pub static PLAYBACK_STATE: LazyLock<Arc<Mutex<PlaybackState>>> = LazyLock::new(|
 pub static IMAGES_CACHE: LazyLock<DashMap<String, ImageData>> = LazyLock::new(DashMap::new);
 pub static TRACK_DATA_CACHE: LazyLock<DashMap<TrackId<'static>, TrackData>> =
     LazyLock::new(DashMap::new);
-pub static ARTIST_DATA_CACHE: LazyLock<DashMap<ArtistId<'static>, ArtistData>> =
+pub static ARTIST_DATA_CACHE: LazyLock<DashMap<ArtistId<'static>, String>> =
     LazyLock::new(DashMap::new);
-static PLAYLIST_CACHE_PATH: LazyLock<PathBuf> = LazyLock::new(|| {
-    dirs::config_dir()
-        .unwrap()
-        .join("cantus/cantus_playlist_tracks.json")
-});
 
 pub const RATING_PLAYLISTS: [&str; 11] = [
     "0.0", "0.5", "1.0", "1.5", "2.0", "2.5", "3.0", "3.5", "4.0", "4.5", "5.0",
@@ -96,9 +90,7 @@ pub struct Track {
     pub title: String,
     pub artist_id: ArtistId<'static>,
     pub artist_name: String,
-    pub album_name: String,
     pub image_url: String,
-    pub release_date: String,
     pub milliseconds: u32,
 }
 
@@ -108,13 +100,6 @@ pub struct TrackData {
     pub primary_colors: Vec<[u8; 4]>,
     /// Generated texture derived from the palette for shader backgrounds.
     pub palette_image: ImageData,
-}
-
-pub struct ArtistData {
-    pub name: String,
-    pub genres: Vec<String>,
-    pub popularity: u8,
-    pub image_url: String,
 }
 
 #[derive(Debug, Clone)]
@@ -135,7 +120,6 @@ impl Track {
             title: track.name,
             artist_id: artist.id.clone().unwrap(),
             artist_name: artist.name.clone(),
-            album_name: track.album.name,
             image_url: track
                 .album
                 .images
@@ -143,7 +127,6 @@ impl Track {
                 .min_by_key(|img| img.width)
                 .map(|img| img.url)
                 .unwrap(),
-            release_date: track.album.release_date.unwrap(),
             milliseconds: track.duration.num_milliseconds() as u32,
         }
     }
@@ -161,13 +144,13 @@ where
 type PlaylistCache = HashMap<PlaylistId<'static>, (String, HashSet<TrackId<'static>>)>;
 
 fn load_cached_playlist_tracks() -> PlaylistCache {
-    let bytes = match fs::read(PLAYLIST_CACHE_PATH.clone()) {
+    let cache_path = dirs::config_dir()
+        .unwrap()
+        .join("cantus/cantus_playlist_tracks.json");
+    let bytes = match fs::read(cache_path.clone()) {
         Ok(bytes) => bytes,
         Err(err) => {
-            warn!(
-                "Failed to read playlist cache at {}: {err}",
-                PLAYLIST_CACHE_PATH.display()
-            );
+            warn!("Failed to read playlist cache at {cache_path:?}: {err}");
             return HashMap::new();
         }
     };
@@ -175,10 +158,7 @@ fn load_cached_playlist_tracks() -> PlaylistCache {
     match serde_json::from_slice::<PlaylistCache>(&bytes) {
         Ok(map) => map,
         Err(err) => {
-            warn!(
-                "Failed to parse playlist cache at {}: {err}",
-                PLAYLIST_CACHE_PATH.display()
-            );
+            warn!("Failed to parse playlist cache at {cache_path:?}: {err}",);
             HashMap::new()
         }
     }
@@ -204,13 +184,13 @@ fn persist_playlist_cache() {
         .collect();
     drop(state);
 
+    let cache_path = dirs::config_dir()
+        .unwrap()
+        .join("cantus/cantus_playlist_tracks.json");
     match serde_json::to_vec(&cache_payload) {
         Ok(serialized) => {
-            if let Err(err) = fs::write(PLAYLIST_CACHE_PATH.clone(), serialized) {
-                warn!(
-                    "Failed to write playlist cache at {}: {err}",
-                    PLAYLIST_CACHE_PATH.display()
-                );
+            if let Err(err) = fs::write(cache_path.clone(), serialized) {
+                warn!("Failed to write playlist cache at {cache_path:?}: {err}");
             }
         }
         Err(err) => {
@@ -459,15 +439,7 @@ async fn update_state_from_spotify(used_mpris_progress: bool) {
                     .into_iter()
                     .min_by_key(|img| img.width)
                     .unwrap();
-                ARTIST_DATA_CACHE.insert(
-                    artist.id,
-                    ArtistData {
-                        name: artist.name.clone(),
-                        genres: artist.genres.clone(),
-                        popularity: artist.popularity as u8,
-                        image_url: artist_image.url.clone(),
-                    },
-                );
+                ARTIST_DATA_CACHE.insert(artist.id, artist_image.url.clone());
                 set.spawn(async move {
                     let url = artist_image.url.clone();
                     if let Err(err) = ensure_image_cached(url.as_str()).await {
