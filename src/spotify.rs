@@ -240,7 +240,9 @@ pub async fn init() {
                 "playlist-read-private",
                 "playlist-read-collaborative",
                 "playlist-modify-private",
-                "playlist-modify-public"
+                "playlist-modify-public",
+                "user-library-read",
+                "user-library-modify"
             ),
             ..Default::default()
         },
@@ -602,84 +604,84 @@ async fn poll_playlists() {
 
     // Spawn loop to collect spotify playlist tracks
     loop {
-        let spotify_client = SPOTIFY_CLIENT.get().unwrap();
-        let state = PLAYBACK_STATE.lock().clone();
-
-        // Find playlists which have changed
-        let mut changed_playlists = Vec::new();
-        for (playlist_idx, playlist) in spotify_client
-            .current_user_playlists_manual(Some(50), None)
-            .await
-            .unwrap()
-            .items
-            .into_iter()
-            .filter(|playlist| {
-                target_playlists.contains(&playlist.name.as_str())
-                    || RATING_PLAYLISTS.contains(&playlist.name.as_str())
-            })
-            .enumerate()
-        {
-            if let Some(state_playlist) = state.playlists.iter().find(|p| p.id == playlist.id)
-                && playlist.snapshot_id != state_playlist.snapshot_id
-            {
-                changed_playlists.push((playlist_idx, playlist));
-            }
-        }
-
-        // Fetch all new tracks in one go for changed playlists
-        for (playlist_idx, playlist) in changed_playlists {
-            let chunk_size = 50;
-            let num_pages = playlist.tracks.total.div_ceil(chunk_size) as usize;
-            info!("Fetching {num_pages} pages from playlist {}", playlist.name);
-            let fetch_futures = (0..num_pages)
-                .map(|p| {
-                    let playlist_id = playlist.id.clone();
-                    async move {
-                        spotify_client
-                            .playlist_items_manual(
-                                playlist_id,
-                                Some("href,limit,offset,total,items(is_local,track(id))"),
-                                None,
-                                Some(chunk_size),
-                                Some((p as u32) * chunk_size),
-                            )
-                            .await
-                    }
-                })
-                .collect::<Vec<_>>();
-
-            // Await all futures, stopping and returning on the first error
-            let pages = match try_join_all(fetch_futures).await {
-                Ok(p) => p,
-                Err(e) => {
-                    error!("Failed to fetch one or more playlist pages: {:?}", e);
-                    return;
-                }
-            };
-
-            // Process the collected pages into a single track ID set and get the total
-            let new_total = pages.first().map_or(0, |p| p.total);
-            let playlist_track_ids: HashSet<TrackId> = pages
-                .into_iter()
-                .flat_map(|page| page.items)
-                .filter_map(|item| {
-                    let Some(PlayableItem::Unknown(track)) = &item.track else {
-                        return None;
-                    };
-                    TrackId::from_id(track.get("id")?.as_str()?)
-                        .ok()
-                        .map(TrackId::into_static)
-                })
-                .collect();
-
-            update_playback_state(|state| {
-                state.playlists[playlist_idx].tracks = playlist_track_ids;
-                state.playlists[playlist_idx].tracks_total = new_total;
-                state.playlists[playlist_idx].snapshot_id = playlist.snapshot_id;
-            });
-        }
-        persist_playlist_cache();
+        refresh_playlists().await;
 
         sleep(Duration::from_secs(20)).await;
+    }
+}
+
+pub async fn refresh_playlists() {
+    let spotify_client = SPOTIFY_CLIENT.get().unwrap();
+    let state = PLAYBACK_STATE.lock().clone();
+
+    // Find playlists which have changed
+    let mut changed_playlists = Vec::new();
+    for (playlist_idx, playlist) in spotify_client
+        .current_user_playlists_manual(Some(50), None)
+        .await
+        .unwrap()
+        .items
+        .into_iter()
+        .enumerate()
+    {
+        if let Some(state_playlist) = state.playlists.iter().find(|p| p.id == playlist.id)
+            && playlist.snapshot_id != state_playlist.snapshot_id
+        {
+            changed_playlists.push((playlist_idx, playlist));
+        }
+    }
+
+    // Fetch all new tracks in one go for changed playlists
+    for (playlist_idx, playlist) in changed_playlists {
+        let chunk_size = 50;
+        let num_pages = playlist.tracks.total.div_ceil(chunk_size) as usize;
+        info!("Fetching {num_pages} pages from playlist {}", playlist.name);
+        let fetch_futures = (0..num_pages)
+            .map(|p| {
+                let playlist_id = playlist.id.clone();
+                async move {
+                    spotify_client
+                        .playlist_items_manual(
+                            playlist_id,
+                            Some("href,limit,offset,total,items(is_local,track(id))"),
+                            None,
+                            Some(chunk_size),
+                            Some((p as u32) * chunk_size),
+                        )
+                        .await
+                }
+            })
+            .collect::<Vec<_>>();
+
+        // Await all futures, stopping and returning on the first error
+        let pages = match try_join_all(fetch_futures).await {
+            Ok(p) => p,
+            Err(e) => {
+                error!("Failed to fetch one or more playlist pages: {:?}", e);
+                return;
+            }
+        };
+
+        // Process the collected pages into a single track ID set and get the total
+        let new_total = pages.first().map_or(0, |p| p.total);
+        let playlist_track_ids: HashSet<TrackId> = pages
+            .into_iter()
+            .flat_map(|page| page.items)
+            .filter_map(|item| {
+                let Some(PlayableItem::Unknown(track)) = &item.track else {
+                    return None;
+                };
+                TrackId::from_id(track.get("id")?.as_str()?)
+                    .ok()
+                    .map(TrackId::into_static)
+            })
+            .collect();
+
+        update_playback_state(|state| {
+            state.playlists[playlist_idx].tracks = playlist_track_ids;
+            state.playlists[playlist_idx].tracks_total = new_total;
+            state.playlists[playlist_idx].snapshot_id = playlist.snapshot_id;
+        });
+        persist_playlist_cache();
     }
 }

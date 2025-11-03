@@ -2,21 +2,22 @@ use crate::{
     CantusLayer,
     spotify::{
         IMAGES_CACHE, PLAYBACK_STATE, Playlist, RATING_PLAYLISTS, SPOTIFY_CLIENT, Track,
-        update_state_from_spotify,
+        refresh_playlists, update_state_from_spotify,
     },
 };
 use chrono::TimeDelta;
 use itertools::Itertools;
 use rspotify::{
-    model::{PlaylistId, TrackId},
+    model::{PlayableId, PlaylistId, TrackId},
     prelude::OAuthClient,
 };
 use std::{
     cmp::Ordering,
     collections::HashMap,
-    sync::{LazyLock, atomic::AtomicBool},
+    sync::LazyLock,
     time::{Duration, Instant},
 };
+use tokio::sync::Mutex;
 use tracing::{error, info, warn};
 use vello::{
     Scene,
@@ -26,27 +27,7 @@ use vello::{
 use vello_svg::usvg;
 use wayland_client::QueueHandle;
 
-static SPOTIFY_INTERACTION_ACTIVE: AtomicBool = AtomicBool::new(false);
-
-struct SpotifyInteractionGuard;
-impl SpotifyInteractionGuard {
-    fn try_acquire() -> Option<Self> {
-        SPOTIFY_INTERACTION_ACTIVE
-            .compare_exchange(
-                false,
-                true,
-                std::sync::atomic::Ordering::Acquire,
-                std::sync::atomic::Ordering::Relaxed,
-            )
-            .is_ok()
-            .then(|| Self)
-    }
-}
-impl Drop for SpotifyInteractionGuard {
-    fn drop(&mut self) {
-        SPOTIFY_INTERACTION_ACTIVE.store(false, std::sync::atomic::Ordering::Release);
-    }
-}
+static SPOTIFY_INTERACTION_GUARD: LazyLock<Mutex<()>> = LazyLock::new(|| Mutex::new(()));
 
 #[derive(Clone, Debug)]
 pub struct IconHitbox {
@@ -100,24 +81,19 @@ impl CantusLayer {
             .iter()
             .find(|hitbox| hitbox.rect.contains(point))
         {
+            let track_id = hitbox.track_id.clone();
             if let Some(index) = hitbox.rating_index {
                 let center_x = (hitbox.rect.x0 + hitbox.rect.x1) * 0.5;
                 let left_half = point.x < center_x;
-                let half_label = if left_half { "left" } else { "right" };
-                let rating_preview = index as f64 + if left_half { 0.5 } else { 1.0 };
-                println!(
-                    "Clicked button for track {:?}, playlist {:?}, rating index {:?}, star_half {}, rating {:.1}",
-                    hitbox.track_id,
-                    hitbox.playlist_id,
-                    hitbox.rating_index,
-                    half_label,
-                    rating_preview,
-                );
-            } else {
-                println!(
-                    "Clicked button for track {:?}, playlist {:?}, rating index {:?}",
-                    hitbox.track_id, hitbox.playlist_id, hitbox.rating_index
-                );
+                let rating_slot = index * 2 + if left_half { 1 } else { 2 };
+                tokio::spawn(async move {
+                    update_star_rating(track_id, rating_slot).await;
+                });
+            } else if let Some(playlist_id) = &hitbox.playlist_id {
+                let playlist_id = playlist_id.clone();
+                tokio::spawn(async move {
+                    toggle_playlist_membership(track_id, playlist_id).await;
+                });
             }
             return true;
         }
@@ -352,9 +328,8 @@ impl CantusLayer {
 }
 
 /// Skip to the specified track in the queue.
-pub async fn skip_to_track(track_id: TrackId<'static>, point: Point, rect: Rect) {
-    let Some(_interaction_guard) = SpotifyInteractionGuard::try_acquire() else {
-        warn!("Spotify interaction already in progress; skip_to_track returning early");
+async fn skip_to_track(track_id: TrackId<'static>, point: Point, rect: Rect) {
+    let Ok(_guard) = SPOTIFY_INTERACTION_GUARD.try_lock() else {
         return;
     };
 
@@ -407,5 +382,151 @@ pub async fn skip_to_track(track_id: TrackId<'static>, point: Point, rect: Rect)
         }
     }
 
+    update_state_from_spotify(false).await;
+}
+
+/// Update Spotify rating playlists for the given track.
+async fn update_star_rating(track_id: TrackId<'static>, rating_slot: usize) {
+    let Ok(_guard) = SPOTIFY_INTERACTION_GUARD.try_lock() else {
+        return;
+    };
+    let Some(rating_name) = RATING_PLAYLISTS.get(rating_slot) else {
+        return;
+    };
+    let playback_state = PLAYBACK_STATE.lock().clone();
+    let spotify_client = SPOTIFY_CLIENT.get().unwrap();
+
+    let mut target_playlist: Option<Playlist> = None;
+    let track_playable = PlayableId::Track(track_id.clone());
+    for playlist in playback_state
+        .playlists
+        .into_iter()
+        .filter(|p| RATING_PLAYLISTS.contains(&p.name.as_str()))
+    {
+        if playlist.name == *rating_name {
+            target_playlist = Some(playlist);
+            continue;
+        }
+        if !playlist.tracks.contains(&track_id) {
+            continue;
+        }
+        info!(
+            "Removing track {track_id} from rating playlist {}",
+            playlist.name
+        );
+        if let Err(err) = spotify_client
+            .playlist_remove_all_occurrences_of_items(
+                playlist.id.clone(),
+                [track_playable.clone()],
+                None,
+            )
+            .await
+        {
+            error!(
+                "Failed to remove track {track_id} from rating playlist {}: {err}",
+                playlist.name
+            );
+        }
+    }
+
+    // Add the track to the target playlist if it's not already there
+    if let Some(target_playlist) = target_playlist
+        && !target_playlist.tracks.contains(&track_id)
+    {
+        info!(
+            "Adding track {track_id} to rating playlist {}",
+            target_playlist.name
+        );
+        if let Err(err) = spotify_client
+            .playlist_add_items(target_playlist.id.clone(), [track_playable], None)
+            .await
+        {
+            error!(
+                "Failed to add track {track_id} to rating playlist {}: {err}",
+                target_playlist.name
+            );
+        }
+    }
+
+    // Add the track the liked songs if its rated above 3 stars
+    match spotify_client
+        .current_user_saved_tracks_contains([track_id.clone()])
+        .await
+    {
+        Ok(already_liked) => {
+            let already_liked = already_liked[0];
+            let should_be_liked = rating_slot >= 6;
+            if already_liked && !should_be_liked {
+                info!("Removing track {track_id} from liked songs");
+                if let Err(err) = spotify_client
+                    .current_user_saved_tracks_delete([track_id.clone()])
+                    .await
+                {
+                    error!("Failed to remove track {track_id} from liked songs: {err}");
+                }
+            } else if !already_liked && should_be_liked {
+                info!("Adding track {track_id} to liked songs");
+                if let Err(err) = spotify_client
+                    .current_user_saved_tracks_add([track_id.clone()])
+                    .await
+                {
+                    error!("Failed to add track {track_id} to liked songs: {err}");
+                }
+            }
+        }
+        Err(err) => {
+            error!("Failed to check if track {track_id} is already liked: {err}");
+        }
+    }
+
+    refresh_playlists().await;
+    update_state_from_spotify(false).await;
+}
+
+/// Toggle Spotify playlist membership for the given track.
+async fn toggle_playlist_membership(track_id: TrackId<'static>, playlist_id: PlaylistId<'static>) {
+    let Ok(_guard) = SPOTIFY_INTERACTION_GUARD.try_lock() else {
+        return;
+    };
+    let playback_state = PLAYBACK_STATE.lock().clone();
+    let Some(playlist) = playback_state
+        .playlists
+        .into_iter()
+        .find(|p| p.id == playlist_id)
+    else {
+        warn!("Playlist {playlist_id} not found while toggling membership for track {track_id}");
+        return;
+    };
+
+    let spotify_client = SPOTIFY_CLIENT.get().unwrap();
+    if playlist.tracks.contains(&track_id) {
+        info!("Removing track {track_id} from playlist {}", playlist.name);
+        if let Err(err) = spotify_client
+            .playlist_remove_all_occurrences_of_items(
+                playlist.id,
+                [PlayableId::Track(track_id.clone())],
+                None,
+            )
+            .await
+        {
+            error!(
+                "Failed to remove track {track_id} from playlist {}: {err}",
+                playlist.name
+            );
+        }
+    } else {
+        info!("Adding track {track_id} to playlist {}", playlist.name);
+        if let Err(err) = spotify_client
+            .playlist_add_items(playlist.id, [PlayableId::Track(track_id.clone())], None)
+            .await
+        {
+            error!(
+                "Failed to add track {track_id} to playlist {}: {err}",
+                playlist.name
+            );
+        }
+    }
+
+    refresh_playlists().await;
     update_state_from_spotify(false).await;
 }
