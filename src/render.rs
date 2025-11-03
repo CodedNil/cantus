@@ -59,11 +59,11 @@ impl CantusLayer {
         let px_per_ms = total_width / TIMELINE_DURATION_MS;
         let current_index = playback_state.queue_index.min(queue.len() - 1);
 
-        // Get playlists data as a HashMap
-        let playlists: HashMap<String, Playlist> = playback_state
+        // Borrow playlists for quick lookups without cloning each entry.
+        let playlists: HashMap<&str, &Playlist> = playback_state
             .playlists
-            .into_iter()
-            .map(|p| (p.name.clone(), p))
+            .iter()
+            .map(|playlist| (playlist.name.as_str(), playlist))
             .collect();
 
         // Lerp the progress based on when the data was last updated, get the start time of the current track
@@ -157,7 +157,7 @@ impl CantusLayer {
         px_per_ms: f64,
         height: f64,
         seconds_until_start: f64,
-        playlists: &HashMap<String, Playlist>,
+        playlists: &HashMap<&str, &Playlist>,
     ) {
         let visible_start_ms = track_start_ms.max(TIMELINE_START_MS);
         let visible_end_ms = track_end_ms.min(timeline_end_ms);
@@ -202,11 +202,8 @@ impl CantusLayer {
         let Some(track_data) = TRACK_DATA_CACHE.get(&track.id) else {
             return;
         };
-        let background_image = self.render_background(
-            device_id,
-            &track.image_url,
-            &track_data.palette_image.clone(),
-        );
+        let background_image =
+            self.render_background(device_id, &track.image_url, &track_data.palette_image);
 
         // --- BACKGROUND ---
         let background_aspect_ratio = (width - height * 0.5) / height;

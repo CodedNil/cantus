@@ -2,7 +2,7 @@ use crate::{
     CantusLayer,
     spotify::{
         IMAGES_CACHE, PLAYBACK_STATE, Playlist, RATING_PLAYLISTS, SPOTIFY_CLIENT, Track,
-        update_playback_state, update_state_from_spotify,
+        update_playback_state,
     },
 };
 use chrono::TimeDelta;
@@ -37,9 +37,14 @@ pub struct IconHitbox {
     pub rating_index: Option<usize>,
 }
 
-enum IconEntry {
-    Star { index: usize },
-    Playlist { playlist: Playlist, contained: bool },
+enum IconEntry<'a> {
+    Star {
+        index: usize,
+    },
+    Playlist {
+        playlist: &'a Playlist,
+        contained: bool,
+    },
 }
 
 /// Star images
@@ -76,21 +81,15 @@ impl CantusLayer {
     /// Handle pointer click events.
     pub fn handle_pointer_click(&self) -> bool {
         let point = Point::new(self.pointer_position.0, self.pointer_position.1);
-        if let Some(hitbox) = self
-            .icon_hitboxes
-            .iter()
-            .find(|hitbox| hitbox.rect.contains(point))
-        {
+        if let Some(hitbox) = self.icon_hitboxes.iter().find(|h| h.rect.contains(point)) {
             let track_id = hitbox.track_id.clone();
             if let Some(index) = hitbox.rating_index {
                 let center_x = (hitbox.rect.x0 + hitbox.rect.x1) * 0.5;
-                let left_half = point.x < center_x;
-                let rating_slot = index * 2 + if left_half { 1 } else { 2 };
+                let rating_slot = index * 2 + 1 + usize::from(point.x >= center_x);
                 tokio::spawn(async move {
                     update_star_rating(track_id, rating_slot).await;
                 });
-            } else if let Some(playlist_id) = &hitbox.playlist_id {
-                let playlist_id = playlist_id.clone();
+            } else if let Some(playlist_id) = hitbox.playlist_id.clone() {
                 tokio::spawn(async move {
                     toggle_playlist_membership(track_id, playlist_id).await;
                 });
@@ -102,8 +101,7 @@ impl CantusLayer {
             .iter()
             .find(|(_, rect)| rect.contains(point))
         {
-            let id = id.clone();
-            let rect = *rect;
+            let (id, rect) = (id.clone(), *rect);
             tokio::spawn(async move {
                 skip_to_track(id, point, rect).await;
             });
@@ -123,16 +121,11 @@ impl CantusLayer {
         };
 
         let region = compositor.create_region(qhandle, ());
-        for rect in self.track_hitboxes.values() {
-            region.add(
-                rect.x0.round() as i32,
-                rect.y0.round() as i32,
-                (rect.x1 - rect.x0).round() as i32,
-                (rect.y1 - rect.y0).round() as i32,
-            );
-        }
-        for hitbox in &self.icon_hitboxes {
-            let rect = &hitbox.rect;
+        for rect in self
+            .track_hitboxes
+            .values()
+            .chain(self.icon_hitboxes.iter().map(|hitbox| &hitbox.rect))
+        {
             region.add(
                 rect.x0.round() as i32,
                 rect.y0.round() as i32,
@@ -151,7 +144,7 @@ impl CantusLayer {
         &mut self,
         track: &Track,
         is_current: bool,
-        playlists: &HashMap<String, Playlist>,
+        playlists: &HashMap<&str, &Playlist>,
         width: f64,
         height: f64,
         pos_x: f64,
@@ -171,16 +164,17 @@ impl CantusLayer {
         let icon_total_size = icon_size + star_size_border * 2.0;
         let pointer_point = Point::new(self.pointer_position.0, self.pointer_position.1);
 
-        let mut icon_entries: Vec<IconEntry> =
-            (0..5).map(|index| IconEntry::Star { index }).collect();
+        let mut icon_entries = (0..5)
+            .map(|index| IconEntry::Star { index })
+            .collect::<Vec<_>>();
         icon_entries.extend(
             playlists
                 .iter()
-                .filter_map(|(key, playlist)| {
-                    let is_rating = RATING_PLAYLISTS.contains(&key.as_str());
+                .filter_map(|(&key, &playlist)| {
+                    let is_rating = RATING_PLAYLISTS.contains(&key);
                     let contained = playlist.tracks.contains(&track.id);
                     let should_include = !is_rating && (is_current || contained);
-                    should_include.then(|| (playlist.clone(), contained))
+                    should_include.then_some((playlist, contained))
                 })
                 .sorted_by(|(a, _), (b, _)| a.name.cmp(&b.name))
                 .map(|(playlist, contained)| IconEntry::Playlist {
@@ -193,29 +187,32 @@ impl CantusLayer {
             return;
         }
 
-        let mut hover_rating_index: Option<usize> = None;
         let inv_scale = 1.0 / self.scale_factor;
         let base_y = height * 0.8;
         let icon_center_y = base_y - star_size_border + icon_total_size * 0.5;
         let center_x = pos_x + width * 0.5;
         let half_icons = num_icons as f64 / 2.0;
-
-        for (i, entry) in icon_entries.iter().enumerate() {
-            let offset = (i as f64 - half_icons) * (icon_size + icon_spacing);
-            let icon_origin_x = center_x + offset;
-            let button_rect = Rect::new(
+        let spacing = icon_size + icon_spacing;
+        let button_rect = |icon_origin_x: f64| {
+            Rect::new(
                 (icon_origin_x - star_size_border) * inv_scale,
                 (base_y - star_size_border) * inv_scale,
                 (icon_origin_x - star_size_border + icon_total_size) * inv_scale,
                 (base_y - star_size_border + icon_total_size) * inv_scale,
-            );
-            if button_rect.contains(pointer_point)
+            )
+        };
+
+        let mut hover_rating_index = None;
+        for (i, entry) in icon_entries.iter().enumerate() {
+            let icon_origin_x = center_x + (i as f64 - half_icons) * spacing;
+            let button_rect = button_rect(icon_origin_x);
+            if hover_rating_index.is_none()
+                && button_rect.contains(pointer_point)
                 && let IconEntry::Star { index } = entry
             {
                 let rect_center_x = (button_rect.x0 + button_rect.x1) * 0.5;
-                let left_half = pointer_point.x < rect_center_x;
-                hover_rating_index = Some(*index * 2 + if left_half { 1 } else { 2 });
-                break;
+                hover_rating_index =
+                    Some(*index * 2 + 1 + usize::from(pointer_point.x >= rect_center_x));
             }
         }
 
@@ -226,15 +223,9 @@ impl CantusLayer {
         let star_border_scale = (icon_size + star_size_border * 2.0) / *STAR_IMAGE_SIZE;
         let star_fill_scale = icon_size / *STAR_IMAGE_SIZE;
         for (i, entry) in icon_entries.into_iter().enumerate() {
-            let offset = (i as f64 - half_icons) * (icon_size + icon_spacing);
-            let icon_origin_x = center_x + offset;
+            let icon_origin_x = center_x + (i as f64 - half_icons) * spacing;
             let base_transform = Affine::translate((icon_origin_x, base_y));
-            let button_rect = Rect::new(
-                (icon_origin_x - star_size_border) * inv_scale,
-                (base_y - star_size_border) * inv_scale,
-                (icon_origin_x - star_size_border + icon_total_size) * inv_scale,
-                (base_y - star_size_border + icon_total_size) * inv_scale,
-            );
+            let button_rect = button_rect(icon_origin_x);
             let is_hovered = button_rect.contains(pointer_point);
             let icon_center_x = icon_origin_x - star_size_border + icon_total_size * 0.5;
             let hover_transform = if is_hovered {
@@ -277,50 +268,43 @@ impl CantusLayer {
                     playlist,
                     contained,
                 } => {
-                    if let Some(playlist_image) = IMAGES_CACHE.get(&playlist.image_url) {
-                        let icon_transform = combined_transform
-                            * Affine::translate((-star_size_border, -star_size_border));
-                        let playlist_icon_size = icon_total_size;
-                        self.scene.push_clip_layer(
-                            icon_transform,
-                            &RoundedRect::new(
-                                0.0,
-                                0.0,
-                                playlist_icon_size,
-                                playlist_icon_size,
-                                10.0,
-                            ),
-                        );
-                        let zoom_pixels = 16.0;
-                        let image_size = f64::from(playlist_image.width);
+                    let Some(playlist_image) = IMAGES_CACHE.get(&playlist.image_url) else {
+                        continue;
+                    };
+                    let icon_transform = combined_transform
+                        * Affine::translate((-star_size_border, -star_size_border));
+                    let playlist_icon_size = icon_total_size;
+                    self.scene.push_clip_layer(
+                        icon_transform,
+                        &RoundedRect::new(0.0, 0.0, playlist_icon_size, playlist_icon_size, 10.0),
+                    );
+                    let zoom_pixels = 16.0;
+                    let image_size = f64::from(playlist_image.width);
+                    self.scene.fill(
+                        Fill::NonZero,
+                        icon_transform
+                            * Affine::translate((-zoom_pixels, -zoom_pixels))
+                            * Affine::scale((playlist_icon_size + zoom_pixels * 2.0) / image_size),
+                        &ImageBrush::new(playlist_image.clone()),
+                        None,
+                        &Rect::new(0.0, 0.0, image_size, image_size),
+                    );
+                    if !contained {
                         self.scene.fill(
                             Fill::NonZero,
-                            icon_transform
-                                * Affine::translate((-zoom_pixels, -zoom_pixels))
-                                * Affine::scale(
-                                    (playlist_icon_size + zoom_pixels * 2.0) / image_size,
-                                ),
-                            &ImageBrush::new(playlist_image.clone()),
+                            icon_transform,
+                            Color::from_rgba8(60, 60, 60, 180),
                             None,
-                            &Rect::new(0.0, 0.0, image_size, image_size),
+                            &Rect::new(0.0, 0.0, playlist_icon_size, playlist_icon_size),
                         );
-                        if !contained {
-                            self.scene.fill(
-                                Fill::NonZero,
-                                icon_transform,
-                                Color::from_rgba8(60, 60, 60, 180),
-                                None,
-                                &Rect::new(0.0, 0.0, playlist_icon_size, playlist_icon_size),
-                            );
-                        }
-                        self.scene.pop_layer();
-                        self.icon_hitboxes.push(IconHitbox {
-                            rect: button_rect,
-                            track_id: track.id.clone(),
-                            playlist_id: Some(playlist.id.clone()),
-                            rating_index: None,
-                        });
                     }
+                    self.scene.pop_layer();
+                    self.icon_hitboxes.push(IconHitbox {
+                        rect: button_rect,
+                        track_id: track.id.clone(),
+                        playlist_id: Some(playlist.id.clone()),
+                        rating_index: None,
+                    });
                 }
             }
         }
@@ -329,7 +313,7 @@ impl CantusLayer {
 
 /// Skip to the specified track in the queue.
 async fn skip_to_track(track_id: TrackId<'static>, point: Point, rect: Rect) {
-    let Ok(_guard) = SPOTIFY_INTERACTION_GUARD.try_lock() else {
+    let Ok(guard) = SPOTIFY_INTERACTION_GUARD.try_lock() else {
         return;
     };
 
@@ -339,50 +323,55 @@ async fn skip_to_track(track_id: TrackId<'static>, point: Point, rect: Rect) {
         error!("Track not found in queue");
         return;
     };
-    match queue_index.cmp(&position_in_queue) {
-        Ordering::Equal => {
-            let position = (point.x - rect.x0) / rect.width();
-            let song_ms = playback_state.queue[position_in_queue].milliseconds;
-            // If click is near the very left, reset to the start of the song, else seek to clicked position
-            let milliseconds = if point.x < 20.0 || position < 0.05 {
-                0.0
+    if queue_index.cmp(&position_in_queue) == Ordering::Equal {
+        let position = (point.x - rect.x0) / rect.width();
+        let song_ms = playback_state.queue[position_in_queue].milliseconds;
+        // If click is near the very left, reset to the start of the song, else seek to clicked position
+        let milliseconds = if point.x < 20.0 || position < 0.05 {
+            0.0
+        } else {
+            f64::from(song_ms) * position
+        };
+        info!(
+            "Seeking track {track_id} to {}%",
+            (milliseconds / f64::from(song_ms) * 100.0).round()
+        );
+        update_playback_state(|state| {
+            state.progress = milliseconds.round() as u32;
+            state.last_updated = Instant::now();
+        });
+        if let Err(err) = SPOTIFY_CLIENT
+            .get()
+            .unwrap()
+            .seek_track(TimeDelta::milliseconds(milliseconds as i64), None)
+            .await
+        {
+            error!("Failed to seek track: {err}");
+        }
+    } else {
+        let forward = queue_index < position_in_queue;
+        let skips = if forward {
+            position_in_queue - queue_index
+        } else {
+            queue_index - position_in_queue
+        };
+        info!(
+            "{} to track {track_id}, {skips} skips",
+            if forward { "Skipping" } else { "Rewinding" }
+        );
+        let client = SPOTIFY_CLIENT.get().unwrap();
+        for _ in 0..skips.min(10) {
+            let result = if forward {
+                client.next_track(None).await
             } else {
-                f64::from(song_ms) * position
+                client.previous_track(None).await
             };
-            info!(
-                "Seeking track {track_id} to {}%",
-                (milliseconds / f64::from(song_ms) * 100.0).round()
-            );
-            if let Err(err) = SPOTIFY_CLIENT
-                .get()
-                .unwrap()
-                .seek_track(TimeDelta::milliseconds(milliseconds as i64), None)
-                .await
-            {
-                error!("Failed to seek track: {err}");
-            }
-        }
-        Ordering::Greater => {
-            let position_difference = queue_index - position_in_queue;
-            info!("Rewinding to track {track_id}, {position_difference} skips");
-            for _ in 0..(position_difference.min(10)) {
-                if let Err(err) = SPOTIFY_CLIENT.get().unwrap().previous_track(None).await {
-                    error!("Failed to skip to track: {err}");
-                }
-            }
-        }
-        Ordering::Less => {
-            let position_difference = position_in_queue - queue_index;
-            info!("Skipping to track {track_id}, {position_difference} skips");
-            for _ in 0..(position_difference.min(10)) {
-                if let Err(err) = SPOTIFY_CLIENT.get().unwrap().next_track(None).await {
-                    error!("Failed to skip to track: {err}");
-                }
+            if let Err(err) = result {
+                error!("Failed to skip to track: {err}");
             }
         }
     }
-
-    update_state_from_spotify(false).await;
+    drop(guard);
 }
 
 /// Update Spotify rating playlists for the given track.
@@ -415,6 +404,9 @@ async fn update_star_rating(track_id: TrackId<'static>, rating_slot: usize) {
             "Removing track {track_id} from rating playlist {}",
             playlist.name
         );
+        update_playback_state(|state| {
+            state.playlists[playlist_idx].tracks.remove(&track_id);
+        });
         if let Err(err) = spotify_client
             .playlist_remove_all_occurrences_of_items(
                 playlist.id.clone(),
@@ -428,9 +420,6 @@ async fn update_star_rating(track_id: TrackId<'static>, rating_slot: usize) {
                 playlist.name
             );
         }
-        update_playback_state(|state| {
-            state.playlists[playlist_idx].tracks.remove(&track_id);
-        });
     }
 
     // Add the track to the target playlist if it's not already there
@@ -441,6 +430,11 @@ async fn update_star_rating(track_id: TrackId<'static>, rating_slot: usize) {
             "Adding track {track_id} to rating playlist {}",
             target_playlist.name
         );
+        update_playback_state(|state| {
+            state.playlists[target_playlist_idx]
+                .tracks
+                .insert(track_id.clone());
+        });
         if let Err(err) = spotify_client
             .playlist_add_items(target_playlist.id.clone(), [track_playable], None)
             .await
@@ -450,22 +444,16 @@ async fn update_star_rating(track_id: TrackId<'static>, rating_slot: usize) {
                 target_playlist.name
             );
         }
-        update_playback_state(|state| {
-            state.playlists[target_playlist_idx]
-                .tracks
-                .insert(track_id.clone());
-        });
     }
 
     // Add the track the liked songs if its rated above 3 stars
+    let should_be_liked = rating_slot >= 6;
     match spotify_client
         .current_user_saved_tracks_contains([track_id.clone()])
         .await
     {
-        Ok(already_liked) => {
-            let already_liked = already_liked[0];
-            let should_be_liked = rating_slot >= 6;
-            if already_liked && !should_be_liked {
+        Ok(already_liked) => match (already_liked[0], should_be_liked) {
+            (true, false) => {
                 info!("Removing track {track_id} from liked songs");
                 if let Err(err) = spotify_client
                     .current_user_saved_tracks_delete([track_id.clone()])
@@ -473,7 +461,8 @@ async fn update_star_rating(track_id: TrackId<'static>, rating_slot: usize) {
                 {
                     error!("Failed to remove track {track_id} from liked songs: {err}");
                 }
-            } else if !already_liked && should_be_liked {
+            }
+            (false, true) => {
                 info!("Adding track {track_id} to liked songs");
                 if let Err(err) = spotify_client
                     .current_user_saved_tracks_add([track_id.clone()])
@@ -482,7 +471,8 @@ async fn update_star_rating(track_id: TrackId<'static>, rating_slot: usize) {
                     error!("Failed to add track {track_id} to liked songs: {err}");
                 }
             }
-        }
+            _ => {}
+        },
         Err(err) => {
             error!("Failed to check if track {track_id} is already liked: {err}");
         }
@@ -508,38 +498,41 @@ async fn toggle_playlist_membership(track_id: TrackId<'static>, playlist_id: Pla
     };
 
     let spotify_client = SPOTIFY_CLIENT.get().unwrap();
-    if playlist.tracks.contains(&track_id) {
-        info!("Removing track {track_id} from playlist {}", playlist.name);
-        if let Err(err) = spotify_client
-            .playlist_remove_all_occurrences_of_items(
-                playlist.id,
-                [PlayableId::Track(track_id.clone())],
-                None,
-            )
-            .await
-        {
-            error!(
-                "Failed to remove track {track_id} from playlist {}: {err}",
-                playlist.name
-            );
+    let playlist_id = playlist.id;
+    let playlist_name = playlist.name;
+    let contained = playlist.tracks.contains(&track_id);
+    let track_playable = PlayableId::Track(track_id.clone());
+
+    info!(
+        "{} track {track_id} {} playlist {playlist_name}",
+        if contained { "Removing" } else { "Adding" },
+        if contained { "from" } else { "to" }
+    );
+
+    update_playback_state(|state| {
+        let playlist_tracks = &mut state.playlists[playlist_idx].tracks;
+        if contained {
+            playlist_tracks.remove(&track_id);
+        } else {
+            playlist_tracks.insert(track_id.clone());
         }
-        update_playback_state(|state| {
-            state.playlists[playlist_idx].tracks.remove(&track_id);
-        });
+    });
+
+    let result = if contained {
+        spotify_client.playlist_remove_all_occurrences_of_items(
+            playlist_id.clone(),
+            [track_playable],
+            None,
+        )
     } else {
-        info!("Adding track {track_id} to playlist {}", playlist.name);
-        if let Err(err) = spotify_client
-            .playlist_add_items(playlist.id, [PlayableId::Track(track_id.clone())], None)
-            .await
-        {
-            error!(
-                "Failed to add track {track_id} to playlist {}: {err}",
-                playlist.name
-            );
-        }
-        update_playback_state(|state| {
-            state.playlists[playlist_idx].tracks.insert(track_id);
-        });
+        spotify_client.playlist_add_items(playlist_id.clone(), [track_playable], None)
+    };
+    if let Err(err) = result.await {
+        error!(
+            "Failed to {} track {track_id} {} playlist {playlist_name}: {err}",
+            if contained { "remove" } else { "add" },
+            if contained { "from" } else { "to" }
+        );
     }
 
     drop(guard);

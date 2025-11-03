@@ -390,7 +390,7 @@ async fn update_state_from_mpris(
 }
 
 /// Pulls the current playback queue and status from the Spotify Web API and updates shared state.
-pub async fn update_state_from_spotify(used_mpris_progress: bool) {
+async fn update_state_from_spotify(used_mpris_progress: bool) {
     // Fetch current playback and queue concurrently
     let request_start = Instant::now();
     let spotify_client = SPOTIFY_CLIENT.get().unwrap();
@@ -613,7 +613,7 @@ async fn poll_playlists() {
     }
 }
 
-pub async fn refresh_playlists() {
+async fn refresh_playlists() {
     let spotify_client = SPOTIFY_CLIENT.get().unwrap();
     let state = PLAYBACK_STATE.lock().clone();
 
