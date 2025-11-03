@@ -2,7 +2,7 @@ use crate::{
     CantusLayer,
     spotify::{
         IMAGES_CACHE, PLAYBACK_STATE, Playlist, RATING_PLAYLISTS, SPOTIFY_CLIENT, Track,
-        refresh_playlists, update_state_from_spotify,
+        update_playback_state, update_state_from_spotify,
     },
 };
 use chrono::TimeDelta;
@@ -387,7 +387,7 @@ async fn skip_to_track(track_id: TrackId<'static>, point: Point, rect: Rect) {
 
 /// Update Spotify rating playlists for the given track.
 async fn update_star_rating(track_id: TrackId<'static>, rating_slot: usize) {
-    let Ok(_guard) = SPOTIFY_INTERACTION_GUARD.try_lock() else {
+    let Ok(guard) = SPOTIFY_INTERACTION_GUARD.try_lock() else {
         return;
     };
     let Some(rating_name) = RATING_PLAYLISTS.get(rating_slot) else {
@@ -396,15 +396,16 @@ async fn update_star_rating(track_id: TrackId<'static>, rating_slot: usize) {
     let playback_state = PLAYBACK_STATE.lock().clone();
     let spotify_client = SPOTIFY_CLIENT.get().unwrap();
 
-    let mut target_playlist: Option<Playlist> = None;
+    let mut target_playlist: Option<(usize, Playlist)> = None;
     let track_playable = PlayableId::Track(track_id.clone());
-    for playlist in playback_state
+    for (playlist_idx, playlist) in playback_state
         .playlists
         .into_iter()
-        .filter(|p| RATING_PLAYLISTS.contains(&p.name.as_str()))
+        .enumerate()
+        .filter(|(_, p)| RATING_PLAYLISTS.contains(&p.name.as_str()))
     {
         if playlist.name == *rating_name {
-            target_playlist = Some(playlist);
+            target_playlist = Some((playlist_idx, playlist));
             continue;
         }
         if !playlist.tracks.contains(&track_id) {
@@ -427,10 +428,13 @@ async fn update_star_rating(track_id: TrackId<'static>, rating_slot: usize) {
                 playlist.name
             );
         }
+        update_playback_state(|state| {
+            state.playlists[playlist_idx].tracks.remove(&track_id);
+        });
     }
 
     // Add the track to the target playlist if it's not already there
-    if let Some(target_playlist) = target_playlist
+    if let Some((target_playlist_idx, target_playlist)) = target_playlist
         && !target_playlist.tracks.contains(&track_id)
     {
         info!(
@@ -446,6 +450,11 @@ async fn update_star_rating(track_id: TrackId<'static>, rating_slot: usize) {
                 target_playlist.name
             );
         }
+        update_playback_state(|state| {
+            state.playlists[target_playlist_idx]
+                .tracks
+                .insert(track_id.clone());
+        });
     }
 
     // Add the track the liked songs if its rated above 3 stars
@@ -479,20 +488,20 @@ async fn update_star_rating(track_id: TrackId<'static>, rating_slot: usize) {
         }
     }
 
-    refresh_playlists().await;
-    update_state_from_spotify(false).await;
+    drop(guard);
 }
 
 /// Toggle Spotify playlist membership for the given track.
 async fn toggle_playlist_membership(track_id: TrackId<'static>, playlist_id: PlaylistId<'static>) {
-    let Ok(_guard) = SPOTIFY_INTERACTION_GUARD.try_lock() else {
+    let Ok(guard) = SPOTIFY_INTERACTION_GUARD.try_lock() else {
         return;
     };
     let playback_state = PLAYBACK_STATE.lock().clone();
-    let Some(playlist) = playback_state
+    let Some((playlist_idx, playlist)) = playback_state
         .playlists
         .into_iter()
-        .find(|p| p.id == playlist_id)
+        .enumerate()
+        .find(|(_, p)| p.id == playlist_id)
     else {
         warn!("Playlist {playlist_id} not found while toggling membership for track {track_id}");
         return;
@@ -514,6 +523,9 @@ async fn toggle_playlist_membership(track_id: TrackId<'static>, playlist_id: Pla
                 playlist.name
             );
         }
+        update_playback_state(|state| {
+            state.playlists[playlist_idx].tracks.remove(&track_id);
+        });
     } else {
         info!("Adding track {track_id} to playlist {}", playlist.name);
         if let Err(err) = spotify_client
@@ -525,8 +537,10 @@ async fn toggle_playlist_membership(track_id: TrackId<'static>, playlist_id: Pla
                 playlist.name
             );
         }
+        update_playback_state(|state| {
+            state.playlists[playlist_idx].tracks.insert(track_id);
+        });
     }
 
-    refresh_playlists().await;
-    update_state_from_spotify(false).await;
+    drop(guard);
 }

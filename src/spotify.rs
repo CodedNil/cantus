@@ -7,7 +7,10 @@ use parking_lot::Mutex;
 use reqwest::Client;
 use rspotify::{
     AuthCodeSpotify, Config, Credentials, OAuth,
-    model::{AdditionalType, ArtistId, Context, FullTrack, PlayableItem, PlaylistId, TrackId},
+    model::{
+        AdditionalType, ArtistId, Context, FullTrack, PlayableItem, PlaylistId, SimplifiedPlaylist,
+        TrackId,
+    },
     prelude::{BaseClient, OAuthClient},
     scopes,
 };
@@ -147,7 +150,7 @@ impl Track {
 }
 
 /// Mutably updates the global playback state inside the mutex.
-fn update_playback_state<F>(update: F)
+pub fn update_playback_state<F>(update: F)
 where
     F: FnOnce(&mut PlaybackState),
 {
@@ -606,7 +609,7 @@ async fn poll_playlists() {
     loop {
         refresh_playlists().await;
 
-        sleep(Duration::from_secs(20)).await;
+        sleep(Duration::from_secs(12)).await;
     }
 }
 
@@ -615,21 +618,27 @@ pub async fn refresh_playlists() {
     let state = PLAYBACK_STATE.lock().clone();
 
     // Find playlists which have changed
-    let mut changed_playlists = Vec::new();
-    for (playlist_idx, playlist) in spotify_client
+    let changed_playlists: Vec<(usize, SimplifiedPlaylist)> = spotify_client
         .current_user_playlists_manual(Some(50), None)
         .await
         .unwrap()
         .items
         .into_iter()
-        .enumerate()
-    {
-        if let Some(state_playlist) = state.playlists.iter().find(|p| p.id == playlist.id)
-            && playlist.snapshot_id != state_playlist.snapshot_id
-        {
-            changed_playlists.push((playlist_idx, playlist));
-        }
-    }
+        .filter_map(|playlist| {
+            if let Some((playlist_idx, state_playlist)) = state
+                .playlists
+                .iter()
+                .enumerate()
+                .find(|(_, p)| p.id == playlist.id)
+            {
+                // Check if the snapshot ID has changed
+                (playlist.snapshot_id != state_playlist.snapshot_id)
+                    .then_some((playlist_idx, playlist))
+            } else {
+                None
+            }
+        })
+        .collect();
 
     // Fetch all new tracks in one go for changed playlists
     for (playlist_idx, playlist) in changed_playlists {
