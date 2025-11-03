@@ -226,8 +226,6 @@ struct CantusLayer {
 impl CantusLayer {
     /// Create a new layer shell state container.
     fn new(display_ptr: NonNull<c_void>) -> Self {
-        let font = FontEngine::new(include_bytes!("../assets/NotoSans.ttf"));
-
         // Create a RenderContext with Vulkan backend
         let mut render_context = RenderContext::new();
         render_context.instance = vello::wgpu::Instance::new(&InstanceDescriptor {
@@ -260,7 +258,7 @@ impl CantusLayer {
             scene: Scene::new(),
 
             // --- Text ---
-            font,
+            font: FontEngine::new(),
 
             // --- State ---
             scale_factor: 1.0,

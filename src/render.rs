@@ -42,7 +42,6 @@ const SPARK_THICKNESS_RANGE: Range<f64> = 2.0..4.0;
 pub struct FontEngine {
     font_data: FontData,
     base_face: Face<'static>,
-    base_metrics: FontMetrics,
     axes: Vec<VariationAxis>,
     weight_axis_index: Option<usize>,
 }
@@ -59,19 +58,15 @@ struct FontMetrics {
 impl FontMetrics {
     fn from_face(face: &Face<'_>) -> Self {
         let units_per_em = f32::from(face.units_per_em()).max(1.0);
-        let ascender = f32::from(face.ascender()).max(0.0);
-        let descender = f32::from(-face.descender()).max(0.0);
-        let line_gap = f32::from(face.line_gap()).max(0.0);
-        let space_advance = face
-            .glyph_index(' ')
-            .and_then(|gid| face.glyph_hor_advance(gid))
-            .map_or(units_per_em * 0.5, f32::from);
         Self {
             units_per_em,
-            ascender,
-            descender,
-            line_gap,
-            space_advance,
+            ascender: f32::from(face.ascender()).max(0.0),
+            descender: f32::from(-face.descender()).max(0.0),
+            line_gap: f32::from(face.line_gap()).max(0.0),
+            space_advance: face
+                .glyph_index(' ')
+                .and_then(|gid| face.glyph_hor_advance(gid))
+                .map_or(units_per_em * 0.5, f32::from),
         }
     }
 
@@ -101,6 +96,7 @@ fn axis_normalized_value(axis: &VariationAxis, value: f32) -> i16 {
     NormalizedCoordinate::from(v).get()
 }
 
+#[allow(dead_code)]
 #[derive(Clone, Copy)]
 enum Align {
     Start,
@@ -129,18 +125,17 @@ impl FontWeight {
 
 pub struct TextLayout {
     glyphs: Vec<Glyph>,
-    width: f32,
-    height: f32,
+    width: f64,
+    height: f64,
     font_size: f32,
     coords: Vec<i16>,
 }
 
 impl FontEngine {
-    pub fn new(bytes: &'static [u8]) -> Self {
-        let blob = Blob::from(bytes.to_vec());
-        let font_data = FontData::new(blob, 0);
+    pub fn new() -> Self {
+        let bytes = include_bytes!("../assets/NotoSans.ttf");
+        let font_data = FontData::new(Blob::from(bytes.to_vec()), 0);
         let face = Face::parse(bytes, 0).expect("failed to parse embedded font");
-        let base_metrics = FontMetrics::from_face(&face);
         let axes = face.variation_axes().into_iter().collect::<Vec<_>>();
         let weight_axis_index = axes
             .iter()
@@ -149,7 +144,6 @@ impl FontEngine {
         Self {
             font_data,
             base_face: face,
-            base_metrics,
             axes,
             weight_axis_index,
         }
@@ -325,83 +319,92 @@ impl CantusLayer {
             ),
         );
 
+        let (Some(image), Some(track_data)) = (
+            IMAGES_CACHE.get(&track.image_url),
+            TRACK_DATA_CACHE.get(&track.id),
+        ) else {
+            return;
+        };
+
         let rounding = ROUNDING_RADIUS * self.scale_factor;
         let left_rounding = rounding * if start_trimmed { 1.0 } else { 0.3 };
         let right_rounding = rounding * if end_trimmed { 1.0 } else { 0.3 };
         let radii =
             RoundedRectRadii::new(left_rounding, right_rounding, right_rounding, left_rounding);
 
-        let Some(image) = IMAGES_CACHE.get(&track.image_url) else {
-            return;
-        };
-        let Some(track_data) = TRACK_DATA_CACHE.get(&track.id) else {
-            return;
-        };
-        let background_image = {
+        // --- BACKGROUND ---
+        {
             let bundle = self
                 .render_devices
                 .get_mut(&device_id)
                 .expect("render device must exist");
-            bundle.background.render(
+            let background_image = bundle.background.render(
                 &track.image_url,
                 &self.render_context.devices[device_id],
                 &mut bundle.renderer,
                 &track_data.palette_image,
                 self.time_origin.elapsed().as_secs_f32(),
                 self.frame_index,
-            )
+            );
+
+            self.scene.push_clip_layer(
+                Affine::translate((pos_x, 0.0)),
+                &RoundedRect::new(
+                    0.0,
+                    0.0,
+                    width - height * 0.25, // Don't need to render all the way to the edge since the album art is at the right edge
+                    height,
+                    radii,
+                ),
+            );
+            let image_width = f64::from(background_image.width);
+            let background_aspect_ratio = (width - height * 0.5) / height;
+            self.scene.fill(
+                Fill::NonZero,
+                Affine::translate((pos_x, 0.0))
+                    * Affine::scale((uncropped_width - height * 0.25) / image_width),
+                &ImageBrush::new(background_image),
+                None,
+                &Rect::new(0.0, 0.0, image_width, image_width * background_aspect_ratio),
+            );
+            self.scene.pop_layer();
         };
 
-        // --- BACKGROUND ---
-        let background_aspect_ratio = (width - height * 0.5) / height;
-        self.scene.push_clip_layer(
-            Affine::translate((pos_x, 0.0)),
-            &RoundedRect::new(
-                0.0,
-                0.0,
-                width - height * 0.25, // Don't need to render all the way to the edge since the album art
-                height,
-                radii,
-            ),
-        );
-        let image_width = f64::from(background_image.width);
-        self.scene.fill(
-            Fill::NonZero,
-            Affine::translate((pos_x, 0.0))
-                * Affine::scale((uncropped_width - height * 0.25) / image_width),
-            &ImageBrush::new(background_image),
-            None,
-            &Rect::new(0.0, 0.0, image_width, image_width * background_aspect_ratio),
-        );
-        self.scene.pop_layer();
-
         // --- ALBUM ART SQUARE ---
-        let image_height = f64::from(image.height);
-        let transform = Affine::translate((pos_x + width - height, 0.0));
-        self.scene.push_clip_layer(
-            transform,
-            &RoundedRect::new(
-                0.0,
-                0.0,
-                height,
-                height,
-                RoundedRectRadii::new(rounding, right_rounding, right_rounding, rounding),
-            ),
-        );
-        self.scene.fill(
-            Fill::NonZero,
-            transform * Affine::scale(height / image_height),
-            &ImageBrush::new(image.clone()),
-            None,
-            &Rect::new(0.0, 0.0, image_height, image_height),
-        );
-        self.scene.pop_layer();
+        {
+            let image_height = f64::from(image.height);
+            let transform = Affine::translate((pos_x + width - height, 0.0));
+            self.scene.push_clip_layer(
+                transform,
+                &RoundedRect::new(
+                    0.0,
+                    0.0,
+                    height,
+                    height,
+                    RoundedRectRadii::new(rounding, right_rounding, right_rounding, rounding),
+                ),
+            );
+            self.scene.fill(
+                Fill::NonZero,
+                transform * Affine::scale(height / image_height),
+                &ImageBrush::new(image.clone()),
+                None,
+                &Rect::new(0.0, 0.0, image_height, image_height),
+            );
+            self.scene.pop_layer();
+        }
 
         // --- TEXT ---
         // Clipping mask to the edge of the background rectangle, shrunk by a margin
         self.scene.push_clip_layer(
             Affine::translate((pos_x, 0.0)),
-            &RoundedRect::new(4.0, 4.0, width - height - 4.0, height - 4.0, rounding),
+            &RoundedRect::new(
+                4.0,
+                4.0,
+                width - height - 4.0,
+                height - 4.0,
+                6.0 * self.scale_factor,
+            ),
         );
         // Get available width for text
         let text_start_left = pos_x + dark_width + 12.0;
@@ -409,102 +412,102 @@ impl CantusLayer {
         let available_width = (text_start_right - text_start_left).max(0.0);
 
         // Render the songs title (strip anything beyond a - or ( in the song title)
-        let song_name = track.title[..track
-            .title
-            .find(" (")
-            .or_else(|| track.title.find(" -"))
-            .unwrap_or(track.title.len())]
-            .trim();
-        let font_size = 13.0;
-        let font_weight = FontWeight::Bold;
-        let text_height = (height * 0.25).floor();
-        let brush = Color::from_rgb8(240, 240, 240);
-        let layout = self.layout_text(song_name, font_size, font_weight);
-        let width_ratio = available_width / f64::from(layout.width);
-        if width_ratio <= 1.0 {
-            let layout = self.layout_text(song_name, font_size * width_ratio.max(0.8), font_weight);
-            self.draw_text(
-                layout,
-                text_start_left,
-                text_height,
-                Align::Start,
-                Align::Center,
-                // Fade out when it gets too small, 0.6-0.4
-                brush.with_alpha(((width_ratio - 0.4) / 0.2) as f32),
-            );
-        } else {
-            self.draw_text(
-                layout,
-                text_start_right,
-                text_height,
-                Align::End,
-                Align::Center,
-                brush,
-            );
+        let text_brush = Color::from_rgb8(240, 240, 240);
+        {
+            let song_name = track.title[..track
+                .title
+                .find(" (")
+                .or_else(|| track.title.find(" -"))
+                .unwrap_or(track.title.len())]
+                .trim();
+            let font_size = 13.0;
+            let font_weight = FontWeight::Bold;
+            let text_height = (height * 0.25).floor();
+            let layout = self.layout_text(song_name, font_size, font_weight);
+            let width_ratio = available_width / layout.width;
+            if width_ratio <= 1.0 {
+                let layout =
+                    self.layout_text(song_name, font_size * width_ratio.max(0.8), font_weight);
+                self.draw_text(
+                    layout,
+                    text_start_left,
+                    text_height,
+                    Align::Start,
+                    // Fade out when it gets too small, 0.6-0.4
+                    text_brush.with_alpha(((width_ratio - 0.4) / 0.2) as f32),
+                );
+            } else {
+                self.draw_text(
+                    layout,
+                    text_start_right,
+                    text_height,
+                    Align::End,
+                    text_brush,
+                );
+            }
         }
 
         // Get text layouts for bottom row of text
-        let font_size = 10.5;
-        let font_weight = FontWeight::Bold;
-        let text_height = (height * 0.57).floor();
+        {
+            let font_size = 10.5;
+            let font_weight = FontWeight::Bold;
+            let text_height = (height * 0.57).floor();
 
-        let artist_text = &track.artist_name;
-        let artist_layout = self.layout_text(artist_text, font_size, font_weight);
-        let dot_text = "\u{2004}•\u{2004}"; // Use thin spaces on either side of the bullet point
-        let dot_layout = self.layout_text(dot_text, font_size, font_weight);
-        let time_text = if seconds_until_start >= 60.0 {
-            format!(
-                "{}m{}s",
-                (seconds_until_start / 60.0).floor(),
-                (seconds_until_start % 60.0).floor()
-            )
-        } else {
-            format!("{}s", seconds_until_start.round())
-        };
-        let time_layout = self.layout_text(&time_text, font_size, font_weight);
+            let artist_text = &track.artist_name;
+            let artist_layout = self.layout_text(artist_text, font_size, font_weight);
+            let dot_text = "\u{2004}•\u{2004}"; // Use thin spaces on either side of the bullet point
+            let dot_layout = self.layout_text(dot_text, font_size, font_weight);
+            let time_text = if seconds_until_start >= 60.0 {
+                format!(
+                    "{}m{}s",
+                    (seconds_until_start / 60.0).floor(),
+                    (seconds_until_start % 60.0).floor()
+                )
+            } else {
+                format!("{}s", seconds_until_start.round())
+            };
+            let time_layout = self.layout_text(&time_text, font_size, font_weight);
 
-        let width_ratio =
-            available_width / f64::from(artist_layout.width + dot_layout.width + time_layout.width);
-        if width_ratio <= 1.0 || !is_current {
-            let layout = self.layout_text(
-                &format!("{time_text}{dot_text}{artist_text}"),
-                font_size * width_ratio.clamp(0.8, 1.0),
-                font_weight,
-            );
-            self.draw_text(
-                layout,
-                if width_ratio > 1.0 {
-                    text_start_right
-                } else {
-                    text_start_left
-                },
-                text_height,
-                if width_ratio > 1.0 {
-                    Align::End
-                } else {
-                    Align::Start
-                },
-                Align::Center,
-                // Fade out when it gets too small, 0.6-0.4
-                brush.with_alpha(((width_ratio - 0.4) / 0.2) as f32),
-            );
-        } else {
-            self.draw_text(
-                time_layout,
-                pos_x + dark_width + 12.0,
-                text_height,
-                Align::Start,
-                Align::Center,
-                brush,
-            );
-            self.draw_text(
-                artist_layout,
-                text_start_right,
-                text_height,
-                Align::End,
-                Align::Center,
-                brush,
-            );
+            let width_ratio =
+                available_width / (artist_layout.width + dot_layout.width + time_layout.width);
+            if width_ratio <= 1.0 || !is_current {
+                let layout = self.layout_text(
+                    &format!("{time_text}{dot_text}{artist_text}"),
+                    font_size * width_ratio.clamp(0.8, 1.0),
+                    font_weight,
+                );
+                self.draw_text(
+                    layout,
+                    if width_ratio > 1.0 {
+                        text_start_right
+                    } else {
+                        text_start_left
+                    },
+                    text_height,
+                    if width_ratio > 1.0 {
+                        Align::End
+                    } else {
+                        Align::Start
+                    },
+                    // Fade out when it gets too small, 0.6-0.4
+                    text_brush.with_alpha(((width_ratio - 0.4) / 0.2) as f32),
+                );
+            } else {
+                self.draw_text(
+                    time_layout,
+                    pos_x + dark_width + 12.0,
+                    text_height,
+                    Align::Start,
+                    text_brush,
+                );
+                self.draw_text(
+                    artist_layout,
+                    text_start_right,
+                    text_height,
+                    Align::End,
+                    text_brush,
+                );
+            }
         }
 
         // Release clipping mask
@@ -543,26 +546,6 @@ impl CantusLayer {
         let font_size_px = (font_size * self.scale_factor) as f32;
         let scale = font_size_px / metrics.units_per_em;
         let baseline = metrics.ascender * scale;
-        let fallback_height_units = self
-            .font
-            .base_metrics
-            .line_height_units()
-            .max(self.font.base_metrics.units_per_em);
-        let height_units = {
-            let units = metrics.line_height_units();
-            if units > 0.0 {
-                units
-            } else {
-                fallback_height_units
-            }
-        }
-        .max(fallback_height_units);
-        let height = height_units * scale;
-        let space_units = if metrics.space_advance > 0.0 {
-            metrics.space_advance
-        } else {
-            self.font.base_metrics.space_advance
-        };
 
         let mut pen_x = 0.0f32;
         let mut glyphs = Vec::with_capacity(text.len());
@@ -575,7 +558,7 @@ impl CantusLayer {
             }
             let advance_units = glyph_id
                 .and_then(|gid| face.glyph_hor_advance(gid))
-                .map_or(space_units, f32::from);
+                .map_or(metrics.space_advance, f32::from);
             if let Some(gid) = glyph_id {
                 glyphs.push(Glyph {
                     id: u32::from(gid.0),
@@ -591,8 +574,8 @@ impl CantusLayer {
 
         TextLayout {
             glyphs,
-            width: pen_x,
-            height,
+            width: f64::from(pen_x),
+            height: f64::from(metrics.line_height_units() * scale),
             font_size: font_size_px,
             coords: self
                 .font
@@ -610,7 +593,6 @@ impl CantusLayer {
         pos_x: f64,
         pos_y: f64,
         horizontal_align: Align,
-        vertical_align: Align,
         brush: Color,
     ) {
         self.scene
@@ -621,15 +603,10 @@ impl CantusLayer {
                 pos_x
                     - match horizontal_align {
                         Align::Start => 0.0,
-                        Align::End => f64::from(layout.width),
-                        Align::Center => f64::from(layout.width) * 0.5,
+                        Align::End => layout.width,
+                        Align::Center => layout.width * 0.5,
                     },
-                pos_y
-                    - match vertical_align {
-                        Align::Start => 0.0,
-                        Align::End => f64::from(layout.height),
-                        Align::Center => f64::from(layout.height) * 0.5,
-                    },
+                pos_y - layout.height * 0.5,
             )))
             .hint(true)
             .brush(brush)

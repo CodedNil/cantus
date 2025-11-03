@@ -5,7 +5,7 @@ use crate::{
 use anyhow::Result;
 use auto_palette::Palette;
 use bytemuck::{Pod, Zeroable};
-use image::RgbaImage;
+use image::{Pixel, RgbaImage};
 use itertools::Itertools;
 use orx_parallel::{IntoParIter, ParIter};
 use rand::{Rng, SeedableRng, rngs::SmallRng};
@@ -43,6 +43,8 @@ const PALETTE_IMAGE_WIDTH: u32 = PALETTE_IMAGE_HEIGHT * 3;
 const PALETTE_PASS_COUNT: usize = 8;
 /// Maximum number of brush placements per pass.
 const PALETTE_STROKES_PER_PASS: usize = 16;
+
+const STALE_FRAME_BUDGET: u64 = 600;
 
 static BRUSHES: LazyLock<[RgbaImage; 5]> = LazyLock::new(|| {
     let bytes = (
@@ -240,10 +242,13 @@ impl WarpBackground {
             },
         );
 
-        let uniforms = WarpUniforms {
-            params: [elapsed_seconds, 0.0, 0.0, 0.0],
-        };
-        queue.write_buffer(&self.uniform_buffer, 0, bytemuck::bytes_of(&uniforms));
+        queue.write_buffer(
+            &self.uniform_buffer,
+            0,
+            bytemuck::bytes_of(&WarpUniforms {
+                params: [elapsed_seconds, 0.0, 0.0, 0.0],
+            }),
+        );
 
         slot.last_frame = frame_index;
 
@@ -277,7 +282,6 @@ impl WarpBackground {
     }
 
     pub fn purge_stale(&mut self, renderer: &mut Renderer, frame_index: u64) {
-        const STALE_FRAME_BUDGET: u64 = 600;
         self.slots.retain(|_, slot| {
             let keep = frame_index.saturating_sub(slot.last_frame) <= STALE_FRAME_BUDGET;
             if !keep {
@@ -607,34 +611,57 @@ fn generate_palette_image(colors: &[[u8; 4]], seed: u64) -> Vec<u8> {
             let brush_size = (base_height * brush_factor)
                 .round()
                 .clamp(6.0, PALETTE_IMAGE_HEIGHT as f32) as u32;
-
-            let mut stamp = image::imageops::resize(
+            let stamp = image::imageops::resize(
                 template,
                 brush_size,
                 brush_size,
                 image::imageops::FilterType::Triangle,
             );
 
+            // Overlay the stamp onto the canvas
             let fade_factor = rng.random_range(0.55..0.9);
-            for pixel in stamp.pixels_mut() {
-                let alpha = pixel[3];
-                if alpha == 0 {
-                    continue;
-                }
-                let faded_alpha =
-                    ((f32::from(alpha) * fade_factor).round().clamp(1.0, 255.0)) as u8;
-                pixel[0] = color[0];
-                pixel[1] = color[1];
-                pixel[2] = color[2];
-                pixel[3] = faded_alpha;
-            }
-
-            let offset_x =
+            let x =
                 i64::from(rng.random_range(0..=PALETTE_IMAGE_WIDTH)) - i64::from(brush_size / 2);
-            let offset_y =
+            let y =
                 i64::from(rng.random_range(0..=PALETTE_IMAGE_HEIGHT)) - i64::from(brush_size / 2);
+            let (bottom_width, bottom_height) = canvas.dimensions();
+            let (top_width, top_height) = stamp.dimensions();
 
-            image::imageops::overlay(&mut canvas, &stamp, offset_x, offset_y);
+            // Crop our top image if we're going out of bounds
+            let origin_bottom_x = x.clamp(0, i64::from(bottom_width)) as u32;
+            let origin_bottom_y = y.clamp(0, i64::from(bottom_height)) as u32;
+
+            let range_width = x
+                .saturating_add(i64::from(top_width))
+                .clamp(0, i64::from(bottom_width)) as u32
+                - origin_bottom_x;
+            let range_height = y
+                .saturating_add(i64::from(top_height))
+                .clamp(0, i64::from(bottom_height)) as u32
+                - origin_bottom_y;
+
+            let origin_top_x = x.saturating_mul(-1).clamp(0, i64::from(top_width)) as u32;
+            let origin_top_y = y.saturating_mul(-1).clamp(0, i64::from(top_height)) as u32;
+
+            for y in 0..range_height {
+                for x in 0..range_width {
+                    let stamp = {
+                        let mut pixel = *stamp.get_pixel(origin_top_x + x, origin_top_y + y);
+                        pixel[0] = color[0];
+                        pixel[1] = color[1];
+                        pixel[2] = color[2];
+                        pixel[3] = ((f32::from(pixel[3]) * fade_factor)
+                            .round()
+                            .clamp(1.0, 255.0)) as u8;
+                        pixel
+                    };
+                    let mut bottom_pixel =
+                        *canvas.get_pixel(origin_bottom_x + x, origin_bottom_y + y);
+                    bottom_pixel.blend(&stamp);
+
+                    *canvas.get_pixel_mut(origin_bottom_x + x, origin_bottom_y + y) = bottom_pixel;
+                }
+            }
         }
     }
 
