@@ -1,4 +1,4 @@
-use crate::{background::WarpBackground, render::NowPlayingParticle};
+use crate::{background::WarpBackground, interaction::IconHitbox, render::NowPlayingParticle};
 use anyhow::Result;
 use parley::{FontContext, LayoutContext};
 use rand::{SeedableRng, rngs::SmallRng};
@@ -12,13 +12,13 @@ use std::{
     ffi::c_void,
     ptr::NonNull,
     sync::Arc,
-    time::{Duration, Instant},
+    time::Instant,
 };
 use tracing::{debug, error};
 use tracing_subscriber::EnvFilter;
 use vello::{
     AaConfig, Renderer, RendererOptions, Scene,
-    kurbo::{Point, Rect},
+    kurbo::Rect,
     peniko::{Blob, color::palette},
     util::{DeviceHandle, RenderContext, RenderSurface},
     wgpu::{
@@ -56,6 +56,7 @@ use wayland_protocols_wlr::layer_shell::v1::client::{
 };
 
 mod background;
+mod interaction;
 mod render;
 mod spotify;
 
@@ -208,6 +209,7 @@ struct CantusLayer {
     pointer_position: (f64, f64),
     last_hitbox_update: Instant,
     track_hitboxes: HashMap<TrackId<'static>, Rect>,
+    icon_hitboxes: Vec<IconHitbox>,
 
     // --- Animation ---
     track_start_ms: f64,
@@ -280,6 +282,7 @@ impl CantusLayer {
             // --- Interaction ---
             pointer_position: (0.0, 0.0),
             track_hitboxes: HashMap::new(),
+            icon_hitboxes: Vec::new(),
             last_hitbox_update: Instant::now(),
 
             // --- Particles ---
@@ -403,49 +406,6 @@ impl CantusLayer {
             self.output_matched = matched_target;
         }
         true
-    }
-
-    /// Handle pointer click events.
-    fn handle_pointer_click(&self) -> bool {
-        let point = Point::new(self.pointer_position.0, self.pointer_position.1);
-        if let Some((id, rect)) = self
-            .track_hitboxes
-            .iter()
-            .find(|(_, rect)| rect.contains(point))
-        {
-            let id = id.clone();
-            let rect = *rect;
-            tokio::spawn(async move {
-                spotify::skip_to_track(id, point, rect).await;
-            });
-            return true;
-        }
-        false
-    }
-
-    /// Update the input region for the surface.
-    fn update_input_region(&mut self, qhandle: &QueueHandle<Self>) {
-        if self.last_hitbox_update.elapsed() <= Duration::from_millis(500) {
-            return;
-        }
-
-        let (Some(wl_surface), Some(compositor)) = (&self.wl_surface, &self.compositor) else {
-            return;
-        };
-
-        let region = compositor.create_region(qhandle, ());
-        for rect in self.track_hitboxes.values() {
-            region.add(
-                rect.x0.round() as i32,
-                rect.y0.round() as i32,
-                (rect.x1 - rect.x0).round() as i32,
-                (rect.y1 - rect.y0).round() as i32,
-            );
-        }
-
-        wl_surface.set_input_region(Some(&region));
-        wl_surface.commit();
-        self.last_hitbox_update = Instant::now();
     }
 
     /// Render a frame and present it if the surface is available.

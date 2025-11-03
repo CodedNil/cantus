@@ -1,5 +1,5 @@
 use crate::{
-    CantusLayer, PANEL_HEIGHT_BASE, PANEL_WIDTH,
+    CantusLayer, IconHitbox, PANEL_HEIGHT_BASE, PANEL_WIDTH,
     spotify::{IMAGES_CACHE, PLAYBACK_STATE, Playlist, RATING_PLAYLISTS, TRACK_DATA_CACHE, Track},
 };
 use itertools::Itertools;
@@ -81,6 +81,8 @@ impl CantusLayer {
 
         let playback_state = PLAYBACK_STATE.lock().clone();
         let queue = &playback_state.queue;
+        self.icon_hitboxes.clear();
+        self.track_hitboxes.clear();
         if queue.is_empty() {
             return;
         }
@@ -422,6 +424,7 @@ impl CantusLayer {
                         .is_some_and(|playlist| playlist.tracks.contains(&track.id))
                 })
                 .map_or(0, |index| index);
+
             let non_rating_playlists: Vec<(Playlist, bool)> = playlists
                 .iter()
                 .filter_map(|(key, playlist)| {
@@ -443,15 +446,19 @@ impl CantusLayer {
             let star_size_border = 1.0 * self.scale_factor;
             let icon_spacing = 2.0 * self.scale_factor;
             let num_icons = 5 + non_rating_playlists.len();
+            let icon_total_size = icon_size + star_size_border * 2.0;
 
             for i in 0..num_icons {
-                let transform = Affine::translate((
-                    // Horizontally align to the center of the track canvas
-                    pos_x
-                        + width * 0.5
-                        + ((i as f64 - (num_icons as f64 / 2.0)) * (icon_size + icon_spacing)),
-                    height * 0.8,
-                ));
+                let icon_origin_x = pos_x
+                    + width * 0.5
+                    + ((i as f64 - (num_icons as f64 / 2.0)) * (icon_size + icon_spacing));
+                let transform = Affine::translate((icon_origin_x, height * 0.8));
+                let button_rect = Rect::new(
+                    (icon_origin_x - star_size_border) / self.scale_factor,
+                    (height * 0.8 - star_size_border) / self.scale_factor,
+                    (icon_origin_x - star_size_border + icon_total_size) / self.scale_factor,
+                    (height * 0.8 - star_size_border + icon_total_size) / self.scale_factor,
+                );
                 if i < 5 {
                     // Border white star
                     self.scene.append(
@@ -478,6 +485,12 @@ impl CantusLayer {
                         self.scene
                             .append(&STAR_IMAGES[3], Some(transform * transform_scale));
                     }
+                    self.icon_hitboxes.push(IconHitbox {
+                        rect: button_rect,
+                        track_id: track.id.clone(),
+                        playlist_id: None,
+                        rating_index: Some(i),
+                    });
                 } else if let Some((playlist, is_contained)) = non_rating_playlists.get(i - 5)
                     && let Some(playlist_image) = IMAGES_CACHE.get(&playlist.image_url)
                 {
@@ -510,6 +523,12 @@ impl CantusLayer {
                         );
                     }
                     self.scene.pop_layer();
+                    self.icon_hitboxes.push(IconHitbox {
+                        rect: button_rect,
+                        track_id: track.id.clone(),
+                        playlist_id: Some(playlist.id.clone()),
+                        rating_index: None,
+                    });
                 }
             }
         }
