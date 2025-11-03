@@ -21,7 +21,7 @@ wgpu = { version = "26.0.1", default-features = false, features = [
 ] }
 vello = { version = "0.6.0", default-features = false, features = ["wgpu"] }
 vello_svg = { version = "0.8.0", default-features = false }
-parley = "0.6.0"
+ttf-parser = { version = "0.25.1", features = ["variable-fonts"] }
 rspotify = { version = "0.15.2", default-features = false, features = [
     "client-reqwest",
     "reqwest-rustls-tls",

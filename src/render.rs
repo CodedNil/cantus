@@ -2,16 +2,13 @@ use crate::{
     CantusLayer, PANEL_HEIGHT_BASE, PANEL_WIDTH,
     spotify::{IMAGES_CACHE, PLAYBACK_STATE, Playlist, TRACK_DATA_CACHE, Track},
 };
-use parley::{
-    Alignment, FontFamily, FontStack, FontWeight, Layout, layout::PositionedLayoutItem,
-    style::StyleProperty,
-};
 use rand::Rng;
 use std::{collections::HashMap, ops::Range, time::Instant};
+use ttf_parser::{Face, GlyphId, NormalizedCoordinate, Tag, VariationAxis};
 use vello::{
     Glyph,
     kurbo::{Affine, Rect, RoundedRect, RoundedRectRadii},
-    peniko::{Color, Fill, ImageBrush, ImageData},
+    peniko::{Blob, Color, Fill, FontData, ImageBrush},
 };
 
 /// Spacing between tracks in ms
@@ -41,6 +38,141 @@ const SPARK_LENGTH_RANGE: Range<f64> = 6.0..10.0;
 /// Rendered spark thickness range, in logical pixels.
 const SPARK_THICKNESS_RANGE: Range<f64> = 2.0..4.0;
 
+#[derive(Clone)]
+pub struct FontEngine {
+    font_data: FontData,
+    base_face: Face<'static>,
+    base_metrics: FontMetrics,
+    axes: Vec<VariationAxis>,
+    weight_axis_index: Option<usize>,
+}
+
+#[derive(Clone, Copy, Debug)]
+struct FontMetrics {
+    units_per_em: f32,
+    ascender: f32,
+    descender: f32,
+    line_gap: f32,
+    space_advance: f32,
+}
+
+impl FontMetrics {
+    fn from_face(face: &Face<'_>) -> Self {
+        let units_per_em = f32::from(face.units_per_em()).max(1.0);
+        let ascender = f32::from(face.ascender()).max(0.0);
+        let descender = f32::from(-face.descender()).max(0.0);
+        let line_gap = f32::from(face.line_gap()).max(0.0);
+        let space_advance = face
+            .glyph_index(' ')
+            .and_then(|gid| face.glyph_hor_advance(gid))
+            .map_or(units_per_em * 0.5, f32::from);
+        Self {
+            units_per_em,
+            ascender,
+            descender,
+            line_gap,
+            space_advance,
+        }
+    }
+
+    const fn line_height_units(&self) -> f32 {
+        self.ascender + self.descender + self.line_gap
+    }
+}
+
+fn axis_normalized_value(axis: &VariationAxis, value: f32) -> i16 {
+    let mut v = value.clamp(axis.min_value, axis.max_value);
+    if (v - axis.def_value).abs() < f32::EPSILON {
+        return 0;
+    }
+    if v < axis.def_value {
+        let denom = axis.def_value - axis.min_value;
+        if denom.abs() < f32::EPSILON {
+            return 0;
+        }
+        v = (v - axis.def_value) / denom;
+    } else {
+        let denom = axis.max_value - axis.def_value;
+        if denom.abs() < f32::EPSILON {
+            return 0;
+        }
+        v = (v - axis.def_value) / denom;
+    }
+    NormalizedCoordinate::from(v).get()
+}
+
+#[derive(Clone, Copy)]
+enum Align {
+    Start,
+    Center,
+    End,
+}
+
+#[allow(dead_code)]
+#[derive(Clone, Copy)]
+pub enum FontWeight {
+    Regular,
+    Bold,
+    Value(f32),
+}
+
+impl FontWeight {
+    const fn value_for(self, axis: &VariationAxis) -> f32 {
+        let target = match self {
+            Self::Regular => axis.def_value,
+            Self::Bold => 700.0,
+            Self::Value(v) => v,
+        };
+        target.clamp(axis.min_value, axis.max_value)
+    }
+}
+
+pub struct TextLayout {
+    glyphs: Vec<Glyph>,
+    width: f32,
+    height: f32,
+    font_size: f32,
+    coords: Vec<i16>,
+}
+
+impl FontEngine {
+    pub fn new(bytes: &'static [u8]) -> Self {
+        let blob = Blob::from(bytes.to_vec());
+        let font_data = FontData::new(blob, 0);
+        let face = Face::parse(bytes, 0).expect("failed to parse embedded font");
+        let base_metrics = FontMetrics::from_face(&face);
+        let axes = face.variation_axes().into_iter().collect::<Vec<_>>();
+        let weight_axis_index = axes
+            .iter()
+            .position(|axis| axis.tag == Tag::from_bytes(b"wght"));
+
+        Self {
+            font_data,
+            base_face: face,
+            base_metrics,
+            axes,
+            weight_axis_index,
+        }
+    }
+
+    fn kerning_units(face: &Face<'_>, left: GlyphId, right: GlyphId) -> f32 {
+        let Some(kern_table) = face.tables().kern else {
+            return 0.0;
+        };
+        let mut adjustment = 0.0f32;
+        for subtable in kern_table.subtables {
+            if subtable.horizontal
+                && !subtable.has_cross_stream
+                && !subtable.has_state_machine
+                && let Some(value) = subtable.glyphs_kerning(left, right)
+            {
+                adjustment += f32::from(value);
+            }
+        }
+        adjustment
+    }
+}
+
 /// Build the scene for rendering.
 impl CantusLayer {
     pub fn create_scene(&mut self, device_id: usize) {
@@ -48,7 +180,7 @@ impl CantusLayer {
         let total_width = (PANEL_WIDTH * self.scale_factor).ceil();
         let total_height = (PANEL_HEIGHT_BASE * self.scale_factor).ceil();
 
-        let playback_state = PLAYBACK_STATE.lock().clone();
+        let playback_state = PLAYBACK_STATE.lock();
         let queue = &playback_state.queue;
         self.icon_hitboxes.clear();
         self.track_hitboxes.clear();
@@ -144,6 +276,7 @@ impl CantusLayer {
                 .background
                 .purge_stale(&mut bundle.renderer, self.frame_index);
         }
+        drop(playback_state);
         tracing::info!("Render took {:?}", start.elapsed());
     }
 
@@ -204,8 +337,20 @@ impl CantusLayer {
         let Some(track_data) = TRACK_DATA_CACHE.get(&track.id) else {
             return;
         };
-        let background_image =
-            self.render_background(device_id, &track.image_url, &track_data.palette_image);
+        let background_image = {
+            let bundle = self
+                .render_devices
+                .get_mut(&device_id)
+                .expect("render device must exist");
+            bundle.background.render(
+                &track.image_url,
+                &self.render_context.devices[device_id],
+                &mut bundle.renderer,
+                &track_data.palette_image,
+                self.time_origin.elapsed().as_secs_f32(),
+                self.frame_index,
+            )
+        };
 
         // --- BACKGROUND ---
         let background_aspect_ratio = (width - height * 0.5) / height;
@@ -271,36 +416,36 @@ impl CantusLayer {
             .unwrap_or(track.title.len())]
             .trim();
         let font_size = 13.0;
-        let font_weight = FontWeight::BOLD;
+        let font_weight = FontWeight::Bold;
         let text_height = (height * 0.25).floor();
         let brush = Color::from_rgb8(240, 240, 240);
         let layout = self.layout_text(song_name, font_size, font_weight);
-        let width_ratio = available_width / f64::from(layout.width());
+        let width_ratio = available_width / f64::from(layout.width);
         if width_ratio <= 1.0 {
             let layout = self.layout_text(song_name, font_size * width_ratio.max(0.8), font_weight);
             self.draw_text(
-                &layout,
+                layout,
                 text_start_left,
                 text_height,
-                Alignment::Left,
-                Alignment::Center,
+                Align::Start,
+                Align::Center,
                 // Fade out when it gets too small, 0.6-0.4
                 brush.with_alpha(((width_ratio - 0.4) / 0.2) as f32),
             );
         } else {
             self.draw_text(
-                &layout,
+                layout,
                 text_start_right,
                 text_height,
-                Alignment::Right,
-                Alignment::Center,
+                Align::End,
+                Align::Center,
                 brush,
             );
         }
 
         // Get text layouts for bottom row of text
         let font_size = 10.5;
-        let font_weight = FontWeight::BOLD;
+        let font_weight = FontWeight::Bold;
         let text_height = (height * 0.57).floor();
 
         let artist_text = &track.artist_name;
@@ -318,8 +463,8 @@ impl CantusLayer {
         };
         let time_layout = self.layout_text(&time_text, font_size, font_weight);
 
-        let width_ratio = available_width
-            / f64::from(artist_layout.width() + dot_layout.width() + time_layout.width());
+        let width_ratio =
+            available_width / f64::from(artist_layout.width + dot_layout.width + time_layout.width);
         if width_ratio <= 1.0 || !is_current {
             let layout = self.layout_text(
                 &format!("{time_text}{dot_text}{artist_text}"),
@@ -327,7 +472,7 @@ impl CantusLayer {
                 font_weight,
             );
             self.draw_text(
-                &layout,
+                layout,
                 if width_ratio > 1.0 {
                     text_start_right
                 } else {
@@ -335,29 +480,29 @@ impl CantusLayer {
                 },
                 text_height,
                 if width_ratio > 1.0 {
-                    Alignment::Right
+                    Align::End
                 } else {
-                    Alignment::Left
+                    Align::Start
                 },
-                Alignment::Center,
+                Align::Center,
                 // Fade out when it gets too small, 0.6-0.4
                 brush.with_alpha(((width_ratio - 0.4) / 0.2) as f32),
             );
         } else {
             self.draw_text(
-                &time_layout,
+                time_layout,
                 pos_x + dark_width + 12.0,
                 text_height,
-                Alignment::Left,
-                Alignment::Center,
+                Align::Start,
+                Align::Center,
                 brush,
             );
             self.draw_text(
-                &artist_layout,
+                artist_layout,
                 text_start_right,
                 text_height,
-                Alignment::Right,
-                Alignment::Center,
+                Align::End,
+                Align::Center,
                 brush,
             );
         }
@@ -386,91 +531,109 @@ impl CantusLayer {
         }
     }
 
-    fn render_background(
-        &mut self,
-        device_id: usize,
-        key: &str,
-        palette_image: &ImageData,
-    ) -> ImageData {
-        let device_handle = &self.render_context.devices[device_id];
-        let bundle = self
-            .render_devices
-            .get_mut(&device_id)
-            .expect("render device must exist");
-        bundle.background.render(
-            key,
-            device_handle,
-            &mut bundle.renderer,
-            palette_image,
-            self.time_origin.elapsed().as_secs_f32(),
-            self.frame_index,
-        )
-    }
+    /// Creates the text layout for a single-line string.
+    fn layout_text(&self, text: &str, font_size: f64, weight: FontWeight) -> TextLayout {
+        let mut face = self.font.base_face.clone();
+        if let Some(index) = self.font.weight_axis_index {
+            let axis = &self.font.axes[index];
+            let _ = face.set_variation(axis.tag, weight.value_for(axis));
+        }
 
-    /// Creates the text layout based on font properties.
-    fn layout_text(&mut self, text: &str, font_size: f64, font_weight: FontWeight) -> Layout<()> {
-        let mut builder =
-            self.layout_context
-                .ranged_builder(&mut self.font_context, text, 1.0, false);
-        builder.push_default(StyleProperty::FontStack(FontStack::Single(
-            FontFamily::Named("Noto Sans".into()),
-        )));
-        builder.push_default(StyleProperty::FontSize(
-            (font_size * self.scale_factor) as f32,
-        ));
-        builder.push_default(StyleProperty::FontWeight(font_weight));
+        let metrics = FontMetrics::from_face(&face);
+        let font_size_px = (font_size * self.scale_factor) as f32;
+        let scale = font_size_px / metrics.units_per_em;
+        let baseline = metrics.ascender * scale;
+        let fallback_height_units = self
+            .font
+            .base_metrics
+            .line_height_units()
+            .max(self.font.base_metrics.units_per_em);
+        let height_units = {
+            let units = metrics.line_height_units();
+            if units > 0.0 {
+                units
+            } else {
+                fallback_height_units
+            }
+        }
+        .max(fallback_height_units);
+        let height = height_units * scale;
+        let space_units = if metrics.space_advance > 0.0 {
+            metrics.space_advance
+        } else {
+            self.font.base_metrics.space_advance
+        };
 
-        let mut layout: Layout<()> = builder.build(text);
-        layout.break_all_lines(None);
-        layout
+        let mut pen_x = 0.0f32;
+        let mut glyphs = Vec::with_capacity(text.len());
+        let mut previous: Option<GlyphId> = None;
+
+        for ch in text.chars() {
+            let glyph_id = face.glyph_index(ch);
+            if let (Some(left), Some(right)) = (previous, glyph_id) {
+                pen_x += FontEngine::kerning_units(&face, left, right) * scale;
+            }
+            let advance_units = glyph_id
+                .and_then(|gid| face.glyph_hor_advance(gid))
+                .map_or(space_units, f32::from);
+            if let Some(gid) = glyph_id {
+                glyphs.push(Glyph {
+                    id: u32::from(gid.0),
+                    x: pen_x,
+                    y: baseline,
+                });
+                previous = Some(gid);
+            } else {
+                previous = None;
+            }
+            pen_x += advance_units * scale;
+        }
+
+        TextLayout {
+            glyphs,
+            width: pen_x,
+            height,
+            font_size: font_size_px,
+            coords: self
+                .font
+                .axes
+                .iter()
+                .map(|axis| axis_normalized_value(axis, weight.value_for(axis)))
+                .collect(),
+        }
     }
 
     /// Draw the text layout onto the scene.
     fn draw_text(
         &mut self,
-        layout: &Layout<()>,
+        layout: TextLayout,
         pos_x: f64,
         pos_y: f64,
-        horizontal_align: Alignment,
-        vertical_align: Alignment,
+        horizontal_align: Align,
+        vertical_align: Align,
         brush: Color,
     ) {
-        let offset_x = match horizontal_align {
-            Alignment::Right => f64::from(layout.width()),
-            Alignment::Center => f64::from(layout.width()) * 0.5,
-            Alignment::Start | Alignment::End | Alignment::Left | Alignment::Justify => 0.0,
-        };
-        let offset_y = match vertical_align {
-            Alignment::End => f64::from(layout.height()),
-            Alignment::Center => f64::from(layout.height()) * 0.5,
-            Alignment::Start | Alignment::Left | Alignment::Right | Alignment::Justify => 0.0,
-        };
-        let text_transform = Affine::translate((pos_x - offset_x, pos_y - offset_y));
-
-        for glyph_run in
-            layout
-                .lines()
-                .flat_map(|line| line.items())
-                .filter_map(|item| match item {
-                    PositionedLayoutItem::GlyphRun(run) => Some(run),
-                    PositionedLayoutItem::InlineBox(_) => None,
-                })
-        {
-            let glyphs = glyph_run.positioned_glyphs().map(|g| Glyph {
-                id: g.id,
-                x: g.x,
-                y: g.y,
-            });
-            let run = glyph_run.run();
-            self.scene
-                .draw_glyphs(run.font())
-                .font_size(run.font_size())
-                .normalized_coords(run.normalized_coords())
-                .transform(text_transform)
-                .hint(true)
-                .brush(brush)
-                .draw(Fill::NonZero, glyphs);
-        }
+        self.scene
+            .draw_glyphs(&self.font.font_data)
+            .font_size(layout.font_size)
+            .normalized_coords(&layout.coords)
+            .transform(Affine::translate((
+                pos_x
+                    - match horizontal_align {
+                        Align::Start => 0.0,
+                        Align::End => f64::from(layout.width),
+                        Align::Center => f64::from(layout.width) * 0.5,
+                    },
+                pos_y
+                    - match vertical_align {
+                        Align::Start => 0.0,
+                        Align::End => f64::from(layout.height),
+                        Align::Center => f64::from(layout.height) * 0.5,
+                    },
+            )))
+            .hint(true)
+            .brush(brush)
+            .draw(Fill::NonZero, layout.glyphs.into_iter());
     }
 
     fn render_playing_particles(&mut self, track: &Track, x: f64, height: f64, is_playing: bool) {

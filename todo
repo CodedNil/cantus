@@ -18,8 +18,6 @@ entry particles for songs on the right that are growing (very subtle in comparis
 
 cleanup:
 dirty the queue if its drastically changed
-optimise setting hitboxes
-inline the playback_state into the cantuslayer, to optimise the hot code
 simplify cantuslayer struct with sub structs
 
 

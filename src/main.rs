@@ -1,6 +1,9 @@
-use crate::{background::WarpBackground, interaction::IconHitbox, render::NowPlayingParticle};
+use crate::{
+    background::WarpBackground,
+    interaction::IconHitbox,
+    render::{FontEngine, NowPlayingParticle},
+};
 use anyhow::Result;
-use parley::{FontContext, LayoutContext};
 use rand::{SeedableRng, rngs::SmallRng};
 use raw_window_handle::{
     RawDisplayHandle, RawWindowHandle, WaylandDisplayHandle, WaylandWindowHandle,
@@ -11,7 +14,6 @@ use std::{
     env,
     ffi::c_void,
     ptr::NonNull,
-    sync::Arc,
     time::Instant,
 };
 use tracing::{debug, error};
@@ -19,7 +21,7 @@ use tracing_subscriber::EnvFilter;
 use vello::{
     AaConfig, Renderer, RendererOptions, Scene,
     kurbo::Rect,
-    peniko::{Blob, color::palette},
+    peniko::color::palette,
     util::{DeviceHandle, RenderContext, RenderSurface},
     wgpu::{
         BlendComponent, BlendFactor, BlendOperation, BlendState, CommandEncoderDescriptor,
@@ -193,8 +195,7 @@ struct CantusLayer {
     scene: Scene,
 
     // --- Text ---
-    font_context: FontContext,
-    layout_context: LayoutContext<()>,
+    font: FontEngine,
 
     // --- State ---
     scale_factor: f64,
@@ -225,11 +226,7 @@ struct CantusLayer {
 impl CantusLayer {
     /// Create a new layer shell state container.
     fn new(display_ptr: NonNull<c_void>) -> Self {
-        let mut font_context = FontContext::new();
-        font_context.collection.register_fonts(
-            Blob::new(Arc::new(include_bytes!("../assets/NotoSans.ttf"))),
-            None,
-        );
+        let font = FontEngine::new(include_bytes!("../assets/NotoSans.ttf"));
 
         // Create a RenderContext with Vulkan backend
         let mut render_context = RenderContext::new();
@@ -263,8 +260,7 @@ impl CantusLayer {
             scene: Scene::new(),
 
             // --- Text ---
-            font_context,
-            layout_context: LayoutContext::new(),
+            font,
 
             // --- State ---
             scale_factor: 1.0,
