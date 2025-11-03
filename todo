@@ -17,14 +17,8 @@ pulse emission based on songs current analysis (loudness etc at that point)
 entry particles for songs on the right that are growing (very subtle in comparison)
 
 
-shrink dependencies:
-wasm-bindgen
-wgpu optional features
-
-
 cleanup:
 dirty the queue if its drastically changed
-for very short songs they dont fit the whole height with background
 
 
 misc:

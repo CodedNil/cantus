@@ -21,7 +21,7 @@ const TRACK_SPACING_MS: f64 = 4000.0;
 /// How many ms to show in the timeline
 const TIMELINE_DURATION_MS: f64 = 15.0 * 60.0 * 1000.0;
 /// Starting position of the timeline in ms, if negative then it shows the history too
-const TIMELINE_START_MS: f64 = -60.0 * 1000.0;
+const TIMELINE_START_MS: f64 = -3.0 * 60.0 * 1000.0;
 
 /// Corner radius applied to rendered track pills.
 const ROUNDING_RADIUS: f64 = 14.0;
@@ -145,6 +145,7 @@ impl CantusLayer {
                 device_id,
                 track,
                 index == current_index,
+                index < current_index,
                 track_start_ms_spaced,
                 track_end_ms,
                 timeline_end_ms,
@@ -179,6 +180,7 @@ impl CantusLayer {
         device_id: usize,
         track: &Track,
         is_current: bool,
+        is_past: bool,
         track_start_ms: f64,
         track_end_ms: f64,
         timeline_end_ms: f64,
@@ -237,6 +239,7 @@ impl CantusLayer {
         );
 
         // --- BACKGROUND ---
+        let background_aspect_ratio = (width - height * 0.5) / height;
         self.scene.push_clip_layer(
             Affine::translate((pos_x, 0.0)),
             &RoundedRect::new(
@@ -248,14 +251,13 @@ impl CantusLayer {
             ),
         );
         let image_width = f64::from(background_image.width);
-        let image_height = f64::from(background_image.height);
         self.scene.fill(
             Fill::NonZero,
             Affine::translate((pos_x, 0.0))
                 * Affine::scale((uncropped_width - height * 0.5) / image_width),
             &ImageBrush::new(background_image),
             None,
-            &Rect::new(0.0, 0.0, image_width, image_height),
+            &Rect::new(0.0, 0.0, image_width, image_width * background_aspect_ratio),
         );
         self.scene.pop_layer();
 
@@ -411,96 +413,104 @@ impl CantusLayer {
         }
 
         // --- Star ratings and favourite playlists ---
-        let track_rating_index = RATING_PLAYLISTS
-            .iter()
-            .position(|&rating_key| {
-                playlists
-                    .get(rating_key)
-                    .is_some_and(|playlist| playlist.tracks.contains(&track.id))
-            })
-            .map_or(0, |index| index);
-        let non_rating_playlists: Vec<(Playlist, bool)> = playlists
-            .iter()
-            .filter_map(|(key, playlist)| {
-                let is_rating = RATING_PLAYLISTS.contains(&key.as_str());
-                let contained = playlist.tracks.contains(&track.id);
-                let should_include = if is_current {
-                    !is_rating
-                } else {
-                    !is_rating && contained
-                };
-                should_include.then(|| (playlist.clone(), contained))
-            })
-            .sorted_by(|(a, _), (b, _)| a.name.cmp(&b.name))
-            .collect();
-        let full_stars = track_rating_index / 2;
-        let has_half = track_rating_index % 2 == 1;
+        if !is_past {
+            let track_rating_index = RATING_PLAYLISTS
+                .iter()
+                .position(|&rating_key| {
+                    playlists
+                        .get(rating_key)
+                        .is_some_and(|playlist| playlist.tracks.contains(&track.id))
+                })
+                .map_or(0, |index| index);
+            let non_rating_playlists: Vec<(Playlist, bool)> = playlists
+                .iter()
+                .filter_map(|(key, playlist)| {
+                    let is_rating = RATING_PLAYLISTS.contains(&key.as_str());
+                    let contained = playlist.tracks.contains(&track.id);
+                    let should_include = if is_current {
+                        !is_rating
+                    } else {
+                        !is_rating && contained
+                    };
+                    should_include.then(|| (playlist.clone(), contained))
+                })
+                .sorted_by(|(a, _), (b, _)| a.name.cmp(&b.name))
+                .collect();
+            let full_stars = track_rating_index / 2;
+            let has_half = track_rating_index % 2 == 1;
 
-        let icon_size = 14.0 * self.scale_factor;
-        let star_size_border = 1.0 * self.scale_factor;
-        let icon_spacing = 2.0 * self.scale_factor;
-        let num_icons = 5 + non_rating_playlists.len();
+            let icon_size = 14.0 * self.scale_factor;
+            let star_size_border = 1.0 * self.scale_factor;
+            let icon_spacing = 2.0 * self.scale_factor;
+            let num_icons = 5 + non_rating_playlists.len();
 
-        for i in 0..num_icons {
-            let transform = Affine::translate((
-                // Horizontally align to the center of the track canvas
-                pos_x
-                    + width * 0.5
-                    + ((i as f64 - (num_icons as f64 / 2.0)) * (icon_size + icon_spacing)),
-                height * 0.8,
-            ));
-            if i < 5 {
-                // Border white star
-                self.scene.append(
-                    &STAR_IMAGES[1],
-                    Some(
-                        transform
-                            * Affine::translate((-star_size_border, -star_size_border))
-                            * Affine::scale(
-                                (icon_size + star_size_border * 2.0) / *STAR_IMAGE_SIZE,
-                            ),
-                    ),
-                );
+            for i in 0..num_icons {
+                let transform = Affine::translate((
+                    // Horizontally align to the center of the track canvas
+                    pos_x
+                        + width * 0.5
+                        + ((i as f64 - (num_icons as f64 / 2.0)) * (icon_size + icon_spacing)),
+                    height * 0.8,
+                ));
+                if i < 5 {
+                    // Border white star
+                    self.scene.append(
+                        &STAR_IMAGES[1],
+                        Some(
+                            transform
+                                * Affine::translate((-star_size_border, -star_size_border))
+                                * Affine::scale(
+                                    (icon_size + star_size_border * 2.0) / *STAR_IMAGE_SIZE,
+                                ),
+                        ),
+                    );
 
-                // Foreground grey/yellow star
-                let transform_scale = Affine::scale(icon_size / *STAR_IMAGE_SIZE);
-                if i < full_stars {
-                    self.scene
-                        .append(&STAR_IMAGES[2], Some(transform * transform_scale));
-                } else {
-                    self.scene
-                        .append(&STAR_IMAGES[0], Some(transform * transform_scale));
-                }
-                if (i == full_stars) && has_half {
-                    self.scene
-                        .append(&STAR_IMAGES[3], Some(transform * transform_scale));
-                }
-            } else if let Some((playlist, is_contained)) = non_rating_playlists.get(i - 5)
-                && let Some(playlist_image) = IMAGES_CACHE.get(&playlist.image_url)
-            {
-                let image_height = f64::from(playlist_image.width);
-                self.scene.push_clip_layer(
-                    transform,
-                    &RoundedRect::new(0.0, 0.0, icon_size, icon_size, 10.0),
-                );
-                self.scene.fill(
-                    Fill::NonZero,
-                    transform * Affine::scale(icon_size / image_height),
-                    &ImageBrush::new(playlist_image.clone()),
-                    None,
-                    &Rect::new(0.0, 0.0, image_height, image_height),
-                );
-                if !is_contained {
-                    // If not contained, grey it out
+                    // Foreground grey/yellow star
+                    let transform_scale = Affine::scale(icon_size / *STAR_IMAGE_SIZE);
+                    if i < full_stars {
+                        self.scene
+                            .append(&STAR_IMAGES[2], Some(transform * transform_scale));
+                    } else {
+                        self.scene
+                            .append(&STAR_IMAGES[0], Some(transform * transform_scale));
+                    }
+                    if (i == full_stars) && has_half {
+                        self.scene
+                            .append(&STAR_IMAGES[3], Some(transform * transform_scale));
+                    }
+                } else if let Some((playlist, is_contained)) = non_rating_playlists.get(i - 5)
+                    && let Some(playlist_image) = IMAGES_CACHE.get(&playlist.image_url)
+                {
+                    let transform =
+                        transform * Affine::translate((-star_size_border, -star_size_border));
+                    let image_height = f64::from(playlist_image.width);
+                    let icon_size = icon_size + star_size_border * 2.0;
+                    self.scene.push_clip_layer(
+                        transform,
+                        &RoundedRect::new(0.0, 0.0, icon_size, icon_size, 10.0),
+                    );
+                    let zoom_pixels = 16.0;
                     self.scene.fill(
                         Fill::NonZero,
-                        transform,
-                        Color::from_rgba8(60, 60, 60, 180),
+                        transform
+                            * Affine::translate((-zoom_pixels, -zoom_pixels))
+                            * Affine::scale((icon_size + zoom_pixels * 2.0) / image_height),
+                        &ImageBrush::new(playlist_image.clone()),
                         None,
-                        &Rect::new(0.0, 0.0, icon_size, icon_size),
+                        &Rect::new(0.0, 0.0, image_height, image_height),
                     );
+                    if !is_contained {
+                        // If not contained, grey it out
+                        self.scene.fill(
+                            Fill::NonZero,
+                            transform,
+                            Color::from_rgba8(60, 60, 60, 180),
+                            None,
+                            &Rect::new(0.0, 0.0, icon_size, icon_size),
+                        );
+                    }
+                    self.scene.pop_layer();
                 }
-                self.scene.pop_layer();
             }
         }
     }
