@@ -1,20 +1,18 @@
 use crate::{
-    CantusLayer, IconHitbox, PANEL_HEIGHT_BASE, PANEL_WIDTH,
-    spotify::{IMAGES_CACHE, PLAYBACK_STATE, Playlist, RATING_PLAYLISTS, TRACK_DATA_CACHE, Track},
+    CantusLayer, PANEL_HEIGHT_BASE, PANEL_WIDTH,
+    spotify::{IMAGES_CACHE, PLAYBACK_STATE, Playlist, TRACK_DATA_CACHE, Track},
 };
-use itertools::Itertools;
 use parley::{
     Alignment, FontFamily, FontStack, FontWeight, Layout, layout::PositionedLayoutItem,
     style::StyleProperty,
 };
 use rand::Rng;
-use std::{collections::HashMap, ops::Range, sync::LazyLock, time::Instant};
+use std::{collections::HashMap, ops::Range, time::Instant};
 use vello::{
-    Glyph, Scene,
+    Glyph,
     kurbo::{Affine, Rect, RoundedRect, RoundedRectRadii},
     peniko::{Color, Fill, ImageBrush, ImageData},
 };
-use vello_svg::usvg;
 
 /// Spacing between tracks in ms
 const TRACK_SPACING_MS: f64 = 4000.0;
@@ -42,36 +40,6 @@ const SPARK_LIFETIME: Range<f32> = 0.3..0.6;
 const SPARK_LENGTH_RANGE: Range<f64> = 6.0..10.0;
 /// Rendered spark thickness range, in logical pixels.
 const SPARK_THICKNESS_RANGE: Range<f64> = 2.0..4.0;
-
-/// Star images
-static STAR_IMAGES: LazyLock<[Scene; 4]> = LazyLock::new(|| {
-    let full_svg = include_str!("../assets/star.svg");
-    let half_svg = include_str!("../assets/star-half.svg");
-    let options = usvg::Options::default();
-
-    let full_gray = full_svg.replace("fill=\"none\"", "fill=\"#555555\"");
-    let full_border = full_svg.replace("fill=\"none\"", "fill=\"#000000\"");
-    let full_yellow = full_svg.replace("fill=\"none\"", "fill=\"#dcb400\"");
-    let half_yellow = half_svg.replace("fill=\"none\"", "fill=\"#dcb400\"");
-
-    [
-        vello_svg::render_tree(&usvg::Tree::from_data(full_gray.as_bytes(), &options).unwrap()),
-        vello_svg::render_tree(&usvg::Tree::from_data(full_border.as_bytes(), &options).unwrap()),
-        vello_svg::render_tree(&usvg::Tree::from_data(full_yellow.as_bytes(), &options).unwrap()),
-        vello_svg::render_tree(&usvg::Tree::from_data(half_yellow.as_bytes(), &options).unwrap()),
-    ]
-});
-static STAR_IMAGE_SIZE: LazyLock<f64> = LazyLock::new(|| {
-    f64::from(
-        usvg::Tree::from_data(
-            include_bytes!("../assets/star-half.svg"),
-            &usvg::Options::default(),
-        )
-        .unwrap()
-        .size()
-        .width(),
-    )
-});
 
 /// Build the scene for rendering.
 impl CantusLayer {
@@ -414,123 +382,8 @@ impl CantusLayer {
             self.scene.pop_layer();
         }
 
-        // --- Star ratings and favourite playlists ---
         if !is_past {
-            let track_rating_index = RATING_PLAYLISTS
-                .iter()
-                .position(|&rating_key| {
-                    playlists
-                        .get(rating_key)
-                        .is_some_and(|playlist| playlist.tracks.contains(&track.id))
-                })
-                .map_or(0, |index| index);
-
-            let non_rating_playlists: Vec<(Playlist, bool)> = playlists
-                .iter()
-                .filter_map(|(key, playlist)| {
-                    let is_rating = RATING_PLAYLISTS.contains(&key.as_str());
-                    let contained = playlist.tracks.contains(&track.id);
-                    let should_include = if is_current {
-                        !is_rating
-                    } else {
-                        !is_rating && contained
-                    };
-                    should_include.then(|| (playlist.clone(), contained))
-                })
-                .sorted_by(|(a, _), (b, _)| a.name.cmp(&b.name))
-                .collect();
-            let full_stars = track_rating_index / 2;
-            let has_half = track_rating_index % 2 == 1;
-
-            let icon_size = 14.0 * self.scale_factor;
-            let star_size_border = 1.0 * self.scale_factor;
-            let icon_spacing = 2.0 * self.scale_factor;
-            let num_icons = 5 + non_rating_playlists.len();
-            let icon_total_size = icon_size + star_size_border * 2.0;
-
-            for i in 0..num_icons {
-                let icon_origin_x = pos_x
-                    + width * 0.5
-                    + ((i as f64 - (num_icons as f64 / 2.0)) * (icon_size + icon_spacing));
-                let transform = Affine::translate((icon_origin_x, height * 0.8));
-                let button_rect = Rect::new(
-                    (icon_origin_x - star_size_border) / self.scale_factor,
-                    (height * 0.8 - star_size_border) / self.scale_factor,
-                    (icon_origin_x - star_size_border + icon_total_size) / self.scale_factor,
-                    (height * 0.8 - star_size_border + icon_total_size) / self.scale_factor,
-                );
-                if i < 5 {
-                    // Border white star
-                    self.scene.append(
-                        &STAR_IMAGES[1],
-                        Some(
-                            transform
-                                * Affine::translate((-star_size_border, -star_size_border))
-                                * Affine::scale(
-                                    (icon_size + star_size_border * 2.0) / *STAR_IMAGE_SIZE,
-                                ),
-                        ),
-                    );
-
-                    // Foreground grey/yellow star
-                    let transform_scale = Affine::scale(icon_size / *STAR_IMAGE_SIZE);
-                    if i < full_stars {
-                        self.scene
-                            .append(&STAR_IMAGES[2], Some(transform * transform_scale));
-                    } else {
-                        self.scene
-                            .append(&STAR_IMAGES[0], Some(transform * transform_scale));
-                    }
-                    if (i == full_stars) && has_half {
-                        self.scene
-                            .append(&STAR_IMAGES[3], Some(transform * transform_scale));
-                    }
-                    self.icon_hitboxes.push(IconHitbox {
-                        rect: button_rect,
-                        track_id: track.id.clone(),
-                        playlist_id: None,
-                        rating_index: Some(i),
-                    });
-                } else if let Some((playlist, is_contained)) = non_rating_playlists.get(i - 5)
-                    && let Some(playlist_image) = IMAGES_CACHE.get(&playlist.image_url)
-                {
-                    let transform =
-                        transform * Affine::translate((-star_size_border, -star_size_border));
-                    let image_height = f64::from(playlist_image.width);
-                    let icon_size = icon_size + star_size_border * 2.0;
-                    self.scene.push_clip_layer(
-                        transform,
-                        &RoundedRect::new(0.0, 0.0, icon_size, icon_size, 10.0),
-                    );
-                    let zoom_pixels = 16.0;
-                    self.scene.fill(
-                        Fill::NonZero,
-                        transform
-                            * Affine::translate((-zoom_pixels, -zoom_pixels))
-                            * Affine::scale((icon_size + zoom_pixels * 2.0) / image_height),
-                        &ImageBrush::new(playlist_image.clone()),
-                        None,
-                        &Rect::new(0.0, 0.0, image_height, image_height),
-                    );
-                    if !is_contained {
-                        // If not contained, grey it out
-                        self.scene.fill(
-                            Fill::NonZero,
-                            transform,
-                            Color::from_rgba8(60, 60, 60, 180),
-                            None,
-                            &Rect::new(0.0, 0.0, icon_size, icon_size),
-                        );
-                    }
-                    self.scene.pop_layer();
-                    self.icon_hitboxes.push(IconHitbox {
-                        rect: button_rect,
-                        track_id: track.id.clone(),
-                        playlist_id: Some(playlist.id.clone()),
-                        rating_index: None,
-                    });
-                }
-            }
+            self.draw_playlist_buttons(track, is_current, playlists, width, height, pos_x);
         }
     }
 
