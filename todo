@@ -10,13 +10,10 @@ pulse animation when play or pause like zen
 maybe make currently playing song have an animated glow outline, when the song is changed the new one should do have a heavy pulse
 
 
-cleanup:
-dirty the queue if its drastically changed
-
-
 misc:
+dirty the queue better if its drastically changed
 lyrics along the bottom
-compile feature to run as a winit window instead of a layer_shell bar
+run as a proper windows layer-shell bar
 
 
 todo when audio analysis is possible again:

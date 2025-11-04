@@ -1,5 +1,5 @@
 use crate::{
-    CantusLayer, PANEL_HEIGHT_BASE, PANEL_WIDTH,
+    CantusApp, PANEL_HEIGHT_BASE, PANEL_WIDTH,
     spotify::{IMAGES_CACHE, PLAYBACK_STATE, Playlist, TRACK_DATA_CACHE, Track},
 };
 use rand::Rng;
@@ -116,7 +116,7 @@ impl FontEngine {
 }
 
 /// Build the scene for rendering.
-impl CantusLayer {
+impl CantusApp {
     pub fn create_scene(&mut self, device_id: usize) {
         let total_width = (PANEL_WIDTH * self.scale_factor).ceil();
         let total_height = (PANEL_HEIGHT_BASE * self.scale_factor).ceil();

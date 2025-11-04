@@ -14,6 +14,7 @@ pkgs.mkShell rec {
   buildInputs = with pkgs; [
     wayland
     vulkan-loader
+    libxkbcommon
   ];
 
   RUST_SRC_PATH = "${pkgs.rust.packages.stable.rustPlatform.rustLibSrc}";

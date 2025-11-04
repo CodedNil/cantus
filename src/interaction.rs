@@ -1,5 +1,5 @@
 use crate::{
-    CantusLayer,
+    CantusApp,
     spotify::{
         IMAGES_CACHE, PLAYBACK_STATE, Playlist, RATING_PLAYLISTS, SPOTIFY_CLIENT, Track,
         update_playback_state,
@@ -12,12 +12,7 @@ use rspotify::{
     prelude::OAuthClient,
 };
 use std::sync::atomic::{AtomicBool, Ordering as AtomicOrdering};
-use std::{
-    cmp::Ordering,
-    collections::HashMap,
-    sync::LazyLock,
-    time::{Duration, Instant},
-};
+use std::{cmp::Ordering, collections::HashMap, sync::LazyLock, time::Instant};
 use tracing::{error, info, warn};
 use vello::{
     Scene,
@@ -25,7 +20,6 @@ use vello::{
     peniko::{Color, Fill, ImageBrush},
 };
 use vello_svg::usvg;
-use wayland_client::QueueHandle;
 
 static SPOTIFY_INTERACTION_GUARD: AtomicBool = AtomicBool::new(false);
 struct SpotifyInteractionToken;
@@ -56,6 +50,7 @@ pub struct IconHitbox {
 
 pub struct InteractionState {
     pub pointer_position: (f64, f64),
+    #[cfg(feature = "layer-shell")]
     pub last_hitbox_update: Instant,
     pub track_hitboxes: HashMap<TrackId<'static>, Rect>,
     pub icon_hitboxes: Vec<IconHitbox>,
@@ -69,6 +64,7 @@ impl InteractionState {
     pub fn new() -> Self {
         Self {
             pointer_position: (0.0, 0.0),
+            #[cfg(feature = "layer-shell")]
             last_hitbox_update: Instant::now(),
             track_hitboxes: HashMap::new(),
             icon_hitboxes: Vec::new(),
@@ -140,7 +136,7 @@ static STAR_IMAGE_SIZE: LazyLock<f64> = LazyLock::new(|| {
     )
 });
 
-impl CantusLayer {
+impl CantusApp {
     /// Handle pointer click events.
     pub fn handle_pointer_click(&self) -> bool {
         let point = Point::new(
@@ -200,36 +196,6 @@ impl CantusLayer {
         } else {
             self.interaction.drag_delta_pixels = 0.0;
         }
-    }
-
-    /// Update the input region for the surface.
-    pub fn update_input_region(&mut self, qhandle: &QueueHandle<Self>) {
-        if self.interaction.last_hitbox_update.elapsed() <= Duration::from_millis(500) {
-            return;
-        }
-
-        let (Some(wl_surface), Some(compositor)) = (&self.wl_surface, &self.compositor) else {
-            return;
-        };
-
-        let region = compositor.create_region(qhandle, ());
-        for rect in self.interaction.track_hitboxes.values().chain(
-            self.interaction
-                .icon_hitboxes
-                .iter()
-                .map(|hitbox| &hitbox.rect),
-        ) {
-            region.add(
-                rect.x0.round() as i32,
-                rect.y0.round() as i32,
-                (rect.x1 - rect.x0).round() as i32,
-                (rect.y1 - rect.y0).round() as i32,
-            );
-        }
-
-        wl_surface.set_input_region(Some(&region));
-        wl_surface.commit();
-        self.interaction.last_hitbox_update = Instant::now();
     }
 
     /// Star ratings and favourite playlists
