@@ -1,8 +1,5 @@
-drag seek:
-actually seek/skip song on release
-particles based on the speed of change, and direction
-
 interaction:
+actually seek/skip song on drag release
 stack previous songs so a bit of each is visible up to like 6 songs
 
 
@@ -13,14 +10,8 @@ pulse animation when play or pause like zen
 maybe make currently playing song have an animated glow outline, when the song is changed the new one should do have a heavy pulse
 
 
-particles:
-pulse emission based on songs current analysis (loudness etc at that point)
-entry particles for songs on the right that are growing (very subtle in comparison)
-
-
 cleanup:
 dirty the queue if its drastically changed
-simplify cantuslayer struct with sub structs
 
 
 misc:

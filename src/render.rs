@@ -24,13 +24,11 @@ const ROUNDING_RADIUS: f64 = 14.0;
 /// Particles emitted per second when playback is active.
 const SPARK_EMISSION: f32 = 60.0;
 /// Downward acceleration applied to each particle (scaled by DPI).
-const SPARK_GRAVITY: f32 = 620.0;
-/// Normalized vertical spawn range along the divider (0.0 = top, 1.0 = bottom).
-const SPARK_SPAWN_Y: Range<f32> = 0.05..0.95;
-/// Horizontal velocity range applied at spawn (negative moves sparks left).
-const SPARK_VELOCITY_X: Range<f32> = -120.0..-70.0;
-/// Vertical velocity range applied at spawn (negative moves sparks upward).
-const SPARK_VELOCITY_Y: Range<f32> = -70.0..-40.0;
+const SPARK_GRAVITY: f32 = 300.0;
+/// Horizontal velocity range applied at spawn.
+const SPARK_VELOCITY_X: Range<f32> = 70.0..120.0;
+/// Vertical velocity range applied at spawn.
+const SPARK_VELOCITY_Y: Range<f32> = 10.0..70.0;
 /// Lifetime range for individual particles, in seconds.
 const SPARK_LIFETIME: Range<f32> = 0.3..0.6;
 /// Rendered spark segment length range, in logical pixels.
@@ -168,6 +166,7 @@ impl CantusLayer {
             track_start_target =
                 self.track_start_ms + (track_start_target - self.track_start_ms) * 0.1;
         }
+        let track_move_speed = track_start_target - self.track_start_ms;
         self.track_start_ms = track_start_target;
 
         // Lerp track spacing based on the target and current spacing
@@ -221,6 +220,7 @@ impl CantusLayer {
             -TIMELINE_START_MS * px_per_ms,
             total_height,
             playback_state.playing,
+            track_move_speed,
         );
 
         // Purge the stale background cache entries.
@@ -593,7 +593,14 @@ impl CantusLayer {
             .draw(Fill::NonZero, layout.glyphs.into_iter());
     }
 
-    fn render_playing_particles(&mut self, track: &Track, x: f64, height: f64, is_playing: bool) {
+    fn render_playing_particles(
+        &mut self,
+        track: &Track,
+        x: f64,
+        height: f64,
+        is_playing: bool,
+        track_move_speed: f64,
+    ) {
         let now = Instant::now();
         let dt = now.duration_since(self.last_particle_update).as_secs_f32();
         self.last_particle_update = now;
@@ -626,10 +633,12 @@ impl CantusLayer {
             let emit_count = self.particle_spawn_accumulator.floor() as u16;
             self.particle_spawn_accumulator -= f32::from(emit_count);
             for _ in 0..emit_count {
-                let position = [x as f32, height_f32 * self.rng.random_range(SPARK_SPAWN_Y)];
+                let position = [x as f32, height_f32 * self.rng.random_range(0.05..0.95)];
                 let velocity = [
-                    self.rng.random_range(SPARK_VELOCITY_X) * scale,
-                    self.rng.random_range(SPARK_VELOCITY_Y) * scale,
+                    self.rng.random_range(SPARK_VELOCITY_X)
+                        * scale
+                        * (track_move_speed as f32 * 0.05).clamp(-3.0, 3.0),
+                    -self.rng.random_range(SPARK_VELOCITY_Y) * scale,
                 ];
                 let life = self.rng.random_range(SPARK_LIFETIME);
                 if let Some(dead_particle) = self
