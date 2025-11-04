@@ -504,18 +504,29 @@ async fn ensure_image_cached(url: &str) -> Result<()> {
     }
     let response = HTTP_CLIENT.get(url).send().await?.error_for_status()?;
     let dynamic_image = image::load_from_memory(&response.bytes().await?)?;
+    // If width or height more thant 64 pixels, resize the image
     let (width, height) = dynamic_image.dimensions();
-    let rgba = dynamic_image.to_rgba8();
-    IMAGES_CACHE.insert(
-        url.to_owned(),
+    let image_data = if width > 64 || height > 64 {
+        let rgb = dynamic_image
+            .resize_to_fill(64, 64, image::imageops::FilterType::Lanczos3)
+            .to_rgba8();
         ImageData {
-            data: Blob::from(rgba.into_raw()),
+            data: Blob::from(rgb.into_raw()),
+            format: ImageFormat::Rgba8,
+            alpha_type: ImageAlphaType::Alpha,
+            width: 64,
+            height: 64,
+        }
+    } else {
+        ImageData {
+            data: Blob::from(dynamic_image.to_rgba8().into_raw()),
             format: ImageFormat::Rgba8,
             alpha_type: ImageAlphaType::Alpha,
             width,
             height,
-        },
-    );
+        }
+    };
+    IMAGES_CACHE.insert(url.to_owned(), image_data);
     Ok(())
 }
 
