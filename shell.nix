@@ -13,12 +13,7 @@ pkgs.mkShell rec {
 
   buildInputs = with pkgs; [
     wayland
-    dbus
-    libxkbcommon
     vulkan-loader
-    libGL
-    fontconfig
-    openssl
   ];
 
   RUST_SRC_PATH = "${pkgs.rust.packages.stable.rustPlatform.rustLibSrc}";

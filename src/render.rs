@@ -368,9 +368,9 @@ impl CantusLayer {
                 .or_else(|| track.title.find(" -"))
                 .unwrap_or(track.title.len())]
                 .trim();
-            let font_size = 13.0;
+            let font_size = 12.0;
             let font_weight = FontWeight::Bold;
-            let text_height = (height * 0.25).floor();
+            let text_height = (height * 0.2).floor();
             let layout = self.layout_text(song_name, font_size, font_weight);
             let width_ratio = available_width / layout.width;
             if width_ratio <= 1.0 {
@@ -399,7 +399,7 @@ impl CantusLayer {
         {
             let font_size = 10.5;
             let font_weight = FontWeight::Bold;
-            let text_height = (height * 0.57).floor();
+            let text_height = (height * 0.52).floor();
 
             let artist_text = &track.artist_name;
             let artist_layout = self.layout_text(artist_text, font_size, font_weight);
