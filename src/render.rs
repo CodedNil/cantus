@@ -46,56 +46,6 @@ pub struct FontEngine {
     weight_axis_index: Option<usize>,
 }
 
-#[derive(Clone, Copy, Debug)]
-struct FontMetrics {
-    units_per_em: f32,
-    ascender: f32,
-    descender: f32,
-    line_gap: f32,
-    space_advance: f32,
-}
-
-impl FontMetrics {
-    fn from_face(face: &Face<'_>) -> Self {
-        let units_per_em = f32::from(face.units_per_em()).max(1.0);
-        Self {
-            units_per_em,
-            ascender: f32::from(face.ascender()).max(0.0),
-            descender: f32::from(-face.descender()).max(0.0),
-            line_gap: f32::from(face.line_gap()).max(0.0),
-            space_advance: face
-                .glyph_index(' ')
-                .and_then(|gid| face.glyph_hor_advance(gid))
-                .map_or(units_per_em * 0.5, f32::from),
-        }
-    }
-
-    const fn line_height_units(&self) -> f32 {
-        self.ascender + self.descender + self.line_gap
-    }
-}
-
-fn axis_normalized_value(axis: &VariationAxis, value: f32) -> i16 {
-    let mut v = value.clamp(axis.min_value, axis.max_value);
-    if (v - axis.def_value).abs() < f32::EPSILON {
-        return 0;
-    }
-    if v < axis.def_value {
-        let denom = axis.def_value - axis.min_value;
-        if denom.abs() < f32::EPSILON {
-            return 0;
-        }
-        v = (v - axis.def_value) / denom;
-    } else {
-        let denom = axis.max_value - axis.def_value;
-        if denom.abs() < f32::EPSILON {
-            return 0;
-        }
-        v = (v - axis.def_value) / denom;
-    }
-    NormalizedCoordinate::from(v).get()
-}
-
 #[allow(dead_code)]
 #[derive(Clone, Copy)]
 enum Align {
@@ -170,7 +120,6 @@ impl FontEngine {
 /// Build the scene for rendering.
 impl CantusLayer {
     pub fn create_scene(&mut self, device_id: usize) {
-        let start = Instant::now();
         let total_width = (PANEL_WIDTH * self.scale_factor).ceil();
         let total_height = (PANEL_HEIGHT_BASE * self.scale_factor).ceil();
 
@@ -271,7 +220,6 @@ impl CantusLayer {
                 .purge_stale(&mut bundle.renderer, self.frame_index);
         }
         drop(playback_state);
-        tracing::info!("Render took {:?}", start.elapsed());
     }
 
     fn draw_track(
@@ -539,13 +487,17 @@ impl CantusLayer {
         let mut face = self.font.base_face.clone();
         if let Some(index) = self.font.weight_axis_index {
             let axis = &self.font.axes[index];
-            let _ = face.set_variation(axis.tag, weight.value_for(axis));
+            face.set_variation(axis.tag, weight.value_for(axis));
         }
 
-        let metrics = FontMetrics::from_face(&face);
         let font_size_px = (font_size * self.scale_factor) as f32;
-        let scale = font_size_px / metrics.units_per_em;
-        let baseline = metrics.ascender * scale;
+        let scale = font_size_px / f32::from(face.units_per_em());
+        let baseline = f32::from(face.ascender()) * scale;
+        let space_advance = face
+            .glyph_index(' ')
+            .and_then(|gid| face.glyph_hor_advance(gid))
+            .map_or_else(|| f32::from(face.units_per_em()) * 0.5, f32::from);
+        let line_height_units = f32::from(face.ascender() + face.descender() + face.line_gap());
 
         let mut pen_x = 0.0f32;
         let mut glyphs = Vec::with_capacity(text.len());
@@ -558,7 +510,7 @@ impl CantusLayer {
             }
             let advance_units = glyph_id
                 .and_then(|gid| face.glyph_hor_advance(gid))
-                .map_or(metrics.space_advance, f32::from);
+                .map_or(space_advance, f32::from);
             if let Some(gid) = glyph_id {
                 glyphs.push(Glyph {
                     id: u32::from(gid.0),
@@ -575,13 +527,31 @@ impl CantusLayer {
         TextLayout {
             glyphs,
             width: f64::from(pen_x),
-            height: f64::from(metrics.line_height_units() * scale),
+            height: f64::from(line_height_units * scale),
             font_size: font_size_px,
             coords: self
                 .font
                 .axes
                 .iter()
-                .map(|axis| axis_normalized_value(axis, weight.value_for(axis)))
+                .map(|axis| {
+                    let mut v = weight.value_for(axis).clamp(axis.min_value, axis.max_value);
+                    if (v - axis.def_value).abs() < f32::EPSILON {
+                        return 0;
+                    } else if v < axis.def_value {
+                        let denom = axis.def_value - axis.min_value;
+                        if denom.abs() < f32::EPSILON {
+                            return 0;
+                        }
+                        v = (v - axis.def_value) / denom;
+                    } else {
+                        let denom = axis.max_value - axis.def_value;
+                        if denom.abs() < f32::EPSILON {
+                            return 0;
+                        }
+                        v = (v - axis.def_value) / denom;
+                    }
+                    NormalizedCoordinate::from(v).get()
+                })
                 .collect(),
         }
     }
