@@ -167,9 +167,11 @@ impl LayerShellApp {
     }
 
     fn request_frame(&mut self, qhandle: &QueueHandle<Self>) {
-        if self.frame_callback.is_none()
-            && let Some(surface) = self.wl_surface.as_ref()
-        {
+        if self.frame_callback.is_some() {
+            return;
+        }
+
+        if let Some(surface) = &self.wl_surface {
             self.frame_callback = Some(surface.frame(qhandle, ()));
         }
     }
@@ -231,16 +233,14 @@ impl LayerShellApp {
             return false;
         }
 
-        let target = env::var("TARGET_MONITOR").ok();
-        let (index, matched_target) = target
-            .as_deref()
-            .and_then(|needle| {
-                self.outputs
-                    .iter()
-                    .position(|info| info.matches(needle))
-                    .map(|idx| (idx, true))
-            })
-            .unwrap_or((0, false));
+        let mut index = 0;
+        let mut matched_target = false;
+        if let Ok(target) = env::var("TARGET_MONITOR")
+            && let Some(found) = self.outputs.iter().position(|info| info.matches(&target))
+        {
+            index = found;
+            matched_target = true;
+        }
 
         if self.active_output != index || (matched_target && !self.output_matched) {
             self.active_output = index;
@@ -274,6 +274,9 @@ impl LayerShellApp {
     }
 
     fn update_scale_and_viewport(&self) {
+        let buffer_width = (PANEL_WIDTH * self.cantus.scale_factor).round();
+        let buffer_height = (PANEL_HEIGHT * self.cantus.scale_factor).round();
+
         if let Some(surface) = &self.wl_surface {
             surface.set_buffer_scale(if self.viewport.is_some() {
                 1
@@ -282,12 +285,7 @@ impl LayerShellApp {
             });
         }
         if let Some(viewport) = &self.viewport {
-            viewport.set_source(
-                0.0,
-                0.0,
-                (PANEL_WIDTH * self.cantus.scale_factor).round(),
-                (PANEL_HEIGHT * self.cantus.scale_factor).round(),
-            );
+            viewport.set_source(0.0, 0.0, buffer_width, buffer_height);
             viewport.set_destination(PANEL_WIDTH as i32, PANEL_HEIGHT as i32);
         }
     }
@@ -389,8 +387,8 @@ impl Dispatch<WlCallback, ()> for LayerShellApp {
         _conn: &Connection,
         qhandle: &QueueHandle<Self>,
     ) {
-        if let wl_callback::Event::Done { .. } = event
-            && let Some(_) = state.frame_callback.take()
+        if matches!(event, wl_callback::Event::Done { .. })
+            && state.frame_callback.take().is_some()
             && let Err(err) = state.try_render_frame(qhandle)
         {
             error!("Rendering failed: {err}");
@@ -490,25 +488,21 @@ impl Dispatch<WlPointer, ()> for LayerShellApp {
                 state.cantus.interaction.end_drag();
             }
             wl_pointer::Event::Button {
-                button,
+                button: 0x110,
                 state: button_state,
                 ..
-            } => {
-                if button == 0x110 {
-                    match button_state {
-                        WEnum::Value(wl_pointer::ButtonState::Pressed) => {
-                            state.cantus.interaction.start_drag();
-                        }
-                        WEnum::Value(wl_pointer::ButtonState::Released) => {
-                            if !state.cantus.interaction.pointer_dragging {
-                                let _ = state.cantus.handle_pointer_click();
-                            }
-                            state.cantus.interaction.end_drag();
-                        }
-                        WEnum::Value(_) | WEnum::Unknown(_) => {}
-                    }
+            } => match button_state {
+                WEnum::Value(wl_pointer::ButtonState::Pressed) => {
+                    state.cantus.interaction.start_drag();
                 }
-            }
+                WEnum::Value(wl_pointer::ButtonState::Released) => {
+                    if !state.cantus.interaction.pointer_dragging {
+                        let _ = state.cantus.handle_pointer_click();
+                    }
+                    state.cantus.interaction.end_drag();
+                }
+                WEnum::Value(_) | WEnum::Unknown(_) => {}
+            },
             wl_pointer::Event::Axis { .. }
             | wl_pointer::Event::Frame
             | wl_pointer::Event::AxisSource { .. }

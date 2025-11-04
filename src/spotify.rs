@@ -317,34 +317,26 @@ async fn update_state_from_mpris(
         return (false, false);
     };
 
-    let new_track_id = properties_proxy
-        .get(PLAYER_INTERFACE, "Metadata")
-        .await
-        .ok()
-        .and_then(|metadata| {
-            Some(
-                HashMap::<String, OwnedValue>::try_from(metadata)
-                    .ok()?
-                    .get("mpris:trackid")?
-                    .to_string(),
-            )
-        });
+    // Get data from dbus
+    let (new_track_id, playing, progress) = tokio::join!(
+        properties_proxy.get(PLAYER_INTERFACE, "Metadata"),
+        properties_proxy.get(PLAYER_INTERFACE, "PlaybackStatus"),
+        properties_proxy.get(PLAYER_INTERFACE, "Position"),
+    );
     let mut should_refresh = new_track_id
+        .ok()
+        .and_then(|metadata| HashMap::<String, OwnedValue>::try_from(metadata).ok())
+        .and_then(|metadata| Some(metadata.get("mpris:trackid")?.to_string()))
         .filter(|track_id| last_track_id.as_ref() != Some(track_id))
         .is_some_and(|track_id| {
             *last_track_id = Some(track_id);
             true
         });
-
-    let playing = properties_proxy
-        .get(PLAYER_INTERFACE, "PlaybackStatus")
-        .await
+    let playing = playing
         .ok()
         .and_then(|value| value.try_into().ok())
         .map(|status: String| status == "Playing");
-    let progress = properties_proxy
-        .get(PLAYER_INTERFACE, "Position")
-        .await
+    let progress = progress
         .ok()
         .and_then(|value| value.try_into().ok())
         .map(|position: i64| position / 1_000);
@@ -386,10 +378,11 @@ async fn update_state_from_spotify(used_mpris_progress: bool) {
             return;
         }
         Err(err) => {
-            error!("Failed to fetch current playback and queue: {}", err);
+            error!("Failed to fetch current playback and queue: {err}");
             return;
         }
     };
+    let request_duration = request_start.elapsed();
 
     // Get current track and the upcoming queue
     let current_track = if let Some(PlayableItem::Track(track)) = queue.currently_playing {
@@ -490,7 +483,7 @@ async fn update_state_from_spotify(used_mpris_progress: bool) {
             let progress = current_playback
                 .progress
                 .map_or(0, |p| p.num_milliseconds()) as u32;
-            let http_delay = (request_start.elapsed().as_millis() / 2) as u32;
+            let http_delay = (request_duration.as_millis() / 2) as u32;
             state.progress = progress + http_delay;
             state.last_updated = Instant::now();
         }
