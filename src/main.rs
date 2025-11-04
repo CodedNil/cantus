@@ -1,6 +1,6 @@
 use crate::{
     background::WarpBackground,
-    interaction::IconHitbox,
+    interaction::InteractionState,
     render::{FontEngine, NowPlayingParticle},
 };
 use anyhow::Result;
@@ -8,7 +8,6 @@ use rand::{SeedableRng, rngs::SmallRng};
 use raw_window_handle::{
     RawDisplayHandle, RawWindowHandle, WaylandDisplayHandle, WaylandWindowHandle,
 };
-use rspotify::model::TrackId;
 use std::{
     collections::{HashMap, hash_map},
     env,
@@ -20,7 +19,6 @@ use tracing::{debug, error};
 use tracing_subscriber::EnvFilter;
 use vello::{
     AaConfig, Renderer, RendererOptions, Scene,
-    kurbo::Rect,
     peniko::color::palette,
     util::{DeviceHandle, RenderContext, RenderSurface},
     wgpu::{
@@ -207,10 +205,7 @@ struct CantusLayer {
     frame_index: u64,
 
     // --- Interaction ---
-    pointer_position: (f64, f64),
-    last_hitbox_update: Instant,
-    track_hitboxes: HashMap<TrackId<'static>, Rect>,
-    icon_hitboxes: Vec<IconHitbox>,
+    interaction: InteractionState,
 
     // --- Animation ---
     track_start_ms: f64,
@@ -274,10 +269,7 @@ impl CantusLayer {
             track_spacing: 0.0,
 
             // --- Interaction ---
-            pointer_position: (0.0, 0.0),
-            track_hitboxes: HashMap::new(),
-            icon_hitboxes: Vec::new(),
-            last_hitbox_update: Instant::now(),
+            interaction: InteractionState::new(),
 
             // --- Particles ---
             now_playing_particles: Vec::new(),
@@ -669,7 +661,7 @@ impl Dispatch<WlPointer, ()> for CantusLayer {
                     .as_ref()
                     .is_some_and(|wl_surface| wl_surface.id() == surface.id())
                 {
-                    state.pointer_position = (surface_x, surface_y);
+                    state.interaction.pointer_position = (surface_x, surface_y);
                 }
             }
             wl_pointer::Event::Motion {
@@ -677,20 +669,31 @@ impl Dispatch<WlPointer, ()> for CantusLayer {
                 surface_y,
                 ..
             } => {
-                state.pointer_position = (surface_x, surface_y);
+                state.interaction.pointer_position = (surface_x, surface_y);
+                state.handle_pointer_drag_motion();
             }
             wl_pointer::Event::Leave { .. } => {
-                state.pointer_position = (-1.0, -1.0);
+                state.interaction.pointer_position = (-1.0, -1.0);
+                state.interaction.end_drag();
             }
             wl_pointer::Event::Button {
                 button,
                 state: button_state,
                 ..
             } => {
-                if button == 0x110
-                    && matches!(button_state, WEnum::Value(wl_pointer::ButtonState::Pressed))
-                {
-                    let _ = state.handle_pointer_click();
+                if button == 0x110 {
+                    match button_state {
+                        WEnum::Value(wl_pointer::ButtonState::Pressed) => {
+                            state.interaction.start_drag();
+                        }
+                        WEnum::Value(wl_pointer::ButtonState::Released) => {
+                            if !state.interaction.pointer_dragging {
+                                let _ = state.handle_pointer_click();
+                            }
+                            state.interaction.end_drag();
+                        }
+                        WEnum::Value(_) | WEnum::Unknown(_) => {}
+                    }
                 }
             }
             wl_pointer::Event::Axis { .. }

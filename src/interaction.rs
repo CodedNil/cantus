@@ -11,13 +11,13 @@ use rspotify::{
     model::{PlayableId, PlaylistId, TrackId},
     prelude::OAuthClient,
 };
+use std::sync::atomic::{AtomicBool, Ordering as AtomicOrdering};
 use std::{
     cmp::Ordering,
     collections::HashMap,
     sync::LazyLock,
     time::{Duration, Instant},
 };
-use tokio::sync::Mutex;
 use tracing::{error, info, warn};
 use vello::{
     Scene,
@@ -27,14 +27,77 @@ use vello::{
 use vello_svg::usvg;
 use wayland_client::QueueHandle;
 
-static SPOTIFY_INTERACTION_GUARD: LazyLock<Mutex<()>> = LazyLock::new(|| Mutex::new(()));
+static SPOTIFY_INTERACTION_GUARD: AtomicBool = AtomicBool::new(false);
+struct SpotifyInteractionToken;
+fn try_acquire_spotify_guard() -> Option<SpotifyInteractionToken> {
+    SPOTIFY_INTERACTION_GUARD
+        .compare_exchange(
+            false,
+            true,
+            AtomicOrdering::Acquire,
+            AtomicOrdering::Relaxed,
+        )
+        .ok()
+        .map(|_| SpotifyInteractionToken)
+}
+impl Drop for SpotifyInteractionToken {
+    fn drop(&mut self) {
+        SPOTIFY_INTERACTION_GUARD.store(false, AtomicOrdering::Release);
+    }
+}
 
-#[derive(Clone, Debug)]
+#[derive(Clone)]
 pub struct IconHitbox {
     pub rect: Rect,
     pub track_id: TrackId<'static>,
     pub playlist_id: Option<PlaylistId<'static>>,
     pub rating_index: Option<usize>,
+}
+
+pub struct InteractionState {
+    pub pointer_position: (f64, f64),
+    pub last_hitbox_update: Instant,
+    pub track_hitboxes: HashMap<TrackId<'static>, Rect>,
+    pub icon_hitboxes: Vec<IconHitbox>,
+    pub pointer_drag_origin: Option<(f64, f64)>,
+    pub pointer_dragging: bool,
+    pub drag_delta_pixels: f64,
+    spotify_guard: Option<SpotifyInteractionToken>,
+}
+
+impl InteractionState {
+    pub fn new() -> Self {
+        Self {
+            pointer_position: (0.0, 0.0),
+            last_hitbox_update: Instant::now(),
+            track_hitboxes: HashMap::new(),
+            icon_hitboxes: Vec::new(),
+            pointer_drag_origin: None,
+            pointer_dragging: false,
+            drag_delta_pixels: 0.0,
+            spotify_guard: None,
+        }
+    }
+
+    pub fn start_drag(&mut self) {
+        self.pointer_drag_origin = Some(self.pointer_position);
+        self.pointer_dragging = false;
+        self.drag_delta_pixels = 0.0;
+        self.spotify_guard = None;
+    }
+
+    pub fn end_drag(&mut self) {
+        self.pointer_drag_origin = None;
+        self.pointer_dragging = false;
+        self.drag_delta_pixels = 0.0;
+        self.spotify_guard = None;
+    }
+
+    fn ensure_spotify_guard(&mut self) {
+        if self.spotify_guard.is_none() {
+            self.spotify_guard = try_acquire_spotify_guard();
+        }
+    }
 }
 
 enum IconEntry<'a> {
@@ -80,8 +143,16 @@ static STAR_IMAGE_SIZE: LazyLock<f64> = LazyLock::new(|| {
 impl CantusLayer {
     /// Handle pointer click events.
     pub fn handle_pointer_click(&self) -> bool {
-        let point = Point::new(self.pointer_position.0, self.pointer_position.1);
-        if let Some(hitbox) = self.icon_hitboxes.iter().find(|h| h.rect.contains(point)) {
+        let point = Point::new(
+            self.interaction.pointer_position.0,
+            self.interaction.pointer_position.1,
+        );
+        if let Some(hitbox) = self
+            .interaction
+            .icon_hitboxes
+            .iter()
+            .find(|h| h.rect.contains(point))
+        {
             let track_id = hitbox.track_id.clone();
             if let Some(index) = hitbox.rating_index {
                 let center_x = (hitbox.rect.x0 + hitbox.rect.x1) * 0.5;
@@ -97,6 +168,7 @@ impl CantusLayer {
             return true;
         }
         if let Some((id, rect)) = self
+            .interaction
             .track_hitboxes
             .iter()
             .find(|(_, rect)| rect.contains(point))
@@ -110,9 +182,29 @@ impl CantusLayer {
         false
     }
 
+    /// Drag across the progress bar to seek.
+    pub fn handle_pointer_drag_motion(&mut self) {
+        if let Some((origin_x, origin_y)) = self.interaction.pointer_drag_origin {
+            let delta_x = self.interaction.pointer_position.0 - origin_x;
+            let delta_y = self.interaction.pointer_position.1 - origin_y;
+            if !self.interaction.pointer_dragging && (delta_x.abs() >= 2.0 || delta_y.abs() >= 2.0)
+            {
+                self.interaction.pointer_dragging = true;
+                self.interaction.ensure_spotify_guard();
+            }
+            self.interaction.drag_delta_pixels = if self.interaction.pointer_dragging {
+                delta_x
+            } else {
+                0.0
+            };
+        } else {
+            self.interaction.drag_delta_pixels = 0.0;
+        }
+    }
+
     /// Update the input region for the surface.
     pub fn update_input_region(&mut self, qhandle: &QueueHandle<Self>) {
-        if self.last_hitbox_update.elapsed() <= Duration::from_millis(500) {
+        if self.interaction.last_hitbox_update.elapsed() <= Duration::from_millis(500) {
             return;
         }
 
@@ -121,11 +213,12 @@ impl CantusLayer {
         };
 
         let region = compositor.create_region(qhandle, ());
-        for rect in self
-            .track_hitboxes
-            .values()
-            .chain(self.icon_hitboxes.iter().map(|hitbox| &hitbox.rect))
-        {
+        for rect in self.interaction.track_hitboxes.values().chain(
+            self.interaction
+                .icon_hitboxes
+                .iter()
+                .map(|hitbox| &hitbox.rect),
+        ) {
             region.add(
                 rect.x0.round() as i32,
                 rect.y0.round() as i32,
@@ -136,7 +229,7 @@ impl CantusLayer {
 
         wl_surface.set_input_region(Some(&region));
         wl_surface.commit();
-        self.last_hitbox_update = Instant::now();
+        self.interaction.last_hitbox_update = Instant::now();
     }
 
     /// Star ratings and favourite playlists
@@ -162,7 +255,10 @@ impl CantusLayer {
         let star_size_border = 1.0 * self.scale_factor;
         let icon_spacing = 2.0 * self.scale_factor;
         let icon_total_size = icon_size + star_size_border * 2.0;
-        let pointer_point = Point::new(self.pointer_position.0, self.pointer_position.1);
+        let pointer_point = Point::new(
+            self.interaction.pointer_position.0,
+            self.interaction.pointer_position.1,
+        );
 
         let mut icon_entries = (0..5)
             .map(|index| IconEntry::Star { index })
@@ -257,7 +353,7 @@ impl CantusLayer {
                     if index == display_full_stars && display_has_half {
                         self.scene.append(&STAR_IMAGES[3], Some(fill_transform));
                     }
-                    self.icon_hitboxes.push(IconHitbox {
+                    self.interaction.icon_hitboxes.push(IconHitbox {
                         rect: button_rect,
                         track_id: track.id.clone(),
                         playlist_id: None,
@@ -299,7 +395,7 @@ impl CantusLayer {
                         );
                     }
                     self.scene.pop_layer();
-                    self.icon_hitboxes.push(IconHitbox {
+                    self.interaction.icon_hitboxes.push(IconHitbox {
                         rect: button_rect,
                         track_id: track.id.clone(),
                         playlist_id: Some(playlist.id.clone()),
@@ -313,7 +409,7 @@ impl CantusLayer {
 
 /// Skip to the specified track in the queue.
 async fn skip_to_track(track_id: TrackId<'static>, point: Point, rect: Rect) {
-    let Ok(guard) = SPOTIFY_INTERACTION_GUARD.try_lock() else {
+    let Some(_guard) = try_acquire_spotify_guard() else {
         return;
     };
 
@@ -371,12 +467,11 @@ async fn skip_to_track(track_id: TrackId<'static>, point: Point, rect: Rect) {
             }
         }
     }
-    drop(guard);
 }
 
 /// Update Spotify rating playlists for the given track.
 async fn update_star_rating(track_id: TrackId<'static>, rating_slot: usize) {
-    let Ok(guard) = SPOTIFY_INTERACTION_GUARD.try_lock() else {
+    let Some(_guard) = try_acquire_spotify_guard() else {
         return;
     };
     let Some(rating_name) = RATING_PLAYLISTS.get(rating_slot) else {
@@ -477,13 +572,11 @@ async fn update_star_rating(track_id: TrackId<'static>, rating_slot: usize) {
             error!("Failed to check if track {track_id} is already liked: {err}");
         }
     }
-
-    drop(guard);
 }
 
 /// Toggle Spotify playlist membership for the given track.
 async fn toggle_playlist_membership(track_id: TrackId<'static>, playlist_id: PlaylistId<'static>) {
-    let Ok(guard) = SPOTIFY_INTERACTION_GUARD.try_lock() else {
+    let Some(_guard) = try_acquire_spotify_guard() else {
         return;
     };
     let playback_state = PLAYBACK_STATE.lock().clone();
@@ -534,6 +627,4 @@ async fn toggle_playlist_membership(track_id: TrackId<'static>, playlist_id: Pla
             if contained { "from" } else { "to" }
         );
     }
-
-    drop(guard);
 }

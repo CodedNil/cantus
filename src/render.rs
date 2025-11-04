@@ -125,14 +125,19 @@ impl CantusLayer {
 
         let playback_state = PLAYBACK_STATE.lock();
         let queue = &playback_state.queue;
-        self.icon_hitboxes.clear();
-        self.track_hitboxes.clear();
+        self.interaction.icon_hitboxes.clear();
+        self.interaction.track_hitboxes.clear();
         if queue.is_empty() {
             return;
         }
 
         let timeline_end_ms = TIMELINE_START_MS + TIMELINE_DURATION_MS;
         let px_per_ms = total_width / TIMELINE_DURATION_MS;
+        let drag_offset_ms = if self.interaction.pointer_dragging {
+            (self.interaction.drag_delta_pixels * self.scale_factor) / px_per_ms
+        } else {
+            0.0
+        };
         let current_index = playback_state.queue_index.min(queue.len() - 1);
 
         // Borrow playlists for quick lookups without cloning each entry.
@@ -148,7 +153,8 @@ impl CantusLayer {
         } else {
             0.0
         };
-        let mut track_start_target = -f64::from(playback_state.progress) - playback_elapsed;
+        let mut track_start_target =
+            -f64::from(playback_state.progress) - playback_elapsed + drag_offset_ms;
         track_start_target -= queue[..current_index]
             .iter()
             .map(|track| f64::from(track.milliseconds))
@@ -156,14 +162,18 @@ impl CantusLayer {
         let mut track_spacing_target = -TRACK_SPACING_MS * current_index as f64;
 
         // Lerp track start based on the target and current start time
-        if (track_start_target - self.track_start_ms).abs() > 200.0 {
+        if !self.interaction.pointer_dragging
+            && (track_start_target - self.track_start_ms).abs() > 200.0
+        {
             track_start_target =
                 self.track_start_ms + (track_start_target - self.track_start_ms) * 0.1;
         }
         self.track_start_ms = track_start_target;
 
         // Lerp track spacing based on the target and current spacing
-        if (track_spacing_target - self.track_spacing).abs() > 200.0 {
+        if !self.interaction.pointer_dragging
+            && (track_spacing_target - self.track_spacing).abs() > 200.0
+        {
             track_spacing_target =
                 self.track_spacing + (track_spacing_target - self.track_spacing) * 0.1;
         }
@@ -244,7 +254,7 @@ impl CantusLayer {
         let pos_x = (visible_start_ms - TIMELINE_START_MS) * px_per_ms;
         let width = (visible_end_ms - visible_start_ms) * px_per_ms;
         if width <= 0.0 {
-            self.track_hitboxes.remove(&track.id);
+            self.interaction.track_hitboxes.remove(&track.id);
             return;
         }
         let uncropped_width = (track_end_ms - track_start_ms) * px_per_ms;
@@ -257,7 +267,7 @@ impl CantusLayer {
         };
 
         // Add hitbox
-        self.track_hitboxes.insert(
+        self.interaction.track_hitboxes.insert(
             track.id.clone(),
             Rect::new(
                 ((track_start_ms - TIMELINE_START_MS) * px_per_ms) / self.scale_factor,
