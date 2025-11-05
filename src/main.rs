@@ -1,10 +1,9 @@
 use crate::{
     background::WarpBackground,
     interaction::InteractionState,
-    render::{FontEngine, NowPlayingParticle},
+    render::{FontEngine, ParticlesState},
 };
 use anyhow::Result;
-use rand::{SeedableRng, rngs::SmallRng};
 use std::{
     collections::{HashMap, hash_map},
     time::Instant,
@@ -39,6 +38,15 @@ mod layer_shell;
 #[cfg(feature = "winit")]
 mod winit_app;
 
+/// Target width of the panel in logical pixels.
+const PANEL_WIDTH: f64 = 1100.0;
+/// Base height of the panel in logical pixels.
+const PANEL_HEIGHT_BASE: f64 = 40.0;
+/// Additional height allocated for extended content.
+const PANEL_HEIGHT_EXTENSION: f64 = 10.0;
+/// Total height of the panel in logical pixels.
+const PANEL_HEIGHT: f64 = PANEL_HEIGHT_BASE + PANEL_HEIGHT_EXTENSION;
+
 #[tokio::main]
 async fn main() {
     #[cfg(debug_assertions)]
@@ -59,15 +67,6 @@ async fn main() {
     winit_app::run();
 }
 
-/// Target width of the panel in logical pixels.
-const PANEL_WIDTH: f64 = 1050.0;
-/// Base height of the panel in logical pixels.
-const PANEL_HEIGHT_BASE: f64 = 40.0;
-/// Additional height allocated for extended content.
-const PANEL_HEIGHT_EXTENSION: f64 = 70.0;
-/// Total height of the panel in logical pixels.
-const PANEL_HEIGHT: f64 = PANEL_HEIGHT_BASE + PANEL_HEIGHT_EXTENSION;
-
 struct CantusApp {
     render_context: RenderContext,
     render_surface: Option<RenderSurface<'static>>,
@@ -84,10 +83,7 @@ struct CantusApp {
     track_start_ms: f64,
     track_spacing: f64,
     interaction: InteractionState,
-    now_playing_particles: Vec<NowPlayingParticle>,
-    rng: SmallRng,
-    last_particle_update: Instant,
-    particle_spawn_accumulator: f32,
+    particles: ParticlesState,
 }
 
 impl Default for CantusApp {
@@ -114,10 +110,7 @@ impl Default for CantusApp {
             track_start_ms: 0.0,
             track_spacing: 0.0,
             interaction: InteractionState::new(),
-            now_playing_particles: Vec::new(),
-            rng: SmallRng::from_os_rng(),
-            last_particle_update: Instant::now(),
-            particle_spawn_accumulator: 0.0,
+            particles: ParticlesState::default(),
         }
     }
 }

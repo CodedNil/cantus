@@ -1,6 +1,8 @@
 interaction:
 actually seek/skip song on drag release
 stack previous songs so a bit of each is visible up to like 6 songs
+play/pause
+volume
 
 
 animations:
@@ -10,7 +12,6 @@ ratings showing and hiding should fade in and out
 
 
 misc:
-dirty the queue better if its drastically changed
 lyrics along the bottom
 run as a proper windows layer-shell bar
 

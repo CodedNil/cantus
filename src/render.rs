@@ -2,7 +2,7 @@ use crate::{
     CantusApp, PANEL_HEIGHT_BASE, PANEL_WIDTH,
     spotify::{IMAGES_CACHE, PLAYBACK_STATE, Playlist, TRACK_DATA_CACHE, Track},
 };
-use rand::Rng;
+use rand::{Rng, SeedableRng, rngs::SmallRng};
 use std::{collections::HashMap, ops::Range, time::Instant};
 use ttf_parser::{Face, GlyphId, NormalizedCoordinate, Tag, VariationAxis};
 use vello::{
@@ -16,7 +16,7 @@ const TRACK_SPACING_MS: f64 = 4000.0;
 /// How many ms to show in the timeline
 const TIMELINE_DURATION_MS: f64 = 12.0 * 60.0 * 1000.0;
 /// Starting position of the timeline in ms, if negative then it shows the history too
-const TIMELINE_START_MS: f64 = -3.0 * 60.0 * 1000.0;
+const TIMELINE_START_MS: f64 = -1.5 * 60.0 * 1000.0;
 
 /// Particles emitted per second when playback is active.
 const SPARK_EMISSION: f32 = 60.0;
@@ -112,6 +112,32 @@ impl FontEngine {
     }
 }
 
+pub struct ParticlesState {
+    particles: Vec<Particle>,
+    rng: SmallRng,
+    last_update: Instant,
+    spawn_accumulator: f32,
+}
+
+impl Default for ParticlesState {
+    fn default() -> Self {
+        Self {
+            particles: Vec::new(),
+            rng: SmallRng::from_os_rng(),
+            last_update: Instant::now(),
+            spawn_accumulator: 0.0,
+        }
+    }
+}
+
+struct Particle {
+    alive: bool,
+    position: [f32; 2],
+    velocity: [f32; 2],
+    color: usize,
+    life: f32,
+}
+
 /// Build the scene for rendering.
 impl CantusApp {
     pub fn create_scene(&mut self, device_id: usize) {
@@ -119,7 +145,7 @@ impl CantusApp {
         let total_width = (PANEL_WIDTH * self.scale_factor - history_width).ceil();
         let total_height = (PANEL_HEIGHT_BASE * self.scale_factor).ceil();
 
-        let playback_state = PLAYBACK_STATE.lock();
+        let playback_state = PLAYBACK_STATE.read();
         let queue = &playback_state.queue;
         self.interaction.icon_hitboxes.clear();
         self.interaction.track_hitboxes.clear();
@@ -611,8 +637,8 @@ impl CantusApp {
         track_move_speed: f64,
     ) {
         let now = Instant::now();
-        let dt = now.duration_since(self.last_particle_update).as_secs_f32();
-        self.last_particle_update = now;
+        let dt = now.duration_since(self.particles.last_update).as_secs_f32();
+        self.particles.last_update = now;
 
         let scale = self.scale_factor as f32;
         let height_f32 = height as f32;
@@ -638,20 +664,24 @@ impl CantusApp {
 
         // Emit new particles while playing
         if is_playing {
-            self.particle_spawn_accumulator += dt * SPARK_EMISSION;
-            let emit_count = self.particle_spawn_accumulator.floor() as u16;
-            self.particle_spawn_accumulator -= f32::from(emit_count);
+            self.particles.spawn_accumulator += dt * SPARK_EMISSION;
+            let emit_count = self.particles.spawn_accumulator.floor() as u16;
+            self.particles.spawn_accumulator -= f32::from(emit_count);
             for _ in 0..emit_count {
-                let position = [x as f32, height_f32 * self.rng.random_range(0.05..0.95)];
+                let position = [
+                    x as f32,
+                    height_f32 * self.particles.rng.random_range(0.05..0.95),
+                ];
                 let velocity = [
-                    self.rng.random_range(SPARK_VELOCITY_X)
+                    self.particles.rng.random_range(SPARK_VELOCITY_X)
                         * scale
                         * (track_move_speed as f32 * 0.05).clamp(-3.0, 3.0),
-                    -self.rng.random_range(SPARK_VELOCITY_Y) * scale,
+                    -self.particles.rng.random_range(SPARK_VELOCITY_Y) * scale,
                 ];
-                let life = self.rng.random_range(SPARK_LIFETIME);
+                let life = self.particles.rng.random_range(SPARK_LIFETIME);
                 if let Some(dead_particle) = self
-                    .now_playing_particles
+                    .particles
+                    .particles
                     .iter_mut()
                     .find(|particle| !particle.alive)
                 {
@@ -659,23 +689,33 @@ impl CantusApp {
                     dead_particle.position = position;
                     dead_particle.velocity = velocity;
                     dead_particle.life = life;
-                    dead_particle.color = self.rng.random_range(0..primary_colors.len());
+                    dead_particle.color = self.particles.rng.random_range(0..primary_colors.len());
                 } else {
-                    self.now_playing_particles.push(NowPlayingParticle {
+                    self.particles.particles.push(Particle {
                         alive: true,
                         position,
                         velocity,
-                        color: self.rng.random_range(0..primary_colors.len()),
+                        color: self.particles.rng.random_range(0..primary_colors.len()),
                         life,
                     });
                 }
             }
         } else {
-            self.particle_spawn_accumulator = 0.0;
+            self.particles.spawn_accumulator = 0.0;
         }
 
-        // Delete dead particles, and update positions of others
-        for particle in &mut self.now_playing_particles {
+        // Line at the now playing position to denote the cutoff
+        let line_width = 4.0 * self.scale_factor;
+        self.scene.fill(
+            Fill::NonZero,
+            Affine::translate((x - line_width * 0.5, 0.0)),
+            Color::from_rgb8(255, 224, 210),
+            None,
+            &RoundedRect::new(0.0, 0.0, line_width, height, 100.0),
+        );
+
+        // Kill dead particles, and update positions of others, then render them
+        for particle in &mut self.particles.particles {
             if !particle.alive {
                 continue;
             }
@@ -689,20 +729,7 @@ impl CantusApp {
             particle.velocity[1] += SPARK_GRAVITY * scale * dt;
             particle.position[0] += particle.velocity[0] * dt;
             particle.position[1] += particle.velocity[1] * dt;
-        }
 
-        // Line at the now playing position to denote the cutoff
-        let line_width = 4.0 * self.scale_factor;
-        self.scene.fill(
-            Fill::NonZero,
-            Affine::translate((x - line_width * 0.5, 0.0)),
-            Color::from_rgb8(255, 224, 210),
-            None,
-            &RoundedRect::new(0.0, 0.0, line_width, height, 100.0),
-        );
-
-        // Render out the particles
-        for particle in &self.now_playing_particles {
             let fade = (particle.life / 0.6).clamp(0.0, 1.0);
             let length = lerp_range(SPARK_LENGTH_RANGE, f64::from(fade)) * self.scale_factor;
             let thickness = lerp_range(SPARK_THICKNESS_RANGE, f64::from(fade)) * self.scale_factor;
@@ -738,12 +765,4 @@ fn lerp_range(range: Range<f64>, t: f64) -> f64 {
 
 fn lerp(t: f64, v0: f64, v1: f64) -> f64 {
     (1.0 - t) * v0 + t * v1
-}
-
-pub struct NowPlayingParticle {
-    alive: bool,
-    position: [f32; 2],
-    velocity: [f32; 2],
-    color: usize,
-    life: f32,
 }

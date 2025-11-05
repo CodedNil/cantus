@@ -3,7 +3,7 @@ use anyhow::Result;
 use dashmap::DashMap;
 use futures::future::try_join_all;
 use image::GenericImageView;
-use parking_lot::Mutex;
+use parking_lot::RwLock;
 use reqwest::Client;
 use rspotify::{
     AuthCodeSpotify, Config, Credentials, OAuth,
@@ -47,8 +47,8 @@ const ROOT_INTERFACE: InterfaceName<'static> =
 /// Object path for the Spotify MPRIS instance on D-Bus.
 const MPRIS_OBJECT_PATH: &str = "/org/mpris/MediaPlayer2";
 
-pub static PLAYBACK_STATE: LazyLock<Arc<Mutex<PlaybackState>>> = LazyLock::new(|| {
-    Arc::new(Mutex::new(PlaybackState {
+pub static PLAYBACK_STATE: LazyLock<Arc<RwLock<PlaybackState>>> = LazyLock::new(|| {
+    Arc::new(RwLock::new(PlaybackState {
         last_updated: Instant::now(),
         playing: false,
         shuffle: false,
@@ -132,12 +132,12 @@ impl Track {
     }
 }
 
-/// Mutably updates the global playback state inside the mutex.
+/// Mutably updates the global playback state.
 pub fn update_playback_state<F>(update: F)
 where
     F: FnOnce(&mut PlaybackState),
 {
-    let mut state = PLAYBACK_STATE.lock();
+    let mut state = PLAYBACK_STATE.write();
     update(&mut state);
 }
 
@@ -165,7 +165,7 @@ fn load_cached_playlist_tracks() -> PlaylistCache {
 }
 
 fn persist_playlist_cache() {
-    let state = PLAYBACK_STATE.lock();
+    let state = PLAYBACK_STATE.read();
     if state.playlists.is_empty() {
         return;
     }
@@ -591,7 +591,6 @@ async fn poll_playlists() {
 
 async fn refresh_playlists() {
     let spotify_client = SPOTIFY_CLIENT.get().unwrap();
-    let state = PLAYBACK_STATE.lock().clone();
 
     // Find playlists which have changed
     let changed_playlists: Vec<(usize, SimplifiedPlaylist)> = spotify_client
@@ -601,6 +600,7 @@ async fn refresh_playlists() {
         .items
         .into_iter()
         .filter_map(|playlist| {
+            let state = PLAYBACK_STATE.read();
             if let Some((playlist_idx, state_playlist)) = state
                 .playlists
                 .iter()

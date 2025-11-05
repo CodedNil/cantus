@@ -367,7 +367,7 @@ impl BackgroundSlot {
 
 /// Downloads and caches an image from the given URL.
 pub fn update_color_palettes() -> Result<()> {
-    let state = PLAYBACK_STATE.lock().clone();
+    let state = PLAYBACK_STATE.read();
     let mut pending_palettes = Vec::new();
     for track in &state.queue {
         if !TRACK_DATA_CACHE.contains_key(&track.id)

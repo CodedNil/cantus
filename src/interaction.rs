@@ -378,15 +378,25 @@ async fn skip_to_track(track_id: TrackId<'static>, point: Point, rect: Rect) {
         return;
     };
 
-    let playback_state = PLAYBACK_STATE.lock().clone();
-    let queue_index = playback_state.queue_index;
-    let Some(position_in_queue) = playback_state.queue.iter().position(|t| t.id == track_id) else {
-        error!("Track not found in queue");
-        return;
+    let (queue_index, position_in_queue, ms_lookup) = {
+        let playback_state = PLAYBACK_STATE.read();
+        let queue_index = playback_state.queue_index;
+        let Some(position_in_queue) = playback_state.queue.iter().position(|t| t.id == track_id)
+        else {
+            error!("Track not found in queue");
+            return;
+        };
+        let ms_lookup = playback_state
+            .queue
+            .iter()
+            .map(|playlist| playlist.milliseconds)
+            .collect::<Vec<_>>();
+        drop(playback_state);
+        (queue_index, position_in_queue, ms_lookup)
     };
     if queue_index.cmp(&position_in_queue) == Ordering::Equal {
         let position = (point.x - rect.x0) / rect.width();
-        let song_ms = playback_state.queue[position_in_queue].milliseconds;
+        let song_ms = ms_lookup[position_in_queue];
         // If click is near the very left, reset to the start of the song, else seek to clicked position
         let milliseconds = if point.x < 20.0 || position < 0.05 {
             0.0
@@ -442,17 +452,19 @@ async fn update_star_rating(track_id: TrackId<'static>, rating_slot: usize) {
     let Some(rating_name) = RATING_PLAYLISTS.get(rating_slot) else {
         return;
     };
-    let playback_state = PLAYBACK_STATE.lock().clone();
+    let filtered_playlists = PLAYBACK_STATE
+        .read()
+        .playlists
+        .iter()
+        .enumerate()
+        .filter(|(_, p)| RATING_PLAYLISTS.contains(&p.name.as_str()))
+        .map(|(index, p)| (index, p.clone()))
+        .collect::<Vec<_>>();
     let spotify_client = SPOTIFY_CLIENT.get().unwrap();
 
     let mut target_playlist: Option<(usize, Playlist)> = None;
     let track_playable = PlayableId::Track(track_id.clone());
-    for (playlist_idx, playlist) in playback_state
-        .playlists
-        .into_iter()
-        .enumerate()
-        .filter(|(_, p)| RATING_PLAYLISTS.contains(&p.name.as_str()))
-    {
+    for (playlist_idx, playlist) in filtered_playlists {
         if playlist.name == *rating_name {
             target_playlist = Some((playlist_idx, playlist));
             continue;
@@ -544,20 +556,21 @@ async fn toggle_playlist_membership(track_id: TrackId<'static>, playlist_id: Pla
     let Some(_guard) = try_acquire_spotify_guard() else {
         return;
     };
-    let playback_state = PLAYBACK_STATE.lock().clone();
-    let Some((playlist_idx, playlist)) = playback_state
+    let Some((playlist_idx, playlist)) = PLAYBACK_STATE
+        .read()
         .playlists
-        .into_iter()
+        .iter()
         .enumerate()
         .find(|(_, p)| p.id == playlist_id)
+        .map(|(idx, playlist)| (idx, playlist.clone()))
     else {
         warn!("Playlist {playlist_id} not found while toggling membership for track {track_id}");
         return;
     };
 
     let spotify_client = SPOTIFY_CLIENT.get().unwrap();
-    let playlist_id = playlist.id;
-    let playlist_name = playlist.name;
+    let playlist_id = playlist.id.clone();
+    let playlist_name = playlist.name.clone();
     let contained = playlist.tracks.contains(&track_id);
     let track_playable = PlayableId::Track(track_id.clone());
 
