@@ -496,7 +496,7 @@ impl Dispatch<WlPointer, ()> for LayerShellApp {
                     state.cantus.interaction.start_drag();
                 }
                 WEnum::Value(wl_pointer::ButtonState::Released) => {
-                    if !state.cantus.interaction.pointer_dragging {
+                    if !state.cantus.interaction.dragging {
                         let _ = state.cantus.handle_pointer_click();
                     }
                     state.cantus.interaction.end_drag();

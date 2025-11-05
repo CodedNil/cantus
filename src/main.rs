@@ -9,7 +9,7 @@ use std::{
     collections::{HashMap, hash_map},
     time::Instant,
 };
-use tracing::debug;
+use tracing::info;
 use tracing_subscriber::EnvFilter;
 use vello::{
     AaConfig, Renderer, RendererOptions, Scene,
@@ -212,7 +212,7 @@ impl CantusApp {
         let acquired = match render_surface.surface.get_current_texture() {
             Ok(frame) => frame,
             Err(err) => {
-                debug!("Surface acquisition failed: {err}");
+                info!("Surface acquisition failed: {err}");
                 self.render_surface = None;
                 on_surface_lost();
                 return Ok(false);

@@ -54,8 +54,8 @@ pub struct InteractionState {
     pub last_hitbox_update: Instant,
     pub track_hitboxes: HashMap<TrackId<'static>, Rect>,
     pub icon_hitboxes: Vec<IconHitbox>,
-    pub pointer_drag_origin: Option<(f64, f64)>,
-    pub pointer_dragging: bool,
+    pub drag_origin: Option<(f64, f64)>,
+    pub dragging: bool,
     pub drag_delta_pixels: f64,
     spotify_guard: Option<SpotifyInteractionToken>,
 }
@@ -68,23 +68,23 @@ impl InteractionState {
             last_hitbox_update: Instant::now(),
             track_hitboxes: HashMap::new(),
             icon_hitboxes: Vec::new(),
-            pointer_drag_origin: None,
-            pointer_dragging: false,
+            drag_origin: None,
+            dragging: false,
             drag_delta_pixels: 0.0,
             spotify_guard: None,
         }
     }
 
     pub fn start_drag(&mut self) {
-        self.pointer_drag_origin = Some(self.pointer_position);
-        self.pointer_dragging = false;
+        self.drag_origin = Some(self.pointer_position);
+        self.dragging = false;
         self.drag_delta_pixels = 0.0;
         self.spotify_guard = None;
     }
 
     pub fn end_drag(&mut self) {
-        self.pointer_drag_origin = None;
-        self.pointer_dragging = false;
+        self.drag_origin = None;
+        self.dragging = false;
         self.drag_delta_pixels = 0.0;
         self.spotify_guard = None;
     }
@@ -180,15 +180,14 @@ impl CantusApp {
 
     /// Drag across the progress bar to seek.
     pub fn handle_pointer_drag_motion(&mut self) {
-        if let Some((origin_x, origin_y)) = self.interaction.pointer_drag_origin {
+        if let Some((origin_x, origin_y)) = self.interaction.drag_origin {
             let delta_x = self.interaction.pointer_position.0 - origin_x;
             let delta_y = self.interaction.pointer_position.1 - origin_y;
-            if !self.interaction.pointer_dragging && (delta_x.abs() >= 2.0 || delta_y.abs() >= 2.0)
-            {
-                self.interaction.pointer_dragging = true;
+            if !self.interaction.dragging && (delta_x.abs() >= 2.0 || delta_y.abs() >= 2.0) {
+                self.interaction.dragging = true;
                 self.interaction.ensure_spotify_guard();
             }
-            self.interaction.drag_delta_pixels = if self.interaction.pointer_dragging {
+            self.interaction.drag_delta_pixels = if self.interaction.dragging {
                 delta_x
             } else {
                 0.0

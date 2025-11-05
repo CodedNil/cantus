@@ -4,10 +4,9 @@ stack previous songs so a bit of each is visible up to like 6 songs
 
 
 animations:
-switching from the lower to full rounded corner when its cropped
-smoothly enter new songs into the right side, dont crop them in, have one waiting then in a smooth quick animation it pops in like a bubble
 pulse animation when play or pause like zen
 maybe make currently playing song have an animated glow outline, when the song is changed the new one should do have a heavy pulse
+ratings showing and hiding should fade in and out
 
 
 misc:

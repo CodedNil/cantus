@@ -374,7 +374,7 @@ async fn update_state_from_spotify(used_mpris_progress: bool) {
     ) {
         Ok((Some(playback), queue)) => (playback, queue),
         Ok((None, _)) => {
-            error!("Failed to fetch current playback from Spotify API: Returned None");
+            // Spotify is not playing anything
             return;
         }
         Err(err) => {

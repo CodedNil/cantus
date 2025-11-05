@@ -14,12 +14,9 @@ use vello::{
 /// Spacing between tracks in ms
 const TRACK_SPACING_MS: f64 = 4000.0;
 /// How many ms to show in the timeline
-const TIMELINE_DURATION_MS: f64 = 15.0 * 60.0 * 1000.0;
+const TIMELINE_DURATION_MS: f64 = 12.0 * 60.0 * 1000.0;
 /// Starting position of the timeline in ms, if negative then it shows the history too
 const TIMELINE_START_MS: f64 = -3.0 * 60.0 * 1000.0;
-
-/// Corner radius applied to rendered track pills.
-const ROUNDING_RADIUS: f64 = 14.0;
 
 /// Particles emitted per second when playback is active.
 const SPARK_EMISSION: f32 = 60.0;
@@ -118,7 +115,8 @@ impl FontEngine {
 /// Build the scene for rendering.
 impl CantusApp {
     pub fn create_scene(&mut self, device_id: usize) {
-        let total_width = (PANEL_WIDTH * self.scale_factor).ceil();
+        let history_width = (100.0 * self.scale_factor).ceil();
+        let total_width = (PANEL_WIDTH * self.scale_factor - history_width).ceil();
         let total_height = (PANEL_HEIGHT_BASE * self.scale_factor).ceil();
 
         let playback_state = PLAYBACK_STATE.lock();
@@ -131,7 +129,7 @@ impl CantusApp {
 
         let timeline_end_ms = TIMELINE_START_MS + TIMELINE_DURATION_MS;
         let px_per_ms = total_width / TIMELINE_DURATION_MS;
-        let drag_offset_ms = if self.interaction.pointer_dragging {
+        let drag_offset_ms = if self.interaction.dragging {
             (self.interaction.drag_delta_pixels * self.scale_factor) / px_per_ms
         } else {
             0.0
@@ -151,38 +149,30 @@ impl CantusApp {
         } else {
             0.0
         };
-        let mut track_start_target =
-            -f64::from(playback_state.progress) - playback_elapsed + drag_offset_ms;
-        track_start_target -= queue[..current_index]
-            .iter()
-            .map(|track| f64::from(track.milliseconds))
-            .sum::<f64>();
-        let mut track_spacing_target = -TRACK_SPACING_MS * current_index as f64;
 
         // Lerp track start based on the target and current start time
-        if !self.interaction.pointer_dragging
-            && (track_start_target - self.track_start_ms).abs() > 200.0
-        {
-            track_start_target =
-                self.track_start_ms + (track_start_target - self.track_start_ms) * 0.1;
+        let mut track_start_ms = -f64::from(playback_state.progress)
+            - playback_elapsed
+            - queue[..current_index]
+                .iter()
+                .map(|t| f64::from(t.milliseconds))
+                .sum::<f64>()
+            + drag_offset_ms;
+        if !self.interaction.dragging && (track_start_ms - self.track_start_ms).abs() > 200.0 {
+            track_start_ms = self.track_start_ms + (track_start_ms - self.track_start_ms) * 0.1;
         }
-        let track_move_speed = track_start_target - self.track_start_ms;
-        self.track_start_ms = track_start_target;
+        let track_move_speed = track_start_ms - self.track_start_ms;
+        self.track_start_ms = track_start_ms;
 
         // Lerp track spacing based on the target and current spacing
-        if !self.interaction.pointer_dragging
-            && (track_spacing_target - self.track_spacing).abs() > 200.0
-        {
-            track_spacing_target =
-                self.track_spacing + (track_spacing_target - self.track_spacing) * 0.1;
+        let mut track_spacing = -TRACK_SPACING_MS * current_index as f64;
+        if !self.interaction.dragging && (track_spacing - self.track_spacing).abs() > 200.0 {
+            track_spacing = self.track_spacing + (track_spacing - self.track_spacing) * 0.1;
         }
-        self.track_spacing = track_spacing_target;
-
-        let mut track_start_ms = self.track_start_ms;
-        let mut track_spacing = self.track_spacing;
+        self.track_spacing = track_spacing;
 
         // Iterate over the currently playing track followed by the queued tracks.
-        for (index, track) in queue.iter().enumerate() {
+        for track in queue {
             let track_start_ms_spaced = track_start_ms + track_spacing;
             if track_start_ms_spaced >= timeline_end_ms {
                 break;
@@ -199,14 +189,12 @@ impl CantusApp {
             self.draw_track(
                 device_id,
                 track,
-                index == current_index,
-                index < current_index,
+                history_width,
                 track_start_ms_spaced,
                 track_end_ms,
                 timeline_end_ms,
                 px_per_ms,
                 total_height,
-                (track_start_ms / 1000.0).abs(),
                 &playlists,
             );
 
@@ -217,7 +205,7 @@ impl CantusApp {
         // Draw the particles
         self.render_playing_particles(
             &queue[current_index],
-            -TIMELINE_START_MS * px_per_ms,
+            -TIMELINE_START_MS * px_per_ms + history_width,
             total_height,
             playback_state.playing,
             track_move_speed,
@@ -236,28 +224,34 @@ impl CantusApp {
         &mut self,
         device_id: usize,
         track: &Track,
-        is_current: bool,
-        is_past: bool,
+        history_width: f64,
         track_start_ms: f64,
         track_end_ms: f64,
         timeline_end_ms: f64,
         px_per_ms: f64,
         height: f64,
-        seconds_until_start: f64,
         playlists: &HashMap<&str, &Playlist>,
     ) {
+        let is_current = track_start_ms <= 0.0 && track_end_ms >= 0.0;
+        let is_past = track_end_ms < 0.0;
+        let seconds_until_start = (track_start_ms / 1000.0).abs();
+
         let visible_start_ms = track_start_ms.max(TIMELINE_START_MS);
         let visible_end_ms = track_end_ms.min(timeline_end_ms);
-        let start_trimmed = track_start_ms >= TIMELINE_START_MS;
-        let end_trimmed = track_end_ms <= timeline_end_ms;
-
-        let pos_x = (visible_start_ms - TIMELINE_START_MS) * px_per_ms;
+        let pos_x = (visible_start_ms - TIMELINE_START_MS) * px_per_ms + history_width;
         let width = (visible_end_ms - visible_start_ms) * px_per_ms;
         if width <= 0.0 {
             self.interaction.track_hitboxes.remove(&track.id);
             return;
         }
         let uncropped_width = (track_end_ms - track_start_ms) * px_per_ms;
+
+        // Fade out based on width
+        let fade_alpha = if width < height {
+            ((width / height) as f32 * 1.5 - 0.5).max(0.0)
+        } else {
+            1.0
+        };
 
         // How much of the width is to the left of the current position
         let dark_width = if track_start_ms < 0.0 {
@@ -270,9 +264,11 @@ impl CantusApp {
         self.interaction.track_hitboxes.insert(
             track.id.clone(),
             Rect::new(
-                ((track_start_ms - TIMELINE_START_MS) * px_per_ms) / self.scale_factor,
+                ((track_start_ms - TIMELINE_START_MS) * px_per_ms + history_width)
+                    / self.scale_factor,
                 0.0,
-                ((track_end_ms - TIMELINE_START_MS) * px_per_ms) / self.scale_factor,
+                ((track_end_ms - TIMELINE_START_MS) * px_per_ms + history_width)
+                    / self.scale_factor,
                 height / self.scale_factor,
             ),
         );
@@ -284,14 +280,25 @@ impl CantusApp {
             return;
         };
 
-        let rounding = ROUNDING_RADIUS * self.scale_factor;
-        let left_rounding = rounding * if start_trimmed { 1.0 } else { 0.3 };
-        let right_rounding = rounding * if end_trimmed { 1.0 } else { 0.3 };
+        let rounding = 14.0 * self.scale_factor;
+        let buffer_ms = 20000.0;
+        let left_rounding = rounding
+            * lerp(
+                ((track_start_ms - (TIMELINE_START_MS - buffer_ms)) / buffer_ms).clamp(0.0, 1.0),
+                0.3,
+                1.0,
+            );
+        let right_rounding = rounding
+            * lerp(
+                ((track_end_ms - timeline_end_ms) / buffer_ms).clamp(0.0, 1.0),
+                1.0,
+                0.3,
+            );
         let radii =
             RoundedRectRadii::new(left_rounding, right_rounding, right_rounding, left_rounding);
 
         // --- BACKGROUND ---
-        {
+        if fade_alpha >= 1.0 {
             let bundle = self
                 .render_devices
                 .get_mut(&device_id)
@@ -326,150 +333,152 @@ impl CantusApp {
                 &Rect::new(0.0, 0.0, image_width, image_width * background_aspect_ratio),
             );
             self.scene.pop_layer();
-        };
+        }
 
         // --- ALBUM ART SQUARE ---
-        {
+        if fade_alpha >= 0.0 {
             let image_height = f64::from(image.height);
             let transform = Affine::translate((pos_x + width - height, 0.0));
             self.scene.push_clip_layer(
-                transform,
-                &RoundedRect::new(
-                    0.0,
-                    0.0,
-                    height,
-                    height,
-                    RoundedRectRadii::new(rounding, right_rounding, right_rounding, rounding),
-                ),
+                Affine::translate((pos_x, 0.0)),
+                &RoundedRect::new(0.0, 0.0, width, height, radii),
             );
             self.scene.fill(
                 Fill::NonZero,
                 transform * Affine::scale(height / image_height),
-                &ImageBrush::new(image.clone()),
+                &ImageBrush::new(image.clone()).with_alpha(fade_alpha),
                 None,
-                &Rect::new(0.0, 0.0, image_height, image_height),
+                &RoundedRect::new(
+                    0.0,
+                    0.0,
+                    image_height,
+                    image_height,
+                    RoundedRectRadii::new(rounding, right_rounding, right_rounding, rounding),
+                ),
             );
             self.scene.pop_layer();
         }
 
         // --- TEXT ---
-        // Clipping mask to the edge of the background rectangle, shrunk by a margin
-        self.scene.push_clip_layer(
-            Affine::translate((pos_x, 0.0)),
-            &RoundedRect::new(
-                4.0,
-                4.0,
-                width - height - 4.0,
-                height - 4.0,
-                6.0 * self.scale_factor,
-            ),
-        );
-        // Get available width for text
-        let text_start_left = pos_x + dark_width + 12.0;
-        let text_start_right = pos_x + width - height - 8.0;
-        let available_width = (text_start_right - text_start_left).max(0.0);
+        if fade_alpha >= 1.0 {
+            // Clipping mask to the edge of the background rectangle, shrunk by a margin
+            self.scene.push_clip_layer(
+                Affine::translate((pos_x, 0.0)),
+                &RoundedRect::new(
+                    4.0,
+                    4.0,
+                    width - height - 4.0,
+                    height - 4.0,
+                    6.0 * self.scale_factor,
+                ),
+            );
+            // Get available width for text
+            let text_start_left = pos_x + dark_width + 12.0;
+            let text_start_right = pos_x + width - height - 8.0;
+            let available_width = (text_start_right - text_start_left).max(0.0);
 
-        // Render the songs title (strip anything beyond a - or ( in the song title)
-        let text_brush = Color::from_rgb8(240, 240, 240);
-        {
-            let song_name = track.title[..track
-                .title
-                .find(" (")
-                .or_else(|| track.title.find(" -"))
-                .unwrap_or(track.title.len())]
-                .trim();
-            let font_size = 12.0;
-            let font_weight = FontWeight::Bold;
-            let text_height = (height * 0.2).floor();
-            let layout = self.layout_text(song_name, font_size, font_weight);
-            let width_ratio = available_width / layout.width;
-            if width_ratio <= 1.0 {
-                let layout =
-                    self.layout_text(song_name, font_size * width_ratio.max(0.8), font_weight);
-                self.draw_text(
-                    layout,
-                    text_start_left,
-                    text_height,
-                    Align::Start,
-                    // Fade out when it gets too small, 0.6-0.4
-                    text_brush.with_alpha(((width_ratio - 0.4) / 0.2) as f32),
-                );
-            } else {
-                self.draw_text(
-                    layout,
-                    text_start_right,
-                    text_height,
-                    Align::End,
-                    text_brush,
-                );
+            // Render the songs title (strip anything beyond a - or ( in the song title)
+            let text_brush = Color::from_rgb8(240, 240, 240);
+            {
+                let song_name = track.title[..track
+                    .title
+                    .find(" (")
+                    .or_else(|| track.title.find(" -"))
+                    .unwrap_or(track.title.len())]
+                    .trim();
+                let font_size = 12.0;
+                let font_weight = FontWeight::Bold;
+                let text_height = (height * 0.2).floor();
+                let layout = self.layout_text(song_name, font_size, font_weight);
+                let width_ratio = available_width / layout.width;
+                if width_ratio <= 1.0 {
+                    let layout =
+                        self.layout_text(song_name, font_size * width_ratio.max(0.8), font_weight);
+                    self.draw_text(
+                        layout,
+                        text_start_left,
+                        text_height,
+                        Align::Start,
+                        // Fade out when it gets too small, 0.6-0.4
+                        text_brush.with_alpha(((width_ratio - 0.4) / 0.2) as f32),
+                    );
+                } else {
+                    self.draw_text(
+                        layout,
+                        text_start_right,
+                        text_height,
+                        Align::End,
+                        text_brush,
+                    );
+                }
             }
-        }
 
-        // Get text layouts for bottom row of text
-        {
-            let font_size = 10.5;
-            let font_weight = FontWeight::Bold;
-            let text_height = (height * 0.52).floor();
+            // Get text layouts for bottom row of text
+            {
+                let font_size = 10.5;
+                let font_weight = FontWeight::Bold;
+                let text_height = (height * 0.52).floor();
 
-            let artist_text = &track.artist_name;
-            let artist_layout = self.layout_text(artist_text, font_size, font_weight);
-            let dot_text = "\u{2004}•\u{2004}"; // Use thin spaces on either side of the bullet point
-            let dot_layout = self.layout_text(dot_text, font_size, font_weight);
-            let time_text = if seconds_until_start >= 60.0 {
-                format!(
-                    "{}m{}s",
-                    (seconds_until_start / 60.0).floor(),
-                    (seconds_until_start % 60.0).floor()
-                )
-            } else {
-                format!("{}s", seconds_until_start.round())
-            };
-            let time_layout = self.layout_text(&time_text, font_size, font_weight);
+                let artist_text = &track.artist_name;
+                let artist_layout = self.layout_text(artist_text, font_size, font_weight);
+                let dot_text = "\u{2004}•\u{2004}"; // Use thin spaces on either side of the bullet point
+                let dot_layout = self.layout_text(dot_text, font_size, font_weight);
+                let time_text = if seconds_until_start >= 60.0 {
+                    format!(
+                        "{}m{}s",
+                        (seconds_until_start / 60.0).floor(),
+                        (seconds_until_start % 60.0).floor()
+                    )
+                } else {
+                    format!("{}s", seconds_until_start.round())
+                };
+                let time_layout = self.layout_text(&time_text, font_size, font_weight);
 
-            let width_ratio =
-                available_width / (artist_layout.width + dot_layout.width + time_layout.width);
-            if width_ratio <= 1.0 || !is_current {
-                let layout = self.layout_text(
-                    &format!("{time_text}{dot_text}{artist_text}"),
-                    font_size * width_ratio.clamp(0.8, 1.0),
-                    font_weight,
-                );
-                self.draw_text(
-                    layout,
-                    if width_ratio > 1.0 {
-                        text_start_right
-                    } else {
-                        text_start_left
-                    },
-                    text_height,
-                    if width_ratio > 1.0 {
-                        Align::End
-                    } else {
-                        Align::Start
-                    },
-                    // Fade out when it gets too small, 0.6-0.4
-                    text_brush.with_alpha(((width_ratio - 0.4) / 0.2) as f32),
-                );
-            } else {
-                self.draw_text(
-                    time_layout,
-                    pos_x + dark_width + 12.0,
-                    text_height,
-                    Align::Start,
-                    text_brush,
-                );
-                self.draw_text(
-                    artist_layout,
-                    text_start_right,
-                    text_height,
-                    Align::End,
-                    text_brush,
-                );
+                let width_ratio =
+                    available_width / (artist_layout.width + dot_layout.width + time_layout.width);
+                if width_ratio <= 1.0 || !is_current {
+                    let layout = self.layout_text(
+                        &format!("{time_text}{dot_text}{artist_text}"),
+                        font_size * width_ratio.clamp(0.8, 1.0),
+                        font_weight,
+                    );
+                    self.draw_text(
+                        layout,
+                        if width_ratio > 1.0 {
+                            text_start_right
+                        } else {
+                            text_start_left
+                        },
+                        text_height,
+                        if width_ratio > 1.0 {
+                            Align::End
+                        } else {
+                            Align::Start
+                        },
+                        // Fade out when it gets too small, 0.6-0.4
+                        text_brush.with_alpha(((width_ratio - 0.4) / 0.2) as f32),
+                    );
+                } else {
+                    self.draw_text(
+                        time_layout,
+                        pos_x + dark_width + 12.0,
+                        text_height,
+                        Align::Start,
+                        text_brush,
+                    );
+                    self.draw_text(
+                        artist_layout,
+                        text_start_right,
+                        text_height,
+                        Align::End,
+                        text_brush,
+                    );
+                }
             }
-        }
 
-        // Release clipping mask
-        self.scene.pop_layer();
+            // Release clipping mask
+            self.scene.pop_layer();
+        }
 
         // --- Add a dark overlay for the dark_width ---
         if dark_width > 0.0 {
@@ -480,7 +489,7 @@ impl CantusApp {
             self.scene.fill(
                 Fill::NonZero,
                 Affine::translate((pos_x, 0.0)),
-                Color::from_rgba8(0, 0, 0, 140),
+                Color::from_rgb8(0, 0, 0).with_alpha(0.5 * fade_alpha),
                 None,
                 &Rect::new(0.0, 0.0, dark_width, height),
             );
@@ -617,9 +626,9 @@ impl CantusApp {
             .iter()
             .map(|[r, g, b, _]| {
                 [
-                    (lerp(0.3, f32::from(*r), 255.0) + lightness_boost).min(255.0) as u8,
-                    (lerp(0.3, f32::from(*g), 210.0) + lightness_boost).min(255.0) as u8,
-                    (lerp(0.3, f32::from(*b), 160.0) + lightness_boost).min(255.0) as u8,
+                    (lerp(0.3, f64::from(*r), 255.0) + lightness_boost).min(255.0) as u8,
+                    (lerp(0.3, f64::from(*g), 210.0) + lightness_boost).min(255.0) as u8,
+                    (lerp(0.3, f64::from(*b), 160.0) + lightness_boost).min(255.0) as u8,
                 ]
             })
             .collect();
@@ -727,7 +736,7 @@ fn lerp_range(range: Range<f64>, t: f64) -> f64 {
     range.start + (range.end - range.start) * t.clamp(0.0, 1.0)
 }
 
-fn lerp(t: f32, v0: f32, v1: f32) -> f32 {
+fn lerp(t: f64, v0: f64, v1: f64) -> f64 {
     (1.0 - t) * v0 + t * v1
 }
 
