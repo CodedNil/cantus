@@ -39,7 +39,7 @@ mod layer_shell;
 mod winit_app;
 
 /// Target width of the panel in logical pixels.
-const PANEL_WIDTH: f64 = 1100.0;
+const PANEL_WIDTH: f64 = 1050.0;
 /// Base height of the panel in logical pixels.
 const PANEL_HEIGHT_BASE: f64 = 40.0;
 /// Additional height allocated for extended content.
@@ -174,24 +174,21 @@ impl CantusApp {
         };
 
         let dev_id = render_surface.dev_id;
-        let handle = &self.render_context.devices[dev_id];
-        let device = handle.device.clone();
-        let queue = handle.queue.clone();
-
         if let hash_map::Entry::Vacant(entry) = self.render_devices.entry(dev_id) {
-            entry.insert(RenderDevice::new(handle)?);
+            entry.insert(RenderDevice::new(&self.render_context.devices[dev_id])?);
         }
 
         self.scene.reset();
         self.create_scene(dev_id);
 
+        let handle = &self.render_context.devices[dev_id];
         let bundle = self
             .render_devices
             .get_mut(&dev_id)
             .expect("render device must exist");
         bundle.renderer.render_to_texture(
-            &device,
-            &queue,
+            &handle.device,
+            &handle.queue,
             &self.scene,
             &render_surface.target_view,
             &vello::RenderParams {
@@ -212,11 +209,13 @@ impl CantusApp {
             }
         };
 
-        let mut encoder = device.create_command_encoder(&CommandEncoderDescriptor {
-            label: Some("Cantus blit"),
-        });
+        let mut encoder = handle
+            .device
+            .create_command_encoder(&CommandEncoderDescriptor {
+                label: Some("Cantus blit"),
+            });
         render_surface.blitter.copy(
-            &device,
+            &handle.device,
             &mut encoder,
             &render_surface.target_view,
             &acquired
@@ -224,9 +223,9 @@ impl CantusApp {
                 .create_view(&TextureViewDescriptor::default()),
         );
 
-        queue.submit([encoder.finish()]);
+        handle.queue.submit([encoder.finish()]);
         acquired.present();
-        device.poll(PollType::Poll)?;
+        handle.device.poll(PollType::Poll)?;
 
         self.render_surface = Some(render_surface);
         Ok(true)

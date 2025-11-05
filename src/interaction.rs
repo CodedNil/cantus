@@ -17,7 +17,7 @@ use tracing::{error, info, warn};
 use vello::{
     Scene,
     kurbo::{Affine, Point, Rect, RoundedRect},
-    peniko::{Color, Fill, ImageBrush},
+    peniko::{BlendMode, Color, Compose, Fill, ImageBrush, Mix},
 };
 use vello_svg::usvg;
 
@@ -107,32 +107,22 @@ enum IconEntry<'a> {
 }
 
 /// Star images
-static STAR_IMAGES: LazyLock<[Scene; 4]> = LazyLock::new(|| {
+static STAR_IMAGES: LazyLock<(f64, [Scene; 4])> = LazyLock::new(|| {
     let full_svg = include_str!("../assets/star.svg");
     let half_svg = include_str!("../assets/star-half.svg");
-    let options = usvg::Options::default();
-
-    let full_gray = full_svg.replace("fill=\"none\"", "fill=\"#555555\"");
-    let full_border = full_svg.replace("fill=\"none\"", "fill=\"#000000\"");
-    let full_yellow = full_svg.replace("fill=\"none\"", "fill=\"#dcb400\"");
-    let half_yellow = half_svg.replace("fill=\"none\"", "fill=\"#dcb400\"");
-
-    [
-        vello_svg::render_tree(&usvg::Tree::from_data(full_gray.as_bytes(), &options).unwrap()),
-        vello_svg::render_tree(&usvg::Tree::from_data(full_border.as_bytes(), &options).unwrap()),
-        vello_svg::render_tree(&usvg::Tree::from_data(full_yellow.as_bytes(), &options).unwrap()),
-        vello_svg::render_tree(&usvg::Tree::from_data(half_yellow.as_bytes(), &options).unwrap()),
-    ]
-});
-static STAR_IMAGE_SIZE: LazyLock<f64> = LazyLock::new(|| {
-    f64::from(
-        usvg::Tree::from_data(
-            include_bytes!("../assets/star-half.svg"),
-            &usvg::Options::default(),
-        )
-        .unwrap()
-        .size()
-        .width(),
+    (
+        f64::from(
+            usvg::Tree::from_str(full_svg, &usvg::Options::default())
+                .unwrap()
+                .size()
+                .width(),
+        ),
+        [
+            vello_svg::render(&full_svg.replace("fill=\"none\"", "fill=\"#555555\"")).unwrap(),
+            vello_svg::render(&full_svg.replace("fill=\"none\"", "fill=\"#000000\"")).unwrap(),
+            vello_svg::render(&full_svg.replace("fill=\"none\"", "fill=\"#dcb400\"")).unwrap(),
+            vello_svg::render(&half_svg.replace("fill=\"none\"", "fill=\"#dcb400\"")).unwrap(),
+        ],
     )
 });
 
@@ -228,25 +218,37 @@ impl CantusApp {
         let mut icon_entries = (0..5)
             .map(|index| IconEntry::Star { index })
             .collect::<Vec<_>>();
+        // Add playlists that are contained in the favourited playlists
         icon_entries.extend(
             playlists
                 .iter()
                 .filter_map(|(&key, &playlist)| {
-                    let is_rating = RATING_PLAYLISTS.contains(&key);
+                    if RATING_PLAYLISTS.contains(&key) {
+                        return None;
+                    }
                     let contained = playlist.tracks.contains(&track.id);
-                    let should_include = !is_rating && (is_current || contained);
-                    should_include.then_some((playlist, contained))
+                    if !contained && !is_current {
+                        return None;
+                    }
+                    Some((playlist, contained))
                 })
-                .sorted_by(|(a, _), (b, _)| a.name.cmp(&b.name))
+                .sorted_by(|(a, ac), (b, bc)| match bc.cmp(ac) {
+                    Ordering::Equal => a.name.cmp(&b.name),
+                    Ordering::Less => Ordering::Less,
+                    Ordering::Greater => Ordering::Greater,
+                })
                 .map(|(playlist, contained)| IconEntry::Playlist {
                     playlist,
                     contained,
                 }),
         );
         let num_icons = icon_entries.len();
-        if width < icon_size * num_icons as f64 {
+        // Fade out when there's not enough space
+        let needed_width = icon_size * num_icons as f64;
+        if width < needed_width {
             return;
         }
+        let fade_alpha = ((width - needed_width) / (needed_width * 0.25)).clamp(0.0, 1.0) as f32;
 
         let inv_scale = 1.0 / self.scale_factor;
         let base_y = height * 0.8;
@@ -281,8 +283,8 @@ impl CantusApp {
         let display_full_stars = display_rating_index / 2;
         let display_has_half = display_rating_index % 2 == 1;
 
-        let star_border_scale = (icon_size + star_size_border * 2.0) / *STAR_IMAGE_SIZE;
-        let star_fill_scale = icon_size / *STAR_IMAGE_SIZE;
+        let star_border_scale = (icon_size + star_size_border * 2.0) / STAR_IMAGES.0;
+        let star_fill_scale = icon_size / STAR_IMAGES.0;
         for (i, entry) in icon_entries.into_iter().enumerate() {
             let icon_origin_x = center_x + (i as f64 - half_icons) * spacing;
             let base_transform = Affine::translate((icon_origin_x, base_y));
@@ -300,8 +302,16 @@ impl CantusApp {
 
             match entry {
                 IconEntry::Star { index } => {
+                    if fade_alpha < 1.0 {
+                        self.scene.push_layer(
+                            BlendMode::new(Mix::Normal, Compose::SrcOver),
+                            fade_alpha,
+                            Affine::IDENTITY,
+                            &Rect::new(-1e9, -1e9, 1e9, 1e9),
+                        );
+                    }
                     self.scene.append(
-                        &STAR_IMAGES[1],
+                        &STAR_IMAGES.1[1],
                         Some(
                             combined_transform
                                 * Affine::translate((-star_size_border, -star_size_border))
@@ -311,12 +321,15 @@ impl CantusApp {
 
                     let fill_transform = combined_transform * Affine::scale(star_fill_scale);
                     if index < display_full_stars {
-                        self.scene.append(&STAR_IMAGES[2], Some(fill_transform));
+                        self.scene.append(&STAR_IMAGES.1[2], Some(fill_transform));
                     } else {
-                        self.scene.append(&STAR_IMAGES[0], Some(fill_transform));
+                        self.scene.append(&STAR_IMAGES.1[0], Some(fill_transform));
                     }
                     if index == display_full_stars && display_has_half {
-                        self.scene.append(&STAR_IMAGES[3], Some(fill_transform));
+                        self.scene.append(&STAR_IMAGES.1[3], Some(fill_transform));
+                    }
+                    if fade_alpha < 1.0 {
+                        self.scene.pop_layer();
                     }
                     self.interaction.icon_hitboxes.push(IconHitbox {
                         rect: button_rect,
@@ -346,7 +359,7 @@ impl CantusApp {
                         icon_transform
                             * Affine::translate((-zoom_pixels, -zoom_pixels))
                             * Affine::scale((playlist_icon_size + zoom_pixels * 2.0) / image_size),
-                        &ImageBrush::new(playlist_image.clone()),
+                        &ImageBrush::new(playlist_image.clone()).with_alpha(fade_alpha),
                         None,
                         &Rect::new(0.0, 0.0, image_size, image_size),
                     );
@@ -354,7 +367,7 @@ impl CantusApp {
                         self.scene.fill(
                             Fill::NonZero,
                             icon_transform,
-                            Color::from_rgba8(60, 60, 60, 180),
+                            Color::from_rgb8(60, 60, 60).with_alpha(0.7 * fade_alpha),
                             None,
                             &Rect::new(0.0, 0.0, playlist_icon_size, playlist_icon_size),
                         );

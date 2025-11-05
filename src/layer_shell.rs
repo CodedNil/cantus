@@ -63,17 +63,17 @@ pub fn run() {
     let wl_surface = compositor.create_surface(&qhandle, ());
     let surface_ptr = NonNull::new(wl_surface.id().as_ptr().cast::<c_void>())
         .expect("Failed to get surface pointer");
-    let surface = app.wl_surface.insert(wl_surface).clone();
     app.surface_ptr = Some(surface_ptr);
     assert!(app.try_select_output(), "Failed to select a Wayland output");
 
+    let surface = app.wl_surface.insert(wl_surface);
     if let (Some(vp), Some(fm)) = (app.viewporter.take(), app.fractional_manager.take()) {
-        app.viewport = Some(vp.get_viewport(&surface, &qhandle, ()));
-        app.fractional = Some(fm.get_fractional_scale(&surface, &qhandle, ()));
+        app.viewport = Some(vp.get_viewport(surface, &qhandle, ()));
+        app.fractional = Some(fm.get_fractional_scale(surface, &qhandle, ()));
     }
 
     let layer_surface = layer_shell.get_layer_surface(
-        &surface,
+        surface,
         app.outputs.get(app.active_output).map(|info| &info.handle),
         zwlr_layer_shell_v1::Layer::Top,
         "cantus".into(),
@@ -98,7 +98,6 @@ pub fn run() {
     }
 }
 
-#[derive(Clone)]
 struct OutputInfo {
     handle: WlOutput,
     name: Option<String>,

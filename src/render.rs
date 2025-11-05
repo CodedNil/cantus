@@ -259,7 +259,6 @@ impl CantusApp {
         playlists: &HashMap<&str, &Playlist>,
     ) {
         let is_current = track_start_ms <= 0.0 && track_end_ms >= 0.0;
-        let is_past = track_end_ms < 0.0;
         let seconds_until_start = (track_start_ms / 1000.0).abs();
 
         let visible_start_ms = track_start_ms.max(TIMELINE_START_MS);
@@ -522,9 +521,7 @@ impl CantusApp {
             self.scene.pop_layer();
         }
 
-        if !is_past {
-            self.draw_playlist_buttons(track, is_current, playlists, width, height, pos_x);
-        }
+        self.draw_playlist_buttons(track, is_current, playlists, width, height, pos_x);
     }
 
     /// Creates the text layout for a single-line string.
