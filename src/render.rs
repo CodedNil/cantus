@@ -20,9 +20,10 @@ use vello::{
 /// Spacing between tracks in ms
 const TRACK_SPACING_MS: f64 = 4000.0;
 /// How many ms to show in the timeline
-const TIMELINE_DURATION_MS: f64 = 12.0 * 60.0 * 1000.0;
+pub const TIMELINE_DURATION_MS: f64 = 12.0 * 60.0 * 1000.0;
 /// Starting position of the timeline in ms, if negative then it shows the history too
-const TIMELINE_START_MS: f64 = -1.5 * 60.0 * 1000.0;
+pub const TIMELINE_START_MS: f64 = -1.5 * 60.0 * 1000.0;
+const TIMELINE_END_MS: f64 = TIMELINE_START_MS + TIMELINE_DURATION_MS;
 
 /// Particles emitted per second when playback is active.
 const SPARK_EMISSION: f32 = 60.0;
@@ -139,6 +140,7 @@ impl CantusApp {
         let history_width = (HISTORY_WIDTH * self.scale_factor).ceil();
         let total_width = (PANEL_WIDTH * self.scale_factor - history_width).ceil();
         let total_height = (PANEL_HEIGHT_BASE * self.scale_factor).ceil();
+        let px_per_ms = total_width / TIMELINE_DURATION_MS;
 
         let playback_state = PLAYBACK_STATE.read();
         let queue = &playback_state.queue;
@@ -148,8 +150,6 @@ impl CantusApp {
             return;
         }
 
-        let timeline_end_ms = TIMELINE_START_MS + TIMELINE_DURATION_MS;
-        let px_per_ms = total_width / TIMELINE_DURATION_MS;
         let drag_offset_ms = if self.interaction.dragging {
             (self.interaction.drag_delta_pixels * self.scale_factor) / px_per_ms
         } else {
@@ -209,7 +209,7 @@ impl CantusApp {
         // Iterate over the currently playing track followed by the queued tracks.
         for track in queue {
             let track_start_ms_spaced = track_start_ms + track_spacing;
-            if track_start_ms_spaced >= timeline_end_ms {
+            if track_start_ms_spaced >= TIMELINE_END_MS {
                 break;
             }
 
@@ -227,7 +227,6 @@ impl CantusApp {
                 history_width,
                 track_start_ms_spaced,
                 track_end_ms,
-                timeline_end_ms,
                 px_per_ms,
                 total_height,
                 &playlists,
@@ -261,7 +260,6 @@ impl CantusApp {
         history_width: f64,
         track_start_ms: f64,
         track_end_ms: f64,
-        timeline_end_ms: f64,
         px_per_ms: f64,
         height: f64,
         playlists: &HashMap<&str, &Playlist>,
@@ -270,7 +268,7 @@ impl CantusApp {
         let seconds_until_start = (track_start_ms / 1000.0).abs();
 
         let visible_start_ms = track_start_ms.max(TIMELINE_START_MS);
-        let visible_end_ms = track_end_ms.min(timeline_end_ms);
+        let visible_end_ms = track_end_ms.min(TIMELINE_END_MS);
         let pos_x = (visible_start_ms - TIMELINE_START_MS) * px_per_ms + history_width;
         let width = (visible_end_ms - visible_start_ms) * px_per_ms;
         if width <= 0.0 {
@@ -297,12 +295,10 @@ impl CantusApp {
         self.interaction.track_hitboxes.insert(
             track.id.clone(),
             Rect::new(
-                ((track_start_ms - TIMELINE_START_MS) * px_per_ms + history_width)
-                    / self.scale_factor,
+                (track_start_ms - TIMELINE_START_MS) * px_per_ms + history_width,
                 0.0,
-                ((track_end_ms - TIMELINE_START_MS) * px_per_ms + history_width)
-                    / self.scale_factor,
-                height / self.scale_factor,
+                (track_end_ms - TIMELINE_START_MS) * px_per_ms + history_width,
+                height,
             ),
         );
 
@@ -323,7 +319,7 @@ impl CantusApp {
             );
         let right_rounding = rounding
             * lerp(
-                ((track_end_ms - timeline_end_ms) / buffer_ms).clamp(0.0, 1.0),
+                ((track_end_ms - TIMELINE_END_MS) / buffer_ms).clamp(0.0, 1.0),
                 1.0,
                 0.3,
             );

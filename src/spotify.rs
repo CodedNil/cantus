@@ -49,6 +49,7 @@ const MPRIS_OBJECT_PATH: &str = "/org/mpris/MediaPlayer2";
 
 pub static PLAYBACK_STATE: LazyLock<Arc<RwLock<PlaybackState>>> = LazyLock::new(|| {
     Arc::new(RwLock::new(PlaybackState {
+        is_local: false,
         last_updated: Instant::now(),
         playing: false,
         shuffle: false,
@@ -74,6 +75,7 @@ pub static SPOTIFY_CLIENT: OnceCell<AuthCodeSpotify> = OnceCell::const_new();
 
 #[derive(Debug, Clone)]
 pub struct PlaybackState {
+    pub is_local: bool, // Whether we are playing spotify on the local device
     pub last_updated: Instant,
     pub playing: bool,
     pub shuffle: bool,
@@ -287,6 +289,9 @@ async fn update_state_from_mpris(
     last_track_id: &mut Option<String>,
 ) -> (bool, bool) {
     let Ok(names) = dbus_proxy.list_names().await else {
+        update_playback_state(|state| {
+            state.is_local = true;
+        });
         return (false, false);
     };
 
@@ -314,6 +319,9 @@ async fn update_state_from_mpris(
         }
     }
     let Some(properties_proxy) = properties_proxy else {
+        update_playback_state(|state| {
+            state.is_local = true;
+        });
         return (false, false);
     };
 
@@ -352,6 +360,7 @@ async fn update_state_from_mpris(
                 if let Some(progress) = progress {
                     state.progress = progress as u32;
                     state.last_updated = Instant::now();
+                    state.is_local = true;
                     updated_progress = true;
                 }
             }

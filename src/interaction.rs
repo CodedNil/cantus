@@ -1,5 +1,6 @@
 use crate::{
-    CantusApp, HISTORY_WIDTH,
+    CantusApp, HISTORY_WIDTH, PANEL_HEIGHT_BASE, PANEL_WIDTH,
+    render::{TIMELINE_DURATION_MS, TIMELINE_START_MS},
     spotify::{
         IMAGES_CACHE, PLAYBACK_STATE, Playlist, RATING_PLAYLISTS, SPOTIFY_CLIENT, Track,
         update_playback_state,
@@ -51,12 +52,12 @@ pub struct IconHitbox {
 
 pub struct InteractionState {
     pub last_event: InteractionEvent,
-    pub pointer_position: (f64, f64),
+    pub mouse_position: Point,
     #[cfg(feature = "layer-shell")]
     pub last_hitbox_update: Instant,
     pub track_hitboxes: HashMap<TrackId<'static>, Rect>,
     pub icon_hitboxes: Vec<IconHitbox>,
-    pub drag_origin: Option<(f64, f64)>,
+    pub drag_origin: Option<Point>,
     pub dragging: bool,
     pub drag_delta_pixels: f64,
     spotify_guard: Option<SpotifyInteractionToken>,
@@ -68,7 +69,7 @@ impl Default for InteractionState {
             last_event: InteractionEvent::Paused(
                 Instant::now().checked_sub(Duration::from_secs(60)).unwrap(),
             ),
-            pointer_position: (0.0, 0.0),
+            mouse_position: Point::default(),
             #[cfg(feature = "layer-shell")]
             last_hitbox_update: Instant::now(),
             track_hitboxes: HashMap::new(),
@@ -83,7 +84,7 @@ impl Default for InteractionState {
 
 impl InteractionState {
     pub fn start_drag(&mut self) {
-        self.drag_origin = Some(self.pointer_position);
+        self.drag_origin = Some(self.mouse_position);
         self.dragging = false;
         self.drag_delta_pixels = 0.0;
         self.spotify_guard = None;
@@ -125,22 +126,21 @@ static STAR_SVG_HALF: LazyLock<BezPath> =
     LazyLock::new(|| BezPath::from_svg(include_str!("../assets/star-half.path")).unwrap());
 
 impl CantusApp {
-    /// Handle pointer click events.
-    pub fn handle_pointer_click(&self) -> bool {
-        let point = Point::new(
-            self.interaction.pointer_position.0,
-            self.interaction.pointer_position.1,
-        );
+    /// Handle click events.
+    pub fn handle_click(&self) -> bool {
+        let mouse_pos = self.interaction.mouse_position;
+
+        // Click on rating/playlist icons
         if let Some(hitbox) = self
             .interaction
             .icon_hitboxes
             .iter()
-            .find(|h| h.rect.contains(point))
+            .find(|h| h.rect.contains(mouse_pos))
         {
             let track_id = hitbox.track_id.clone();
             if let Some(index) = hitbox.rating_index {
                 let center_x = (hitbox.rect.x0 + hitbox.rect.x1) * 0.5;
-                let rating_slot = index * 2 + 1 + usize::from(point.x >= center_x);
+                let rating_slot = index * 2 + 1 + usize::from(mouse_pos.x >= center_x);
                 tokio::spawn(async move {
                     update_star_rating(track_id, rating_slot).await;
                 });
@@ -151,15 +151,38 @@ impl CantusApp {
             }
             return true;
         }
-        if let Some((id, rect)) = self
+
+        // Play/pause
+        let history_width = (HISTORY_WIDTH * self.scale_factor).ceil();
+        let total_height = (PANEL_HEIGHT_BASE * self.scale_factor).ceil();
+        let playbutton_center = -TIMELINE_START_MS
+            * ((PANEL_WIDTH * self.scale_factor - history_width).ceil() / TIMELINE_DURATION_MS)
+            + history_width;
+        let playbutton_hsize = total_height * 0.25;
+        let play_hitbox = Rect::new(
+            playbutton_center - playbutton_hsize,
+            0.0,
+            playbutton_center + playbutton_hsize,
+            total_height,
+        );
+        if play_hitbox.contains(mouse_pos) {
+            let playing = PLAYBACK_STATE.read().playing;
+            tokio::spawn(async move {
+                toggle_playing(!playing).await;
+            });
+            return true;
+        }
+
+        // Seek track
+        if let Some((id, track_rect)) = self
             .interaction
             .track_hitboxes
             .iter()
-            .find(|(_, rect)| rect.contains(point))
+            .find(|(_, track_rect)| track_rect.contains(mouse_pos))
         {
-            let (id, rect) = (id.clone(), *rect);
+            let (id, track_rect) = (id.clone(), *track_rect);
             tokio::spawn(async move {
-                skip_to_track(id, point, rect).await;
+                skip_to_track(id, mouse_pos, track_rect).await;
             });
             return true;
         }
@@ -167,10 +190,10 @@ impl CantusApp {
     }
 
     /// Drag across the progress bar to seek.
-    pub fn handle_pointer_drag_motion(&mut self) {
-        if let Some((origin_x, origin_y)) = self.interaction.drag_origin {
-            let delta_x = self.interaction.pointer_position.0 - origin_x;
-            let delta_y = self.interaction.pointer_position.1 - origin_y;
+    pub fn handle_mouse_drag(&mut self) {
+        if let Some(origin_pos) = self.interaction.drag_origin {
+            let delta_x = self.interaction.mouse_position.x - origin_pos.x;
+            let delta_y = self.interaction.mouse_position.y - origin_pos.y;
             if !self.interaction.dragging && (delta_x.abs() >= 2.0 || delta_y.abs() >= 2.0) {
                 self.interaction.dragging = true;
                 self.interaction.ensure_spotify_guard();
@@ -235,10 +258,7 @@ impl CantusApp {
         // Fade out when there's not enough space
         let icon_size = 14.0 * self.scale_factor;
         let icon_spacing = 2.0 * self.scale_factor;
-        let pointer_point = Point::new(
-            self.interaction.pointer_position.0,
-            self.interaction.pointer_position.1,
-        );
+        let mouse_pos = self.interaction.mouse_position;
         let num_icons = icon_entries.len();
         let needed_width = icon_size * num_icons as f64;
         if width < needed_width {
@@ -246,7 +266,6 @@ impl CantusApp {
         }
         let fade_alpha = ((width - needed_width) / (needed_width * 0.25)).clamp(0.0, 1.0) as f32;
 
-        let inv_scale = 1.0 / self.scale_factor;
         let center_x = pos_x + width * 0.5;
         let center_y = height * 0.975;
         let half_icons = num_icons as f64 / 2.0;
@@ -258,18 +277,18 @@ impl CantusApp {
             let icon_origin_x = center_x + (i as f64 - half_icons) * (icon_size + icon_spacing);
             let half_icon_size = (icon_size + icon_spacing) * 0.5; // Include some spacing so the hitboxes don't have gaps
             let button_rect = Rect::new(
-                (icon_origin_x - half_icon_size) * inv_scale,
-                (center_y - half_icon_size) * inv_scale,
-                (icon_origin_x + half_icon_size) * inv_scale,
-                (center_y + half_icon_size) * inv_scale,
+                icon_origin_x - half_icon_size,
+                center_y - half_icon_size,
+                icon_origin_x + half_icon_size,
+                center_y + half_icon_size,
             );
-            let hovered = button_rect.contains(pointer_point);
+            let hovered = button_rect.contains(mouse_pos);
             match entry {
                 IconEntry::Star { index } => {
                     if hovered {
                         let rect_center_x = (button_rect.x0 + button_rect.x1) * 0.5;
                         hover_rating_index =
-                            Some(*index * 2 + 1 + usize::from(pointer_point.x >= rect_center_x));
+                            Some(*index * 2 + 1 + usize::from(mouse_pos.x >= rect_center_x));
                     }
                     icon_entry_extras.push((hovered, icon_origin_x));
                     self.interaction.icon_hitboxes.push(IconHitbox {
@@ -622,5 +641,22 @@ async fn toggle_playlist_membership(track_id: TrackId<'static>, playlist_id: Pla
             if contained { "remove" } else { "add" },
             if contained { "from" } else { "to" }
         );
+    }
+}
+
+/// Toggle Spotify playlist membership for the given track.
+async fn toggle_playing(play: bool) {
+    let Some(_guard) = try_acquire_spotify_guard() else {
+        return;
+    };
+
+    info!("{} current track", if play { "Playing" } else { "Pausing" },);
+    let spotify_client = SPOTIFY_CLIENT.get().unwrap();
+    if play {
+        if let Err(err) = spotify_client.resume_playback(None, None).await {
+            error!("Failed to play playback: {err}");
+        }
+    } else if let Err(err) = spotify_client.pause_playback(None).await {
+        error!("Failed to pause playback: {err}");
     }
 }

@@ -10,7 +10,10 @@ use std::{
     time::{Duration, Instant},
 };
 use tracing::error;
-use vello::wgpu::{PresentMode, SurfaceTargetUnsafe};
+use vello::{
+    kurbo::Point,
+    wgpu::{PresentMode, SurfaceTargetUnsafe},
+};
 use wayland_client::{
     Connection, Dispatch, Proxy, QueueHandle, WEnum,
     protocol::{
@@ -471,7 +474,10 @@ impl Dispatch<WlPointer, ()> for LayerShellApp {
                     .as_ref()
                     .is_some_and(|wl_surface| wl_surface.id() == surface.id())
                 {
-                    state.cantus.interaction.pointer_position = (surface_x, surface_y);
+                    state.cantus.interaction.mouse_position = Point::new(
+                        surface_x * state.cantus.scale_factor,
+                        surface_y * state.cantus.scale_factor,
+                    );
                 }
             }
             wl_pointer::Event::Motion {
@@ -479,11 +485,14 @@ impl Dispatch<WlPointer, ()> for LayerShellApp {
                 surface_y,
                 ..
             } => {
-                state.cantus.interaction.pointer_position = (surface_x, surface_y);
-                state.cantus.handle_pointer_drag_motion();
+                state.cantus.interaction.mouse_position = Point::new(
+                    surface_x * state.cantus.scale_factor,
+                    surface_y * state.cantus.scale_factor,
+                );
+                state.cantus.handle_mouse_drag();
             }
             wl_pointer::Event::Leave { .. } => {
-                state.cantus.interaction.pointer_position = (-1.0, -1.0);
+                state.cantus.interaction.mouse_position = Point::new(-1.0, -1.0);
                 state.cantus.interaction.end_drag();
             }
             wl_pointer::Event::Button {
@@ -496,7 +505,7 @@ impl Dispatch<WlPointer, ()> for LayerShellApp {
                 }
                 WEnum::Value(wl_pointer::ButtonState::Released) => {
                     if !state.cantus.interaction.dragging {
-                        let _ = state.cantus.handle_pointer_click();
+                        let _ = state.cantus.handle_click();
                     }
                     state.cantus.interaction.end_drag();
                 }
