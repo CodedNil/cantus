@@ -119,12 +119,10 @@ enum IconEntry<'a> {
 }
 
 /// Star images
-static STAR_SVGS: LazyLock<[BezPath; 2]> = LazyLock::new(|| {
-    [
-        BezPath::from_svg(include_str!("../assets/star.path")).unwrap(),
-        BezPath::from_svg(include_str!("../assets/star-half.path")).unwrap(),
-    ]
-});
+static STAR_SVG: LazyLock<BezPath> =
+    LazyLock::new(|| BezPath::from_svg(include_str!("../assets/star.path")).unwrap());
+static STAR_SVG_HALF: LazyLock<BezPath> =
+    LazyLock::new(|| BezPath::from_svg(include_str!("../assets/star-half.path")).unwrap());
 
 impl CantusApp {
     /// Handle pointer click events.
@@ -206,13 +204,6 @@ impl CantusApp {
             })
             .unwrap_or(0);
 
-        let icon_size = 14.0 * self.scale_factor;
-        let icon_spacing = 2.0 * self.scale_factor;
-        let pointer_point = Point::new(
-            self.interaction.pointer_position.0,
-            self.interaction.pointer_position.1,
-        );
-
         let mut icon_entries = (0..5)
             .map(|index| IconEntry::Star { index })
             .collect::<Vec<_>>();
@@ -240,8 +231,15 @@ impl CantusApp {
                     contained,
                 }),
         );
-        let num_icons = icon_entries.len();
+
         // Fade out when there's not enough space
+        let icon_size = 14.0 * self.scale_factor;
+        let icon_spacing = 2.0 * self.scale_factor;
+        let pointer_point = Point::new(
+            self.interaction.pointer_position.0,
+            self.interaction.pointer_position.1,
+        );
+        let num_icons = icon_entries.len();
         let needed_width = icon_size * num_icons as f64;
         if width < needed_width {
             return;
@@ -249,56 +247,69 @@ impl CantusApp {
         let fade_alpha = ((width - needed_width) / (needed_width * 0.25)).clamp(0.0, 1.0) as f32;
 
         let inv_scale = 1.0 / self.scale_factor;
-        let base_y = height * 0.8;
-        let icon_center_y = base_y + icon_size * 0.5;
         let center_x = pos_x + width * 0.5;
+        let center_y = height * 0.975;
         let half_icons = num_icons as f64 / 2.0;
-        let spacing = icon_size + icon_spacing;
-        let button_rect = |icon_origin_x: f64| {
-            Rect::new(
-                icon_origin_x * inv_scale,
-                base_y * inv_scale,
-                (icon_origin_x + icon_size) * inv_scale,
-                (base_y + icon_size) * inv_scale,
-            )
-        };
 
-        // Track hover over stars to update the displayed rating
+        // Track hovers, and add hitboxes
         let mut hover_rating_index = None;
+        let mut icon_entry_extras = Vec::new();
         for (i, entry) in icon_entries.iter().enumerate() {
-            let icon_origin_x = center_x + (i as f64 - half_icons) * spacing;
-            let button_rect = button_rect(icon_origin_x);
-            if button_rect.contains(pointer_point)
-                && let IconEntry::Star { index } = entry
-            {
-                let rect_center_x = (button_rect.x0 + button_rect.x1) * 0.5;
-                hover_rating_index =
-                    Some(*index * 2 + 1 + usize::from(pointer_point.x >= rect_center_x));
-                break;
+            let icon_origin_x = center_x + (i as f64 - half_icons) * (icon_size + icon_spacing);
+            let half_icon_size = (icon_size + icon_spacing) * 0.5; // Include some spacing so the hitboxes don't have gaps
+            let button_rect = Rect::new(
+                (icon_origin_x - half_icon_size) * inv_scale,
+                (center_y - half_icon_size) * inv_scale,
+                (icon_origin_x + half_icon_size) * inv_scale,
+                (center_y + half_icon_size) * inv_scale,
+            );
+            let hovered = button_rect.contains(pointer_point);
+            match entry {
+                IconEntry::Star { index } => {
+                    if hovered {
+                        let rect_center_x = (button_rect.x0 + button_rect.x1) * 0.5;
+                        hover_rating_index =
+                            Some(*index * 2 + 1 + usize::from(pointer_point.x >= rect_center_x));
+                    }
+                    icon_entry_extras.push((hovered, icon_origin_x));
+                    self.interaction.icon_hitboxes.push(IconHitbox {
+                        rect: button_rect,
+                        track_id: track.id.clone(),
+                        playlist_id: None,
+                        rating_index: Some(*index),
+                    });
+                }
+                IconEntry::Playlist {
+                    playlist,
+                    contained: _,
+                } => {
+                    icon_entry_extras.push((hovered, icon_origin_x));
+                    self.interaction.icon_hitboxes.push(IconHitbox {
+                        rect: button_rect,
+                        track_id: track.id.clone(),
+                        playlist_id: Some(playlist.id.clone()),
+                        rating_index: None,
+                    });
+                }
             }
         }
 
+        // Render out the icons
         let display_rating_index = hover_rating_index.unwrap_or(track_rating_index);
         let display_full_stars = display_rating_index / 2;
         let display_has_half = display_rating_index % 2 == 1;
-
         for (i, entry) in icon_entries.into_iter().enumerate() {
-            let icon_origin_x = center_x + (i as f64 - half_icons) * spacing;
-            let button_rect = button_rect(icon_origin_x);
-            let icon_center_x = icon_origin_x - icon_size * 0.5;
-            let hover_transform = if button_rect.contains(pointer_point) {
-                Affine::translate((icon_center_x, icon_center_y))
-                    * Affine::scale(1.2)
-                    * Affine::translate((-icon_center_x, -icon_center_y))
-            } else {
-                Affine::IDENTITY
-            };
-            let combined_transform = hover_transform * Affine::translate((icon_origin_x, base_y));
+            let (hovered, icon_origin_x) = icon_entry_extras[i];
+
+            let icon_size = icon_size * if hovered { 1.6 } else { 1.0 };
+            let half_icon_size = icon_size * 0.5;
+            let icon_transform =
+                Affine::translate((icon_origin_x - half_icon_size, center_y - half_icon_size));
 
             match entry {
                 IconEntry::Star { index } => {
-                    let fill_transform = combined_transform
-                        * Affine::scale(icon_size / STAR_SVGS[0].bounding_box().width());
+                    let fill_transform =
+                        icon_transform * Affine::scale(icon_size / STAR_SVG.bounding_box().width());
 
                     // Shadow outline
                     self.scene.stroke(
@@ -306,7 +317,7 @@ impl CantusApp {
                         fill_transform,
                         Color::from_rgb8(0, 0, 0).with_alpha(fade_alpha),
                         None,
-                        &STAR_SVGS[0],
+                        &*STAR_SVG,
                     );
 
                     self.scene.fill(
@@ -319,7 +330,7 @@ impl CantusApp {
                         }
                         .with_alpha(fade_alpha),
                         None,
-                        &STAR_SVGS[0],
+                        &*STAR_SVG,
                     );
                     if index == display_full_stars && display_has_half {
                         self.scene.fill(
@@ -327,15 +338,9 @@ impl CantusApp {
                             fill_transform,
                             Color::from_rgb8(220, 180, 0).with_alpha(fade_alpha),
                             None,
-                            &STAR_SVGS[1],
+                            &*STAR_SVG_HALF,
                         );
                     }
-                    self.interaction.icon_hitboxes.push(IconHitbox {
-                        rect: button_rect,
-                        track_id: track.id.clone(),
-                        playlist_id: None,
-                        rating_index: Some(index),
-                    });
                 }
                 IconEntry::Playlist {
                     playlist,
@@ -348,43 +353,37 @@ impl CantusApp {
                     // Shadow outline
                     self.scene.stroke(
                         &Stroke::new(1.0 * self.scale_factor),
-                        combined_transform,
+                        icon_transform,
                         Color::from_rgb8(0, 0, 0).with_alpha(fade_alpha),
                         None,
                         &RoundedRect::new(0.0, 0.0, icon_size, icon_size, 6.0),
                     );
 
                     self.scene.push_clip_layer(
-                        combined_transform,
+                        icon_transform,
                         &RoundedRect::new(0.0, 0.0, icon_size, icon_size, 6.0),
                     );
-                    let zoom_pixels = 16.0;
+                    let zoom_pixels = 12.0;
                     let image_size = f64::from(playlist_image.width);
                     self.scene.fill(
                         Fill::EvenOdd,
-                        combined_transform
+                        icon_transform
                             * Affine::translate((-zoom_pixels, -zoom_pixels))
                             * Affine::scale((icon_size + zoom_pixels * 2.0) / image_size),
                         &ImageBrush::new(playlist_image.clone()).with_alpha(fade_alpha),
                         None,
                         &Rect::new(0.0, 0.0, image_size, image_size),
                     );
-                    if !contained {
+                    if !contained && !hovered {
                         self.scene.fill(
                             Fill::EvenOdd,
-                            combined_transform,
-                            Color::from_rgb8(60, 60, 60).with_alpha(0.7 * fade_alpha),
+                            icon_transform,
+                            Color::from_rgb8(60, 60, 60).with_alpha(0.5 * fade_alpha),
                             None,
                             &Rect::new(0.0, 0.0, icon_size, icon_size),
                         );
                     }
                     self.scene.pop_layer();
-                    self.interaction.icon_hitboxes.push(IconHitbox {
-                        rect: button_rect,
-                        track_id: track.id.clone(),
-                        playlist_id: Some(playlist.id.clone()),
-                        rating_index: None,
-                    });
                 }
             }
         }

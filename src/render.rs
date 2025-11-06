@@ -7,12 +7,13 @@ use rand::{Rng, SeedableRng, rngs::SmallRng};
 use std::{
     collections::HashMap,
     ops::Range,
+    sync::LazyLock,
     time::{Duration, Instant},
 };
 use ttf_parser::{Face, GlyphId, NormalizedCoordinate, Tag, VariationAxis};
 use vello::{
     Glyph,
-    kurbo::{Affine, Circle, Point, Rect, RoundedRect, RoundedRectRadii},
+    kurbo::{Affine, BezPath, Circle, Point, Rect, RoundedRect, RoundedRectRadii, Shape},
     peniko::{Blob, Color, Fill, FontData, ImageBrush},
 };
 
@@ -28,9 +29,9 @@ const SPARK_EMISSION: f32 = 60.0;
 /// Downward acceleration applied to each particle (scaled by DPI).
 const SPARK_GRAVITY: f32 = 300.0;
 /// Horizontal velocity range applied at spawn.
-const SPARK_VELOCITY_X: Range<f32> = 70.0..120.0;
+const SPARK_VELOCITY_X: Range<f32> = 75.0..100.0;
 /// Vertical velocity range applied at spawn.
-const SPARK_VELOCITY_Y: Range<f32> = 10.0..70.0;
+const SPARK_VELOCITY_Y: Range<f32> = 30.0..70.0;
 /// Lifetime range for individual particles, in seconds.
 const SPARK_LIFETIME: Range<f32> = 0.3..0.6;
 /// Rendered spark segment length range, in logical pixels.
@@ -40,6 +41,9 @@ const SPARK_THICKNESS_RANGE: Range<f64> = 2.0..4.0;
 
 /// Duration for animation events
 const ANIMATION_DURATION: Duration = Duration::from_millis(3500);
+
+static PLAY_SVG: LazyLock<BezPath> =
+    LazyLock::new(|| BezPath::from_svg(include_str!("../assets/play.path")).unwrap());
 
 #[derive(Clone)]
 pub struct FontEngine {
@@ -790,7 +794,7 @@ impl CantusApp {
 
         if anim_lerp < 1.0 {
             // Start with the lines split, then 3/4 way through close them again
-            let line_height = height * lerp(((anim_lerp - 0.75) * 4.0).max(0.0), 0.333, 0.5);
+            let line_height = height * lerp(((anim_lerp - 0.75) * 4.0).max(0.0), 0.2, 0.5);
             self.scene.fill(
                 Fill::EvenOdd,
                 Affine::translate((line_x, 0.0)),
@@ -806,25 +810,39 @@ impl CantusApp {
                 &RoundedRect::new(0.0, 0.0, line_width, line_height, 100.0),
             );
 
-            // Two lines for pause, expand it out in the first quarter, then keep in place for half, then expand out with a fade in final quarter
-            let pause_line_lerp = (anim_lerp * 4.0).min(1.0);
-            let pause_line_fade = ((anim_lerp - 0.75) * 4.0).clamp(0.0, 1.0);
-            let pause_line_offset = 6.0 * pause_line_lerp + 4.0 * pause_line_fade;
-            let pause_line_color = line_color.with_alpha(1.0 - pause_line_fade as f32);
-            self.scene.fill(
-                Fill::EvenOdd,
-                Affine::translate((line_x - pause_line_offset, height * 0.333)),
-                pause_line_color,
-                None,
-                &RoundedRect::new(0.0, 0.0, line_width, height * 0.333, 100.0),
-            );
-            self.scene.fill(
-                Fill::EvenOdd,
-                Affine::translate((line_x + pause_line_offset, height * 0.333)),
-                pause_line_color,
-                None,
-                &RoundedRect::new(0.0, 0.0, line_width, height * 0.333, 100.0),
-            );
+            let icon_height = height * 0.333;
+            let icon_fade = ((anim_lerp - 0.75) * 4.0).clamp(0.0, 1.0);
+            let icon_color = line_color.with_alpha(1.0 - icon_fade as f32);
+            if matches!(self.interaction.last_event, InteractionEvent::Paused(_)) {
+                // Two lines for pause, expand it out in the first quarter, then keep in place for half, then expand out with a fade in final quarter
+                let icon_offset = 5.0 * (anim_lerp * 4.0).min(1.0) + 4.0 * icon_fade;
+                self.scene.fill(
+                    Fill::EvenOdd,
+                    Affine::translate((line_x - icon_offset, icon_height)),
+                    icon_color,
+                    None,
+                    &RoundedRect::new(0.0, 0.0, line_width, icon_height, 100.0),
+                );
+                self.scene.fill(
+                    Fill::EvenOdd,
+                    Affine::translate((line_x + icon_offset, icon_height)),
+                    icon_color,
+                    None,
+                    &RoundedRect::new(0.0, 0.0, line_width, icon_height, 100.0),
+                );
+            } else {
+                // Render out the play icon svg, grow it in the first quarter, then keep in place for half, then expand out with a fade in final quarter
+                let play_icon_width = PLAY_SVG.bounding_box().width();
+                let icon_scale = icon_height * (anim_lerp * 4.0).min(1.0) + 0.5 * icon_fade;
+                self.scene.fill(
+                    Fill::EvenOdd,
+                    Affine::translate((line_x - icon_scale * 0.3, height * 0.5 - icon_scale * 0.5))
+                        * Affine::scale(icon_scale / play_icon_width),
+                    icon_color,
+                    None,
+                    &*PLAY_SVG,
+                );
+            }
         } else {
             // Full bar
             self.scene.fill(

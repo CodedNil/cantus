@@ -1,20 +1,18 @@
 interaction:
 actually seek/skip song on drag release
 stack previous songs so a bit of each is visible up to like 6 songs
-play/pause
+show the play/pause button when hovering, click to play/pause
 volume (rendered onto the playback bar as a vertical colour fill, scroll to change)
 instead of showing unincluded playlists for current song, only show that when hovering on that track, even if theres no room
 
 
 animations:
-show the a play button svg instead of the pause thing when playing, also show this when hovering, click to play/pause
 show the highlight animation when you click to seek
 
 
 misc:
 run as a proper windows layer-shell bar
 use local playerctl for seek and skip as much when viable
-simplify drawing out the star/playlist icons, with hover animation working, hitbox should include spacing
 fix the dodgy sprayed off particles due to tiny errors in playback position sampling
 
 
