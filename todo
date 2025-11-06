@@ -6,13 +6,15 @@ volume
 
 
 animations:
-pulse animation when play or pause like zen
-maybe make currently playing song have an animated glow outline, when the song is changed the new one should do have a heavy pulse
+in the center of the now playing now, split out a pause or play icon when the state changes
+pause should take a chunk and move it left and another right
+also show this when hovering
 
 
 misc:
-lyrics along the bottom
 run as a proper windows layer-shell bar
+use local playerctl for seek and skip as much as possible
+redo svg rendering with BezPath::from_svg
 
 
 todo when audio analysis is possible again:

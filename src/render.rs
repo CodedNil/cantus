@@ -1,13 +1,18 @@
 use crate::{
-    CantusApp, PANEL_HEIGHT_BASE, PANEL_WIDTH,
+    CantusApp, HISTORY_WIDTH, PANEL_HEIGHT_BASE, PANEL_WIDTH,
+    interaction::InteractionEvent,
     spotify::{IMAGES_CACHE, PLAYBACK_STATE, Playlist, TRACK_DATA_CACHE, Track},
 };
 use rand::{Rng, SeedableRng, rngs::SmallRng};
-use std::{collections::HashMap, ops::Range, time::Instant};
+use std::{
+    collections::HashMap,
+    ops::Range,
+    time::{Duration, Instant},
+};
 use ttf_parser::{Face, GlyphId, NormalizedCoordinate, Tag, VariationAxis};
 use vello::{
     Glyph,
-    kurbo::{Affine, Rect, RoundedRect, RoundedRectRadii},
+    kurbo::{Affine, Circle, Point, Rect, RoundedRect, RoundedRectRadii},
     peniko::{Blob, Color, Fill, FontData, ImageBrush},
 };
 
@@ -32,6 +37,9 @@ const SPARK_LIFETIME: Range<f32> = 0.3..0.6;
 const SPARK_LENGTH_RANGE: Range<f64> = 6.0..10.0;
 /// Rendered spark thickness range, in logical pixels.
 const SPARK_THICKNESS_RANGE: Range<f64> = 2.0..4.0;
+
+/// Duration for animation events
+const ANIMATION_DURATION: Duration = Duration::from_millis(3500);
 
 #[derive(Clone)]
 pub struct FontEngine {
@@ -76,8 +84,8 @@ pub struct TextLayout {
     coords: Vec<i16>,
 }
 
-impl FontEngine {
-    pub fn new() -> Self {
+impl Default for FontEngine {
+    fn default() -> Self {
         let bytes = include_bytes!("../assets/NotoSans.ttf");
         let font_data = FontData::new(Blob::from(bytes.to_vec()), 0);
         let face = Face::parse(bytes, 0).expect("failed to parse embedded font");
@@ -92,23 +100,6 @@ impl FontEngine {
             axes,
             weight_axis_index,
         }
-    }
-
-    fn kerning_units(face: &Face<'_>, left: GlyphId, right: GlyphId) -> f32 {
-        let Some(kern_table) = face.tables().kern else {
-            return 0.0;
-        };
-        let mut adjustment = 0.0f32;
-        for subtable in kern_table.subtables {
-            if subtable.horizontal
-                && !subtable.has_cross_stream
-                && !subtable.has_state_machine
-                && let Some(value) = subtable.glyphs_kerning(left, right)
-            {
-                adjustment += f32::from(value);
-            }
-        }
-        adjustment
     }
 }
 
@@ -141,7 +132,7 @@ struct Particle {
 /// Build the scene for rendering.
 impl CantusApp {
     pub fn create_scene(&mut self, device_id: usize) {
-        let history_width = (100.0 * self.scale_factor).ceil();
+        let history_width = (HISTORY_WIDTH * self.scale_factor).ceil();
         let total_width = (PANEL_WIDTH * self.scale_factor - history_width).ceil();
         let total_height = (PANEL_HEIGHT_BASE * self.scale_factor).ceil();
 
@@ -161,6 +152,20 @@ impl CantusApp {
             0.0
         };
         let current_index = playback_state.queue_index.min(queue.len() - 1);
+
+        // Update interaction events
+        match self.interaction.last_event {
+            InteractionEvent::Paused(_) => {
+                if playback_state.playing {
+                    self.interaction.last_event = InteractionEvent::Played(Instant::now());
+                }
+            }
+            InteractionEvent::Played(_) => {
+                if !playback_state.playing {
+                    self.interaction.last_event = InteractionEvent::Paused(Instant::now());
+                }
+            }
+        }
 
         // Borrow playlists for quick lookups without cloning each entry.
         let playlists: HashMap<&str, &Playlist> = playback_state
@@ -233,7 +238,6 @@ impl CantusApp {
             &queue[current_index],
             -TIMELINE_START_MS * px_per_ms + history_width,
             total_height,
-            playback_state.playing,
             track_move_speed,
         );
 
@@ -350,7 +354,7 @@ impl CantusApp {
             let image_width = f64::from(background_image.width);
             let background_aspect_ratio = (width - height * 0.5) / height;
             self.scene.fill(
-                Fill::NonZero,
+                Fill::EvenOdd,
                 Affine::translate((pos_x, 0.0))
                     * Affine::scale((uncropped_width - height * 0.25) / image_width),
                 &ImageBrush::new(background_image),
@@ -369,7 +373,7 @@ impl CantusApp {
                 &RoundedRect::new(0.0, 0.0, width, height, radii),
             );
             self.scene.fill(
-                Fill::NonZero,
+                Fill::EvenOdd,
                 transform * Affine::scale(height / image_height),
                 &ImageBrush::new(image.clone()).with_alpha(fade_alpha),
                 None,
@@ -402,103 +406,99 @@ impl CantusApp {
             let text_start_right = pos_x + width - height - 8.0;
             let available_width = (text_start_right - text_start_left).max(0.0);
 
-            // Render the songs title (strip anything beyond a - or ( in the song title)
             let text_brush = Color::from_rgb8(240, 240, 240);
-            {
-                let song_name = track.title[..track
-                    .title
-                    .find(" (")
-                    .or_else(|| track.title.find(" -"))
-                    .unwrap_or(track.title.len())]
-                    .trim();
-                let font_size = 12.0;
-                let font_weight = FontWeight::Bold;
-                let text_height = (height * 0.2).floor();
-                let layout = self.layout_text(song_name, font_size, font_weight);
-                let width_ratio = available_width / layout.width;
-                if width_ratio <= 1.0 {
-                    let layout =
-                        self.layout_text(song_name, font_size * width_ratio.max(0.8), font_weight);
-                    self.draw_text(
-                        layout,
-                        text_start_left,
-                        text_height,
-                        Align::Start,
-                        // Fade out when it gets too small, 0.6-0.4
-                        text_brush.with_alpha(((width_ratio - 0.4) / 0.2) as f32),
-                    );
-                } else {
-                    self.draw_text(
-                        layout,
-                        text_start_right,
-                        text_height,
-                        Align::End,
-                        text_brush,
-                    );
-                }
+            let font_weight = FontWeight::Bold;
+
+            // Render the songs title (strip anything beyond a - or ( in the song title)
+            let song_name = track.title[..track
+                .title
+                .find(" (")
+                .or_else(|| track.title.find(" -"))
+                .unwrap_or(track.title.len())]
+                .trim();
+            let font_size = 12.0;
+            let text_height = (height * 0.2).floor();
+            let layout = self.layout_text(song_name, font_size, font_weight);
+            let width_ratio = available_width / layout.width;
+            if width_ratio <= 1.0 {
+                let layout =
+                    self.layout_text(song_name, font_size * width_ratio.max(0.8), font_weight);
+                self.draw_text(
+                    layout,
+                    text_start_left,
+                    text_height,
+                    Align::Start,
+                    // Fade out when it gets too small, 0.6-0.4
+                    text_brush.with_alpha(((width_ratio - 0.4) / 0.2) as f32),
+                );
+            } else {
+                self.draw_text(
+                    layout,
+                    text_start_right,
+                    text_height,
+                    Align::End,
+                    text_brush,
+                );
             }
 
             // Get text layouts for bottom row of text
-            {
-                let font_size = 10.5;
-                let font_weight = FontWeight::Bold;
-                let text_height = (height * 0.52).floor();
+            let font_size = 10.5;
+            let text_height = (height * 0.52).floor();
 
-                let artist_text = &track.artist_name;
-                let artist_layout = self.layout_text(artist_text, font_size, font_weight);
-                let dot_text = "\u{2004}•\u{2004}"; // Use thin spaces on either side of the bullet point
-                let dot_layout = self.layout_text(dot_text, font_size, font_weight);
-                let time_text = if seconds_until_start >= 60.0 {
-                    format!(
-                        "{}m{}s",
-                        (seconds_until_start / 60.0).floor(),
-                        (seconds_until_start % 60.0).floor()
-                    )
-                } else {
-                    format!("{}s", seconds_until_start.round())
-                };
-                let time_layout = self.layout_text(&time_text, font_size, font_weight);
+            let artist_text = &track.artist_name;
+            let artist_layout = self.layout_text(artist_text, font_size, font_weight);
+            let dot_text = "\u{2004}•\u{2004}"; // Use thin spaces on either side of the bullet point
+            let dot_layout = self.layout_text(dot_text, font_size, font_weight);
+            let time_text = if seconds_until_start >= 60.0 {
+                format!(
+                    "{}m{}s",
+                    (seconds_until_start / 60.0).floor(),
+                    (seconds_until_start % 60.0).floor()
+                )
+            } else {
+                format!("{}s", seconds_until_start.round())
+            };
+            let time_layout = self.layout_text(&time_text, font_size, font_weight);
 
-                let width_ratio =
-                    available_width / (artist_layout.width + dot_layout.width + time_layout.width);
-                if width_ratio <= 1.0 || !is_current {
-                    let layout = self.layout_text(
-                        &format!("{time_text}{dot_text}{artist_text}"),
-                        font_size * width_ratio.clamp(0.8, 1.0),
-                        font_weight,
-                    );
-                    self.draw_text(
-                        layout,
-                        if width_ratio > 1.0 {
-                            text_start_right
-                        } else {
-                            text_start_left
-                        },
-                        text_height,
-                        if width_ratio > 1.0 {
-                            Align::End
-                        } else {
-                            Align::Start
-                        },
-                        // Fade out when it gets too small, 0.6-0.4
-                        text_brush.with_alpha(((width_ratio - 0.4) / 0.2) as f32),
-                    );
-                } else {
-                    self.draw_text(
-                        time_layout,
-                        pos_x + dark_width + 12.0,
-                        text_height,
-                        Align::Start,
-                        text_brush,
-                    );
-                    self.draw_text(
-                        artist_layout,
-                        text_start_right,
-                        text_height,
-                        Align::End,
-                        text_brush,
-                    );
-                }
+            let width_ratio =
+                available_width / (artist_layout.width + dot_layout.width + time_layout.width);
+            if width_ratio <= 1.0 || !is_current {
+                let layout = self.layout_text(
+                    &format!("{time_text}{dot_text}{artist_text}"),
+                    font_size * width_ratio.clamp(0.8, 1.0),
+                    font_weight,
+                );
+                self.draw_text(
+                    layout,
+                    if width_ratio >= 1.0 {
+                        text_start_right
+                    } else {
+                        text_start_left
+                    },
+                    text_height,
+                    if width_ratio >= 1.0 {
+                        Align::End
+                    } else {
+                        Align::Start
+                    },
+                    // Fade out when it gets too small, 0.6-0.4
+                    text_brush.with_alpha(((width_ratio - 0.4) / 0.2) as f32),
+                );
+            } else {
+                self.draw_text(
+                    time_layout,
+                    pos_x + dark_width + 12.0,
+                    text_height,
+                    Align::Start,
+                    text_brush,
+                );
+                self.draw_text(
+                    artist_layout,
+                    text_start_right,
+                    text_height,
+                    Align::End,
+                    text_brush,
+                );
             }
 
             // Release clipping mask
@@ -511,13 +511,33 @@ impl CantusApp {
                 Affine::translate((pos_x, 0.0)),
                 &RoundedRect::new(0.0, 0.0, width, height, radii),
             );
+
             self.scene.fill(
-                Fill::NonZero,
+                Fill::EvenOdd,
                 Affine::translate((pos_x, 0.0)),
                 Color::from_rgb8(0, 0, 0).with_alpha(0.5 * fade_alpha),
                 None,
                 &Rect::new(0.0, 0.0, dark_width, height),
             );
+
+            // During animations add an expanding circle behind the line
+            let anim_lerp = match self.interaction.last_event {
+                InteractionEvent::Paused(start) | InteractionEvent::Played(start) => {
+                    start.elapsed().as_millis() as f64
+                        / (ANIMATION_DURATION.as_millis() as f64 * 0.3)
+                }
+            };
+            if is_current && anim_lerp < 1.0 {
+                self.scene.fill(
+                    Fill::EvenOdd,
+                    Affine::translate((pos_x + dark_width, height * 0.5)),
+                    Color::from_rgb8(255, 224, 210)
+                        .with_alpha(1.0 - (anim_lerp + 0.4).min(1.0) as f32),
+                    None,
+                    &Circle::new(Point::default(), 500.0 * anim_lerp),
+                );
+            }
+
             self.scene.pop_layer();
         }
 
@@ -548,7 +568,21 @@ impl CantusApp {
         for ch in text.chars() {
             let glyph_id = face.glyph_index(ch);
             if let (Some(left), Some(right)) = (previous, glyph_id) {
-                pen_x += FontEngine::kerning_units(&face, left, right) * scale;
+                pen_x += {
+                    face.tables().kern.map_or(0.0, |kern_table| {
+                        let mut adjustment = 0.0f32;
+                        for subtable in kern_table.subtables {
+                            if subtable.horizontal
+                                && !subtable.has_cross_stream
+                                && !subtable.has_state_machine
+                                && let Some(value) = subtable.glyphs_kerning(left, right)
+                            {
+                                adjustment += f32::from(value);
+                            }
+                        }
+                        adjustment
+                    })
+                } * scale;
             }
             let advance_units = glyph_id
                 .and_then(|gid| face.glyph_hor_advance(gid))
@@ -576,22 +610,22 @@ impl CantusApp {
                 .axes
                 .iter()
                 .map(|axis| {
-                    let mut v = weight.value_for(axis).clamp(axis.min_value, axis.max_value);
-                    if (v - axis.def_value).abs() < f32::EPSILON {
+                    let weight = weight.value_for(axis).clamp(axis.min_value, axis.max_value);
+                    let v = if (weight - axis.def_value).abs() < f32::EPSILON {
                         return 0;
-                    } else if v < axis.def_value {
+                    } else if weight < axis.def_value {
                         let denom = axis.def_value - axis.min_value;
                         if denom.abs() < f32::EPSILON {
                             return 0;
                         }
-                        v = (v - axis.def_value) / denom;
+                        (weight - axis.def_value) / denom
                     } else {
                         let denom = axis.max_value - axis.def_value;
                         if denom.abs() < f32::EPSILON {
                             return 0;
                         }
-                        v = (v - axis.def_value) / denom;
-                    }
+                        (weight - axis.def_value) / denom
+                    };
                     NormalizedCoordinate::from(v).get()
                 })
                 .collect(),
@@ -622,7 +656,7 @@ impl CantusApp {
             )))
             .hint(true)
             .brush(brush)
-            .draw(Fill::NonZero, layout.glyphs.into_iter());
+            .draw(Fill::EvenOdd, layout.glyphs.into_iter());
     }
 
     fn render_playing_particles(
@@ -630,7 +664,6 @@ impl CantusApp {
         track: &Track,
         x: f64,
         height: f64,
-        is_playing: bool,
         track_move_speed: f64,
     ) {
         let now = Instant::now();
@@ -649,9 +682,9 @@ impl CantusApp {
             .iter()
             .map(|[r, g, b, _]| {
                 [
-                    (lerp(0.3, f64::from(*r), 255.0) + lightness_boost).min(255.0) as u8,
-                    (lerp(0.3, f64::from(*g), 210.0) + lightness_boost).min(255.0) as u8,
-                    (lerp(0.3, f64::from(*b), 160.0) + lightness_boost).min(255.0) as u8,
+                    (lerp(0.3, f64::from(*r) + lightness_boost, 255.0)).min(255.0) as u8,
+                    (lerp(0.3, f64::from(*g) + lightness_boost, 210.0)).min(255.0) as u8,
+                    (lerp(0.3, f64::from(*b) + lightness_boost, 160.0)).min(255.0) as u8,
                 ]
             })
             .collect();
@@ -660,22 +693,23 @@ impl CantusApp {
         }
 
         // Emit new particles while playing
-        if is_playing {
+        if track_move_speed.abs() > 0.0 {
+            let rng = &mut self.particles.rng;
             self.particles.spawn_accumulator += dt * SPARK_EMISSION;
             let emit_count = self.particles.spawn_accumulator.floor() as u16;
             self.particles.spawn_accumulator -= f32::from(emit_count);
             for _ in 0..emit_count {
                 let position = [
-                    x as f32,
-                    height_f32 * self.particles.rng.random_range(0.05..0.95),
+                    (x + (track_move_speed.signum() * 2.0)) as f32,
+                    height_f32 * rng.random_range(0.05..0.95),
                 ];
                 let velocity = [
-                    self.particles.rng.random_range(SPARK_VELOCITY_X)
+                    rng.random_range(SPARK_VELOCITY_X)
                         * scale
                         * (track_move_speed as f32 * 0.05).clamp(-3.0, 3.0),
-                    -self.particles.rng.random_range(SPARK_VELOCITY_Y) * scale,
+                    -rng.random_range(SPARK_VELOCITY_Y) * scale,
                 ];
-                let life = self.particles.rng.random_range(SPARK_LIFETIME);
+                let life = rng.random_range(SPARK_LIFETIME);
                 if let Some(dead_particle) = self
                     .particles
                     .particles
@@ -686,13 +720,13 @@ impl CantusApp {
                     dead_particle.position = position;
                     dead_particle.velocity = velocity;
                     dead_particle.life = life;
-                    dead_particle.color = self.particles.rng.random_range(0..primary_colors.len());
+                    dead_particle.color = rng.random_range(0..primary_colors.len());
                 } else {
                     self.particles.particles.push(Particle {
                         alive: true,
                         position,
                         velocity,
-                        color: self.particles.rng.random_range(0..primary_colors.len()),
+                        color: rng.random_range(0..primary_colors.len()),
                         life,
                     });
                 }
@@ -700,16 +734,6 @@ impl CantusApp {
         } else {
             self.particles.spawn_accumulator = 0.0;
         }
-
-        // Line at the now playing position to denote the cutoff
-        let line_width = 4.0 * self.scale_factor;
-        self.scene.fill(
-            Fill::NonZero,
-            Affine::translate((x - line_width * 0.5, 0.0)),
-            Color::from_rgb8(255, 224, 210),
-            None,
-            &RoundedRect::new(0.0, 0.0, line_width, height, 100.0),
-        );
 
         // Kill dead particles, and update positions of others, then render them
         for particle in &mut self.particles.particles {
@@ -736,7 +760,7 @@ impl CantusApp {
             let angle = f64::from(particle.velocity[1].atan2(particle.velocity[0]));
             let opacity = (fade.powf(1.1) * 235.0).round().clamp(0.0, 255.0) as u8;
             self.scene.fill(
-                Fill::NonZero,
+                Fill::EvenOdd,
                 Affine::translate((
                     f64::from(particle.position[0]),
                     f64::from(particle.position[1]),
@@ -751,6 +775,64 @@ impl CantusApp {
                     thickness * 0.5,
                     thickness * 0.5,
                 ),
+            );
+        }
+
+        // Line at the now playing position to denote the cutoff
+        let line_width = 4.0 * self.scale_factor;
+        let line_color = Color::from_rgb8(255, 224, 210);
+        let line_x = x - line_width * 0.5;
+        let anim_lerp = match self.interaction.last_event {
+            InteractionEvent::Paused(start) | InteractionEvent::Played(start) => {
+                start.elapsed().as_millis() as f64 / ANIMATION_DURATION.as_millis() as f64
+            }
+        };
+
+        if anim_lerp < 1.0 {
+            // Start with the lines split, then 3/4 way through close them again
+            let line_height = height * lerp(((anim_lerp - 0.75) * 4.0).max(0.0), 0.333, 0.5);
+            self.scene.fill(
+                Fill::EvenOdd,
+                Affine::translate((line_x, 0.0)),
+                line_color,
+                None,
+                &RoundedRect::new(0.0, 0.0, line_width, line_height, 100.0),
+            );
+            self.scene.fill(
+                Fill::EvenOdd,
+                Affine::translate((line_x, height - line_height)),
+                line_color,
+                None,
+                &RoundedRect::new(0.0, 0.0, line_width, line_height, 100.0),
+            );
+
+            // Two lines for pause, expand it out in the first quarter, then keep in place for half, then expand out with a fade in final quarter
+            let pause_line_lerp = (anim_lerp * 4.0).min(1.0);
+            let pause_line_fade = ((anim_lerp - 0.75) * 4.0).clamp(0.0, 1.0);
+            let pause_line_offset = 6.0 * pause_line_lerp + 4.0 * pause_line_fade;
+            let pause_line_color = line_color.with_alpha(1.0 - pause_line_fade as f32);
+            self.scene.fill(
+                Fill::EvenOdd,
+                Affine::translate((line_x - pause_line_offset, height * 0.333)),
+                pause_line_color,
+                None,
+                &RoundedRect::new(0.0, 0.0, line_width, height * 0.333, 100.0),
+            );
+            self.scene.fill(
+                Fill::EvenOdd,
+                Affine::translate((line_x + pause_line_offset, height * 0.333)),
+                pause_line_color,
+                None,
+                &RoundedRect::new(0.0, 0.0, line_width, height * 0.333, 100.0),
+            );
+        } else {
+            // Full bar
+            self.scene.fill(
+                Fill::EvenOdd,
+                Affine::translate((line_x, 0.0)),
+                line_color,
+                None,
+                &RoundedRect::new(0.0, 0.0, line_width, height, 100.0),
             );
         }
     }

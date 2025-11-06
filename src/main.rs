@@ -40,6 +40,8 @@ mod winit_app;
 
 /// Target width of the panel in logical pixels.
 const PANEL_WIDTH: f64 = 1050.0;
+/// The width on the left where previous tracks are shown
+const HISTORY_WIDTH: f64 = 100.0;
 /// Base height of the panel in logical pixels.
 const PANEL_HEIGHT_BASE: f64 = 40.0;
 /// Additional height allocated for extended content.
@@ -99,7 +101,7 @@ impl Default for CantusApp {
             render_surface: None,
             render_devices: HashMap::new(),
             scene: Scene::new(),
-            font: FontEngine::new(),
+            font: FontEngine::default(),
             scale_factor: 1.0,
             #[cfg(feature = "layer-shell")]
             is_configured: false,
@@ -109,7 +111,7 @@ impl Default for CantusApp {
             frame_index: 0,
             track_start_ms: 0.0,
             track_spacing: 0.0,
-            interaction: InteractionState::new(),
+            interaction: InteractionState::default(),
             particles: ParticlesState::default(),
         }
     }

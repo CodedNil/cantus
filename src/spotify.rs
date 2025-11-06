@@ -271,7 +271,7 @@ async fn polling_task() {
 
         // --- Spotify API Polling Logic ---
         spotify_poll_counter += 1;
-        if spotify_poll_counter >= 8 || should_refresh_spotify {
+        if spotify_poll_counter >= 4 || should_refresh_spotify {
             spotify_poll_counter = 0; // Reset counter
             update_state_from_spotify(used_mpris_progress).await;
         }

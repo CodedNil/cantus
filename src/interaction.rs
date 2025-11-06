@@ -1,5 +1,5 @@
 use crate::{
-    CantusApp,
+    CantusApp, HISTORY_WIDTH,
     spotify::{
         IMAGES_CACHE, PLAYBACK_STATE, Playlist, RATING_PLAYLISTS, SPOTIFY_CLIENT, Track,
         update_playback_state,
@@ -11,8 +11,11 @@ use rspotify::{
     model::{PlayableId, PlaylistId, TrackId},
     prelude::OAuthClient,
 };
-use std::sync::atomic::{AtomicBool, Ordering as AtomicOrdering};
 use std::{cmp::Ordering, collections::HashMap, sync::LazyLock, time::Instant};
+use std::{
+    sync::atomic::{AtomicBool, Ordering as AtomicOrdering},
+    time::Duration,
+};
 use tracing::{error, info, warn};
 use vello::{
     Scene,
@@ -49,6 +52,7 @@ pub struct IconHitbox {
 }
 
 pub struct InteractionState {
+    pub last_event: InteractionEvent,
     pub pointer_position: (f64, f64),
     #[cfg(feature = "layer-shell")]
     pub last_hitbox_update: Instant,
@@ -60,9 +64,12 @@ pub struct InteractionState {
     spotify_guard: Option<SpotifyInteractionToken>,
 }
 
-impl InteractionState {
-    pub fn new() -> Self {
+impl Default for InteractionState {
+    fn default() -> Self {
         Self {
+            last_event: InteractionEvent::Paused(
+                Instant::now().checked_sub(Duration::from_secs(60)).unwrap(),
+            ),
             pointer_position: (0.0, 0.0),
             #[cfg(feature = "layer-shell")]
             last_hitbox_update: Instant::now(),
@@ -74,7 +81,9 @@ impl InteractionState {
             spotify_guard: None,
         }
     }
+}
 
+impl InteractionState {
     pub fn start_drag(&mut self) {
         self.drag_origin = Some(self.pointer_position);
         self.dragging = false;
@@ -94,6 +103,11 @@ impl InteractionState {
             self.spotify_guard = try_acquire_spotify_guard();
         }
     }
+}
+
+pub enum InteractionEvent {
+    Paused(Instant),
+    Played(Instant),
 }
 
 enum IconEntry<'a> {
@@ -355,7 +369,7 @@ impl CantusApp {
                     let zoom_pixels = 16.0;
                     let image_size = f64::from(playlist_image.width);
                     self.scene.fill(
-                        Fill::NonZero,
+                        Fill::EvenOdd,
                         icon_transform
                             * Affine::translate((-zoom_pixels, -zoom_pixels))
                             * Affine::scale((playlist_icon_size + zoom_pixels * 2.0) / image_size),
@@ -365,7 +379,7 @@ impl CantusApp {
                     );
                     if !contained {
                         self.scene.fill(
-                            Fill::NonZero,
+                            Fill::EvenOdd,
                             icon_transform,
                             Color::from_rgb8(60, 60, 60).with_alpha(0.7 * fade_alpha),
                             None,
@@ -411,7 +425,7 @@ async fn skip_to_track(track_id: TrackId<'static>, point: Point, rect: Rect) {
         let position = (point.x - rect.x0) / rect.width();
         let song_ms = ms_lookup[position_in_queue];
         // If click is near the very left, reset to the start of the song, else seek to clicked position
-        let milliseconds = if point.x < 20.0 || position < 0.05 {
+        let milliseconds = if point.x < HISTORY_WIDTH + 20.0 || position < 0.05 {
             0.0
         } else {
             f64::from(song_ms) * position
