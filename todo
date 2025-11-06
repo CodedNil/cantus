@@ -2,19 +2,20 @@ interaction:
 actually seek/skip song on drag release
 stack previous songs so a bit of each is visible up to like 6 songs
 play/pause
-volume
+volume (rendered onto the playback bar as a vertical colour fill, scroll to change)
+instead of showing unincluded playlists for current song, only show that when hovering on that track, even if theres no room
 
 
 animations:
-in the center of the now playing now, split out a pause or play icon when the state changes
-pause should take a chunk and move it left and another right
-also show this when hovering
+show the a play button svg instead of the pause thing when playing, also show this when hovering, click to play/pause
+show the highlight animation when you click to seek
 
 
 misc:
 run as a proper windows layer-shell bar
-use local playerctl for seek and skip as much as possible
-redo svg rendering with BezPath::from_svg
+use local playerctl for seek and skip as much when viable
+simplify drawing out the star/playlist icons, with hover animation working, hitbox should include spacing
+fix the dodgy sprayed off particles due to tiny errors in playback position sampling
 
 
 todo when audio analysis is possible again:

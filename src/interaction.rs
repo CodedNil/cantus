@@ -18,11 +18,9 @@ use std::{
 };
 use tracing::{error, info, warn};
 use vello::{
-    Scene,
-    kurbo::{Affine, Point, Rect, RoundedRect},
-    peniko::{BlendMode, Color, Compose, Fill, ImageBrush, Mix},
+    kurbo::{Affine, BezPath, Point, Rect, RoundedRect, Shape, Stroke},
+    peniko::{Color, Fill, ImageBrush},
 };
-use vello_svg::usvg;
 
 static SPOTIFY_INTERACTION_GUARD: AtomicBool = AtomicBool::new(false);
 struct SpotifyInteractionToken;
@@ -121,23 +119,11 @@ enum IconEntry<'a> {
 }
 
 /// Star images
-static STAR_IMAGES: LazyLock<(f64, [Scene; 4])> = LazyLock::new(|| {
-    let full_svg = include_str!("../assets/star.svg");
-    let half_svg = include_str!("../assets/star-half.svg");
-    (
-        f64::from(
-            usvg::Tree::from_str(full_svg, &usvg::Options::default())
-                .unwrap()
-                .size()
-                .width(),
-        ),
-        [
-            vello_svg::render(&full_svg.replace("fill=\"none\"", "fill=\"#555555\"")).unwrap(),
-            vello_svg::render(&full_svg.replace("fill=\"none\"", "fill=\"#000000\"")).unwrap(),
-            vello_svg::render(&full_svg.replace("fill=\"none\"", "fill=\"#dcb400\"")).unwrap(),
-            vello_svg::render(&half_svg.replace("fill=\"none\"", "fill=\"#dcb400\"")).unwrap(),
-        ],
-    )
+static STAR_SVGS: LazyLock<[BezPath; 2]> = LazyLock::new(|| {
+    [
+        BezPath::from_svg(include_str!("../assets/star.path")).unwrap(),
+        BezPath::from_svg(include_str!("../assets/star-half.path")).unwrap(),
+    ]
 });
 
 impl CantusApp {
@@ -221,9 +207,7 @@ impl CantusApp {
             .unwrap_or(0);
 
         let icon_size = 14.0 * self.scale_factor;
-        let star_size_border = 1.0 * self.scale_factor;
         let icon_spacing = 2.0 * self.scale_factor;
-        let icon_total_size = icon_size + star_size_border * 2.0;
         let pointer_point = Point::new(
             self.interaction.pointer_position.0,
             self.interaction.pointer_position.1,
@@ -266,30 +250,31 @@ impl CantusApp {
 
         let inv_scale = 1.0 / self.scale_factor;
         let base_y = height * 0.8;
-        let icon_center_y = base_y - star_size_border + icon_total_size * 0.5;
+        let icon_center_y = base_y + icon_size * 0.5;
         let center_x = pos_x + width * 0.5;
         let half_icons = num_icons as f64 / 2.0;
         let spacing = icon_size + icon_spacing;
         let button_rect = |icon_origin_x: f64| {
             Rect::new(
-                (icon_origin_x - star_size_border) * inv_scale,
-                (base_y - star_size_border) * inv_scale,
-                (icon_origin_x - star_size_border + icon_total_size) * inv_scale,
-                (base_y - star_size_border + icon_total_size) * inv_scale,
+                icon_origin_x * inv_scale,
+                base_y * inv_scale,
+                (icon_origin_x + icon_size) * inv_scale,
+                (base_y + icon_size) * inv_scale,
             )
         };
 
+        // Track hover over stars to update the displayed rating
         let mut hover_rating_index = None;
         for (i, entry) in icon_entries.iter().enumerate() {
             let icon_origin_x = center_x + (i as f64 - half_icons) * spacing;
             let button_rect = button_rect(icon_origin_x);
-            if hover_rating_index.is_none()
-                && button_rect.contains(pointer_point)
+            if button_rect.contains(pointer_point)
                 && let IconEntry::Star { index } = entry
             {
                 let rect_center_x = (button_rect.x0 + button_rect.x1) * 0.5;
                 hover_rating_index =
                     Some(*index * 2 + 1 + usize::from(pointer_point.x >= rect_center_x));
+                break;
             }
         }
 
@@ -297,53 +282,53 @@ impl CantusApp {
         let display_full_stars = display_rating_index / 2;
         let display_has_half = display_rating_index % 2 == 1;
 
-        let star_border_scale = (icon_size + star_size_border * 2.0) / STAR_IMAGES.0;
-        let star_fill_scale = icon_size / STAR_IMAGES.0;
         for (i, entry) in icon_entries.into_iter().enumerate() {
             let icon_origin_x = center_x + (i as f64 - half_icons) * spacing;
-            let base_transform = Affine::translate((icon_origin_x, base_y));
             let button_rect = button_rect(icon_origin_x);
-            let is_hovered = button_rect.contains(pointer_point);
-            let icon_center_x = icon_origin_x - star_size_border + icon_total_size * 0.5;
-            let hover_transform = if is_hovered {
+            let icon_center_x = icon_origin_x - icon_size * 0.5;
+            let hover_transform = if button_rect.contains(pointer_point) {
                 Affine::translate((icon_center_x, icon_center_y))
                     * Affine::scale(1.2)
                     * Affine::translate((-icon_center_x, -icon_center_y))
             } else {
                 Affine::IDENTITY
             };
-            let combined_transform = hover_transform * base_transform;
+            let combined_transform = hover_transform * Affine::translate((icon_origin_x, base_y));
 
             match entry {
                 IconEntry::Star { index } => {
-                    if fade_alpha < 1.0 {
-                        self.scene.push_layer(
-                            BlendMode::new(Mix::Normal, Compose::SrcOver),
-                            fade_alpha,
-                            Affine::IDENTITY,
-                            &Rect::new(-1e9, -1e9, 1e9, 1e9),
-                        );
-                    }
-                    self.scene.append(
-                        &STAR_IMAGES.1[1],
-                        Some(
-                            combined_transform
-                                * Affine::translate((-star_size_border, -star_size_border))
-                                * Affine::scale(star_border_scale),
-                        ),
+                    let fill_transform = combined_transform
+                        * Affine::scale(icon_size / STAR_SVGS[0].bounding_box().width());
+
+                    // Shadow outline
+                    self.scene.stroke(
+                        &Stroke::new(2.0 * self.scale_factor),
+                        fill_transform,
+                        Color::from_rgb8(0, 0, 0).with_alpha(fade_alpha),
+                        None,
+                        &STAR_SVGS[0],
                     );
 
-                    let fill_transform = combined_transform * Affine::scale(star_fill_scale);
-                    if index < display_full_stars {
-                        self.scene.append(&STAR_IMAGES.1[2], Some(fill_transform));
-                    } else {
-                        self.scene.append(&STAR_IMAGES.1[0], Some(fill_transform));
-                    }
+                    self.scene.fill(
+                        Fill::EvenOdd,
+                        fill_transform,
+                        if index < display_full_stars {
+                            Color::from_rgb8(220, 180, 0)
+                        } else {
+                            Color::from_rgb8(85, 85, 85)
+                        }
+                        .with_alpha(fade_alpha),
+                        None,
+                        &STAR_SVGS[0],
+                    );
                     if index == display_full_stars && display_has_half {
-                        self.scene.append(&STAR_IMAGES.1[3], Some(fill_transform));
-                    }
-                    if fade_alpha < 1.0 {
-                        self.scene.pop_layer();
+                        self.scene.fill(
+                            Fill::EvenOdd,
+                            fill_transform,
+                            Color::from_rgb8(220, 180, 0).with_alpha(fade_alpha),
+                            None,
+                            &STAR_SVGS[1],
+                        );
                     }
                     self.interaction.icon_hitboxes.push(IconHitbox {
                         rect: button_rect,
@@ -359,20 +344,27 @@ impl CantusApp {
                     let Some(playlist_image) = IMAGES_CACHE.get(&playlist.image_url) else {
                         continue;
                     };
-                    let icon_transform = combined_transform
-                        * Affine::translate((-star_size_border, -star_size_border));
-                    let playlist_icon_size = icon_total_size;
+
+                    // Shadow outline
+                    self.scene.stroke(
+                        &Stroke::new(1.0 * self.scale_factor),
+                        combined_transform,
+                        Color::from_rgb8(0, 0, 0).with_alpha(fade_alpha),
+                        None,
+                        &RoundedRect::new(0.0, 0.0, icon_size, icon_size, 6.0),
+                    );
+
                     self.scene.push_clip_layer(
-                        icon_transform,
-                        &RoundedRect::new(0.0, 0.0, playlist_icon_size, playlist_icon_size, 10.0),
+                        combined_transform,
+                        &RoundedRect::new(0.0, 0.0, icon_size, icon_size, 6.0),
                     );
                     let zoom_pixels = 16.0;
                     let image_size = f64::from(playlist_image.width);
                     self.scene.fill(
                         Fill::EvenOdd,
-                        icon_transform
+                        combined_transform
                             * Affine::translate((-zoom_pixels, -zoom_pixels))
-                            * Affine::scale((playlist_icon_size + zoom_pixels * 2.0) / image_size),
+                            * Affine::scale((icon_size + zoom_pixels * 2.0) / image_size),
                         &ImageBrush::new(playlist_image.clone()).with_alpha(fade_alpha),
                         None,
                         &Rect::new(0.0, 0.0, image_size, image_size),
@@ -380,10 +372,10 @@ impl CantusApp {
                     if !contained {
                         self.scene.fill(
                             Fill::EvenOdd,
-                            icon_transform,
+                            combined_transform,
                             Color::from_rgb8(60, 60, 60).with_alpha(0.7 * fade_alpha),
                             None,
-                            &Rect::new(0.0, 0.0, playlist_icon_size, playlist_icon_size),
+                            &Rect::new(0.0, 0.0, icon_size, icon_size),
                         );
                     }
                     self.scene.pop_layer();
