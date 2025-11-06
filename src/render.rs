@@ -170,6 +170,9 @@ impl CantusApp {
                 }
             }
         }
+        if self.interaction.dragging {
+            self.interaction.drag_track = None;
+        }
 
         // Borrow playlists for quick lookups without cloning each entry.
         let playlists: HashMap<&str, &Playlist> = playback_state
@@ -301,6 +304,13 @@ impl CantusApp {
                 height,
             ),
         );
+        // If dragging, set the drag target to this track
+        if self.interaction.dragging && is_current {
+            self.interaction.drag_track = Some((
+                track.id.clone(),
+                1.0 - track_end_ms / f64::from(track.milliseconds),
+            ));
+        }
 
         let (Some(image), Some(track_data)) = (
             IMAGES_CACHE.get(&track.image_url),

@@ -268,31 +268,31 @@ async fn polling_task() {
     let mut spotify_poll_counter = 100; // Counter for Spotify API polling
     loop {
         // --- MPRIS Polling Logic ---
-        let (should_refresh_spotify, used_mpris_progress) =
+        let should_refresh_spotify =
             update_state_from_mpris(&connection, &dbus_proxy, &mut last_mpris_track_id).await;
 
         // --- Spotify API Polling Logic ---
         spotify_poll_counter += 1;
         if spotify_poll_counter >= 4 || should_refresh_spotify {
             spotify_poll_counter = 0; // Reset counter
-            update_state_from_spotify(used_mpris_progress).await;
+            update_state_from_spotify().await;
         }
 
         sleep(Duration::from_millis(500)).await;
     }
 }
 
-/// Synchronizes playback information with the MPRIS interface and returns whether Spotify data should refresh, and whether MPRIS data was fetched.
+/// Synchronizes playback information with the MPRIS interface and returns whether Spotify data should refresh.
 async fn update_state_from_mpris(
     connection: &Connection,
     dbus_proxy: &DBusProxy<'_>,
     last_track_id: &mut Option<String>,
-) -> (bool, bool) {
+) -> bool {
     let Ok(names) = dbus_proxy.list_names().await else {
         update_playback_state(|state| {
             state.is_local = true;
         });
-        return (false, false);
+        return false;
     };
 
     let mut properties_proxy = None;
@@ -322,7 +322,7 @@ async fn update_state_from_mpris(
         update_playback_state(|state| {
             state.is_local = true;
         });
-        return (false, false);
+        return false;
     };
 
     // Get data from dbus
@@ -349,29 +349,27 @@ async fn update_state_from_mpris(
         .and_then(|value| value.try_into().ok())
         .map(|position: i64| position / 1_000);
 
-    let mut updated_progress = false;
     if playing.is_some() || progress.is_some() {
         update_playback_state(|state| {
+            state.is_local = true;
             if let Some(playing) = playing
                 && playing != state.playing
             {
                 should_refresh = true;
                 state.playing = playing;
-                if let Some(progress) = progress {
-                    state.progress = progress as u32;
-                    state.last_updated = Instant::now();
-                    state.is_local = true;
-                    updated_progress = true;
-                }
+            }
+            if let Some(progress) = progress {
+                state.progress = progress as u32;
+                state.last_updated = Instant::now();
             }
         });
     }
 
-    (should_refresh, updated_progress)
+    should_refresh
 }
 
 /// Pulls the current playback queue and status from the Spotify Web API and updates shared state.
-async fn update_state_from_spotify(used_mpris_progress: bool) {
+async fn update_state_from_spotify() {
     // Fetch current playback and queue concurrently
     let request_start = Instant::now();
     let spotify_client = SPOTIFY_CLIENT.get().unwrap();
@@ -488,7 +486,7 @@ async fn update_state_from_spotify(used_mpris_progress: bool) {
 
         state.playing = current_playback.is_playing;
         state.shuffle = current_playback.shuffle_state;
-        if !used_mpris_progress {
+        if !state.is_local {
             let progress = current_playback
                 .progress
                 .map_or(0, |p| p.num_milliseconds()) as u32;

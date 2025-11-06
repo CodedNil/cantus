@@ -58,6 +58,7 @@ pub struct InteractionState {
     pub track_hitboxes: HashMap<TrackId<'static>, Rect>,
     pub icon_hitboxes: Vec<IconHitbox>,
     pub drag_origin: Option<Point>,
+    pub drag_track: Option<(TrackId<'static>, f64)>,
     pub dragging: bool,
     pub drag_delta_pixels: f64,
     spotify_guard: Option<SpotifyInteractionToken>,
@@ -75,6 +76,7 @@ impl Default for InteractionState {
             track_hitboxes: HashMap::new(),
             icon_hitboxes: Vec::new(),
             drag_origin: None,
+            drag_track: None,
             dragging: false,
             drag_delta_pixels: 0.0,
             spotify_guard: None,
@@ -85,12 +87,19 @@ impl Default for InteractionState {
 impl InteractionState {
     pub fn start_drag(&mut self) {
         self.drag_origin = Some(self.mouse_position);
+        self.drag_track = None;
         self.dragging = false;
         self.drag_delta_pixels = 0.0;
         self.spotify_guard = None;
     }
 
     pub fn end_drag(&mut self) {
+        if let Some((track_id, position)) = self.drag_track.take() {
+            let track_id = track_id.clone();
+            tokio::spawn(async move {
+                skip_to_track(track_id, position, false).await;
+            });
+        }
         self.drag_origin = None;
         self.dragging = false;
         self.drag_delta_pixels = 0.0;
@@ -174,15 +183,21 @@ impl CantusApp {
         }
 
         // Seek track
-        if let Some((id, track_rect)) = self
+        if let Some((track_id, track_rect)) = self
             .interaction
             .track_hitboxes
             .iter()
             .find(|(_, track_rect)| track_rect.contains(mouse_pos))
         {
-            let (id, track_rect) = (id.clone(), *track_rect);
+            let track_id = track_id.clone();
+            // If click is near the very left, reset to the start of the song, else seek to clicked position
+            let position = if mouse_pos.x < HISTORY_WIDTH + 20.0 {
+                0.0
+            } else {
+                (mouse_pos.x - track_rect.x0) / track_rect.width()
+            };
             tokio::spawn(async move {
-                skip_to_track(id, mouse_pos, track_rect).await;
+                skip_to_track(track_id, position, false).await;
             });
             return true;
         }
@@ -410,7 +425,7 @@ impl CantusApp {
 }
 
 /// Skip to the specified track in the queue.
-async fn skip_to_track(track_id: TrackId<'static>, point: Point, rect: Rect) {
+async fn skip_to_track(track_id: TrackId<'static>, position: f64, always_seek: bool) {
     let Some(_guard) = try_acquire_spotify_guard() else {
         return;
     };
@@ -431,32 +446,8 @@ async fn skip_to_track(track_id: TrackId<'static>, point: Point, rect: Rect) {
         drop(playback_state);
         (queue_index, position_in_queue, ms_lookup)
     };
-    if queue_index.cmp(&position_in_queue) == Ordering::Equal {
-        let position = (point.x - rect.x0) / rect.width();
-        let song_ms = ms_lookup[position_in_queue];
-        // If click is near the very left, reset to the start of the song, else seek to clicked position
-        let milliseconds = if point.x < HISTORY_WIDTH + 20.0 || position < 0.05 {
-            0.0
-        } else {
-            f64::from(song_ms) * position
-        };
-        info!(
-            "Seeking track {track_id} to {}%",
-            (milliseconds / f64::from(song_ms) * 100.0).round()
-        );
-        update_playback_state(|state| {
-            state.progress = milliseconds.round() as u32;
-            state.last_updated = Instant::now();
-        });
-        if let Err(err) = SPOTIFY_CLIENT
-            .get()
-            .unwrap()
-            .seek_track(TimeDelta::milliseconds(milliseconds as i64), None)
-            .await
-        {
-            error!("Failed to seek track: {err}");
-        }
-    } else {
+    // Skip or rewind to the track
+    if queue_index != position_in_queue {
         let forward = queue_index < position_in_queue;
         let skips = if forward {
             position_in_queue - queue_index
@@ -477,6 +468,31 @@ async fn skip_to_track(track_id: TrackId<'static>, point: Point, rect: Rect) {
             if let Err(err) = result {
                 error!("Failed to skip to track: {err}");
             }
+        }
+    }
+    // Seek to the position
+    if queue_index == position_in_queue || always_seek {
+        let song_ms = ms_lookup[position_in_queue];
+        let milliseconds = if position < 0.05 {
+            0.0
+        } else {
+            f64::from(song_ms) * position
+        };
+        info!(
+            "Seeking track {track_id} to {}%",
+            (milliseconds / f64::from(song_ms) * 100.0).round()
+        );
+        update_playback_state(|state| {
+            state.progress = milliseconds.round() as u32;
+            state.last_updated = Instant::now();
+        });
+        if let Err(err) = SPOTIFY_CLIENT
+            .get()
+            .unwrap()
+            .seek_track(TimeDelta::milliseconds(milliseconds as i64), None)
+            .await
+        {
+            error!("Failed to seek track: {err}");
         }
     }
 }
