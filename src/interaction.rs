@@ -55,6 +55,7 @@ pub struct InteractionState {
     pub play_hitbox: Rect,
     pub track_hitboxes: HashMap<TrackId<'static>, Rect>,
     pub icon_hitboxes: Vec<IconHitbox>,
+    pub mouse_down: bool,
     pub drag_origin: Option<Point>,
     pub drag_track: Option<(TrackId<'static>, f64)>,
     pub dragging: bool,
@@ -73,6 +74,7 @@ impl Default for InteractionState {
             play_hitbox: Rect::default(),
             track_hitboxes: HashMap::new(),
             icon_hitboxes: Vec::new(),
+            mouse_down: false,
             drag_origin: None,
             drag_track: None,
             dragging: false,
@@ -98,6 +100,14 @@ impl InteractionState {
                 skip_to_track(track_id, position, false).await;
             });
         }
+        self.drag_origin = None;
+        self.dragging = false;
+        self.drag_delta_pixels = 0.0;
+        self.spotify_guard = None;
+    }
+
+    pub fn cancel_drag(&mut self) {
+        self.drag_track = None;
         self.drag_origin = None;
         self.dragging = false;
         self.drag_delta_pixels = 0.0;
@@ -242,7 +252,7 @@ impl CantusApp {
     pub fn draw_playlist_buttons(
         &mut self,
         track: &Track,
-        is_current: bool,
+        hovered: bool,
         playlists: &HashMap<&str, &Playlist>,
         width: f64,
         height: f64,
@@ -269,7 +279,7 @@ impl CantusApp {
                         return None;
                     }
                     let contained = playlist.tracks.contains(&track.id);
-                    if !contained && !is_current {
+                    if !contained && !hovered {
                         return None;
                     }
                     Some((playlist, contained))
@@ -289,12 +299,30 @@ impl CantusApp {
         let icon_size = 14.0 * self.scale_factor;
         let icon_spacing = 2.0 * self.scale_factor;
         let mouse_pos = self.interaction.mouse_position;
+
+        let needed_width = icon_size * icon_entries.len() as f64;
+        if width < needed_width {
+            // Strip out all playlists that arent contained
+            icon_entries.retain(|entry| {
+                if let IconEntry::Playlist { contained, .. } = entry {
+                    *contained
+                } else {
+                    true
+                }
+            });
+        }
+        // Try fitting again
         let num_icons = icon_entries.len();
         let needed_width = icon_size * num_icons as f64;
         if width < needed_width {
             return;
         }
-        let fade_alpha = ((width - needed_width) / (needed_width * 0.25)).clamp(0.0, 1.0) as f32;
+
+        let fade_alpha = if hovered {
+            1.0
+        } else {
+            ((width - needed_width) / (needed_width * 0.25)).clamp(0.0, 1.0) as f32
+        };
 
         let center_x = pos_x + width * 0.5;
         let center_y = height * 0.975;

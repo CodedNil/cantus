@@ -492,7 +492,7 @@ impl Dispatch<WlPointer, ()> for LayerShellApp {
                 state.cantus.handle_mouse_drag();
             }
             wl_pointer::Event::Leave { .. } => {
-                state.cantus.interaction.mouse_position = Point::new(-1.0, -1.0);
+                state.cantus.interaction.mouse_position = Point::new(-100.0, -100.0);
                 state.cantus.interaction.end_drag();
             }
             wl_pointer::Event::Button {
@@ -502,15 +502,29 @@ impl Dispatch<WlPointer, ()> for LayerShellApp {
             } => match button_state {
                 WEnum::Value(wl_pointer::ButtonState::Pressed) => {
                     state.cantus.interaction.start_drag();
+                    state.cantus.interaction.mouse_down = true;
                 }
                 WEnum::Value(wl_pointer::ButtonState::Released) => {
-                    if !state.cantus.interaction.dragging {
-                        let _ = state.cantus.handle_click();
+                    if state.cantus.interaction.dragging {
+                        state.cantus.interaction.end_drag();
+                    } else if state.cantus.interaction.mouse_down {
+                        state.cantus.handle_click();
                     }
-                    state.cantus.interaction.end_drag();
                 }
                 WEnum::Value(_) | WEnum::Unknown(_) => {}
             },
+            wl_pointer::Event::Button {
+                button: 0x111,
+                state: button_state,
+                ..
+            } => {
+                if state.cantus.interaction.dragging
+                    && button_state == WEnum::Value(wl_pointer::ButtonState::Pressed)
+                {
+                    state.cantus.interaction.cancel_drag();
+                    state.cantus.interaction.mouse_down = false;
+                }
+            }
             wl_pointer::Event::AxisDiscrete { axis, discrete, .. } => {
                 if axis == WEnum::Value(wl_pointer::Axis::VerticalScroll) {
                     CantusApp::handle_scroll(discrete);

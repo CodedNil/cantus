@@ -151,7 +151,7 @@ impl CantusApp {
         }
 
         let drag_offset_ms = if self.interaction.dragging {
-            (self.interaction.drag_delta_pixels * self.scale_factor) / px_per_ms
+            self.interaction.drag_delta_pixels / px_per_ms
         } else {
             0.0
         };
@@ -335,15 +335,15 @@ impl CantusApp {
         };
 
         // Add hitbox
-        self.interaction.track_hitboxes.insert(
-            track.id.clone(),
-            Rect::new(
-                (track_start_ms - TIMELINE_START_MS) * px_per_ms + history_width,
-                0.0,
-                (track_end_ms - TIMELINE_START_MS) * px_per_ms + history_width,
-                height,
-            ),
+        let hitbox = Rect::new(
+            (track_start_ms - TIMELINE_START_MS) * px_per_ms + history_width,
+            0.0,
+            (track_end_ms - TIMELINE_START_MS) * px_per_ms + history_width,
+            height,
         );
+        self.interaction
+            .track_hitboxes
+            .insert(track.id.clone(), hitbox);
         // If dragging, set the drag target to this track
         if self.interaction.dragging && is_current {
             self.interaction.drag_track = Some((
@@ -635,7 +635,12 @@ impl CantusApp {
             self.scene.pop_layer();
         }
 
-        self.draw_playlist_buttons(track, is_current, playlists, width, height, pos_x);
+        // Expand the hitbox vertically so it includes the playlist buttons
+        let hovered = !self.interaction.dragging
+            && hitbox
+                .inflate(0.0, 20.0)
+                .contains(self.interaction.mouse_position);
+        self.draw_playlist_buttons(track, hovered, playlists, width, height, pos_x);
     }
 
     /// Creates the text layout for a single-line string.

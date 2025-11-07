@@ -1,14 +1,10 @@
-interaction:
-way to cancel a drag seek? right click?
 stack previous songs so a bit of each is visible up to like 6 songs
-
-animations:
-instead of showing unincluded playlists for current song, only show that when hovering on that track, even if theres no room
-
-misc:
 run as a proper windows layer-shell bar
-fix the dodgy sprayed off particles due to tiny errors in playback position sampling
 show the song title to the left of the playback bar when its not visible to the right
+
+improve the particle emission:
+fix the dodgy sprayed off particles due to tiny errors in playback position sampling
+make it more uniform so it evenly emits along the surface instead of looking pulsey
 
 
 todo when audio analysis is possible again:
