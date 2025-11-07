@@ -310,10 +310,10 @@ impl LayerShellApp {
                 .map(|hitbox| &hitbox.rect),
         ) {
             region.add(
-                rect.x0.round() as i32,
-                rect.y0.round() as i32,
-                (rect.x1 - rect.x0).round() as i32,
-                (rect.y1 - rect.y0).round() as i32,
+                (rect.x0 / self.cantus.scale_factor).round() as i32,
+                (rect.y0 / self.cantus.scale_factor).round() as i32,
+                ((rect.x1 - rect.x0) / self.cantus.scale_factor).round() as i32,
+                ((rect.y1 - rect.y0) / self.cantus.scale_factor).round() as i32,
             );
         }
 
@@ -511,12 +511,21 @@ impl Dispatch<WlPointer, ()> for LayerShellApp {
                 }
                 WEnum::Value(_) | WEnum::Unknown(_) => {}
             },
+            wl_pointer::Event::AxisDiscrete { axis, discrete, .. } => {
+                if axis == WEnum::Value(wl_pointer::Axis::VerticalScroll) {
+                    CantusApp::handle_scroll(discrete);
+                }
+            }
+            wl_pointer::Event::AxisValue120 { axis, value120, .. } => {
+                if axis == WEnum::Value(wl_pointer::Axis::VerticalScroll) {
+                    let delta = value120 / 120; // Normalize to -1 or 1
+                    CantusApp::handle_scroll(delta);
+                }
+            }
             wl_pointer::Event::Axis { .. }
             | wl_pointer::Event::Frame
             | wl_pointer::Event::AxisSource { .. }
             | wl_pointer::Event::AxisStop { .. }
-            | wl_pointer::Event::AxisDiscrete { .. }
-            | wl_pointer::Event::AxisValue120 { .. }
             | wl_pointer::Event::AxisRelativeDirection { .. }
             | _ => {}
         }

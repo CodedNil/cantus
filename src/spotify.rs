@@ -54,6 +54,7 @@ pub static PLAYBACK_STATE: LazyLock<Arc<RwLock<PlaybackState>>> = LazyLock::new(
         playing: false,
         shuffle: false,
         progress: 0,
+        volume: None,
         queue: Vec::new(),
         queue_index: 0,
         current_context: None,
@@ -80,6 +81,7 @@ pub struct PlaybackState {
     pub playing: bool,
     pub shuffle: bool,
     pub progress: u32,
+    pub volume: Option<u8>,
     pub queue: Vec<Track>,
     pub queue_index: usize,
     pub current_context: Option<Context>,
@@ -290,7 +292,7 @@ async fn update_state_from_mpris(
 ) -> bool {
     let Ok(names) = dbus_proxy.list_names().await else {
         update_playback_state(|state| {
-            state.is_local = true;
+            state.is_local = false;
         });
         return false;
     };
@@ -320,7 +322,7 @@ async fn update_state_from_mpris(
     }
     let Some(properties_proxy) = properties_proxy else {
         update_playback_state(|state| {
-            state.is_local = true;
+            state.is_local = false;
         });
         return false;
     };
@@ -486,6 +488,7 @@ async fn update_state_from_spotify() {
 
         state.playing = current_playback.is_playing;
         state.shuffle = current_playback.shuffle_state;
+        state.volume = current_playback.device.volume_percent.map(|v| v as u8);
         if !state.is_local {
             let progress = current_playback
                 .progress

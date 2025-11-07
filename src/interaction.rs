@@ -191,7 +191,7 @@ impl CantusApp {
         {
             let track_id = track_id.clone();
             // If click is near the very left, reset to the start of the song, else seek to clicked position
-            let position = if mouse_pos.x < HISTORY_WIDTH + 20.0 {
+            let position = if mouse_pos.x < (HISTORY_WIDTH + 20.0) * self.scale_factor {
                 0.0
             } else {
                 (mouse_pos.x - track_rect.x0) / track_rect.width()
@@ -220,6 +220,25 @@ impl CantusApp {
             };
         } else {
             self.interaction.drag_delta_pixels = 0.0;
+        }
+    }
+
+    /// Handle scrolling events to adjust volume.
+    pub fn handle_scroll(delta: i32) {
+        update_playback_state(|state| {
+            if let Some(volume) = &mut state.volume {
+                *volume = if delta < 0 {
+                    volume.saturating_add(5).min(100)
+                } else {
+                    volume.saturating_sub(5)
+                };
+            }
+        });
+        let current_volume = PLAYBACK_STATE.read().volume;
+        if let Some(volume) = current_volume {
+            tokio::spawn(async move {
+                set_volume(volume).await;
+            });
         }
     }
 
@@ -412,7 +431,7 @@ impl CantusApp {
                         self.scene.fill(
                             Fill::EvenOdd,
                             icon_transform,
-                            Color::from_rgb8(60, 60, 60).with_alpha(0.5 * fade_alpha),
+                            Color::from_rgb8(60, 60, 60).with_alpha(0.7 * fade_alpha),
                             None,
                             &Rect::new(0.0, 0.0, icon_size, icon_size),
                         );
@@ -674,5 +693,18 @@ async fn toggle_playing(play: bool) {
         }
     } else if let Err(err) = spotify_client.pause_playback(None).await {
         error!("Failed to pause playback: {err}");
+    }
+}
+
+/// Set the volume of the current playback device.
+async fn set_volume(volume: u8) {
+    let Some(_guard) = try_acquire_spotify_guard() else {
+        return;
+    };
+
+    info!("Setting volume to {}%", volume);
+    let spotify_client = SPOTIFY_CLIENT.get().unwrap();
+    if let Err(err) = spotify_client.volume(volume, None).await {
+        error!("Failed to set volume: {err}");
     }
 }

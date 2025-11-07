@@ -1,7 +1,6 @@
 interaction:
 way to cancel a drag seek? right click?
 stack previous songs so a bit of each is visible up to like 6 songs
-volume (rendered onto the playback bar as a vertical colour fill, scroll to change)
 
 animations:
 show the play/pause button when hovering
@@ -10,8 +9,9 @@ instead of showing unincluded playlists for current song, only show that when ho
 
 misc:
 run as a proper windows layer-shell bar
-use local playerctl for seek and skip as much when viable
 fix the dodgy sprayed off particles due to tiny errors in playback position sampling
+show the song title to the left of the playback bar when its not visible to the right
+
 
 todo when audio analysis is possible again:
 show the waveform of the song

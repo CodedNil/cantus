@@ -245,6 +245,7 @@ impl CantusApp {
             -TIMELINE_START_MS * px_per_ms + history_width,
             total_height,
             track_move_speed,
+            playback_state.volume,
         );
 
         // Purge the stale background cache entries.
@@ -675,6 +676,7 @@ impl CantusApp {
         x: f64,
         height: f64,
         track_move_speed: f64,
+        volume: Option<u8>,
     ) {
         let now = Instant::now();
         let dt = now.duration_since(self.particles.last_update).as_secs_f32();
@@ -850,13 +852,23 @@ impl CantusApp {
                 );
             }
         } else {
-            // Full bar
+            // Volume display bar
+            let volume = f64::from(volume.unwrap_or(100)) / 100.0;
+            if volume < 1.0 {
+                self.scene.fill(
+                    Fill::EvenOdd,
+                    Affine::translate((line_x, 0.0)),
+                    Color::from_rgb8(150, 150, 150),
+                    None,
+                    &RoundedRect::new(0.0, 0.0, line_width, height, 100.0),
+                );
+            }
             self.scene.fill(
                 Fill::EvenOdd,
-                Affine::translate((line_x, 0.0)),
+                Affine::translate((line_x, height * (1.0 - volume))),
                 line_color,
                 None,
-                &RoundedRect::new(0.0, 0.0, line_width, height, 100.0),
+                &RoundedRect::new(0.0, 0.0, line_width, height * volume, 100.0),
             );
         }
     }
