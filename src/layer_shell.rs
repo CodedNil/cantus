@@ -1,4 +1,4 @@
-use crate::{CantusApp, PANEL_HEIGHT, PANEL_WIDTH};
+use crate::{CantusApp, PANEL_HEIGHT, PANEL_WIDTH, interaction::InteractionState};
 use anyhow::Result;
 use raw_window_handle::{
     RawDisplayHandle, RawWindowHandle, WaylandDisplayHandle, WaylandWindowHandle,
@@ -489,11 +489,12 @@ impl Dispatch<WlPointer, ()> for LayerShellApp {
                     surface_x * state.cantus.scale_factor,
                     surface_y * state.cantus.scale_factor,
                 );
-                state.cantus.handle_mouse_drag();
+                state.cantus.interaction.handle_mouse_drag();
             }
             wl_pointer::Event::Leave { .. } => {
                 state.cantus.interaction.mouse_position = Point::new(-100.0, -100.0);
-                state.cantus.interaction.end_drag();
+                state.cantus.interaction.cancel_drag();
+                state.cantus.interaction.mouse_down = false;
             }
             wl_pointer::Event::Button {
                 button: 0x110,
@@ -501,15 +502,13 @@ impl Dispatch<WlPointer, ()> for LayerShellApp {
                 ..
             } => match button_state {
                 WEnum::Value(wl_pointer::ButtonState::Pressed) => {
-                    state.cantus.interaction.start_drag();
-                    state.cantus.interaction.mouse_down = true;
+                    state.cantus.interaction.left_click();
                 }
                 WEnum::Value(wl_pointer::ButtonState::Released) => {
-                    if state.cantus.interaction.dragging {
-                        state.cantus.interaction.end_drag();
-                    } else if state.cantus.interaction.mouse_down {
-                        state.cantus.handle_click();
-                    }
+                    state
+                        .cantus
+                        .interaction
+                        .left_click_released(state.cantus.scale_factor);
                 }
                 WEnum::Value(_) | WEnum::Unknown(_) => {}
             },
@@ -521,19 +520,17 @@ impl Dispatch<WlPointer, ()> for LayerShellApp {
                 if state.cantus.interaction.dragging
                     && button_state == WEnum::Value(wl_pointer::ButtonState::Pressed)
                 {
-                    state.cantus.interaction.cancel_drag();
-                    state.cantus.interaction.mouse_down = false;
+                    state.cantus.interaction.right_click();
                 }
             }
             wl_pointer::Event::AxisDiscrete { axis, discrete, .. } => {
                 if axis == WEnum::Value(wl_pointer::Axis::VerticalScroll) {
-                    CantusApp::handle_scroll(discrete);
+                    InteractionState::handle_scroll(discrete.signum());
                 }
             }
             wl_pointer::Event::AxisValue120 { axis, value120, .. } => {
                 if axis == WEnum::Value(wl_pointer::Axis::VerticalScroll) {
-                    let delta = value120 / 120; // Normalize to -1 or 1
-                    CantusApp::handle_scroll(delta);
+                    InteractionState::handle_scroll(value120.signum());
                 }
             }
             wl_pointer::Event::Axis { .. }

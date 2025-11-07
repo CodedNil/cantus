@@ -1,12 +1,15 @@
-use crate::{CantusApp, PANEL_HEIGHT, PANEL_WIDTH};
+use crate::{CantusApp, PANEL_HEIGHT, PANEL_WIDTH, interaction::InteractionState};
 use anyhow::Result;
 use raw_window_handle::{HasDisplayHandle, HasWindowHandle};
 use tracing::error;
-use vello::wgpu::{PresentMode, SurfaceTargetUnsafe};
+use vello::{
+    kurbo::Point,
+    wgpu::{PresentMode, SurfaceTargetUnsafe},
+};
 use winit::{
     application::ApplicationHandler,
-    dpi::{PhysicalPosition, PhysicalSize},
-    event::{ElementState, MouseButton, WindowEvent},
+    dpi::PhysicalSize,
+    event::{ElementState, MouseButton, MouseScrollDelta, WindowEvent},
     event_loop::{ActiveEventLoop, EventLoop},
     window::{Window, WindowAttributes},
 };
@@ -92,31 +95,6 @@ impl WinitApp {
         }
         Ok(())
     }
-
-    fn handle_cursor_move(&mut self, position: PhysicalPosition<f64>) {
-        self.cantus.interaction.pointer_position = (position.x, position.y);
-        self.cantus.handle_pointer_drag_motion();
-    }
-
-    fn handle_pointer_leave(&mut self) {
-        self.cantus.interaction.pointer_position = (-1.0, -1.0);
-        self.cantus.interaction.end_drag();
-    }
-
-    fn handle_mouse_input(&mut self, state: ElementState, button: MouseButton) {
-        if button != MouseButton::Left {
-            return;
-        }
-        match state {
-            ElementState::Pressed => self.cantus.interaction.start_drag(),
-            ElementState::Released => {
-                if !self.cantus.interaction.pointer_dragging {
-                    let _ = self.cantus.handle_pointer_click();
-                }
-                self.cantus.interaction.end_drag();
-            }
-        }
-    }
 }
 
 impl ApplicationHandler for WinitApp {
@@ -169,11 +147,49 @@ impl ApplicationHandler for WinitApp {
                     error!("Rendering failed: {err}");
                 }
             }
-            WindowEvent::CursorMoved { position, .. } => self.handle_cursor_move(position),
-            WindowEvent::CursorLeft { .. } => self.handle_pointer_leave(),
-            WindowEvent::MouseInput { state, button, .. } => {
-                self.handle_mouse_input(state, button);
+            WindowEvent::CursorMoved { position, .. } => {
+                self.cantus.interaction.mouse_position = Point::new(position.x, position.y);
+                self.cantus.interaction.handle_mouse_drag();
             }
+            WindowEvent::CursorLeft { .. } => {
+                self.cantus.interaction.mouse_position = Point::new(-100.0, -100.0);
+                self.cantus.interaction.cancel_drag();
+                self.cantus.interaction.mouse_down = false;
+            }
+            WindowEvent::MouseInput { state, button, .. } => match button {
+                MouseButton::Left => match state {
+                    ElementState::Pressed => {
+                        self.cantus.interaction.left_click();
+                    }
+                    ElementState::Released => {
+                        self.cantus
+                            .interaction
+                            .left_click_released(self.cantus.scale_factor);
+                    }
+                },
+                MouseButton::Right => match state {
+                    ElementState::Pressed => {
+                        self.cantus.interaction.right_click();
+                    }
+                    ElementState::Released => {}
+                },
+                MouseButton::Middle
+                | MouseButton::Back
+                | MouseButton::Forward
+                | MouseButton::Other(_) => {}
+            },
+            WindowEvent::MouseWheel { delta, .. } => match delta {
+                MouseScrollDelta::LineDelta(_, y) => {
+                    if y.abs() > 0.0 {
+                        InteractionState::handle_scroll(-(y as i32).signum());
+                    }
+                }
+                MouseScrollDelta::PixelDelta(pos) => {
+                    if pos.y.abs() > 0.0 {
+                        InteractionState::handle_scroll(-(pos.y as i32).signum());
+                    }
+                }
+            },
             WindowEvent::ActivationTokenDone { .. }
             | WindowEvent::Moved(_)
             | WindowEvent::Destroyed
@@ -185,7 +201,6 @@ impl ApplicationHandler for WinitApp {
             | WindowEvent::ModifiersChanged(_)
             | WindowEvent::Ime(_)
             | WindowEvent::CursorEntered { .. }
-            | WindowEvent::MouseWheel { .. }
             | WindowEvent::PinchGesture { .. }
             | WindowEvent::PanGesture { .. }
             | WindowEvent::DoubleTapGesture { .. }

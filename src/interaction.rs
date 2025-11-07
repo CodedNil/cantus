@@ -85,7 +85,8 @@ impl Default for InteractionState {
 }
 
 impl InteractionState {
-    pub fn start_drag(&mut self) {
+    pub fn left_click(&mut self) {
+        self.mouse_down = true;
         self.drag_origin = Some(self.mouse_position);
         self.drag_track = None;
         self.dragging = false;
@@ -93,7 +94,10 @@ impl InteractionState {
         self.spotify_guard = None;
     }
 
-    pub fn end_drag(&mut self) {
+    pub fn left_click_released(&mut self, scale_factor: f64) {
+        if !self.dragging && self.mouse_down {
+            self.handle_click(scale_factor);
+        }
         if let Some((track_id, position)) = self.drag_track.take() {
             let track_id = track_id.clone();
             tokio::spawn(async move {
@@ -104,6 +108,110 @@ impl InteractionState {
         self.dragging = false;
         self.drag_delta_pixels = 0.0;
         self.spotify_guard = None;
+        self.mouse_down = false;
+    }
+
+    pub fn right_click(&mut self) {
+        self.cancel_drag();
+        self.mouse_down = false;
+    }
+
+    /// Handle click events.
+    fn handle_click(&mut self, scale_factor: f64) -> bool {
+        let mouse_pos = self.mouse_position;
+
+        // Click on rating/playlist icons
+        if let Some(hitbox) = self
+            .icon_hitboxes
+            .iter()
+            .find(|h| h.rect.contains(mouse_pos))
+        {
+            let track_id = hitbox.track_id.clone();
+            if let Some(index) = hitbox.rating_index {
+                let center_x = (hitbox.rect.x0 + hitbox.rect.x1) * 0.5;
+                let rating_slot = index * 2 + 1 + usize::from(mouse_pos.x >= center_x);
+                tokio::spawn(async move {
+                    update_star_rating(track_id, rating_slot).await;
+                });
+            } else if let Some(playlist_id) = hitbox.playlist_id.clone() {
+                tokio::spawn(async move {
+                    toggle_playlist_membership(track_id, playlist_id).await;
+                });
+            }
+            return true;
+        }
+
+        // Play/pause
+        if self.play_hitbox.contains(mouse_pos) {
+            let playing = PLAYBACK_STATE.read().playing;
+            tokio::spawn(async move {
+                toggle_playing(!playing).await;
+            });
+            return true;
+        }
+
+        // Seek track
+        if let Some((track_id, track_rect)) = self
+            .track_hitboxes
+            .iter()
+            .find(|(_, track_rect)| track_rect.contains(mouse_pos))
+        {
+            self.last_click = Some((
+                Instant::now(),
+                track_id.clone(),
+                Point::new(mouse_pos.x - track_rect.x0, mouse_pos.y - track_rect.y0),
+            ));
+
+            let track_id = track_id.clone();
+            // If click is near the very left, reset to the start of the song, else seek to clicked position
+            let position = if mouse_pos.x < (HISTORY_WIDTH + 20.0) * scale_factor {
+                0.0
+            } else {
+                (mouse_pos.x - track_rect.x0) / track_rect.width()
+            };
+            tokio::spawn(async move {
+                skip_to_track(track_id, position, false).await;
+            });
+            return true;
+        }
+        false
+    }
+
+    /// Drag across the progress bar to seek.
+    pub fn handle_mouse_drag(&mut self) {
+        if let Some(origin_pos) = self.drag_origin {
+            let delta_x = self.mouse_position.x - origin_pos.x;
+            let delta_y = self.mouse_position.y - origin_pos.y;
+            if !self.dragging && (delta_x.abs() >= 2.0 || delta_y.abs() >= 2.0) {
+                self.dragging = true;
+                self.ensure_spotify_guard();
+            }
+            self.drag_delta_pixels = if self.dragging { delta_x } else { 0.0 };
+        } else {
+            self.drag_delta_pixels = 0.0;
+        }
+    }
+
+    /// Handle scrolling events to adjust volume.
+    pub fn handle_scroll(delta: i32) {
+        if delta == 0 {
+            return;
+        }
+        update_playback_state(|state| {
+            if let Some(volume) = &mut state.volume {
+                *volume = if delta < 0 {
+                    volume.saturating_add(5).min(100)
+                } else {
+                    volume.saturating_sub(5)
+                };
+            }
+        });
+        let current_volume = PLAYBACK_STATE.read().volume;
+        if let Some(volume) = current_volume {
+            tokio::spawn(async move {
+                set_volume(volume).await;
+            });
+        }
     }
 
     pub fn cancel_drag(&mut self) {
@@ -147,107 +255,6 @@ static STAR_SVG_HALF: LazyLock<BezPath> =
     LazyLock::new(|| BezPath::from_svg(include_str!("../assets/star-half.path")).unwrap());
 
 impl CantusApp {
-    /// Handle click events.
-    pub fn handle_click(&mut self) -> bool {
-        let mouse_pos = self.interaction.mouse_position;
-
-        // Click on rating/playlist icons
-        if let Some(hitbox) = self
-            .interaction
-            .icon_hitboxes
-            .iter()
-            .find(|h| h.rect.contains(mouse_pos))
-        {
-            let track_id = hitbox.track_id.clone();
-            if let Some(index) = hitbox.rating_index {
-                let center_x = (hitbox.rect.x0 + hitbox.rect.x1) * 0.5;
-                let rating_slot = index * 2 + 1 + usize::from(mouse_pos.x >= center_x);
-                tokio::spawn(async move {
-                    update_star_rating(track_id, rating_slot).await;
-                });
-            } else if let Some(playlist_id) = hitbox.playlist_id.clone() {
-                tokio::spawn(async move {
-                    toggle_playlist_membership(track_id, playlist_id).await;
-                });
-            }
-            return true;
-        }
-
-        // Play/pause
-        if self.interaction.play_hitbox.contains(mouse_pos) {
-            let playing = PLAYBACK_STATE.read().playing;
-            tokio::spawn(async move {
-                toggle_playing(!playing).await;
-            });
-            return true;
-        }
-
-        // Seek track
-        if let Some((track_id, track_rect)) = self
-            .interaction
-            .track_hitboxes
-            .iter()
-            .find(|(_, track_rect)| track_rect.contains(mouse_pos))
-        {
-            self.interaction.last_click = Some((
-                Instant::now(),
-                track_id.clone(),
-                Point::new(mouse_pos.x - track_rect.x0, mouse_pos.y - track_rect.y0),
-            ));
-
-            let track_id = track_id.clone();
-            // If click is near the very left, reset to the start of the song, else seek to clicked position
-            let position = if mouse_pos.x < (HISTORY_WIDTH + 20.0) * self.scale_factor {
-                0.0
-            } else {
-                (mouse_pos.x - track_rect.x0) / track_rect.width()
-            };
-            tokio::spawn(async move {
-                skip_to_track(track_id, position, false).await;
-            });
-            return true;
-        }
-        false
-    }
-
-    /// Drag across the progress bar to seek.
-    pub fn handle_mouse_drag(&mut self) {
-        if let Some(origin_pos) = self.interaction.drag_origin {
-            let delta_x = self.interaction.mouse_position.x - origin_pos.x;
-            let delta_y = self.interaction.mouse_position.y - origin_pos.y;
-            if !self.interaction.dragging && (delta_x.abs() >= 2.0 || delta_y.abs() >= 2.0) {
-                self.interaction.dragging = true;
-                self.interaction.ensure_spotify_guard();
-            }
-            self.interaction.drag_delta_pixels = if self.interaction.dragging {
-                delta_x
-            } else {
-                0.0
-            };
-        } else {
-            self.interaction.drag_delta_pixels = 0.0;
-        }
-    }
-
-    /// Handle scrolling events to adjust volume.
-    pub fn handle_scroll(delta: i32) {
-        update_playback_state(|state| {
-            if let Some(volume) = &mut state.volume {
-                *volume = if delta < 0 {
-                    volume.saturating_add(5).min(100)
-                } else {
-                    volume.saturating_sub(5)
-                };
-            }
-        });
-        let current_volume = PLAYBACK_STATE.read().volume;
-        if let Some(volume) = current_volume {
-            tokio::spawn(async move {
-                set_volume(volume).await;
-            });
-        }
-    }
-
     /// Star ratings and favourite playlists
     pub fn draw_playlist_buttons(
         &mut self,
