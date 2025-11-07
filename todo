@@ -3,8 +3,6 @@ way to cancel a drag seek? right click?
 stack previous songs so a bit of each is visible up to like 6 songs
 
 animations:
-show the play/pause button when hovering
-show the highlight animation when you click to seek
 instead of showing unincluded playlists for current song, only show that when hovering on that track, even if theres no room
 
 misc:

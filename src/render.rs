@@ -20,9 +20,9 @@ use vello::{
 /// Spacing between tracks in ms
 const TRACK_SPACING_MS: f64 = 4000.0;
 /// How many ms to show in the timeline
-pub const TIMELINE_DURATION_MS: f64 = 12.0 * 60.0 * 1000.0;
+const TIMELINE_DURATION_MS: f64 = 12.0 * 60.0 * 1000.0;
 /// Starting position of the timeline in ms, if negative then it shows the history too
-pub const TIMELINE_START_MS: f64 = -1.5 * 60.0 * 1000.0;
+const TIMELINE_START_MS: f64 = -1.5 * 60.0 * 1000.0;
 const TIMELINE_END_MS: f64 = TIMELINE_START_MS + TIMELINE_DURATION_MS;
 
 /// Particles emitted per second when playback is active.
@@ -157,16 +157,55 @@ impl CantusApp {
         };
         let current_index = playback_state.queue_index.min(queue.len() - 1);
 
+        // Play button hitbox
+        let playbutton_center = -TIMELINE_START_MS * px_per_ms + history_width;
+        let playbutton_hsize = total_height * 0.25;
+        self.interaction.play_hitbox = Rect::new(
+            playbutton_center - playbutton_hsize,
+            0.0,
+            playbutton_center + playbutton_hsize,
+            total_height,
+        );
+        let play_button_hovered = self
+            .interaction
+            .play_hitbox
+            .contains(self.interaction.mouse_position);
+        if play_button_hovered {
+            if playback_state.playing
+                && !matches!(self.interaction.last_event, InteractionEvent::PauseHover(_))
+            {
+                self.interaction.last_event = InteractionEvent::PauseHover(Instant::now());
+            }
+            if !playback_state.playing
+                && !matches!(self.interaction.last_event, InteractionEvent::PlayHover(_))
+            {
+                self.interaction.last_event = InteractionEvent::PlayHover(Instant::now());
+            }
+        }
+
         // Update interaction events
         match self.interaction.last_event {
-            InteractionEvent::Paused(_) => {
-                if playback_state.playing {
-                    self.interaction.last_event = InteractionEvent::Played(Instant::now());
+            InteractionEvent::None => {
+                let instant = Instant::now().checked_sub(Duration::from_secs(5)).unwrap();
+                self.interaction.last_event = if playback_state.playing {
+                    InteractionEvent::Play(instant)
+                } else {
+                    InteractionEvent::Pause(instant)
                 }
             }
-            InteractionEvent::Played(_) => {
+            InteractionEvent::Pause(_) => {
+                if playback_state.playing {
+                    self.interaction.last_event = InteractionEvent::Play(Instant::now());
+                }
+            }
+            InteractionEvent::Play(_) => {
                 if !playback_state.playing {
-                    self.interaction.last_event = InteractionEvent::Paused(Instant::now());
+                    self.interaction.last_event = InteractionEvent::Pause(Instant::now());
+                }
+            }
+            InteractionEvent::PauseHover(_) | InteractionEvent::PlayHover(_) => {
+                if !play_button_hovered {
+                    self.interaction.last_event = InteractionEvent::None;
                 }
             }
         }
@@ -517,31 +556,75 @@ impl CantusApp {
         }
 
         // --- Add a dark overlay for the dark_width ---
-        if dark_width > 0.0 {
+        if dark_width > 0.0 || is_current || self.interaction.last_click.is_some() {
             self.scene.push_clip_layer(
                 Affine::translate((pos_x, 0.0)),
                 &RoundedRect::new(0.0, 0.0, width, height, radii),
             );
 
-            self.scene.fill(
-                Fill::EvenOdd,
-                Affine::translate((pos_x, 0.0)),
-                Color::from_rgb8(0, 0, 0).with_alpha(0.5 * fade_alpha),
-                None,
-                &Rect::new(0.0, 0.0, dark_width, height),
-            );
+            if dark_width > 0.0 {
+                self.scene.fill(
+                    Fill::EvenOdd,
+                    Affine::translate((pos_x, 0.0)),
+                    Color::from_rgb8(0, 0, 0).with_alpha(0.5 * fade_alpha),
+                    None,
+                    &Rect::new(0.0, 0.0, dark_width, height),
+                );
+            }
 
             // During animations add an expanding circle behind the line
-            let anim_lerp = match self.interaction.last_event {
-                InteractionEvent::Paused(start) | InteractionEvent::Played(start) => {
-                    start.elapsed().as_millis() as f64
-                        / (ANIMATION_DURATION.as_millis() as f64 * 0.3)
+            if is_current {
+                let anim_lerp = match self.interaction.last_event {
+                    InteractionEvent::Pause(start) | InteractionEvent::Play(start) => {
+                        start.elapsed().as_millis() as f64
+                            / (ANIMATION_DURATION.as_millis() as f64 * 0.3)
+                    }
+                    InteractionEvent::None
+                    | InteractionEvent::PauseHover(_)
+                    | InteractionEvent::PlayHover(_) => 1.0,
+                };
+                if anim_lerp < 1.0 {
+                    self.scene.fill(
+                        Fill::EvenOdd,
+                        Affine::translate((pos_x + dark_width, height * 0.5)),
+                        Color::from_rgb8(255, 224, 210)
+                            .with_alpha(1.0 - (anim_lerp + 0.4).min(1.0) as f32),
+                        None,
+                        &Circle::new(Point::default(), 500.0 * anim_lerp),
+                    );
                 }
-            };
-            if is_current && anim_lerp < 1.0 {
+            }
+            // After a click, add an expanding circle behind the click point
+            if is_current
+                && let anim_lerp = match self.interaction.last_event {
+                    InteractionEvent::Pause(start) | InteractionEvent::Play(start) => {
+                        start.elapsed().as_millis() as f64
+                            / (ANIMATION_DURATION.as_millis() as f64 * 0.3)
+                    }
+                    InteractionEvent::None
+                    | InteractionEvent::PauseHover(_)
+                    | InteractionEvent::PlayHover(_) => 1.0,
+                }
+                && anim_lerp < 1.0
+            {
                 self.scene.fill(
                     Fill::EvenOdd,
                     Affine::translate((pos_x + dark_width, height * 0.5)),
+                    Color::from_rgb8(255, 224, 210)
+                        .with_alpha(1.0 - (anim_lerp + 0.4).min(1.0) as f32),
+                    None,
+                    &Circle::new(Point::default(), 500.0 * anim_lerp),
+                );
+            }
+            if let Some((start, track_id, point)) = &self.interaction.last_click
+                && track_id == &track.id
+                && let anim_lerp = start.elapsed().as_millis() as f64
+                    / (ANIMATION_DURATION.as_millis() as f64 * 0.3)
+                && anim_lerp < 1.0
+            {
+                self.scene.fill(
+                    Fill::EvenOdd,
+                    Affine::translate((pos_x + point.x, point.y)),
                     Color::from_rgb8(255, 224, 210)
                         .with_alpha(1.0 - (anim_lerp + 0.4).min(1.0) as f32),
                     None,
@@ -795,11 +878,19 @@ impl CantusApp {
         let line_color = Color::from_rgb8(255, 224, 210);
         let line_x = x - line_width * 0.5;
         let anim_lerp = match self.interaction.last_event {
-            InteractionEvent::Paused(start) | InteractionEvent::Played(start) => {
-                start.elapsed().as_millis() as f64 / ANIMATION_DURATION.as_millis() as f64
+            InteractionEvent::Play(start) => (start.elapsed().as_millis() as f64
+                / ANIMATION_DURATION.as_millis() as f64)
+                .clamp(0.0, 1.0),
+            InteractionEvent::Pause(start) => (start.elapsed().as_millis() as f64
+                / ANIMATION_DURATION.as_millis() as f64)
+                .clamp(0.0, 0.5),
+            InteractionEvent::PauseHover(start) | InteractionEvent::PlayHover(start) => {
+                (start.elapsed().as_millis() as f64
+                    / (ANIMATION_DURATION.as_millis() as f64 * 0.25))
+                    .clamp(0.0, 0.5)
             }
+            InteractionEvent::None => 1.0,
         };
-
         if anim_lerp < 1.0 {
             // Start with the lines split, then 3/4 way through close them again
             let line_height = height * lerp(((anim_lerp - 0.75) * 4.0).max(0.0), 0.2, 0.5);
@@ -819,10 +910,19 @@ impl CantusApp {
             );
 
             let icon_height = height * 0.333;
-            let icon_fade = ((anim_lerp - 0.75) * 4.0).clamp(0.0, 1.0);
-            let icon_color = line_color.with_alpha(1.0 - icon_fade as f32);
-            if matches!(self.interaction.last_event, InteractionEvent::Paused(_)) {
-                // Two lines for pause, expand it out in the first quarter, then keep in place for half, then expand out with a fade in final quarter
+            let is_paused = matches!(
+                self.interaction.last_event,
+                InteractionEvent::Pause(_) | InteractionEvent::PauseHover(_)
+            );
+            if is_paused || anim_lerp < 0.5 {
+                // Two lines for pause, during a pause its always there, when on play it fades out
+                let anim_lerp = if is_paused {
+                    anim_lerp
+                } else {
+                    (anim_lerp + 0.5) * 1.5
+                };
+                let icon_fade = ((anim_lerp - 0.75) * 4.0).clamp(0.0, 1.0);
+                let icon_color = line_color.with_alpha(1.0 - icon_fade as f32);
                 let icon_offset = 5.0 * (anim_lerp * 4.0).min(1.0) + 4.0 * icon_fade;
                 self.scene.fill(
                     Fill::EvenOdd,
@@ -838,8 +938,16 @@ impl CantusApp {
                     None,
                     &RoundedRect::new(0.0, 0.0, line_width, icon_height, 100.0),
                 );
-            } else {
+            }
+            if !is_paused || anim_lerp < 0.5 {
                 // Render out the play icon svg, grow it in the first quarter, then keep in place for half, then expand out with a fade in final quarter
+                let anim_lerp = if is_paused {
+                    (anim_lerp + 0.5) * 2.0
+                } else {
+                    anim_lerp
+                };
+                let icon_fade = ((anim_lerp - 0.75) * 4.0).clamp(0.0, 1.0);
+                let icon_color = line_color.with_alpha(1.0 - icon_fade as f32);
                 let play_icon_width = PLAY_SVG.bounding_box().width();
                 let icon_scale = icon_height * (anim_lerp * 4.0).min(1.0) + 0.5 * icon_fade;
                 self.scene.fill(

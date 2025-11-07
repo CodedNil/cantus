@@ -1,6 +1,5 @@
 use crate::{
-    CantusApp, HISTORY_WIDTH, PANEL_HEIGHT_BASE, PANEL_WIDTH,
-    render::{TIMELINE_DURATION_MS, TIMELINE_START_MS},
+    CantusApp, HISTORY_WIDTH,
     spotify::{
         IMAGES_CACHE, PLAYBACK_STATE, Playlist, RATING_PLAYLISTS, SPOTIFY_CLIENT, Track,
         update_playback_state,
@@ -12,11 +11,8 @@ use rspotify::{
     model::{PlayableId, PlaylistId, TrackId},
     prelude::OAuthClient,
 };
+use std::sync::atomic::{AtomicBool, Ordering as AtomicOrdering};
 use std::{cmp::Ordering, collections::HashMap, sync::LazyLock, time::Instant};
-use std::{
-    sync::atomic::{AtomicBool, Ordering as AtomicOrdering},
-    time::Duration,
-};
 use tracing::{error, info, warn};
 use vello::{
     kurbo::{Affine, BezPath, Point, Rect, RoundedRect, Shape, Stroke},
@@ -52,9 +48,11 @@ pub struct IconHitbox {
 
 pub struct InteractionState {
     pub last_event: InteractionEvent,
+    pub last_click: Option<(Instant, TrackId<'static>, Point)>,
     pub mouse_position: Point,
     #[cfg(feature = "layer-shell")]
     pub last_hitbox_update: Instant,
+    pub play_hitbox: Rect,
     pub track_hitboxes: HashMap<TrackId<'static>, Rect>,
     pub icon_hitboxes: Vec<IconHitbox>,
     pub drag_origin: Option<Point>,
@@ -67,12 +65,12 @@ pub struct InteractionState {
 impl Default for InteractionState {
     fn default() -> Self {
         Self {
-            last_event: InteractionEvent::Paused(
-                Instant::now().checked_sub(Duration::from_secs(60)).unwrap(),
-            ),
+            last_event: InteractionEvent::None,
+            last_click: None,
             mouse_position: Point::default(),
             #[cfg(feature = "layer-shell")]
             last_hitbox_update: Instant::now(),
+            play_hitbox: Rect::default(),
             track_hitboxes: HashMap::new(),
             icon_hitboxes: Vec::new(),
             drag_origin: None,
@@ -113,9 +111,13 @@ impl InteractionState {
     }
 }
 
+#[derive(PartialEq, Eq)]
 pub enum InteractionEvent {
-    Paused(Instant),
-    Played(Instant),
+    None,
+    Pause(Instant),
+    Play(Instant),
+    PauseHover(Instant),
+    PlayHover(Instant),
 }
 
 enum IconEntry<'a> {
@@ -136,7 +138,7 @@ static STAR_SVG_HALF: LazyLock<BezPath> =
 
 impl CantusApp {
     /// Handle click events.
-    pub fn handle_click(&self) -> bool {
+    pub fn handle_click(&mut self) -> bool {
         let mouse_pos = self.interaction.mouse_position;
 
         // Click on rating/playlist icons
@@ -162,19 +164,7 @@ impl CantusApp {
         }
 
         // Play/pause
-        let history_width = (HISTORY_WIDTH * self.scale_factor).ceil();
-        let total_height = (PANEL_HEIGHT_BASE * self.scale_factor).ceil();
-        let playbutton_center = -TIMELINE_START_MS
-            * ((PANEL_WIDTH * self.scale_factor - history_width).ceil() / TIMELINE_DURATION_MS)
-            + history_width;
-        let playbutton_hsize = total_height * 0.25;
-        let play_hitbox = Rect::new(
-            playbutton_center - playbutton_hsize,
-            0.0,
-            playbutton_center + playbutton_hsize,
-            total_height,
-        );
-        if play_hitbox.contains(mouse_pos) {
+        if self.interaction.play_hitbox.contains(mouse_pos) {
             let playing = PLAYBACK_STATE.read().playing;
             tokio::spawn(async move {
                 toggle_playing(!playing).await;
@@ -189,6 +179,12 @@ impl CantusApp {
             .iter()
             .find(|(_, track_rect)| track_rect.contains(mouse_pos))
         {
+            self.interaction.last_click = Some((
+                Instant::now(),
+                track_id.clone(),
+                Point::new(mouse_pos.x - track_rect.x0, mouse_pos.y - track_rect.y0),
+            ));
+
             let track_id = track_id.clone();
             // If click is near the very left, reset to the start of the song, else seek to clicked position
             let position = if mouse_pos.x < (HISTORY_WIDTH + 20.0) * self.scale_factor {
