@@ -1,7 +1,6 @@
 use crate::background::update_color_palettes;
 use anyhow::Result;
 use dashmap::DashMap;
-use futures::future::try_join_all;
 use image::GenericImageView;
 use parking_lot::RwLock;
 use reqwest::Client;
@@ -150,7 +149,8 @@ type PlaylistCache = HashMap<PlaylistId<'static>, (String, HashSet<TrackId<'stat
 fn load_cached_playlist_tracks() -> PlaylistCache {
     let cache_path = dirs::config_dir()
         .unwrap()
-        .join("cantus/cantus_playlist_tracks.json");
+        .join("cantus")
+        .join("cantus_playlist_tracks.json");
     let bytes = match fs::read(cache_path.clone()) {
         Ok(bytes) => bytes,
         Err(err) => {
@@ -190,7 +190,8 @@ fn persist_playlist_cache() {
 
     let cache_path = dirs::config_dir()
         .unwrap()
-        .join("cantus/cantus_playlist_tracks.json");
+        .join("cantus")
+        .join("cantus_playlist_tracks.json");
     match serde_json::to_vec(&cache_payload) {
         Ok(serialized) => {
             if let Err(err) = fs::write(cache_path.clone(), serialized) {
@@ -254,13 +255,14 @@ pub async fn init() {
 /// Asynchronous task to poll MPRIS every 500ms and Spotify API every X seconds or on song change.
 async fn polling_task() {
     let mut last_mpris_track_id: Option<String> = None; // Local state for track ID
-    let connection = match Connection::session().await {
-        Ok(conn) => conn,
-        Err(err) => panic!("Failed to connect to D-Bus session: {err}"),
-    };
-    let dbus_proxy = match DBusProxy::new(&connection).await {
-        Ok(proxy) => proxy,
-        Err(err) => panic!("Failed creating D-Bus proxy: {err}"),
+    let connection = Connection::session().await.ok();
+    let dbus_proxy = if let Some(connection) = &connection {
+        match DBusProxy::new(connection).await {
+            Ok(proxy) => Some(proxy),
+            Err(err) => panic!("Failed creating D-Bus proxy: {err}"),
+        }
+    } else {
+        None
     };
 
     tokio::spawn(async move {
@@ -270,8 +272,13 @@ async fn polling_task() {
     let mut spotify_poll_counter = 100; // Counter for Spotify API polling
     loop {
         // --- MPRIS Polling Logic ---
-        let should_refresh_spotify =
-            update_state_from_mpris(&connection, &dbus_proxy, &mut last_mpris_track_id).await;
+        let should_refresh_spotify = if let Some(connection) = &connection
+            && let Some(dbus_proxy) = &dbus_proxy
+        {
+            update_state_from_mpris(connection, dbus_proxy, &mut last_mpris_track_id).await
+        } else {
+            false
+        };
 
         // --- Spotify API Polling Logic ---
         spotify_poll_counter += 1;
@@ -631,31 +638,25 @@ async fn refresh_playlists() {
         let chunk_size = 50;
         let num_pages = playlist.tracks.total.div_ceil(chunk_size) as usize;
         info!("Fetching {num_pages} pages from playlist {}", playlist.name);
-        let fetch_futures = (0..num_pages)
-            .map(|p| {
-                let playlist_id = playlist.id.clone();
-                async move {
-                    spotify_client
-                        .playlist_items_manual(
-                            playlist_id,
-                            Some("href,limit,offset,total,items(is_local,track(id))"),
-                            None,
-                            Some(chunk_size),
-                            Some((p as u32) * chunk_size),
-                        )
-                        .await
+        let mut pages = Vec::new();
+        for page in 0..num_pages {
+            match spotify_client
+                .playlist_items_manual(
+                    playlist.id.clone(),
+                    Some("href,limit,offset,total,items(is_local,track(id))"),
+                    None,
+                    Some(chunk_size),
+                    Some((page as u32) * chunk_size),
+                )
+                .await
+            {
+                Ok(page) => pages.push(page),
+                Err(err) => {
+                    error!("Failed to fetch playlist page: {:?}", err);
+                    return;
                 }
-            })
-            .collect::<Vec<_>>();
-
-        // Await all futures, stopping and returning on the first error
-        let pages = match try_join_all(fetch_futures).await {
-            Ok(p) => p,
-            Err(e) => {
-                error!("Failed to fetch one or more playlist pages: {:?}", e);
-                return;
             }
-        };
+        }
 
         // Process the collected pages into a single track ID set and get the total
         let new_total = pages.first().map_or(0, |p| p.total);

@@ -60,6 +60,8 @@ impl WinitApp {
             return Ok(());
         }
 
+        self.cantus.render_surface = None;
+
         let target = SurfaceTargetUnsafe::RawHandle {
             raw_display_handle,
             raw_window_handle,
@@ -119,6 +121,15 @@ impl ApplicationHandler for WinitApp {
             .expect("failed to create window");
 
         self.cantus.scale_factor = window.scale_factor();
+        if window
+            .request_inner_size(PhysicalSize::new(
+                (PANEL_WIDTH * self.cantus.scale_factor) as u32,
+                (PANEL_HEIGHT * self.cantus.scale_factor) as u32,
+            ))
+            .is_none()
+        {
+            error!("Failed to set inner size");
+        }
         self.window = Some(window);
         self.needs_surface_recreate = true;
         let _ = self.recreate_surface();
