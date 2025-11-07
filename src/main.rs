@@ -20,18 +20,18 @@ use vello::{
     },
 };
 
-#[cfg(not(any(feature = "layer-shell", feature = "winit")))]
-compile_error!("Enable at least one of the `layer-shell` or `winit` features.");
+#[cfg(not(any(feature = "wayland", feature = "winit")))]
+compile_error!("Enable at least one of the `wayland` or `winit` features.");
 
-#[cfg(all(feature = "layer-shell", feature = "winit"))]
-compile_error!("`layer-shell` and `winit` features cannot be enabled at the same time.");
+#[cfg(all(feature = "wayland", feature = "winit"))]
+compile_error!("`wayland` and `winit` features cannot be enabled at the same time.");
 
 mod background;
 mod interaction;
 mod render;
 mod spotify;
 
-#[cfg(feature = "layer-shell")]
+#[cfg(feature = "wayland")]
 mod layer_shell;
 
 #[cfg(feature = "winit")]
@@ -61,7 +61,7 @@ async fn main() {
 
     spotify::init().await;
 
-    #[cfg(feature = "layer-shell")]
+    #[cfg(feature = "wayland")]
     layer_shell::run();
 
     #[cfg(feature = "winit")]
@@ -75,9 +75,9 @@ struct CantusApp {
     scene: Scene,
     font: FontEngine,
     scale_factor: f64,
-    #[cfg(feature = "layer-shell")]
+    #[cfg(feature = "wayland")]
     is_configured: bool,
-    #[cfg(feature = "layer-shell")]
+    #[cfg(feature = "wayland")]
     should_exit: bool,
     time_origin: Instant,
     frame_index: u64,
@@ -102,9 +102,9 @@ impl Default for CantusApp {
             scene: Scene::new(),
             font: FontEngine::default(),
             scale_factor: 1.0,
-            #[cfg(feature = "layer-shell")]
+            #[cfg(feature = "wayland")]
             is_configured: false,
-            #[cfg(feature = "layer-shell")]
+            #[cfg(feature = "wayland")]
             should_exit: false,
             time_origin: Instant::now(),
             frame_index: 0,

@@ -50,7 +50,7 @@ pub struct InteractionState {
     pub last_event: InteractionEvent,
     pub last_click: Option<(Instant, TrackId<'static>, Point)>,
     pub mouse_position: Point,
-    #[cfg(feature = "layer-shell")]
+    #[cfg(feature = "wayland")]
     pub last_hitbox_update: Instant,
     pub play_hitbox: Rect,
     pub track_hitboxes: HashMap<TrackId<'static>, Rect>,
@@ -69,7 +69,7 @@ impl Default for InteractionState {
             last_event: InteractionEvent::None,
             last_click: None,
             mouse_position: Point::default(),
-            #[cfg(feature = "layer-shell")]
+            #[cfg(feature = "wayland")]
             last_hitbox_update: Instant::now(),
             play_hitbox: Rect::default(),
             track_hitboxes: HashMap::new(),

@@ -8,7 +8,7 @@ use vello::{
 };
 use winit::{
     application::ApplicationHandler,
-    dpi::PhysicalSize,
+    dpi::{LogicalPosition, PhysicalSize},
     event::{ElementState, MouseButton, MouseScrollDelta, WindowEvent},
     event_loop::{ActiveEventLoop, EventLoop},
     window::{Window, WindowAttributes},
@@ -110,6 +110,10 @@ impl ApplicationHandler for WinitApp {
                     .with_title("Cantus")
                     .with_inner_size(size)
                     .with_transparent(true)
+                    .with_decorations(false)
+                    .with_active(false)
+                    .with_position(LogicalPosition::new(5.0, 5.0))
+                    .with_window_level(winit::window::WindowLevel::AlwaysOnTop)
                     .with_resizable(false),
             )
             .expect("failed to create window");
