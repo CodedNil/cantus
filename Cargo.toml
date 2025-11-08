@@ -46,7 +46,7 @@ ttf-parser = { version = "0.25.1", default-features = false, features = [
     "std",
     "variable-fonts",
 ] }
-rspotify = { version = "0.15.2", default-features = false, features = [
+rspotify = { version = "0.15.3", default-features = false, features = [
     "client-reqwest",
     "reqwest-rustls-tls",
     "cli",

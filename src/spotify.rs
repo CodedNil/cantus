@@ -252,7 +252,7 @@ pub async fn init() {
     tokio::spawn(polling_task());
 }
 
-/// Asynchronous task to poll MPRIS every 500ms and Spotify API every X seconds or on song change.
+/// Asynchronous task to poll MPRIS every 100ms and Spotify API every X seconds or on song change.
 async fn polling_task() {
     let mut last_mpris_track_id: Option<String> = None; // Local state for track ID
     let connection = Connection::session().await.ok();
@@ -282,12 +282,12 @@ async fn polling_task() {
 
         // --- Spotify API Polling Logic ---
         spotify_poll_counter += 1;
-        if spotify_poll_counter >= 4 || should_refresh_spotify {
+        if spotify_poll_counter >= 20 || should_refresh_spotify {
             spotify_poll_counter = 0; // Reset counter
             update_state_from_spotify().await;
         }
 
-        sleep(Duration::from_millis(500)).await;
+        sleep(Duration::from_millis(100)).await;
     }
 }
 

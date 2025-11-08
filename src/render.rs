@@ -46,6 +46,11 @@ const ANIMATION_DURATION: Duration = Duration::from_millis(3500);
 static PLAY_SVG: LazyLock<BezPath> =
     LazyLock::new(|| BezPath::from_svg(include_str!("../assets/play.path")).unwrap());
 
+#[derive(Default)]
+pub struct RenderState {
+    track_offset: f64,
+}
+
 #[derive(Clone)]
 pub struct FontEngine {
     font_data: FontData,
@@ -132,6 +137,16 @@ struct Particle {
     velocity: [f32; 2],
     color: usize,
     life: f32,
+}
+
+struct TrackRender<'a> {
+    track: &'a Track,
+    is_current: bool,
+    seconds_until_start: f64,
+    start_x: f64,
+    width: f64,
+    hitbox_range: (f64, f64),
+    art_only: bool,
 }
 
 /// Build the scene for rendering.
@@ -221,61 +236,95 @@ impl CantusApp {
             .collect();
 
         // Lerp the progress based on when the data was last updated, get the start time of the current track
-        let playback_elapsed = if playback_state.playing {
-            playback_state.last_updated.elapsed().as_millis() as f64
-        } else {
-            0.0
-        };
+        let playback_elapsed = f64::from(playback_state.progress)
+            + if playback_state.playing {
+                playback_state.last_updated.elapsed().as_millis() as f64
+            } else {
+                0.0
+            };
 
         // Lerp track start based on the target and current start time
-        let mut track_start_ms = -f64::from(playback_state.progress)
-            - playback_elapsed
+        let mut current_ms = -playback_elapsed
             - queue[..current_index]
                 .iter()
                 .map(|t| f64::from(t.milliseconds))
                 .sum::<f64>()
-            + drag_offset_ms;
-        if !self.interaction.dragging && (track_start_ms - self.track_start_ms).abs() > 200.0 {
-            track_start_ms = self.track_start_ms + (track_start_ms - self.track_start_ms) * 0.1;
+            + drag_offset_ms
+            - TRACK_SPACING_MS * current_index as f64;
+        let difference = current_ms - self.render_state.track_offset;
+        if !self.interaction.dragging && difference.abs() > 200.0 {
+            current_ms = self.render_state.track_offset + difference * 0.1;
         }
-        let track_move_speed = track_start_ms - self.track_start_ms;
-        self.track_start_ms = track_start_ms;
+        let track_move_speed = current_ms - self.render_state.track_offset;
+        self.render_state.track_offset = current_ms;
 
-        // Lerp track spacing based on the target and current spacing
-        let mut track_spacing = -TRACK_SPACING_MS * current_index as f64;
-        if !self.interaction.dragging && (track_spacing - self.track_spacing).abs() > 200.0 {
-            track_spacing = self.track_spacing + (track_spacing - self.track_spacing) * 0.1;
-        }
-        self.track_spacing = track_spacing;
-
-        // Iterate over the currently playing track followed by the queued tracks.
+        // Iterate over the tracks within the timeline.
+        let mut track_renders = Vec::with_capacity(queue.len());
         for track in queue {
-            let track_start_ms_spaced = track_start_ms + track_spacing;
-            if track_start_ms_spaced >= TIMELINE_END_MS {
-                break;
-            }
+            let track_start_ms = current_ms + TRACK_SPACING_MS;
+            let track_end_ms = track_start_ms + f64::from(track.milliseconds);
+            current_ms = track_end_ms;
 
-            let track_end_ms = track_start_ms_spaced + f64::from(track.milliseconds);
-            if track_end_ms <= TIMELINE_START_MS {
-                track_start_ms += f64::from(track.milliseconds);
-                track_spacing += TRACK_SPACING_MS;
-                continue;
-            }
+            // Queue up the tracks positions
+            let visible_start_px = track_start_ms.max(TIMELINE_START_MS) * px_per_ms;
+            let visible_end_px = track_end_ms.min(TIMELINE_END_MS) * px_per_ms;
+            let hitbox_range = (
+                (track_start_ms - TIMELINE_START_MS) * px_per_ms + history_width,
+                (track_end_ms - TIMELINE_START_MS) * px_per_ms + history_width,
+            );
 
-            // Draw the track, trimming to the visible window if it spills off either side.
+            let start_x = (visible_start_px - TIMELINE_START_MS * px_per_ms) + history_width;
+            let is_current = track_start_ms <= 0.0 && track_end_ms >= 0.0;
+            let seconds_until_start = (track_start_ms / 1000.0).abs();
+            let width = visible_end_px - visible_start_px;
+            track_renders.push(TrackRender {
+                track,
+                is_current,
+                seconds_until_start,
+                start_x,
+                width,
+                hitbox_range,
+                art_only: false,
+            });
+        }
+
+        // Sort out past tracks so they get a fixed width and stack
+        let mut current_px = 0.0;
+        let mut first_found = false;
+        let track_spacing = TRACK_SPACING_MS * px_per_ms;
+        for track_render in track_renders.iter_mut().rev() {
+            // If the end of the track (minus album width) is before the cropping zone
+            let distance_before =
+                history_width - (track_render.start_x + track_render.width - total_height);
+            if track_render.start_x + track_render.width - total_height <= history_width {
+                track_render.width = total_height;
+                track_render.start_x = current_px;
+                track_render.art_only = true;
+                current_px -= 20.0;
+                if !first_found {
+                    first_found = true;
+                    current_px = history_width - total_height - track_spacing;
+
+                    // Smooth out the snapping
+                    current_px -=
+                        (distance_before - (total_height - track_spacing * 2.0)).clamp(0.0, 20.0);
+                }
+            } else {
+                // Set the start of the track, this will be the closest to the left track before they start being cropped
+                current_px = track_render.start_x - total_height - track_spacing;
+            }
+        }
+
+        // Render the tracks
+        for track_render in &track_renders {
             self.draw_track(
                 device_id,
-                track,
+                track_render,
                 history_width,
-                track_start_ms_spaced,
-                track_end_ms,
                 px_per_ms,
                 total_height,
                 &playlists,
             );
-
-            track_start_ms += f64::from(track.milliseconds);
-            track_spacing += TRACK_SPACING_MS;
         }
 
         // Draw the particles
@@ -299,26 +348,20 @@ impl CantusApp {
     fn draw_track(
         &mut self,
         device_id: usize,
-        track: &Track,
+        track_render: &TrackRender,
         history_width: f64,
-        track_start_ms: f64,
-        track_end_ms: f64,
         px_per_ms: f64,
         height: f64,
         playlists: &HashMap<&str, &Playlist>,
     ) {
-        let is_current = track_start_ms <= 0.0 && track_end_ms >= 0.0;
-        let seconds_until_start = (track_start_ms / 1000.0).abs();
+        let track = track_render.track;
 
-        let visible_start_ms = track_start_ms.max(TIMELINE_START_MS);
-        let visible_end_ms = track_end_ms.min(TIMELINE_END_MS);
-        let pos_x = (visible_start_ms - TIMELINE_START_MS) * px_per_ms + history_width;
-        let width = (visible_end_ms - visible_start_ms) * px_per_ms;
+        let start_x = track_render.start_x;
+        let width = track_render.width;
         if width <= 0.0 {
             self.interaction.track_hitboxes.remove(&track.id);
             return;
         }
-        let uncropped_width = (track_end_ms - track_start_ms) * px_per_ms;
 
         // Fade out based on width
         let fade_alpha = if width < height {
@@ -328,28 +371,18 @@ impl CantusApp {
         };
 
         // How much of the width is to the left of the current position
-        let dark_width = if track_start_ms < 0.0 {
-            track_start_ms.max(TIMELINE_START_MS) * -px_per_ms
-        } else {
-            0.0
-        };
+        let dark_width = (-TIMELINE_START_MS * px_per_ms + history_width - start_x).max(0.0);
 
         // Add hitbox
-        let hitbox = Rect::new(
-            (track_start_ms - TIMELINE_START_MS) * px_per_ms + history_width,
-            0.0,
-            (track_end_ms - TIMELINE_START_MS) * px_per_ms + history_width,
-            height,
-        );
+        let hitbox = Rect::new(start_x, 0.0, start_x + width, height);
         self.interaction
             .track_hitboxes
-            .insert(track.id.clone(), hitbox);
-        // If dragging, set the drag target to this track
-        if self.interaction.dragging && is_current {
-            self.interaction.drag_track = Some((
-                track.id.clone(),
-                1.0 - track_end_ms / f64::from(track.milliseconds),
-            ));
+            .insert(track.id.clone(), (hitbox, track_render.hitbox_range));
+        // If dragging, set the drag target to this track, and the position within the track
+        if self.interaction.dragging && track_render.is_current {
+            let position_within_track = (start_x + dark_width - track_render.hitbox_range.0)
+                / (track_render.hitbox_range.1 - track_render.hitbox_range.0);
+            self.interaction.drag_track = Some((track.id.clone(), position_within_track));
         }
 
         let (Some(image), Some(track_data)) = (
@@ -360,24 +393,16 @@ impl CantusApp {
         };
 
         let rounding = 14.0 * self.scale_factor;
-        let buffer_ms = 20000.0;
-        let left_rounding = rounding
-            * lerp(
-                ((track_start_ms - (TIMELINE_START_MS - buffer_ms)) / buffer_ms).clamp(0.0, 1.0),
-                0.3,
-                1.0,
-            );
-        let right_rounding = rounding
-            * lerp(
-                ((track_end_ms - TIMELINE_END_MS) / buffer_ms).clamp(0.0, 1.0),
-                1.0,
-                0.3,
-            );
+        let buffer_px = 20.0;
+        let crop_left = start_x - track_render.hitbox_range.0;
+        let crop_right = track_render.hitbox_range.1 - (start_x + width);
+        let left_rounding = rounding * lerp((crop_left / buffer_px).clamp(0.0, 1.0), 1.0, 0.3);
+        let right_rounding = rounding * lerp((crop_right / buffer_px).clamp(0.0, 1.0), 1.0, 0.3);
         let radii =
             RoundedRectRadii::new(left_rounding, right_rounding, right_rounding, left_rounding);
 
         // --- BACKGROUND ---
-        if fade_alpha >= 1.0 {
+        if !track_render.art_only && fade_alpha >= 0.0 {
             let bundle = self
                 .render_devices
                 .get_mut(&device_id)
@@ -391,35 +416,95 @@ impl CantusApp {
                 self.frame_index,
             );
 
+            // Don't need to render all the way to the edge since the album art is at the right edge
+            let background_width = width - height * 0.25;
             self.scene.push_clip_layer(
-                Affine::translate((pos_x, 0.0)),
-                &RoundedRect::new(
-                    0.0,
-                    0.0,
-                    width - height * 0.25, // Don't need to render all the way to the edge since the album art is at the right edge
-                    height,
-                    radii,
-                ),
+                Affine::translate((start_x, 0.0)),
+                &RoundedRect::new(0.0, 0.0, background_width, height, radii),
             );
             let image_width = f64::from(background_image.width);
-            let background_aspect_ratio = (width - height * 0.5) / height;
+            let background_aspect_ratio = background_width / height;
             self.scene.fill(
                 Fill::EvenOdd,
-                Affine::translate((pos_x, 0.0))
-                    * Affine::scale((uncropped_width - height * 0.25) / image_width),
-                &ImageBrush::new(background_image),
+                Affine::translate((start_x, 0.0)) * Affine::scale(background_width / image_width),
+                &ImageBrush::new(background_image).with_alpha(fade_alpha),
                 None,
                 &Rect::new(0.0, 0.0, image_width, image_width * background_aspect_ratio),
             );
             self.scene.pop_layer();
         }
 
+        // --- Add a dark overlay for the dark_width, and expanding circles for animating clicks ---
+        if !track_render.art_only && dark_width > 0.0
+            || track_render.is_current
+            || self.interaction.last_click.is_some()
+        {
+            self.scene.push_clip_layer(
+                Affine::translate((start_x, 0.0)),
+                &RoundedRect::new(0.0, 0.0, width, height, radii),
+            );
+
+            if dark_width > 0.0 {
+                self.scene.fill(
+                    Fill::EvenOdd,
+                    Affine::translate((start_x, 0.0)),
+                    Color::from_rgb8(0, 0, 0).with_alpha(0.5 * fade_alpha),
+                    None,
+                    &Rect::new(0.0, 0.0, dark_width, height),
+                );
+            }
+
+            // During animations add an expanding circle behind the line
+            if track_render.is_current {
+                let anim_lerp = match self.interaction.last_event {
+                    InteractionEvent::Pause(start) | InteractionEvent::Play(start) => {
+                        start.elapsed().as_millis() as f64
+                            / (ANIMATION_DURATION.as_millis() as f64 * 0.3)
+                    }
+                    InteractionEvent::None
+                    | InteractionEvent::PauseHover(_)
+                    | InteractionEvent::PlayHover(_) => 1.0,
+                };
+                if anim_lerp < 1.0 {
+                    self.scene.fill(
+                        Fill::EvenOdd,
+                        Affine::translate((
+                            -TIMELINE_START_MS * px_per_ms + history_width,
+                            height * 0.5,
+                        )),
+                        Color::from_rgb8(255, 224, 210)
+                            .with_alpha(1.0 - (anim_lerp + 0.4).min(1.0) as f32),
+                        None,
+                        &Circle::new(Point::default(), 500.0 * anim_lerp),
+                    );
+                }
+            }
+            // After a click, add an expanding circle behind the click point
+            if let Some((start, track_id, point)) = &self.interaction.last_click
+                && track_id == &track.id
+                && let anim_lerp = start.elapsed().as_millis() as f64
+                    / (ANIMATION_DURATION.as_millis() as f64 * 0.3)
+                && anim_lerp < 1.0
+            {
+                self.scene.fill(
+                    Fill::EvenOdd,
+                    Affine::translate((start_x + point.x, point.y)),
+                    Color::from_rgb8(255, 224, 210)
+                        .with_alpha(1.0 - (anim_lerp + 0.4).min(1.0) as f32),
+                    None,
+                    &Circle::new(Point::default(), 500.0 * anim_lerp),
+                );
+            }
+
+            self.scene.pop_layer();
+        }
+
         // --- ALBUM ART SQUARE ---
         if fade_alpha >= 0.0 {
             let image_height = f64::from(image.height);
-            let transform = Affine::translate((pos_x + width - height, 0.0));
+            let transform = Affine::translate((start_x + width - height, 0.0));
             self.scene.push_clip_layer(
-                Affine::translate((pos_x, 0.0)),
+                Affine::translate((start_x, 0.0)),
                 &RoundedRect::new(0.0, 0.0, width, height, radii),
             );
             self.scene.fill(
@@ -439,10 +524,10 @@ impl CantusApp {
         }
 
         // --- TEXT ---
-        if fade_alpha >= 1.0 {
+        if !track_render.art_only && fade_alpha >= 1.0 {
             // Clipping mask to the edge of the background rectangle, shrunk by a margin
             self.scene.push_clip_layer(
-                Affine::translate((pos_x, 0.0)),
+                Affine::translate((start_x, 0.0)),
                 &RoundedRect::new(
                     4.0,
                     4.0,
@@ -452,8 +537,8 @@ impl CantusApp {
                 ),
             );
             // Get available width for text
-            let text_start_left = pos_x + dark_width + 12.0;
-            let text_start_right = pos_x + width - height - 8.0;
+            let text_start_left = start_x + 12.0;
+            let text_start_right = start_x + width - height - 8.0;
             let available_width = (text_start_right - text_start_left).max(0.0);
 
             let text_brush = Color::from_rgb8(240, 240, 240);
@@ -499,20 +584,20 @@ impl CantusApp {
             let artist_layout = self.layout_text(artist_text, font_size, font_weight);
             let dot_text = "\u{2004}•\u{2004}"; // Use thin spaces on either side of the bullet point
             let dot_layout = self.layout_text(dot_text, font_size, font_weight);
-            let time_text = if seconds_until_start >= 60.0 {
+            let time_text = if track_render.seconds_until_start >= 60.0 {
                 format!(
                     "{}m{}s",
-                    (seconds_until_start / 60.0).floor(),
-                    (seconds_until_start % 60.0).floor()
+                    (track_render.seconds_until_start / 60.0).floor(),
+                    (track_render.seconds_until_start % 60.0).floor()
                 )
             } else {
-                format!("{}s", seconds_until_start.round())
+                format!("{}s", track_render.seconds_until_start.round())
             };
             let time_layout = self.layout_text(&time_text, font_size, font_weight);
 
             let width_ratio =
                 available_width / (artist_layout.width + dot_layout.width + time_layout.width);
-            if width_ratio <= 1.0 || !is_current {
+            if width_ratio <= 1.0 || !track_render.is_current {
                 let layout = self.layout_text(
                     &format!("{time_text}{dot_text}{artist_text}"),
                     font_size * width_ratio.clamp(0.8, 1.0),
@@ -537,7 +622,7 @@ impl CantusApp {
             } else {
                 self.draw_text(
                     time_layout,
-                    pos_x + dark_width + 12.0,
+                    start_x + 12.0,
                     text_height,
                     Align::Start,
                     text_brush,
@@ -555,92 +640,14 @@ impl CantusApp {
             self.scene.pop_layer();
         }
 
-        // --- Add a dark overlay for the dark_width ---
-        if dark_width > 0.0 || is_current || self.interaction.last_click.is_some() {
-            self.scene.push_clip_layer(
-                Affine::translate((pos_x, 0.0)),
-                &RoundedRect::new(0.0, 0.0, width, height, radii),
-            );
-
-            if dark_width > 0.0 {
-                self.scene.fill(
-                    Fill::EvenOdd,
-                    Affine::translate((pos_x, 0.0)),
-                    Color::from_rgb8(0, 0, 0).with_alpha(0.5 * fade_alpha),
-                    None,
-                    &Rect::new(0.0, 0.0, dark_width, height),
-                );
-            }
-
-            // During animations add an expanding circle behind the line
-            if is_current {
-                let anim_lerp = match self.interaction.last_event {
-                    InteractionEvent::Pause(start) | InteractionEvent::Play(start) => {
-                        start.elapsed().as_millis() as f64
-                            / (ANIMATION_DURATION.as_millis() as f64 * 0.3)
-                    }
-                    InteractionEvent::None
-                    | InteractionEvent::PauseHover(_)
-                    | InteractionEvent::PlayHover(_) => 1.0,
-                };
-                if anim_lerp < 1.0 {
-                    self.scene.fill(
-                        Fill::EvenOdd,
-                        Affine::translate((pos_x + dark_width, height * 0.5)),
-                        Color::from_rgb8(255, 224, 210)
-                            .with_alpha(1.0 - (anim_lerp + 0.4).min(1.0) as f32),
-                        None,
-                        &Circle::new(Point::default(), 500.0 * anim_lerp),
-                    );
-                }
-            }
-            // After a click, add an expanding circle behind the click point
-            if is_current
-                && let anim_lerp = match self.interaction.last_event {
-                    InteractionEvent::Pause(start) | InteractionEvent::Play(start) => {
-                        start.elapsed().as_millis() as f64
-                            / (ANIMATION_DURATION.as_millis() as f64 * 0.3)
-                    }
-                    InteractionEvent::None
-                    | InteractionEvent::PauseHover(_)
-                    | InteractionEvent::PlayHover(_) => 1.0,
-                }
-                && anim_lerp < 1.0
-            {
-                self.scene.fill(
-                    Fill::EvenOdd,
-                    Affine::translate((pos_x + dark_width, height * 0.5)),
-                    Color::from_rgb8(255, 224, 210)
-                        .with_alpha(1.0 - (anim_lerp + 0.4).min(1.0) as f32),
-                    None,
-                    &Circle::new(Point::default(), 500.0 * anim_lerp),
-                );
-            }
-            if let Some((start, track_id, point)) = &self.interaction.last_click
-                && track_id == &track.id
-                && let anim_lerp = start.elapsed().as_millis() as f64
-                    / (ANIMATION_DURATION.as_millis() as f64 * 0.3)
-                && anim_lerp < 1.0
-            {
-                self.scene.fill(
-                    Fill::EvenOdd,
-                    Affine::translate((pos_x + point.x, point.y)),
-                    Color::from_rgb8(255, 224, 210)
-                        .with_alpha(1.0 - (anim_lerp + 0.4).min(1.0) as f32),
-                    None,
-                    &Circle::new(Point::default(), 500.0 * anim_lerp),
-                );
-            }
-
-            self.scene.pop_layer();
-        }
-
         // Expand the hitbox vertically so it includes the playlist buttons
-        let hovered = !self.interaction.dragging
-            && hitbox
-                .inflate(0.0, 20.0)
-                .contains(self.interaction.mouse_position);
-        self.draw_playlist_buttons(track, hovered, playlists, width, height, pos_x);
+        if !track_render.art_only {
+            let hovered = !self.interaction.dragging
+                && hitbox
+                    .inflate(0.0, 20.0)
+                    .contains(self.interaction.mouse_position);
+            self.draw_playlist_buttons(track, hovered, playlists, width, height, start_x);
+        }
     }
 
     /// Creates the text layout for a single-line string.

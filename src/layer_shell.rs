@@ -302,13 +302,20 @@ impl LayerShellApp {
         };
 
         let region = compositor.create_region(qhandle, ());
-        for rect in self.cantus.interaction.track_hitboxes.values().chain(
-            self.cantus
-                .interaction
-                .icon_hitboxes
-                .iter()
-                .map(|hitbox| &hitbox.rect),
-        ) {
+        for rect in self
+            .cantus
+            .interaction
+            .track_hitboxes
+            .values()
+            .map(|(rect, _)| rect)
+            .chain(
+                self.cantus
+                    .interaction
+                    .icon_hitboxes
+                    .iter()
+                    .map(|hitbox| &hitbox.rect),
+            )
+        {
             region.add(
                 (rect.x0 / self.cantus.scale_factor).round() as i32,
                 (rect.y0 / self.cantus.scale_factor).round() as i32,

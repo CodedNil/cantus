@@ -53,7 +53,7 @@ pub struct InteractionState {
     #[cfg(feature = "wayland")]
     pub last_hitbox_update: Instant,
     pub play_hitbox: Rect,
-    pub track_hitboxes: HashMap<TrackId<'static>, Rect>,
+    pub track_hitboxes: HashMap<TrackId<'static>, (Rect, (f64, f64))>,
     pub icon_hitboxes: Vec<IconHitbox>,
     pub mouse_down: bool,
     pub drag_origin: Option<Point>,
@@ -151,10 +151,10 @@ impl InteractionState {
         }
 
         // Seek track
-        if let Some((track_id, track_rect)) = self
+        if let Some((track_id, (track_rect, (track_range_a, track_range_b)))) = self
             .track_hitboxes
             .iter()
-            .find(|(_, track_rect)| track_rect.contains(mouse_pos))
+            .find(|(_, (track_rect, _))| track_rect.contains(mouse_pos))
         {
             self.last_click = Some((
                 Instant::now(),
@@ -167,7 +167,7 @@ impl InteractionState {
             let position = if mouse_pos.x < (HISTORY_WIDTH + 20.0) * scale_factor {
                 0.0
             } else {
-                (mouse_pos.x - track_rect.x0) / track_rect.width()
+                (mouse_pos.x - track_range_a) / (track_range_b - track_range_a)
             };
             tokio::spawn(async move {
                 skip_to_track(track_id, position, false).await;

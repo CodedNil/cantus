@@ -1,7 +1,7 @@
 use crate::{
     background::WarpBackground,
     interaction::InteractionState,
-    render::{FontEngine, ParticlesState},
+    render::{FontEngine, ParticlesState, RenderState},
 };
 use anyhow::Result;
 use std::{
@@ -81,8 +81,7 @@ struct CantusApp {
     should_exit: bool,
     time_origin: Instant,
     frame_index: u64,
-    track_start_ms: f64,
-    track_spacing: f64,
+    render_state: RenderState,
     interaction: InteractionState,
     particles: ParticlesState,
 }
@@ -108,8 +107,7 @@ impl Default for CantusApp {
             should_exit: false,
             time_origin: Instant::now(),
             frame_index: 0,
-            track_start_ms: 0.0,
-            track_spacing: 0.0,
+            render_state: RenderState::default(),
             interaction: InteractionState::default(),
             particles: ParticlesState::default(),
         }
