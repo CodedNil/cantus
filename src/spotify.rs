@@ -74,7 +74,7 @@ pub const RATING_PLAYLISTS: [&str; 11] = [
 static HTTP_CLIENT: LazyLock<Client> = LazyLock::new(Client::new);
 pub static SPOTIFY_CLIENT: OnceCell<AuthCodeSpotify> = OnceCell::const_new();
 
-#[derive(Debug, Clone)]
+#[derive(Debug)]
 pub struct PlaybackState {
     pub is_local: bool, // Whether we are playing spotify on the local device
     pub last_updated: Instant,
@@ -89,7 +89,7 @@ pub struct PlaybackState {
     pub playlists: Vec<Playlist>,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug)]
 pub struct Track {
     pub id: TrackId<'static>,
     pub title: String,
@@ -99,7 +99,7 @@ pub struct Track {
     pub milliseconds: u32,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug)]
 pub struct TrackData {
     /// Simplified color palette (RGBA, alpha = percentage 0-100).
     pub primary_colors: Vec<[u8; 4]>,
@@ -107,7 +107,7 @@ pub struct TrackData {
     pub palette_image: ImageData,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug)]
 pub struct Playlist {
     pub id: PlaylistId<'static>,
     pub name: String,
@@ -416,7 +416,8 @@ async fn update_state_from_spotify() {
     } else {
         return;
     };
-    let new_queue: Vec<Track> = std::iter::once(current_track.clone())
+    let current_title = current_track.title.clone();
+    let new_queue: Vec<Track> = std::iter::once(current_track)
         .chain(queue.queue.into_iter().filter_map(|item| match item {
             PlayableItem::Track(track) => Some(Track::from_rspotify(track)),
             PlayableItem::Episode(_) | PlayableItem::Unknown(_) => None,
@@ -480,10 +481,7 @@ async fn update_state_from_spotify() {
     // Update the playback state
     update_playback_state(|state| {
         if state.current_context == current_playback.context
-            && let Some(new_index) = state
-                .queue
-                .iter()
-                .position(|track| track.title == current_track.title)
+            && let Some(new_index) = state.queue.iter().position(|t| t.title == current_title)
         {
             // Delete everything past the new_index, and append the new tracks at the end
             state.queue_index = new_index;
@@ -589,23 +587,28 @@ async fn poll_playlists() {
             }
         })
         .collect();
-    // Push the data to the global state
-    update_playback_state(|state| {
-        state.playlists.clone_from(&playlists);
-    });
 
     // Download all the playlist images
+    let image_urls = playlists
+        .iter()
+        .map(|p| p.image_url.clone())
+        .collect::<Vec<_>>();
     tokio::spawn(async move {
         let mut set = JoinSet::new();
-        for url in playlists.iter().map(|p| p.image_url.clone()) {
+        for url in image_urls {
             set.spawn(async move {
-                if let Err(err) = ensure_image_cached(url.as_str()).await {
+                if let Err(err) = ensure_image_cached(&url).await {
                     warn!("failed to cache image {url}: {err}");
                 }
             });
         }
         // Concurrently run all tasks
         while set.join_next().await.is_some() {}
+    });
+
+    // Push the data to the global state
+    update_playback_state(|state| {
+        state.playlists = playlists;
     });
 
     // Spawn loop to collect spotify playlist tracks

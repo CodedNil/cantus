@@ -51,7 +51,6 @@ pub struct RenderState {
     track_offset: f64,
 }
 
-#[derive(Clone)]
 pub struct FontEngine {
     font_data: FontData,
     base_face: Face<'static>,

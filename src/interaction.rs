@@ -38,7 +38,6 @@ impl Drop for SpotifyInteractionToken {
     }
 }
 
-#[derive(Clone)]
 pub struct IconHitbox {
     pub rect: Rect,
     pub track_id: TrackId<'static>,
@@ -567,71 +566,58 @@ async fn update_star_rating(track_id: TrackId<'static>, rating_slot: usize) {
     let Some(rating_name) = RATING_PLAYLISTS.get(rating_slot) else {
         return;
     };
-    let filtered_playlists = PLAYBACK_STATE
-        .read()
-        .playlists
-        .iter()
-        .enumerate()
-        .filter(|(_, p)| RATING_PLAYLISTS.contains(&p.name.as_str()))
-        .map(|(index, p)| (index, p.clone()))
-        .collect::<Vec<_>>();
-    let spotify_client = SPOTIFY_CLIENT.get().unwrap();
 
-    let mut target_playlist: Option<(usize, Playlist)> = None;
-    let track_playable = PlayableId::Track(track_id.clone());
-    for (playlist_idx, playlist) in filtered_playlists {
-        if playlist.name == *rating_name {
-            target_playlist = Some((playlist_idx, playlist));
-            continue;
+    let mut playlists_to_remove_from = Vec::new();
+    let mut playlists_to_add_to = Vec::new();
+    {
+        let mut write_state = PLAYBACK_STATE.write();
+        write_state.last_interaction = Instant::now();
+
+        // Remove tracks from existing playlists
+        for playlist in write_state.playlists.iter_mut().filter(|playlist| {
+            RATING_PLAYLISTS.contains(&playlist.name.as_str())
+                && playlist.name != *rating_name
+                && playlist.tracks.contains(&track_id)
+        }) {
+            playlist.tracks.remove(&track_id);
+            playlists_to_remove_from.push((playlist.id.clone(), playlist.name.clone()));
         }
-        if !playlist.tracks.contains(&track_id) {
-            continue;
+
+        // Add the track to the target playlist if it's not already there
+        for playlist in write_state.playlists.iter_mut().filter(|playlist| {
+            playlist.name == *rating_name && !playlist.tracks.contains(&track_id)
+        }) {
+            info!(
+                "Adding track {track_id} to rating playlist {}",
+                playlist.name
+            );
+            playlist.tracks.insert(track_id.clone());
+            playlists_to_add_to.push((playlist.id.clone(), playlist.name.clone()));
         }
-        info!(
-            "Removing track {track_id} from rating playlist {}",
-            playlist.name
-        );
-        update_playback_state(|state| {
-            state.playlists[playlist_idx].tracks.remove(&track_id);
-            state.last_interaction = Instant::now();
-        });
+    }
+
+    // Make the changes
+    let spotify_client = SPOTIFY_CLIENT.get().unwrap();
+    for (playlist_id, playlist_name) in playlists_to_remove_from {
+        info!("Removing track {track_id} from rating playlist {playlist_name}");
         if let Err(err) = spotify_client
             .playlist_remove_all_occurrences_of_items(
-                playlist.id.clone(),
-                [track_playable.clone()],
+                playlist_id,
+                [PlayableId::Track(track_id.clone())],
                 None,
             )
             .await
         {
-            error!(
-                "Failed to remove track {track_id} from rating playlist {}: {err}",
-                playlist.name
-            );
+            error!("Failed to remove track {track_id} from rating playlist {playlist_name}: {err}");
         }
     }
-
-    // Add the track to the target playlist if it's not already there
-    if let Some((target_playlist_idx, target_playlist)) = target_playlist
-        && !target_playlist.tracks.contains(&track_id)
-    {
-        info!(
-            "Adding track {track_id} to rating playlist {}",
-            target_playlist.name
-        );
-        update_playback_state(|state| {
-            state.playlists[target_playlist_idx]
-                .tracks
-                .insert(track_id.clone());
-            state.last_interaction = Instant::now();
-        });
+    for (playlist_id, playlist_name) in playlists_to_add_to {
+        info!("Adding track {track_id} to rating playlist {playlist_name}");
         if let Err(err) = spotify_client
-            .playlist_add_items(target_playlist.id.clone(), [track_playable], None)
+            .playlist_add_items(playlist_id, [PlayableId::Track(track_id.clone())], None)
             .await
         {
-            error!(
-                "Failed to add track {track_id} to rating playlist {}: {err}",
-                target_playlist.name
-            );
+            error!("Failed to add track {track_id} to rating playlist {playlist_name}: {err}");
         }
     }
 
@@ -673,21 +659,27 @@ async fn toggle_playlist_membership(track_id: TrackId<'static>, playlist_id: Pla
     let Some(_guard) = try_acquire_spotify_guard() else {
         return;
     };
-    let Some((playlist_idx, playlist)) = PLAYBACK_STATE
+    let Some((playlist_idx, (playlist_id, playlist_name, contained))) = PLAYBACK_STATE
         .read()
         .playlists
         .iter()
         .enumerate()
         .find(|(_, p)| p.id == playlist_id)
-        .map(|(idx, playlist)| (idx, playlist.clone()))
+        .map(|(idx, playlist)| {
+            (
+                idx,
+                (
+                    playlist.id.clone(),
+                    playlist.name.clone(),
+                    playlist.tracks.contains(&track_id),
+                ),
+            )
+        })
     else {
         warn!("Playlist {playlist_id} not found while toggling membership for track {track_id}");
         return;
     };
 
-    let playlist_id = playlist.id.clone();
-    let playlist_name = playlist.name.clone();
-    let contained = playlist.tracks.contains(&track_id);
     let track_playable = PlayableId::Track(track_id.clone());
 
     info!(
