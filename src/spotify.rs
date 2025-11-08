@@ -50,6 +50,7 @@ pub static PLAYBACK_STATE: LazyLock<Arc<RwLock<PlaybackState>>> = LazyLock::new(
     Arc::new(RwLock::new(PlaybackState {
         is_local: false,
         last_updated: Instant::now(),
+        last_interaction: Instant::now(),
         playing: false,
         shuffle: false,
         progress: 0,
@@ -77,6 +78,7 @@ pub static SPOTIFY_CLIENT: OnceCell<AuthCodeSpotify> = OnceCell::const_new();
 pub struct PlaybackState {
     pub is_local: bool, // Whether we are playing spotify on the local device
     pub last_updated: Instant,
+    pub last_interaction: Instant,
     pub playing: bool,
     pub shuffle: bool,
     pub progress: u32,
@@ -379,11 +381,19 @@ async fn update_state_from_mpris(
 
 /// Pulls the current playback queue and status from the Spotify Web API and updates shared state.
 async fn update_state_from_spotify() {
+    // Wait if we have recently interacted with spotify
+    {
+        let min_duration = Duration::from_millis(500);
+        let mut last_interaction = PLAYBACK_STATE.read().last_interaction.elapsed();
+        while last_interaction < min_duration {
+            tokio::time::sleep(min_duration - last_interaction).await;
+            last_interaction = PLAYBACK_STATE.read().last_interaction.elapsed();
+        }
+    }
+
     // Fetch current playback and queue concurrently
     let request_start = Instant::now();
     let spotify_client = SPOTIFY_CLIENT.get().unwrap();
-
-    // Get one playlists tracks per loop to keep them fresh
     let (current_playback, queue) = match tokio::try_join!(
         spotify_client.current_playback(None, None::<Vec<&AdditionalType>>),
         spotify_client.current_user_queue(),

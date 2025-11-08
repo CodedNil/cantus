@@ -481,23 +481,28 @@ async fn skip_to_track(track_id: TrackId<'static>, position: f64, always_seek: b
     };
 
     let (queue_index, position_in_queue, ms_lookup) = {
-        let playback_state = PLAYBACK_STATE.read();
-        let queue_index = playback_state.queue_index;
-        let Some(position_in_queue) = playback_state.queue.iter().position(|t| t.id == track_id)
-        else {
+        let state = PLAYBACK_STATE.read();
+        let queue_index = state.queue_index;
+        let Some(position_in_queue) = state.queue.iter().position(|t| t.id == track_id) else {
             error!("Track not found in queue");
             return;
         };
-        let ms_lookup = playback_state
+        let ms_lookup = state
             .queue
             .iter()
             .map(|playlist| playlist.milliseconds)
             .collect::<Vec<_>>();
-        drop(playback_state);
+        drop(state);
         (queue_index, position_in_queue, ms_lookup)
     };
     // Skip or rewind to the track
     if queue_index != position_in_queue {
+        update_playback_state(|state| {
+            state.queue_index = position_in_queue;
+            state.progress = 0;
+            state.last_updated = Instant::now();
+            state.last_interaction = Instant::now();
+        });
         let forward = queue_index < position_in_queue;
         let skips = if forward {
             position_in_queue - queue_index
@@ -515,6 +520,12 @@ async fn skip_to_track(track_id: TrackId<'static>, position: f64, always_seek: b
             } else {
                 client.previous_track(None).await
             };
+            update_playback_state(|state| {
+                state.queue_index = position_in_queue;
+                state.progress = 0;
+                state.last_updated = Instant::now();
+                state.last_interaction = Instant::now();
+            });
             if let Err(err) = result {
                 error!("Failed to skip to track: {err}");
             }
@@ -535,6 +546,7 @@ async fn skip_to_track(track_id: TrackId<'static>, position: f64, always_seek: b
         update_playback_state(|state| {
             state.progress = milliseconds.round() as u32;
             state.last_updated = Instant::now();
+            state.last_interaction = Instant::now();
         });
         if let Err(err) = SPOTIFY_CLIENT
             .get()
@@ -581,6 +593,7 @@ async fn update_star_rating(track_id: TrackId<'static>, rating_slot: usize) {
         );
         update_playback_state(|state| {
             state.playlists[playlist_idx].tracks.remove(&track_id);
+            state.last_interaction = Instant::now();
         });
         if let Err(err) = spotify_client
             .playlist_remove_all_occurrences_of_items(
@@ -609,6 +622,7 @@ async fn update_star_rating(track_id: TrackId<'static>, rating_slot: usize) {
             state.playlists[target_playlist_idx]
                 .tracks
                 .insert(track_id.clone());
+            state.last_interaction = Instant::now();
         });
         if let Err(err) = spotify_client
             .playlist_add_items(target_playlist.id.clone(), [track_playable], None)
@@ -671,7 +685,6 @@ async fn toggle_playlist_membership(track_id: TrackId<'static>, playlist_id: Pla
         return;
     };
 
-    let spotify_client = SPOTIFY_CLIENT.get().unwrap();
     let playlist_id = playlist.id.clone();
     let playlist_name = playlist.name.clone();
     let contained = playlist.tracks.contains(&track_id);
@@ -690,8 +703,10 @@ async fn toggle_playlist_membership(track_id: TrackId<'static>, playlist_id: Pla
         } else {
             playlist_tracks.insert(track_id.clone());
         }
+        state.last_interaction = Instant::now();
     });
 
+    let spotify_client = SPOTIFY_CLIENT.get().unwrap();
     let result = if contained {
         spotify_client.playlist_remove_all_occurrences_of_items(
             playlist_id.clone(),
@@ -716,7 +731,10 @@ async fn toggle_playing(play: bool) {
         return;
     };
 
-    info!("{} current track", if play { "Playing" } else { "Pausing" },);
+    info!("{} current track", if play { "Playing" } else { "Pausing" });
+    update_playback_state(|state| {
+        state.last_interaction = Instant::now();
+    });
     let spotify_client = SPOTIFY_CLIENT.get().unwrap();
     if play {
         if let Err(err) = spotify_client.resume_playback(None, None).await {
@@ -734,6 +752,9 @@ async fn set_volume(volume: u8) {
     };
 
     info!("Setting volume to {}%", volume);
+    update_playback_state(|state| {
+        state.last_interaction = Instant::now();
+    });
     let spotify_client = SPOTIFY_CLIENT.get().unwrap();
     if let Err(err) = spotify_client.volume(volume, None).await {
         error!("Failed to set volume: {err}");
