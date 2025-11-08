@@ -437,13 +437,9 @@ async fn update_state_from_spotify() {
         .collect::<HashSet<_>>();
     if !missing_urls.is_empty() || !missing_artists.is_empty() {
         tokio::spawn(async move {
-            // Grab artists in one go from spotify
-            let Ok(artists) = spotify_client.artists(missing_artists).await else {
-                return;
-            };
+            let mut set = JoinSet::new();
 
             // Start downloading missing album images
-            let mut set = JoinSet::new();
             for url in missing_urls {
                 set.spawn(async move {
                     if let Err(err) = ensure_image_cached(url.as_str()).await {
@@ -453,19 +449,24 @@ async fn update_state_from_spotify() {
             }
 
             // Cache artists, and download images
-            for artist in artists {
-                let artist_image = artist
-                    .images
-                    .into_iter()
-                    .min_by_key(|img| img.width)
-                    .unwrap();
-                ARTIST_DATA_CACHE.insert(artist.id, artist_image.url.clone());
-                set.spawn(async move {
-                    let url = artist_image.url.clone();
-                    if let Err(err) = ensure_image_cached(url.as_str()).await {
-                        warn!("failed to cache image {url}: {err}");
-                    }
-                });
+            if !missing_artists.is_empty() {
+                let Ok(artists) = spotify_client.artists(missing_artists).await else {
+                    return;
+                };
+                for artist in artists {
+                    let artist_image = artist
+                        .images
+                        .into_iter()
+                        .min_by_key(|img| img.width)
+                        .unwrap();
+                    ARTIST_DATA_CACHE.insert(artist.id, artist_image.url.clone());
+                    set.spawn(async move {
+                        let url = artist_image.url.clone();
+                        if let Err(err) = ensure_image_cached(url.as_str()).await {
+                            warn!("failed to cache image {url}: {err}");
+                        }
+                    });
+                }
             }
 
             // Concurrently run all tasks

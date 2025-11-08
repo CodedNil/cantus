@@ -300,14 +300,14 @@ impl CantusApp {
                 track_render.width = total_height;
                 track_render.start_x = current_px;
                 track_render.art_only = true;
-                current_px -= 20.0;
+                current_px -= 30.0;
                 if !first_found {
                     first_found = true;
                     current_px = history_width - total_height - track_spacing;
 
                     // Smooth out the snapping
                     current_px -=
-                        (distance_before - (total_height - track_spacing * 2.0)).clamp(0.0, 20.0);
+                        (distance_before - (total_height - track_spacing * 2.0)).clamp(0.0, 30.0);
                 }
             } else {
                 // Set the start of the track, this will be the closest to the left track before they start being cropped

@@ -5,9 +5,8 @@ use crate::{
 use anyhow::Result;
 use auto_palette::Palette;
 use bytemuck::{Pod, Zeroable};
-use image::{Pixel, RgbaImage};
+use image::{GrayImage, LumaA, RgbaImage};
 use itertools::Itertools;
-use orx_parallel::{IntoParIter, ParIter};
 use rand::{Rng, SeedableRng, rngs::SmallRng};
 use std::{
     collections::{HashMap, hash_map::DefaultHasher},
@@ -46,20 +45,28 @@ const PALETTE_STROKES_PER_PASS: usize = 16;
 
 const STALE_FRAME_BUDGET: u64 = 600;
 
-static BRUSHES: LazyLock<[RgbaImage; 5]> = LazyLock::new(|| {
-    let bytes = (
-        include_bytes!("../assets/brushes/brush1.png"),
-        include_bytes!("../assets/brushes/brush2.png"),
-        include_bytes!("../assets/brushes/brush3.png"),
-        include_bytes!("../assets/brushes/brush4.png"),
-        include_bytes!("../assets/brushes/brush5.png"),
-    );
+static BRUSHES: LazyLock<[GrayImage; 5]> = LazyLock::new(|| {
+    // Helper function to load and extract the alpha channel
+    let load_and_extract_alpha = |bytes: &[u8]| -> GrayImage {
+        let luma_alpha_image: image::ImageBuffer<LumaA<u8>, Vec<u8>> =
+            image::load_from_memory(bytes).unwrap().to_luma_alpha8();
+        GrayImage::from_raw(
+            luma_alpha_image.width(),
+            luma_alpha_image.height(),
+            luma_alpha_image
+                .pixels()
+                .map(|p| p.0[1]) // p.0 is the array [Luma, Alpha]. We take index 1 (Alpha).
+                .collect(),
+        )
+        .expect("Failed to create GrayImage from extracted alpha data")
+    };
+
     [
-        image::load_from_memory(bytes.0).unwrap().to_rgba8(),
-        image::load_from_memory(bytes.1).unwrap().to_rgba8(),
-        image::load_from_memory(bytes.2).unwrap().to_rgba8(),
-        image::load_from_memory(bytes.3).unwrap().to_rgba8(),
-        image::load_from_memory(bytes.4).unwrap().to_rgba8(),
+        load_and_extract_alpha(include_bytes!("../assets/brushes/brush1.png")),
+        load_and_extract_alpha(include_bytes!("../assets/brushes/brush2.png")),
+        load_and_extract_alpha(include_bytes!("../assets/brushes/brush3.png")),
+        load_and_extract_alpha(include_bytes!("../assets/brushes/brush4.png")),
+        load_and_extract_alpha(include_bytes!("../assets/brushes/brush5.png")),
     ]
 });
 
@@ -404,7 +411,7 @@ pub fn update_color_palettes() -> Result<()> {
                         .unwrap(),
                         artist_new_width,
                         height,
-                        image::imageops::FilterType::Triangle,
+                        image::imageops::FilterType::Nearest,
                     );
                     image::imageops::overlay(
                         &mut new_img,
@@ -456,27 +463,21 @@ pub fn update_color_palettes() -> Result<()> {
     }
     drop(state);
 
-    let generated_data: Vec<_> = pending_palettes
-        .into_par()
-        .map(|(track_id, primary_colors, palette_seed)| {
-            let palette_image = ImageData {
-                data: Blob::from(generate_palette_image(&primary_colors, palette_seed)),
-                format: ImageFormat::Rgba8,
-                alpha_type: ImageAlphaType::Alpha,
-                width: PALETTE_IMAGE_WIDTH,
-                height: PALETTE_IMAGE_HEIGHT,
-            };
-            (
-                track_id,
-                TrackData {
-                    primary_colors,
-                    palette_image,
-                },
-            )
-        })
-        .collect();
-    for (track_id, track_data) in generated_data {
-        TRACK_DATA_CACHE.insert(track_id, track_data);
+    for (track_id, primary_colors, palette_seed) in pending_palettes {
+        let palette_image = ImageData {
+            data: Blob::from(generate_palette_image(&primary_colors, palette_seed)),
+            format: ImageFormat::Rgba8,
+            alpha_type: ImageAlphaType::Alpha,
+            width: PALETTE_IMAGE_WIDTH,
+            height: PALETTE_IMAGE_HEIGHT,
+        };
+        TRACK_DATA_CACHE.insert(
+            track_id,
+            TrackData {
+                primary_colors,
+                palette_image,
+            },
+        );
     }
 
     Ok(())
@@ -496,14 +497,8 @@ impl auto_palette::Filter for ChromaFilter {
 }
 
 fn generate_palette_image(colors: &[[u8; 4]], seed: u64) -> Vec<u8> {
-    let mut canvas = RgbaImage::from_pixel(
-        PALETTE_IMAGE_WIDTH,
-        PALETTE_IMAGE_HEIGHT,
-        image::Rgba([12, 14, 18, 255]),
-    );
-
     if colors.is_empty() {
-        return canvas.into_raw();
+        return RgbaImage::new(PALETTE_IMAGE_WIDTH, PALETTE_IMAGE_HEIGHT).into_raw();
     }
 
     let mut rng = SmallRng::seed_from_u64(seed);
@@ -522,19 +517,17 @@ fn generate_palette_image(colors: &[[u8; 4]], seed: u64) -> Vec<u8> {
         .map(|[r, g, b, _]| [f32::from(*r), f32::from(*g), f32::from(*b)])
         .collect::<Vec<_>>();
 
-    let base = colors[0];
-    for pixel in canvas.pixels_mut() {
-        pixel.0 = [base[0], base[1], base[2], 255];
-    }
+    let mut canvas = RgbaImage::from_pixel(
+        PALETTE_IMAGE_WIDTH,
+        PALETTE_IMAGE_HEIGHT,
+        image::Rgba([colors[0][0], colors[0][1], colors[0][2], 255]),
+    );
 
     // Fill with the first colour; refinement passes will rebalance ratios.
     let total_pixels = (PALETTE_IMAGE_WIDTH * PALETTE_IMAGE_HEIGHT) as f32;
-
-    let mut counts = vec![0u32; colors.len()];
-    let mut coverage = vec![0.0f32; colors.len()];
-    let mut per_color_strokes = vec![0u8; colors.len()];
+    let mut coverage = vec![0.0; colors.len()];
+    let mut per_color_strokes = vec![0; colors.len()];
     let mut available_indices = Vec::with_capacity(colors.len());
-
     for pass in 0..PALETTE_PASS_COUNT {
         let base_height = lerp(
             pass as f32 / PALETTE_PASS_COUNT as f32,
@@ -543,7 +536,7 @@ fn generate_palette_image(colors: &[[u8; 4]], seed: u64) -> Vec<u8> {
         );
 
         // Count pixels for each color, to get ratios
-        counts.fill(0);
+        let mut counts = vec![0u32; colors.len()];
         for pixel in canvas.pixels() {
             let pr = f32::from(pixel[0]);
             let pg = f32::from(pixel[1]);
@@ -582,7 +575,6 @@ fn generate_palette_image(colors: &[[u8; 4]], seed: u64) -> Vec<u8> {
                     .floor() as u8;
             }
         }
-
         available_indices.clear();
         for (index, &count) in per_color_strokes.iter().enumerate() {
             if count > 0 {
@@ -590,6 +582,7 @@ fn generate_palette_image(colors: &[[u8; 4]], seed: u64) -> Vec<u8> {
             }
         }
 
+        // Add strokes to the canvas to balance coverage
         for _ in 0..PALETTE_STROKES_PER_PASS {
             if available_indices.is_empty() {
                 break;
@@ -606,16 +599,15 @@ fn generate_palette_image(colors: &[[u8; 4]], seed: u64) -> Vec<u8> {
             let color = colors[color_index];
 
             // Pick a random brush
-            let template = &BRUSHES[rng.random_range(0..BRUSHES.len())];
             let brush_factor = rng.random_range(0.75..1.2);
             let brush_size = (base_height * brush_factor)
                 .round()
                 .clamp(6.0, PALETTE_IMAGE_HEIGHT as f32) as u32;
             let stamp = image::imageops::resize(
-                template,
+                &BRUSHES[rng.random_range(0..BRUSHES.len())],
                 brush_size,
                 brush_size,
-                image::imageops::FilterType::Triangle,
+                image::imageops::FilterType::Nearest,
             );
 
             // Overlay the stamp onto the canvas
@@ -631,35 +623,43 @@ fn generate_palette_image(colors: &[[u8; 4]], seed: u64) -> Vec<u8> {
             let origin_bottom_x = x.clamp(0, i64::from(bottom_width)) as u32;
             let origin_bottom_y = y.clamp(0, i64::from(bottom_height)) as u32;
 
-            let range_width = x
+            let range_width = (x
                 .saturating_add(i64::from(top_width))
-                .clamp(0, i64::from(bottom_width)) as u32
-                - origin_bottom_x;
-            let range_height = y
+                .clamp(0, i64::from(bottom_width)) as u32)
+                .saturating_sub(origin_bottom_x);
+            let range_height = (y
                 .saturating_add(i64::from(top_height))
-                .clamp(0, i64::from(bottom_height)) as u32
-                - origin_bottom_y;
+                .clamp(0, i64::from(bottom_height)) as u32)
+                .saturating_sub(origin_bottom_y);
+            let origin_top_x = x.saturating_neg().clamp(0, i64::from(top_width)) as u32;
+            let origin_top_y = y.saturating_neg().clamp(0, i64::from(top_height)) as u32;
 
-            let origin_top_x = x.saturating_mul(-1).clamp(0, i64::from(top_width)) as u32;
-            let origin_top_y = y.saturating_mul(-1).clamp(0, i64::from(top_height)) as u32;
-
-            for y in 0..range_height {
-                for x in 0..range_width {
-                    let stamp = {
-                        let mut pixel = *stamp.get_pixel(origin_top_x + x, origin_top_y + y);
-                        pixel[0] = color[0];
-                        pixel[1] = color[1];
-                        pixel[2] = color[2];
-                        pixel[3] = ((f32::from(pixel[3]) * fade_factor)
-                            .round()
-                            .clamp(1.0, 255.0)) as u8;
-                        pixel
+            let raw_bottom: &mut [u8] = canvas.as_mut();
+            let bottom_stride = bottom_width as usize * 4;
+            let top_stride = top_width as usize;
+            for y_offset in 0..range_height {
+                let bottom_row_start = ((origin_bottom_y + y_offset) as usize) * bottom_stride;
+                let top_row_start = ((origin_top_y + y_offset) as usize) * top_stride;
+                for x_offset in 0..range_width {
+                    let alpha = stamp.as_raw()[top_row_start + (origin_top_x + x_offset) as usize];
+                    let adjusted_alpha =
+                        (f32::from(alpha) * fade_factor).round().clamp(0.0, 255.0) as u8;
+                    if adjusted_alpha == 0 {
+                        continue;
+                    }
+                    let bottom_idx = bottom_row_start + ((origin_bottom_x + x_offset) as usize) * 4;
+                    let src_a = u32::from(adjusted_alpha);
+                    let inv_a = 255 - src_a;
+                    let dst_a = u32::from(raw_bottom[bottom_idx + 3]);
+                    let out_a = src_a + (dst_a * inv_a / 255);
+                    let blend = |src: u8, dst: u8| {
+                        (((u32::from(src) * src_a) + (u32::from(dst) * dst_a * inv_a / 255))
+                            / out_a) as u8
                     };
-                    let mut bottom_pixel =
-                        *canvas.get_pixel(origin_bottom_x + x, origin_bottom_y + y);
-                    bottom_pixel.blend(&stamp);
-
-                    *canvas.get_pixel_mut(origin_bottom_x + x, origin_bottom_y + y) = bottom_pixel;
+                    raw_bottom[bottom_idx] = blend(color[0], raw_bottom[bottom_idx]);
+                    raw_bottom[bottom_idx + 1] = blend(color[1], raw_bottom[bottom_idx + 1]);
+                    raw_bottom[bottom_idx + 2] = blend(color[2], raw_bottom[bottom_idx + 2]);
+                    raw_bottom[bottom_idx + 3] = out_a as u8;
                 }
             }
         }
@@ -670,5 +670,5 @@ fn generate_palette_image(colors: &[[u8; 4]], seed: u64) -> Vec<u8> {
 }
 
 fn lerp(t: f32, v0: f32, v1: f32) -> f32 {
-    (1.0 - t) * v0 + t * v1
+    (1.0 - t).mul_add(v0, t * v1)
 }
