@@ -156,6 +156,7 @@ impl CantusApp {
         let total_width = (PANEL_WIDTH * self.scale_factor - history_width).ceil();
         let total_height = (PANEL_HEIGHT_BASE * self.scale_factor).ceil();
         let px_per_ms = total_width / TIMELINE_DURATION_MS;
+        let timeline_origin_x = history_width - TIMELINE_START_MS * px_per_ms;
 
         let playback_state = PLAYBACK_STATE.read();
         let queue = &playback_state.queue;
@@ -173,7 +174,7 @@ impl CantusApp {
         let current_index = playback_state.queue_index.min(queue.len() - 1);
 
         // Play button hitbox
-        let playbutton_center = -TIMELINE_START_MS * px_per_ms + history_width;
+        let playbutton_center = timeline_origin_x;
         let playbutton_hsize = total_height * 0.25;
         self.interaction.play_hitbox = Rect::new(
             playbutton_center - playbutton_hsize,
@@ -330,7 +331,7 @@ impl CantusApp {
         // Draw the particles
         self.render_playing_particles(
             &queue[current_index],
-            -TIMELINE_START_MS * px_per_ms + history_width,
+            timeline_origin_x,
             total_height,
             track_move_speed,
             playback_state.volume,
@@ -363,6 +364,9 @@ impl CantusApp {
             return;
         }
 
+        let timeline_origin_x = history_width - TIMELINE_START_MS * px_per_ms;
+        let start_translation = Affine::translate((start_x, 0.0));
+
         // Fade out based on width
         let fade_alpha = if width < height {
             ((width / height) as f32 * 1.5 - 0.5).max(0.0)
@@ -371,7 +375,7 @@ impl CantusApp {
         };
 
         // How much of the width is to the left of the current position
-        let dark_width = (-TIMELINE_START_MS * px_per_ms + history_width - start_x).max(0.0);
+        let dark_width = (timeline_origin_x - start_x).max(0.0);
 
         // Add hitbox
         let hitbox = Rect::new(start_x, 0.0, start_x + width, height);
@@ -400,9 +404,10 @@ impl CantusApp {
         let right_rounding = rounding * lerp((crop_right / buffer_px).clamp(0.0, 1.0), 1.0, 0.3);
         let radii =
             RoundedRectRadii::new(left_rounding, right_rounding, right_rounding, left_rounding);
+        let track_clip = RoundedRect::new(0.0, 0.0, width, height, radii);
 
         // --- BACKGROUND ---
-        if !track_render.art_only && fade_alpha >= 0.0 {
+        if !track_render.art_only {
             let bundle = self
                 .render_devices
                 .get_mut(&device_id)
@@ -419,14 +424,14 @@ impl CantusApp {
             // Don't need to render all the way to the edge since the album art is at the right edge
             let background_width = width - height * 0.25;
             self.scene.push_clip_layer(
-                Affine::translate((start_x, 0.0)),
+                start_translation,
                 &RoundedRect::new(0.0, 0.0, background_width, height, radii),
             );
             let image_width = f64::from(background_image.width);
             let background_aspect_ratio = background_width / height;
             self.scene.fill(
                 Fill::EvenOdd,
-                Affine::translate((start_x, 0.0)) * Affine::scale(background_width / image_width),
+                start_translation * Affine::scale(background_width / image_width),
                 &ImageBrush::new(background_image).with_alpha(fade_alpha),
                 None,
                 &Rect::new(0.0, 0.0, image_width, image_width * background_aspect_ratio),
@@ -435,19 +440,17 @@ impl CantusApp {
         }
 
         // --- Add a dark overlay for the dark_width, and expanding circles for animating clicks ---
-        if !track_render.art_only && dark_width > 0.0
-            || track_render.is_current
-            || self.interaction.last_click.is_some()
-        {
-            self.scene.push_clip_layer(
-                Affine::translate((start_x, 0.0)),
-                &RoundedRect::new(0.0, 0.0, width, height, radii),
-            );
+        let needs_overlay = !track_render.art_only
+            && (dark_width > 0.0
+                || track_render.is_current
+                || self.interaction.last_click.is_some());
+        if needs_overlay {
+            self.scene.push_clip_layer(start_translation, &track_clip);
 
             if dark_width > 0.0 {
                 self.scene.fill(
                     Fill::EvenOdd,
-                    Affine::translate((start_x, 0.0)),
+                    start_translation,
                     Color::from_rgb8(0, 0, 0).with_alpha(0.5 * fade_alpha),
                     None,
                     &Rect::new(0.0, 0.0, dark_width, height),
@@ -468,10 +471,7 @@ impl CantusApp {
                 if anim_lerp < 1.0 {
                     self.scene.fill(
                         Fill::EvenOdd,
-                        Affine::translate((
-                            -TIMELINE_START_MS * px_per_ms + history_width,
-                            height * 0.5,
-                        )),
+                        Affine::translate((timeline_origin_x, height * 0.5)),
                         Color::from_rgb8(255, 224, 210)
                             .with_alpha(1.0 - (anim_lerp + 0.4).min(1.0) as f32),
                         None,
@@ -500,13 +500,10 @@ impl CantusApp {
         }
 
         // --- ALBUM ART SQUARE ---
-        if fade_alpha >= 0.0 {
+        if fade_alpha > 0.0 {
             let image_height = f64::from(image.height);
             let transform = Affine::translate((start_x + width - height, 0.0));
-            self.scene.push_clip_layer(
-                Affine::translate((start_x, 0.0)),
-                &RoundedRect::new(0.0, 0.0, width, height, radii),
-            );
+            self.scene.push_clip_layer(start_translation, &track_clip);
             self.scene.fill(
                 Fill::EvenOdd,
                 transform * Affine::scale(height / image_height),
@@ -527,7 +524,7 @@ impl CantusApp {
         if !track_render.art_only && fade_alpha >= 1.0 {
             // Clipping mask to the edge of the background rectangle, shrunk by a margin
             self.scene.push_clip_layer(
-                Affine::translate((start_x, 0.0)),
+                start_translation,
                 &RoundedRect::new(
                     4.0,
                     4.0,
@@ -717,22 +714,19 @@ impl CantusApp {
                 .iter()
                 .map(|axis| {
                     let weight = weight.value_for(axis).clamp(axis.min_value, axis.max_value);
-                    let v = if (weight - axis.def_value).abs() < f32::EPSILON {
+                    let delta = weight - axis.def_value;
+                    if delta.abs() < f32::EPSILON {
                         return 0;
-                    } else if weight < axis.def_value {
-                        let denom = axis.def_value - axis.min_value;
-                        if denom.abs() < f32::EPSILON {
-                            return 0;
-                        }
-                        (weight - axis.def_value) / denom
+                    }
+                    let range = if delta < 0.0 {
+                        axis.def_value - axis.min_value
                     } else {
-                        let denom = axis.max_value - axis.def_value;
-                        if denom.abs() < f32::EPSILON {
-                            return 0;
-                        }
-                        (weight - axis.def_value) / denom
+                        axis.max_value - axis.def_value
                     };
-                    NormalizedCoordinate::from(v).get()
+                    if range.abs() < f32::EPSILON {
+                        return 0;
+                    }
+                    NormalizedCoordinate::from(delta / range).get()
                 })
                 .collect(),
         }
@@ -784,6 +778,9 @@ impl CantusApp {
         let Some(track_data) = TRACK_DATA_CACHE.get(&track.id) else {
             return;
         };
+        if track_data.primary_colors.is_empty() {
+            return;
+        }
         let primary_colors: Vec<_> = track_data
             .primary_colors
             .iter()
@@ -795,9 +792,6 @@ impl CantusApp {
                 ]
             })
             .collect();
-        if primary_colors.is_empty() {
-            return;
-        }
 
         // Emit new particles while playing
         if track_move_speed.abs() > 0.0 {
@@ -805,18 +799,19 @@ impl CantusApp {
             self.particles.spawn_accumulator += dt * SPARK_EMISSION;
             let emit_count = self.particles.spawn_accumulator.floor() as u16;
             self.particles.spawn_accumulator -= f32::from(emit_count);
+            let spawn_offset = track_move_speed.signum() * 2.0;
+            let horizontal_bias = (track_move_speed as f32 * 0.05).clamp(-3.0, 3.0);
             for _ in 0..emit_count {
                 let position = [
-                    (x + (track_move_speed.signum() * 2.0)) as f32,
+                    (x + spawn_offset) as f32,
                     height_f32 * rng.random_range(0.05..0.95),
                 ];
                 let velocity = [
-                    rng.random_range(SPARK_VELOCITY_X)
-                        * scale
-                        * (track_move_speed as f32 * 0.05).clamp(-3.0, 3.0),
+                    rng.random_range(SPARK_VELOCITY_X) * scale * horizontal_bias,
                     -rng.random_range(SPARK_VELOCITY_Y) * scale,
                 ];
                 let life = rng.random_range(SPARK_LIFETIME);
+                let color_index = rng.random_range(0..primary_colors.len());
                 if let Some(dead_particle) = self
                     .particles
                     .particles
@@ -827,13 +822,13 @@ impl CantusApp {
                     dead_particle.position = position;
                     dead_particle.velocity = velocity;
                     dead_particle.life = life;
-                    dead_particle.color = rng.random_range(0..primary_colors.len());
+                    dead_particle.color = color_index;
                 } else {
                     self.particles.particles.push(Particle {
                         alive: true,
                         position,
                         velocity,
-                        color: rng.random_range(0..primary_colors.len()),
+                        color: color_index,
                         life,
                     });
                 }
@@ -858,7 +853,7 @@ impl CantusApp {
             particle.position[0] += particle.velocity[0] * dt;
             particle.position[1] += particle.velocity[1] * dt;
 
-            let fade = (particle.life / 0.6).clamp(0.0, 1.0);
+            let fade = (particle.life / SPARK_LIFETIME.end).clamp(0.0, 1.0);
             let length = lerp_range(SPARK_LENGTH_RANGE, f64::from(fade)) * self.scale_factor;
             let thickness = lerp_range(SPARK_THICKNESS_RANGE, f64::from(fade)) * self.scale_factor;
             let rgb = primary_colors
