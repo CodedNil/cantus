@@ -211,14 +211,6 @@ impl CantusApp {
 
         // Update interaction events
         match self.interaction.last_event {
-            InteractionEvent::None => {
-                let instant = Instant::now().checked_sub(Duration::from_secs(5)).unwrap();
-                self.interaction.last_event = if playback_state.playing {
-                    InteractionEvent::Play(instant)
-                } else {
-                    InteractionEvent::Pause(instant)
-                }
-            }
             InteractionEvent::Pause(_) => {
                 if playback_state.playing {
                     self.interaction.last_event = InteractionEvent::Play(Instant::now());
@@ -231,7 +223,12 @@ impl CantusApp {
             }
             InteractionEvent::PauseHover(_) | InteractionEvent::PlayHover(_) => {
                 if !play_button_hovered {
-                    self.interaction.last_event = InteractionEvent::None;
+                    let instant = Instant::now().checked_sub(Duration::from_secs(5)).unwrap();
+                    self.interaction.last_event = if playback_state.playing {
+                        InteractionEvent::Play(instant)
+                    } else {
+                        InteractionEvent::Pause(instant)
+                    }
                 }
             }
         }
@@ -482,9 +479,7 @@ impl CantusApp {
                         start.elapsed().as_millis() as f64
                             / (ANIMATION_DURATION.as_millis() as f64 * 0.3)
                     }
-                    InteractionEvent::None
-                    | InteractionEvent::PauseHover(_)
-                    | InteractionEvent::PlayHover(_) => 1.0,
+                    InteractionEvent::PauseHover(_) | InteractionEvent::PlayHover(_) => 1.0,
                 };
                 if anim_lerp < 1.0 {
                     self.scene.fill(
@@ -912,7 +907,6 @@ impl CantusApp {
                     / (ANIMATION_DURATION.as_millis() as f64 * 0.25))
                     .clamp(0.0, 0.5)
             }
-            InteractionEvent::None => 1.0,
         };
         if anim_lerp < 1.0 {
             // Start with the lines split, then 3/4 way through close them again

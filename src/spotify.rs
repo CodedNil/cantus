@@ -241,6 +241,7 @@ pub async fn init() {
                 .unwrap()
                 .join("cantus")
                 .join("spotify_cache.json"),
+            token_refreshing: true,
             ..Default::default()
         },
     );
@@ -382,13 +383,11 @@ async fn update_state_from_mpris(
 /// Pulls the current playback queue and status from the Spotify Web API and updates shared state.
 async fn update_state_from_spotify() {
     // Wait if we have recently interacted with spotify
-    {
-        let min_duration = Duration::from_millis(500);
-        let mut last_interaction = PLAYBACK_STATE.read().last_interaction.elapsed();
-        while last_interaction < min_duration {
-            tokio::time::sleep(min_duration - last_interaction).await;
-            last_interaction = PLAYBACK_STATE.read().last_interaction.elapsed();
-        }
+    let min_duration = Duration::from_millis(500);
+    let mut last_interaction = PLAYBACK_STATE.read().last_interaction.elapsed();
+    while last_interaction < min_duration {
+        tokio::time::sleep(min_duration - last_interaction).await;
+        last_interaction = PLAYBACK_STATE.read().last_interaction.elapsed();
     }
 
     // Fetch current playback and queue concurrently
@@ -496,10 +495,10 @@ async fn update_state_from_spotify() {
             state.current_context = current_playback.context;
         }
 
-        state.playing = current_playback.is_playing;
         state.shuffle = current_playback.shuffle_state;
         state.volume = current_playback.device.volume_percent.map(|v| v as u8);
         if !state.is_local {
+            state.playing = current_playback.is_playing;
             let progress = current_playback
                 .progress
                 .map_or(0, |p| p.num_milliseconds()) as u32;

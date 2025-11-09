@@ -11,8 +11,11 @@ use rspotify::{
     model::{PlayableId, PlaylistId, TrackId},
     prelude::OAuthClient,
 };
-use std::sync::atomic::{AtomicBool, Ordering as AtomicOrdering};
 use std::{cmp::Ordering, collections::HashMap, sync::LazyLock, time::Instant};
+use std::{
+    sync::atomic::{AtomicBool, Ordering as AtomicOrdering},
+    time::Duration,
+};
 use tracing::{error, info, warn};
 use vello::{
     kurbo::{Affine, BezPath, Point, Rect, RoundedRect, Shape, Stroke},
@@ -65,7 +68,9 @@ pub struct InteractionState {
 impl Default for InteractionState {
     fn default() -> Self {
         Self {
-            last_event: InteractionEvent::None,
+            last_event: InteractionEvent::Pause(
+                Instant::now().checked_sub(Duration::from_secs(5)).unwrap(),
+            ),
             last_click: None,
             mouse_position: Point::default(),
             #[cfg(feature = "wayland")]
@@ -247,7 +252,6 @@ impl InteractionState {
 
 #[derive(PartialEq, Eq)]
 pub enum InteractionEvent {
-    None,
     Pause(Instant),
     Play(Instant),
     PauseHover(Instant),
