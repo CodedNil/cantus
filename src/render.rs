@@ -46,12 +46,21 @@ const ANIMATION_DURATION: Duration = Duration::from_millis(3500);
 static PLAY_SVG: LazyLock<BezPath> =
     LazyLock::new(|| BezPath::from_svg(include_str!("../assets/play.path")).unwrap());
 
-#[derive(Default)]
 pub struct RenderState {
+    last_update: Instant,
     track_offset: f64,
-    move_speeds: [f64; 6],
+    move_speeds: [f64; 16],
 }
 
+impl Default for RenderState {
+    fn default() -> Self {
+        Self {
+            last_update: Instant::now(),
+            track_offset: 0.0,
+            move_speeds: [0.0; 16],
+        }
+    }
+}
 pub struct FontEngine {
     font_data: FontData,
     base_face: Face<'static>,
@@ -116,7 +125,6 @@ impl Default for FontEngine {
 pub struct ParticlesState {
     particles: Vec<Particle>,
     rng: SmallRng,
-    last_update: Instant,
     spawn_accumulator: f32,
 }
 
@@ -125,7 +133,6 @@ impl Default for ParticlesState {
         Self {
             particles: Vec::new(),
             rng: SmallRng::from_os_rng(),
-            last_update: Instant::now(),
             spawn_accumulator: 0.0,
         }
     }
@@ -152,6 +159,9 @@ struct TrackRender<'a> {
 /// Build the scene for rendering.
 impl CantusApp {
     pub fn create_scene(&mut self, device_id: usize) {
+        let dt = self.render_state.last_update.elapsed().as_secs_f64();
+        self.render_state.last_update = Instant::now();
+
         let history_width = (HISTORY_WIDTH * self.scale_factor).ceil();
         let total_width = (PANEL_WIDTH * self.scale_factor - history_width).ceil();
         let total_height = (PANEL_HEIGHT_BASE * self.scale_factor).ceil();
@@ -258,14 +268,13 @@ impl CantusApp {
         }
 
         // Add the new move speed to the array move_speeds, trim the previous ones
-        let track_move_speed = current_ms - self.render_state.track_offset;
+        let track_move_speed = (current_ms - self.render_state.track_offset) * dt;
+        self.render_state.track_offset = current_ms;
         self.render_state.move_speeds[0] = track_move_speed;
         self.render_state.move_speeds.rotate_left(1);
         // Get new average
         let track_move_speed = self.render_state.move_speeds.iter().sum::<f64>()
             / self.render_state.move_speeds.len() as f64;
-
-        self.render_state.track_offset = current_ms;
 
         // Iterate over the tracks within the timeline.
         let mut track_renders = Vec::with_capacity(queue.len());
@@ -338,6 +347,7 @@ impl CantusApp {
 
         // Draw the particles
         self.render_playing_particles(
+            dt as f32,
             &queue[current_index],
             timeline_origin_x,
             total_height,
@@ -769,16 +779,13 @@ impl CantusApp {
 
     fn render_playing_particles(
         &mut self,
+        dt: f32,
         track: &Track,
         x: f64,
         height: f64,
         track_move_speed: f64,
         volume: Option<u8>,
     ) {
-        let now = Instant::now();
-        let dt = now.duration_since(self.particles.last_update).as_secs_f32();
-        self.particles.last_update = now;
-
         let scale = self.scale_factor as f32;
         let height_f32 = height as f32;
 
@@ -808,14 +815,15 @@ impl CantusApp {
             let emit_count = self.particles.spawn_accumulator.floor() as u16;
             self.particles.spawn_accumulator -= f32::from(emit_count);
             let spawn_offset = track_move_speed.signum() * 2.0;
-            let horizontal_bias = (track_move_speed as f32 * 0.05).clamp(-3.0, 3.0);
+            let horizontal_bias =
+                (track_move_speed.abs().powf(0.2) * spawn_offset * 0.5).clamp(-3.0, 3.0);
             for _ in 0..emit_count {
                 let position = [
                     (x + spawn_offset) as f32,
                     height_f32 * rng.random_range(0.05..0.95),
                 ];
                 let velocity = [
-                    rng.random_range(SPARK_VELOCITY_X) * scale * horizontal_bias,
+                    rng.random_range(SPARK_VELOCITY_X) * scale * horizontal_bias as f32,
                     -rng.random_range(SPARK_VELOCITY_Y) * scale,
                 ];
                 let life = rng.random_range(SPARK_LIFETIME);
