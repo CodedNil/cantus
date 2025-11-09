@@ -34,9 +34,6 @@ use zbus::{
     zvariant::OwnedValue,
 };
 
-/// Maximum number of historical tracks to keep before trimming.
-const MAX_HISTORY: usize = 20;
-
 /// MPRIS interface identifier used for playback control.
 const PLAYER_INTERFACE: InterfaceName<'static> =
     InterfaceName::from_static_str_unchecked("org.mpris.MediaPlayer2.Player");
@@ -494,12 +491,6 @@ async fn update_state_from_spotify() {
             state.queue = new_queue;
             state.queue_index = 0;
             state.current_context = current_playback.context;
-        }
-
-        // Trim old history to prevent unbounded growth
-        if state.queue_index > MAX_HISTORY {
-            state.queue.drain(0..(state.queue_index - MAX_HISTORY));
-            state.queue_index = MAX_HISTORY;
         }
 
         state.playing = current_playback.is_playing;

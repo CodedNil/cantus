@@ -49,6 +49,7 @@ static PLAY_SVG: LazyLock<BezPath> =
 #[derive(Default)]
 pub struct RenderState {
     track_offset: f64,
+    move_speeds: [f64; 6],
 }
 
 pub struct FontEngine {
@@ -255,7 +256,15 @@ impl CantusApp {
         if !self.interaction.dragging && difference.abs() > 200.0 {
             current_ms = self.render_state.track_offset + difference * 0.1;
         }
+
+        // Add the new move speed to the array move_speeds, trim the previous ones
         let track_move_speed = current_ms - self.render_state.track_offset;
+        self.render_state.move_speeds[0] = track_move_speed;
+        self.render_state.move_speeds.rotate_left(1);
+        // Get new average
+        let track_move_speed = self.render_state.move_speeds.iter().sum::<f64>()
+            / self.render_state.move_speeds.len() as f64;
+
         self.render_state.track_offset = current_ms;
 
         // Iterate over the tracks within the timeline.
