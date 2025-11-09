@@ -5,7 +5,7 @@ use image::GenericImageView;
 use parking_lot::RwLock;
 use reqwest::Client;
 use rspotify::{
-    AuthCodeSpotify, Config, Credentials, OAuth,
+    AuthCodePkceSpotify, Config, Credentials, OAuth,
     model::{
         AdditionalType, ArtistId, Context, FullTrack, PlayableItem, PlaylistId, SimplifiedPlaylist,
         TrackId,
@@ -69,7 +69,7 @@ pub const RATING_PLAYLISTS: [&str; 11] = [
 ];
 
 static HTTP_CLIENT: LazyLock<Client> = LazyLock::new(Client::new);
-pub static SPOTIFY_CLIENT: OnceCell<AuthCodeSpotify> = OnceCell::const_new();
+pub static SPOTIFY_CLIENT: OnceCell<AuthCodePkceSpotify> = OnceCell::const_new();
 
 #[derive(Debug)]
 pub struct PlaybackState {
@@ -215,9 +215,11 @@ pub async fn init() {
     }
 
     // Initialize Spotify client with credentials and OAuth scopes
-    let spotify = AuthCodeSpotify::with_config(
-        Credentials::from_env()
-            .expect("Missing env credentials RSPOTIFY_CLIENT_ID RSPOTIFY_CLIENT_SECRET"),
+    let mut spotify = AuthCodePkceSpotify::with_config(
+        Credentials {
+            id: String::from("84dab8c175424bdb94aa342369e4a0f8"),
+            secret: None,
+        },
         OAuth {
             redirect_uri: String::from("http://127.0.0.1:7474/callback"),
             scopes: scopes!(
@@ -237,13 +239,14 @@ pub async fn init() {
             token_cached: true,
             cache_path: dirs::config_dir()
                 .unwrap()
-                .join("cantus/spotify_cache.json"),
+                .join("cantus")
+                .join("spotify_cache.json"),
             ..Default::default()
         },
     );
 
     // Prompt user for authorization and get the token
-    let url = spotify.get_authorize_url(true).unwrap();
+    let url = spotify.get_authorize_url(None).unwrap();
     spotify.prompt_for_token(&url).await.unwrap();
     SPOTIFY_CLIENT.set(spotify).unwrap();
 

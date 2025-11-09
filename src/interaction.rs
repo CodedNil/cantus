@@ -143,6 +143,23 @@ impl InteractionState {
         // Play/pause
         if self.play_hitbox.contains(mouse_pos) {
             let playing = PLAYBACK_STATE.read().playing;
+            // Add a click event
+            if let Some((track_id, (track_rect, _))) = self
+                .track_hitboxes
+                .iter()
+                .find(|(_, (track_rect, _))| track_rect.contains(mouse_pos))
+            {
+                self.last_click = Some((
+                    Instant::now(),
+                    track_id.clone(),
+                    Point::new(mouse_pos.x - track_rect.x0, mouse_pos.y - track_rect.y0),
+                ));
+            }
+            if playing {
+                self.last_event = InteractionEvent::Pause(Instant::now());
+            } else {
+                self.last_event = InteractionEvent::Play(Instant::now());
+            }
             tokio::spawn(async move {
                 toggle_playing(!playing).await;
             });
