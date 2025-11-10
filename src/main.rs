@@ -1,18 +1,14 @@
 use crate::{
-    background::WarpBackground,
     interaction::InteractionState,
     render::{FontEngine, ParticlesState, RenderState},
 };
 use anyhow::Result;
-use std::{
-    collections::{HashMap, hash_map},
-    time::Instant,
-};
+use std::collections::{HashMap, hash_map};
 use tracing_subscriber::EnvFilter;
 use vello::{
     AaConfig, Renderer, RendererOptions, Scene,
     peniko::color::palette,
-    util::{DeviceHandle, RenderContext, RenderSurface},
+    util::{RenderContext, RenderSurface},
     wgpu::{
         BlendComponent, BlendFactor, BlendOperation, BlendState, CommandEncoderDescriptor,
         CompositeAlphaMode, InstanceDescriptor, PollType, PresentMode, TextureViewDescriptor,
@@ -43,9 +39,6 @@ const PANEL_HEIGHT_EXTENSION: f64 = 10.0;
 
 #[tokio::main]
 async fn main() {
-    #[cfg(debug_assertions)]
-    dotenvy::dotenv().unwrap();
-
     tracing_subscriber::fmt()
         .with_env_filter(EnvFilter::new(
             ["warn", "cantus=info", "wgpu_hal=error"].join(","),
@@ -64,7 +57,7 @@ async fn main() {
 struct CantusApp {
     render_context: RenderContext,
     render_surface: Option<RenderSurface<'static>>,
-    render_devices: HashMap<usize, RenderDevice>,
+    render_devices: HashMap<usize, Renderer>,
     scene: Scene,
     font: FontEngine,
     scale_factor: f64,
@@ -72,7 +65,6 @@ struct CantusApp {
     is_configured: bool,
     #[cfg(feature = "wayland")]
     should_exit: bool,
-    time_origin: Instant,
     frame_index: u64,
     render_state: RenderState,
     interaction: InteractionState,
@@ -98,7 +90,6 @@ impl Default for CantusApp {
             is_configured: false,
             #[cfg(feature = "wayland")]
             should_exit: false,
-            time_origin: Instant::now(),
             frame_index: 0,
             render_state: RenderState::default(),
             interaction: InteractionState::default(),
@@ -167,29 +158,31 @@ impl CantusApp {
 
         let dev_id = render_surface.dev_id;
         if let hash_map::Entry::Vacant(entry) = self.render_devices.entry(dev_id) {
-            entry.insert(RenderDevice::new(&self.render_context.devices[dev_id])?);
+            entry.insert(Renderer::new(
+                &self.render_context.devices[dev_id].device,
+                RendererOptions::default(),
+            )?);
         }
 
         self.scene.reset();
-        self.create_scene(dev_id);
+        self.create_scene();
 
         let handle = &self.render_context.devices[dev_id];
-        let bundle = self
-            .render_devices
+        self.render_devices
             .get_mut(&dev_id)
-            .expect("render device must exist");
-        bundle.renderer.render_to_texture(
-            &handle.device,
-            &handle.queue,
-            &self.scene,
-            &render_surface.target_view,
-            &vello::RenderParams {
-                base_color: palette::css::TRANSPARENT,
-                width: render_surface.config.width,
-                height: render_surface.config.height,
-                antialiasing_method: AaConfig::Area,
-            },
-        )?;
+            .expect("render device must exist")
+            .render_to_texture(
+                &handle.device,
+                &handle.queue,
+                &self.scene,
+                &render_surface.target_view,
+                &vello::RenderParams {
+                    base_color: palette::css::TRANSPARENT,
+                    width: render_surface.config.width,
+                    height: render_surface.config.height,
+                    antialiasing_method: AaConfig::Area,
+                },
+            )?;
 
         let Ok(acquired) = render_surface.surface.get_current_texture() else {
             self.render_surface = None;
@@ -217,19 +210,5 @@ impl CantusApp {
 
         self.render_surface = Some(render_surface);
         Ok(true)
-    }
-}
-
-struct RenderDevice {
-    renderer: Renderer,
-    background: WarpBackground,
-}
-
-impl RenderDevice {
-    fn new(handle: &DeviceHandle) -> Result<Self> {
-        Ok(Self {
-            renderer: Renderer::new(&handle.device, RendererOptions::default())?,
-            background: WarpBackground::new(&handle.device),
-        })
     }
 }

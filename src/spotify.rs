@@ -7,20 +7,18 @@ use reqwest::Client;
 use rspotify::{
     AuthCodePkceSpotify, Config, Credentials, OAuth,
     model::{
-        AdditionalType, ArtistId, Context, FullTrack, PlayableItem, PlaylistId, SimplifiedPlaylist,
-        TrackId,
+        AdditionalType, ArtistId, Context, PlayableItem, PlaylistId, SimplifiedPlaylist, TrackId,
     },
     prelude::{BaseClient, OAuthClient},
     scopes,
 };
 use std::{
     collections::{HashMap, HashSet},
-    convert::TryInto,
-    fs,
-    sync::{Arc, LazyLock},
+    sync::LazyLock,
     time::Instant,
 };
 use tokio::{
+    fs,
     sync::OnceCell,
     task::JoinSet,
     time::{Duration, sleep},
@@ -41,8 +39,8 @@ const ROOT_INTERFACE: InterfaceName<'static> =
 const PLAYER_INTERFACE: InterfaceName<'static> =
     InterfaceName::from_static_str_unchecked("org.mpris.MediaPlayer2.Player");
 
-pub static PLAYBACK_STATE: LazyLock<Arc<RwLock<PlaybackState>>> = LazyLock::new(|| {
-    Arc::new(RwLock::new(PlaybackState {
+pub static PLAYBACK_STATE: LazyLock<RwLock<PlaybackState>> = LazyLock::new(|| {
+    RwLock::new(PlaybackState {
         is_local: false,
         last_updated: Instant::now(),
         last_interaction: Instant::now(),
@@ -54,7 +52,7 @@ pub static PLAYBACK_STATE: LazyLock<Arc<RwLock<PlaybackState>>> = LazyLock::new(
         queue_index: 0,
         current_context: None,
         playlists: Vec::new(),
-    }))
+    })
 });
 pub static IMAGES_CACHE: LazyLock<DashMap<String, ImageData>> = LazyLock::new(DashMap::new);
 pub static TRACK_DATA_CACHE: LazyLock<DashMap<TrackId<'static>, TrackData>> =
@@ -112,26 +110,6 @@ pub struct Playlist {
     snapshot_id: String,
 }
 
-impl Track {
-    fn from_rspotify(track: FullTrack) -> Self {
-        let artist = track.artists.first().unwrap();
-        Self {
-            id: track.id.unwrap(),
-            title: track.name,
-            artist_id: artist.id.clone().unwrap(),
-            artist_name: artist.name.clone(),
-            image_url: track
-                .album
-                .images
-                .into_iter()
-                .min_by_key(|img| img.width)
-                .map(|img| img.url)
-                .unwrap(),
-            milliseconds: track.duration.num_milliseconds() as u32,
-        }
-    }
-}
-
 /// Mutably updates the global playback state.
 pub fn update_playback_state<F>(update: F)
 where
@@ -143,12 +121,12 @@ where
 
 type PlaylistCache = HashMap<PlaylistId<'static>, (String, HashSet<TrackId<'static>>)>;
 
-fn load_cached_playlist_tracks() -> PlaylistCache {
+async fn load_cached_playlist_tracks() -> PlaylistCache {
     let cache_path = dirs::config_dir()
         .unwrap()
         .join("cantus")
         .join("cantus_playlist_tracks.json");
-    let bytes = match fs::read(cache_path.clone()) {
+    let bytes = match fs::read(cache_path.clone()).await {
         Ok(bytes) => bytes,
         Err(err) => {
             warn!("Failed to read playlist cache at {cache_path:?}: {err}");
@@ -165,25 +143,24 @@ fn load_cached_playlist_tracks() -> PlaylistCache {
     }
 }
 
-fn persist_playlist_cache() {
-    let state = PLAYBACK_STATE.read();
-    if state.playlists.is_empty() {
-        return;
-    }
-    let cache_payload: PlaylistCache = state
+async fn persist_playlist_cache() {
+    let cache_payload: PlaylistCache = PLAYBACK_STATE
+        .read()
         .playlists
         .iter()
         .map(|playlist| {
             (
-                playlist.id.clone_static(),
+                playlist.id.clone(),
                 (
                     playlist.snapshot_id.clone(),
-                    playlist.tracks.iter().map(TrackId::clone_static).collect(),
+                    playlist.tracks.iter().cloned().collect(),
                 ),
             )
         })
         .collect();
-    drop(state);
+    if cache_payload.is_empty() {
+        return;
+    }
 
     let cache_path = dirs::config_dir()
         .unwrap()
@@ -191,7 +168,7 @@ fn persist_playlist_cache() {
         .join("cantus_playlist_tracks.json");
     match serde_json::to_vec(&cache_payload) {
         Ok(serialized) => {
-            if let Err(err) = fs::write(cache_path.clone(), serialized) {
+            if let Err(err) = fs::write(cache_path.clone(), serialized).await {
                 warn!("Failed to write playlist cache at {cache_path:?}: {err}");
             }
         }
@@ -408,18 +385,33 @@ async fn update_state_from_spotify() {
     let request_duration = request_start.elapsed();
 
     // Get current track and the upcoming queue
-    let current_track = if let Some(PlayableItem::Track(track)) = queue.currently_playing {
-        Track::from_rspotify(track)
-    } else {
+    if queue.currently_playing.is_none() {
         return;
-    };
-    let current_title = current_track.title.clone();
-    let new_queue: Vec<Track> = std::iter::once(current_track)
-        .chain(queue.queue.into_iter().filter_map(|item| match item {
-            PlayableItem::Track(track) => Some(Track::from_rspotify(track)),
+    }
+    let new_queue: Vec<Track> = std::iter::once(queue.currently_playing.unwrap())
+        .chain(queue.queue.into_iter())
+        .filter_map(|item| match item {
+            PlayableItem::Track(track) => Some({
+                let artist = track.artists.first().unwrap();
+                Track {
+                    id: track.id.unwrap(),
+                    title: track.name,
+                    artist_id: artist.id.clone().unwrap(),
+                    artist_name: artist.name.clone(),
+                    image_url: track
+                        .album
+                        .images
+                        .into_iter()
+                        .min_by_key(|img| img.width)
+                        .map(|img| img.url)
+                        .unwrap(),
+                    milliseconds: track.duration.num_milliseconds() as u32,
+                }
+            }),
             PlayableItem::Episode(_) | PlayableItem::Unknown(_) => None,
-        }))
+        })
         .collect();
+    let current_title = new_queue.first().unwrap().title.clone();
 
     // Start a task to fetch missing artists & images
     let missing_urls = new_queue
@@ -549,7 +541,7 @@ async fn poll_playlists() {
         .map(String::as_str)
         .collect::<HashSet<_>>();
     let include_ratings = config.ratings_enabled;
-    let mut cached_playlist_tracks = load_cached_playlist_tracks();
+    let mut cached_playlist_tracks = load_cached_playlist_tracks().await;
 
     // Grab the current users playlists from spotify
     let playlists: Vec<Playlist> = SPOTIFY_CLIENT
@@ -627,8 +619,8 @@ async fn refresh_playlists() {
         .items
         .into_iter()
         .filter_map(|playlist| {
-            let state = PLAYBACK_STATE.read();
-            if let Some((playlist_idx, state_playlist)) = state
+            if let Some((playlist_idx, state_playlist)) = PLAYBACK_STATE
+                .read()
                 .playlists
                 .iter()
                 .enumerate()
@@ -688,6 +680,6 @@ async fn refresh_playlists() {
             state.playlists[playlist_idx].tracks_total = new_total;
             state.playlists[playlist_idx].snapshot_id = playlist.snapshot_id;
         });
-        persist_playlist_cache();
+        persist_playlist_cache().await;
     }
 }

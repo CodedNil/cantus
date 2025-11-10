@@ -155,7 +155,6 @@ impl InteractionState {
             if let Some((track_id, track_rect, _)) = self
                 .track_hitboxes
                 .iter()
-                .rev()
                 .find(|(_, track_rect, _)| track_rect.contains(mouse_pos))
             {
                 self.last_click = Some((
@@ -179,6 +178,7 @@ impl InteractionState {
         if let Some((track_id, track_rect, (track_range_a, track_range_b))) = self
             .track_hitboxes
             .iter()
+            .rev()
             .find(|(_, track_rect, _)| track_rect.contains(mouse_pos))
         {
             self.last_click = Some((
@@ -187,13 +187,13 @@ impl InteractionState {
                 Point::new(mouse_pos.x - track_rect.x0, mouse_pos.y - track_rect.y0),
             ));
 
-            let track_id = track_id.clone();
             // If click is near the very left, reset to the start of the song, else seek to clicked position
             let position = if mouse_pos.x < (CONFIG.history_width + 20.0) * scale_factor {
                 0.0
             } else {
                 (mouse_pos.x - track_range_a) / (track_range_b - track_range_a)
             };
+            let track_id = track_id.clone();
             tokio::spawn(async move {
                 skip_to_track(track_id, position, false).await;
             });
@@ -366,7 +366,19 @@ impl CantusApp {
 
         let center_x = pos_x + width * 0.5;
         let center_y = height * 0.975;
-        let half_icons = num_icons as f64 / 2.0;
+
+        // Count only the standard icons for spacing
+        let half_icons = icon_entries
+            .iter()
+            .filter(|entry| {
+                if let IconEntry::Playlist { contained, .. } = entry {
+                    *contained
+                } else {
+                    true
+                }
+            })
+            .count() as f64
+            / 2.0;
 
         // Track hovers, and add hitboxes
         let mut hover_rating_index = None;

@@ -154,7 +154,7 @@ struct TrackRender<'a> {
 
 /// Build the scene for rendering.
 impl CantusApp {
-    pub fn create_scene(&mut self, device_id: usize) {
+    pub fn create_scene(&mut self) {
         let dt = self.render_state.last_update.elapsed().as_secs_f64();
         self.render_state.last_update = Instant::now();
 
@@ -333,7 +333,6 @@ impl CantusApp {
         // Render the tracks
         for track_render in &track_renders {
             self.draw_track(
-                device_id,
                 track_render,
                 history_width,
                 px_per_ms,
@@ -351,19 +350,10 @@ impl CantusApp {
             track_move_speed,
             playback_state.volume,
         );
-
-        // Purge the stale background cache entries.
-        if let Some(bundle) = self.render_devices.get_mut(&device_id) {
-            bundle
-                .background
-                .purge_stale(&mut bundle.renderer, self.frame_index);
-        }
-        drop(playback_state);
     }
 
     fn draw_track(
         &mut self,
-        device_id: usize,
         track_render: &TrackRender,
         history_width: f64,
         px_per_ms: f64,
@@ -424,31 +414,18 @@ impl CantusApp {
 
         // --- BACKGROUND ---
         if !track_render.art_only {
-            let bundle = self
-                .render_devices
-                .get_mut(&device_id)
-                .expect("render device must exist");
-            let background_image = bundle.background.render(
-                &track.image_url,
-                &self.render_context.devices[device_id],
-                &mut bundle.renderer,
-                &track_data.palette_image,
-                self.time_origin.elapsed().as_secs_f32(),
-                self.frame_index,
-            );
-
             // Don't need to render all the way to the edge since the album art is at the right edge
             let background_width = width - height * 0.25;
             self.scene.push_clip_layer(
                 start_translation,
                 &RoundedRect::new(0.0, 0.0, background_width, height, radii),
             );
-            let image_width = f64::from(background_image.width);
+            let image_width = f64::from(track_data.palette_image.width);
             let background_aspect_ratio = background_width / height;
             self.scene.fill(
                 Fill::EvenOdd,
                 start_translation * Affine::scale(full_width / image_width),
-                &ImageBrush::new(background_image).with_alpha(fade_alpha),
+                &ImageBrush::new(track_data.palette_image.clone()).with_alpha(fade_alpha),
                 None,
                 &Rect::new(0.0, 0.0, image_width, image_width * background_aspect_ratio),
             );
