@@ -276,9 +276,9 @@ impl CantusApp {
         // Iterate over the tracks within the timeline.
         let mut track_renders = Vec::with_capacity(queue.len());
         for track in queue {
-            let track_start_ms = current_ms + TRACK_SPACING_MS;
+            let track_start_ms = current_ms;
             let track_end_ms = track_start_ms + f64::from(track.milliseconds);
-            current_ms = track_end_ms;
+            current_ms = track_end_ms + TRACK_SPACING_MS;
 
             // Queue up the tracks positions
             let visible_start_px = track_start_ms.max(TIMELINE_START_MS) * px_per_ms;
