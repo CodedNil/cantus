@@ -314,8 +314,8 @@ impl LayerShellApp {
             .cantus
             .interaction
             .track_hitboxes
-            .values()
-            .map(|(rect, _)| rect)
+            .iter()
+            .map(|(_, rect, _)| rect)
             .chain(
                 self.cantus
                     .interaction

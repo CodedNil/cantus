@@ -375,7 +375,6 @@ impl CantusApp {
         let start_x = track_render.start_x;
         let width = track_render.width;
         if width <= 0.0 {
-            self.interaction.track_hitboxes.remove(&track.id);
             return;
         }
 
@@ -397,7 +396,7 @@ impl CantusApp {
         let hitbox = Rect::new(start_x, 0.0, start_x + width, height);
         self.interaction
             .track_hitboxes
-            .insert(track.id.clone(), (hitbox, track_render.hitbox_range));
+            .push((track.id.clone(), hitbox, track_render.hitbox_range));
         // If dragging, set the drag target to this track, and the position within the track
         if self.interaction.dragging && track_render.is_current {
             let position_within_track = (start_x + dark_width - track_render.hitbox_range.0)
@@ -416,6 +415,7 @@ impl CantusApp {
         let buffer_px = 20.0;
         let crop_left = start_x - track_render.hitbox_range.0;
         let crop_right = track_render.hitbox_range.1 - (start_x + width);
+        let full_width = track_render.hitbox_range.1 - track_render.hitbox_range.0;
         let left_rounding = rounding * lerp((crop_left / buffer_px).clamp(0.0, 1.0), 1.0, 0.3);
         let right_rounding = rounding * lerp((crop_right / buffer_px).clamp(0.0, 1.0), 1.0, 0.3);
         let radii =
@@ -447,7 +447,7 @@ impl CantusApp {
             let background_aspect_ratio = background_width / height;
             self.scene.fill(
                 Fill::EvenOdd,
-                start_translation * Affine::scale(background_width / image_width),
+                start_translation * Affine::scale(full_width / image_width),
                 &ImageBrush::new(background_image).with_alpha(fade_alpha),
                 None,
                 &Rect::new(0.0, 0.0, image_width, image_width * background_aspect_ratio),

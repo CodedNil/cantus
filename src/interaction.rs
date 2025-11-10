@@ -56,7 +56,7 @@ pub struct InteractionState {
     #[cfg(feature = "wayland")]
     pub last_hitbox_update: Instant,
     pub play_hitbox: Rect,
-    pub track_hitboxes: HashMap<TrackId<'static>, (Rect, (f64, f64))>,
+    pub track_hitboxes: Vec<(TrackId<'static>, Rect, (f64, f64))>,
     pub icon_hitboxes: Vec<IconHitbox>,
     pub mouse_down: bool,
     pub drag_origin: Option<Point>,
@@ -77,7 +77,7 @@ impl Default for InteractionState {
             #[cfg(feature = "wayland")]
             last_hitbox_update: Instant::now(),
             play_hitbox: Rect::default(),
-            track_hitboxes: HashMap::new(),
+            track_hitboxes: Vec::new(),
             icon_hitboxes: Vec::new(),
             mouse_down: false,
             drag_origin: None,
@@ -152,10 +152,11 @@ impl InteractionState {
         if self.play_hitbox.contains(mouse_pos) {
             let playing = PLAYBACK_STATE.read().playing;
             // Add a click event
-            if let Some((track_id, (track_rect, _))) = self
+            if let Some((track_id, track_rect, _)) = self
                 .track_hitboxes
                 .iter()
-                .find(|(_, (track_rect, _))| track_rect.contains(mouse_pos))
+                .rev()
+                .find(|(_, track_rect, _)| track_rect.contains(mouse_pos))
             {
                 self.last_click = Some((
                     Instant::now(),
@@ -175,10 +176,10 @@ impl InteractionState {
         }
 
         // Seek track
-        if let Some((track_id, (track_rect, (track_range_a, track_range_b)))) = self
+        if let Some((track_id, track_rect, (track_range_a, track_range_b))) = self
             .track_hitboxes
             .iter()
-            .find(|(_, (track_rect, _))| track_rect.contains(mouse_pos))
+            .find(|(_, track_rect, _)| track_rect.contains(mouse_pos))
         {
             self.last_click = Some((
                 Instant::now(),
