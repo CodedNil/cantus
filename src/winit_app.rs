@@ -1,4 +1,4 @@
-use crate::{CantusApp, PANEL_HEIGHT, PANEL_WIDTH, interaction::InteractionState};
+use crate::{CantusApp, PANEL_HEIGHT_EXTENSION, config::CONFIG, interaction::InteractionState};
 use anyhow::Result;
 use raw_window_handle::{HasDisplayHandle, HasWindowHandle};
 use tracing::error;
@@ -105,7 +105,10 @@ impl ApplicationHandler for WinitApp {
             return;
         }
 
-        let size = PhysicalSize::new(PANEL_WIDTH as u32, PANEL_HEIGHT as u32);
+        let size = PhysicalSize::new(
+            CONFIG.width as u32,
+            (CONFIG.height + PANEL_HEIGHT_EXTENSION) as u32,
+        );
         let window = event_loop
             .create_window(
                 WindowAttributes::default()
@@ -123,8 +126,8 @@ impl ApplicationHandler for WinitApp {
         self.cantus.scale_factor = window.scale_factor();
         if window
             .request_inner_size(PhysicalSize::new(
-                (PANEL_WIDTH * self.cantus.scale_factor) as u32,
-                (PANEL_HEIGHT * self.cantus.scale_factor) as u32,
+                (CONFIG.width * self.cantus.scale_factor) as u32,
+                ((CONFIG.height + PANEL_HEIGHT_EXTENSION) * self.cantus.scale_factor) as u32,
             ))
             .is_none()
         {

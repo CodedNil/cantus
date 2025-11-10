@@ -27,6 +27,7 @@ compile_error!("Enable at least one of the `wayland` or `winit` features.");
 compile_error!("`wayland` and `winit` features cannot be enabled at the same time.");
 
 mod background;
+mod config;
 mod interaction;
 mod render;
 mod spotify;
@@ -37,16 +38,8 @@ mod layer_shell;
 #[cfg(feature = "winit")]
 mod winit_app;
 
-/// Target width of the panel in logical pixels.
-const PANEL_WIDTH: f64 = 1050.0;
-/// The width on the left where previous tracks are shown
-const HISTORY_WIDTH: f64 = 100.0;
-/// Base height of the panel in logical pixels.
-const PANEL_HEIGHT_BASE: f64 = 40.0;
 /// Additional height allocated for extended content.
 const PANEL_HEIGHT_EXTENSION: f64 = 10.0;
-/// Total height of the panel in logical pixels.
-const PANEL_HEIGHT: f64 = PANEL_HEIGHT_BASE + PANEL_HEIGHT_EXTENSION;
 
 #[tokio::main]
 async fn main() {

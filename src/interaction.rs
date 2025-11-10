@@ -1,5 +1,6 @@
 use crate::{
-    CantusApp, HISTORY_WIDTH,
+    CantusApp,
+    config::CONFIG,
     spotify::{
         IMAGES_CACHE, PLAYBACK_STATE, Playlist, RATING_PLAYLISTS, SPOTIFY_CLIENT, Track,
         update_playback_state,
@@ -131,7 +132,9 @@ impl InteractionState {
             .find(|h| h.rect.contains(mouse_pos))
         {
             let track_id = hitbox.track_id.clone();
-            if let Some(index) = hitbox.rating_index {
+            if CONFIG.ratings_enabled
+                && let Some(index) = hitbox.rating_index
+            {
                 let center_x = (hitbox.rect.x0 + hitbox.rect.x1) * 0.5;
                 let rating_slot = index * 2 + 1 + usize::from(mouse_pos.x >= center_x);
                 tokio::spawn(async move {
@@ -185,7 +188,7 @@ impl InteractionState {
 
             let track_id = track_id.clone();
             // If click is near the very left, reset to the start of the song, else seek to clicked position
-            let position = if mouse_pos.x < (HISTORY_WIDTH + 20.0) * scale_factor {
+            let position = if mouse_pos.x < (CONFIG.history_width + 20.0) * scale_factor {
                 0.0
             } else {
                 (mouse_pos.x - track_range_a) / (track_range_b - track_range_a)
@@ -285,24 +288,33 @@ impl CantusApp {
         height: f64,
         pos_x: f64,
     ) {
-        let track_rating_index = RATING_PLAYLISTS
-            .iter()
-            .position(|&rating_key| {
-                playlists
-                    .get(rating_key)
-                    .is_some_and(|playlist| playlist.tracks.contains(&track.id))
-            })
-            .unwrap_or(0);
+        let ratings_enabled = CONFIG.ratings_enabled;
+        let track_rating_index = if ratings_enabled {
+            RATING_PLAYLISTS
+                .iter()
+                .position(|&rating_key| {
+                    playlists
+                        .get(rating_key)
+                        .is_some_and(|playlist| playlist.tracks.contains(&track.id))
+                })
+                .unwrap_or(0)
+        } else {
+            0
+        };
 
-        let mut icon_entries = (0..5)
-            .map(|index| IconEntry::Star { index })
-            .collect::<Vec<_>>();
+        let mut icon_entries = if ratings_enabled {
+            (0..5)
+                .map(|index| IconEntry::Star { index })
+                .collect::<Vec<_>>()
+        } else {
+            Vec::new()
+        };
         // Add playlists that are contained in the favourited playlists
         icon_entries.extend(
             playlists
                 .iter()
                 .filter_map(|(&key, &playlist)| {
-                    if RATING_PLAYLISTS.contains(&key) {
+                    if ratings_enabled && RATING_PLAYLISTS.contains(&key) {
                         return None;
                     }
                     let contained = playlist.tracks.contains(&track.id);
@@ -581,6 +593,9 @@ async fn skip_to_track(track_id: TrackId<'static>, position: f64, always_seek: b
 
 /// Update Spotify rating playlists for the given track.
 async fn update_star_rating(track_id: TrackId<'static>, rating_slot: usize) {
+    if !CONFIG.ratings_enabled {
+        return;
+    }
     let Some(_guard) = try_acquire_spotify_guard() else {
         return;
     };
@@ -643,12 +658,11 @@ async fn update_star_rating(track_id: TrackId<'static>, rating_slot: usize) {
     }
 
     // Add the track the liked songs if its rated above 3 stars
-    let should_be_liked = rating_slot >= 6;
     match spotify_client
         .current_user_saved_tracks_contains([track_id.clone()])
         .await
     {
-        Ok(already_liked) => match (already_liked[0], should_be_liked) {
+        Ok(already_liked) => match (already_liked[0], rating_slot >= 6) {
             (true, false) => {
                 info!("Removing track {track_id} from liked songs");
                 if let Err(err) = spotify_client

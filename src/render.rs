@@ -1,5 +1,6 @@
 use crate::{
-    CantusApp, HISTORY_WIDTH, PANEL_HEIGHT_BASE, PANEL_WIDTH,
+    CantusApp,
+    config::CONFIG,
     interaction::InteractionEvent,
     spotify::{IMAGES_CACHE, PLAYBACK_STATE, Playlist, TRACK_DATA_CACHE, Track},
 };
@@ -19,11 +20,6 @@ use vello::{
 
 /// Spacing between tracks in ms
 const TRACK_SPACING_MS: f64 = 4000.0;
-/// How many ms to show in the timeline
-const TIMELINE_DURATION_MS: f64 = 12.0 * 60.0 * 1000.0;
-/// Starting position of the timeline in ms, if negative then it shows the history too
-const TIMELINE_START_MS: f64 = -1.5 * 60.0 * 1000.0;
-const TIMELINE_END_MS: f64 = TIMELINE_START_MS + TIMELINE_DURATION_MS;
 
 /// Particles emitted per second when playback is active.
 const SPARK_EMISSION: f32 = 60.0;
@@ -162,11 +158,15 @@ impl CantusApp {
         let dt = self.render_state.last_update.elapsed().as_secs_f64();
         self.render_state.last_update = Instant::now();
 
-        let history_width = (HISTORY_WIDTH * self.scale_factor).ceil();
-        let total_width = (PANEL_WIDTH * self.scale_factor - history_width).ceil();
-        let total_height = (PANEL_HEIGHT_BASE * self.scale_factor).ceil();
-        let px_per_ms = total_width / TIMELINE_DURATION_MS;
-        let timeline_origin_x = history_width - TIMELINE_START_MS * px_per_ms;
+        let history_width = (CONFIG.history_width * self.scale_factor).ceil();
+        let timeline_duration_ms = CONFIG.timeline_future_minutes * 60_000.0;
+        let timeline_start_ms = -CONFIG.timeline_past_minutes * 60_000.0;
+        let timeline_end_ms = timeline_start_ms + timeline_duration_ms;
+
+        let total_width = (CONFIG.width * self.scale_factor - history_width).ceil();
+        let total_height = (CONFIG.height * self.scale_factor).ceil();
+        let px_per_ms = total_width / timeline_duration_ms;
+        let timeline_origin_x = history_width - timeline_start_ms * px_per_ms;
 
         let playback_state = PLAYBACK_STATE.read();
         let queue = &playback_state.queue;
@@ -281,14 +281,14 @@ impl CantusApp {
             current_ms = track_end_ms + TRACK_SPACING_MS;
 
             // Queue up the tracks positions
-            let visible_start_px = track_start_ms.max(TIMELINE_START_MS) * px_per_ms;
-            let visible_end_px = track_end_ms.min(TIMELINE_END_MS) * px_per_ms;
+            let visible_start_px = track_start_ms.max(timeline_start_ms) * px_per_ms;
+            let visible_end_px = track_end_ms.min(timeline_end_ms) * px_per_ms;
             let hitbox_range = (
-                (track_start_ms - TIMELINE_START_MS) * px_per_ms + history_width,
-                (track_end_ms - TIMELINE_START_MS) * px_per_ms + history_width,
+                (track_start_ms - timeline_start_ms) * px_per_ms + history_width,
+                (track_end_ms - timeline_start_ms) * px_per_ms + history_width,
             );
 
-            let start_x = (visible_start_px - TIMELINE_START_MS * px_per_ms) + history_width;
+            let start_x = (visible_start_px - timeline_start_ms * px_per_ms) + history_width;
             let is_current = track_start_ms <= 0.0 && track_end_ms >= 0.0;
             let seconds_until_start = (track_start_ms / 1000.0).abs();
             let width = visible_end_px - visible_start_px;
@@ -379,7 +379,8 @@ impl CantusApp {
             return;
         }
 
-        let timeline_origin_x = history_width - TIMELINE_START_MS * px_per_ms;
+        let timeline_origin_x =
+            history_width - (-CONFIG.timeline_past_minutes * 60_000.0) * px_per_ms;
         let start_translation = Affine::translate((start_x, 0.0));
 
         // Fade out based on width
@@ -804,7 +805,7 @@ impl CantusApp {
             .collect();
 
         // Emit new particles while playing
-        if track_move_speed.abs() > 0.0 {
+        if track_move_speed.abs() > 0.2 {
             let rng = &mut self.particles.rng;
             self.particles.spawn_accumulator += dt * SPARK_EMISSION;
             let emit_count = self.particles.spawn_accumulator.floor() as u16;

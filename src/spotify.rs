@@ -1,4 +1,4 @@
-use crate::background::update_color_palettes;
+use crate::{background::update_color_palettes, config::CONFIG};
 use anyhow::Result;
 use dashmap::DashMap;
 use image::GenericImageView;
@@ -16,7 +16,7 @@ use rspotify::{
 use std::{
     collections::{HashMap, HashSet},
     convert::TryInto,
-    env, fs,
+    fs,
     sync::{Arc, LazyLock},
     time::Instant,
 };
@@ -34,14 +34,12 @@ use zbus::{
     zvariant::OwnedValue,
 };
 
-/// MPRIS interface identifier used for playback control.
-const PLAYER_INTERFACE: InterfaceName<'static> =
-    InterfaceName::from_static_str_unchecked("org.mpris.MediaPlayer2.Player");
 /// Root MPRIS interface that exposes metadata and identity.
 const ROOT_INTERFACE: InterfaceName<'static> =
     InterfaceName::from_static_str_unchecked("org.mpris.MediaPlayer2");
-/// Object path for the Spotify MPRIS instance on D-Bus.
-const MPRIS_OBJECT_PATH: &str = "/org/mpris/MediaPlayer2";
+/// MPRIS interface identifier used for playback control.
+const PLAYER_INTERFACE: InterfaceName<'static> =
+    InterfaceName::from_static_str_unchecked("org.mpris.MediaPlayer2.Player");
 
 pub static PLAYBACK_STATE: LazyLock<Arc<RwLock<PlaybackState>>> = LazyLock::new(|| {
     Arc::new(RwLock::new(PlaybackState {
@@ -315,7 +313,7 @@ async fn update_state_from_mpris(
 
         let Ok(builder) = PropertiesProxy::builder(connection)
             .destination(name)
-            .and_then(|builder| builder.path(MPRIS_OBJECT_PATH))
+            .and_then(|builder| builder.path("/org/mpris/MediaPlayer2"))
         else {
             continue;
         };
@@ -544,8 +542,13 @@ async fn ensure_image_cached(url: &str) -> Result<()> {
 
 async fn poll_playlists() {
     // Get initial playlist data
-    let playlists_env = env::var("PLAYLISTS").unwrap_or_default();
-    let target_playlists = playlists_env.split(',').collect::<Vec<_>>();
+    let config = &*CONFIG;
+    let target_playlists = config
+        .playlists
+        .iter()
+        .map(String::as_str)
+        .collect::<HashSet<_>>();
+    let include_ratings = config.ratings_enabled;
     let mut cached_playlist_tracks = load_cached_playlist_tracks();
 
     // Grab the current users playlists from spotify
@@ -558,8 +561,8 @@ async fn poll_playlists() {
         .items
         .into_iter()
         .filter(|playlist| {
-            target_playlists.contains(&playlist.name.as_str())
-                || RATING_PLAYLISTS.contains(&playlist.name.as_str())
+            target_playlists.contains(playlist.name.as_str())
+                || (include_ratings && RATING_PLAYLISTS.contains(&playlist.name.as_str()))
         })
         .map(|playlist| {
             let cached = cached_playlist_tracks

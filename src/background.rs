@@ -1,6 +1,6 @@
-use crate::{
-    PANEL_HEIGHT_BASE,
-    spotify::{ARTIST_DATA_CACHE, IMAGES_CACHE, PLAYBACK_STATE, TRACK_DATA_CACHE, TrackData},
+use crate::config::CONFIG;
+use crate::spotify::{
+    ARTIST_DATA_CACHE, IMAGES_CACHE, PLAYBACK_STATE, TRACK_DATA_CACHE, TrackData,
 };
 use anyhow::Result;
 use auto_palette::Palette;
@@ -35,8 +35,13 @@ use wgpu::{
 const NUM_SWATCHES: usize = 4;
 
 /// Dimensions of the generated palette-based textures.
-const PALETTE_IMAGE_HEIGHT: u32 = PANEL_HEIGHT_BASE as u32;
-const PALETTE_IMAGE_WIDTH: u32 = PALETTE_IMAGE_HEIGHT * 3;
+fn palette_image_height() -> u32 {
+    CONFIG.height as u32
+}
+
+fn palette_image_width() -> u32 {
+    palette_image_height() * 3
+}
 
 /// Number of refinement passes when synthesising the background texture.
 const PALETTE_PASS_COUNT: usize = 8;
@@ -468,8 +473,8 @@ pub fn update_color_palettes() -> Result<()> {
             data: Blob::from(generate_palette_image(&primary_colors, palette_seed)),
             format: ImageFormat::Rgba8,
             alpha_type: ImageAlphaType::Alpha,
-            width: PALETTE_IMAGE_WIDTH,
-            height: PALETTE_IMAGE_HEIGHT,
+            width: palette_image_width(),
+            height: palette_image_height(),
         };
         TRACK_DATA_CACHE.insert(
             track_id,
@@ -497,8 +502,11 @@ impl auto_palette::Filter for ChromaFilter {
 }
 
 fn generate_palette_image(colors: &[[u8; 4]], seed: u64) -> Vec<u8> {
+    let palette_width = palette_image_width();
+    let palette_height = palette_image_height();
+
     if colors.is_empty() {
-        return RgbaImage::new(PALETTE_IMAGE_WIDTH, PALETTE_IMAGE_HEIGHT).into_raw();
+        return RgbaImage::new(palette_width, palette_height).into_raw();
     }
 
     let mut rng = SmallRng::seed_from_u64(seed);
@@ -518,21 +526,21 @@ fn generate_palette_image(colors: &[[u8; 4]], seed: u64) -> Vec<u8> {
         .collect::<Vec<_>>();
 
     let mut canvas = RgbaImage::from_pixel(
-        PALETTE_IMAGE_WIDTH,
-        PALETTE_IMAGE_HEIGHT,
+        palette_width,
+        palette_height,
         image::Rgba([colors[0][0], colors[0][1], colors[0][2], 255]),
     );
 
     // Fill with the first colour; refinement passes will rebalance ratios.
-    let total_pixels = (PALETTE_IMAGE_WIDTH * PALETTE_IMAGE_HEIGHT) as f32;
+    let total_pixels = (palette_width * palette_height) as f32;
     let mut coverage = vec![0.0; colors.len()];
     let mut per_color_strokes = vec![0; colors.len()];
     let mut available_indices = Vec::with_capacity(colors.len());
     for pass in 0..PALETTE_PASS_COUNT {
         let base_height = lerp(
             pass as f32 / PALETTE_PASS_COUNT as f32,
-            PALETTE_IMAGE_HEIGHT as f32 * 0.7,
-            PALETTE_IMAGE_HEIGHT as f32 * 0.3,
+            palette_height as f32 * 0.7,
+            palette_height as f32 * 0.3,
         );
 
         // Count pixels for each color, to get ratios
@@ -602,7 +610,7 @@ fn generate_palette_image(colors: &[[u8; 4]], seed: u64) -> Vec<u8> {
             let brush_factor = rng.random_range(0.75..1.2);
             let brush_size = (base_height * brush_factor)
                 .round()
-                .clamp(6.0, PALETTE_IMAGE_HEIGHT as f32) as u32;
+                .clamp(6.0, palette_height as f32) as u32;
             let stamp = image::imageops::resize(
                 &BRUSHES[rng.random_range(0..BRUSHES.len())],
                 brush_size,
@@ -612,10 +620,8 @@ fn generate_palette_image(colors: &[[u8; 4]], seed: u64) -> Vec<u8> {
 
             // Overlay the stamp onto the canvas
             let fade_factor = rng.random_range(0.55..0.9);
-            let x =
-                i64::from(rng.random_range(0..=PALETTE_IMAGE_WIDTH)) - i64::from(brush_size / 2);
-            let y =
-                i64::from(rng.random_range(0..=PALETTE_IMAGE_HEIGHT)) - i64::from(brush_size / 2);
+            let x = i64::from(rng.random_range(0..=palette_width)) - i64::from(brush_size / 2);
+            let y = i64::from(rng.random_range(0..=palette_height)) - i64::from(brush_size / 2);
             let (bottom_width, bottom_height) = canvas.dimensions();
             let (top_width, top_height) = stamp.dimensions();
 

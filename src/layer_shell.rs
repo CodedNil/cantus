@@ -1,10 +1,9 @@
-use crate::{CantusApp, PANEL_HEIGHT, PANEL_WIDTH, interaction::InteractionState};
+use crate::{CantusApp, PANEL_HEIGHT_EXTENSION, config::CONFIG, interaction::InteractionState};
 use anyhow::Result;
 use raw_window_handle::{
     RawDisplayHandle, RawWindowHandle, WaylandDisplayHandle, WaylandWindowHandle,
 };
 use std::{
-    env,
     ffi::c_void,
     ptr::NonNull,
     time::{Duration, Instant},
@@ -83,7 +82,10 @@ pub fn run() {
         &qhandle,
         (),
     );
-    layer_surface.set_size(PANEL_WIDTH as u32, PANEL_HEIGHT as u32);
+    layer_surface.set_size(
+        CONFIG.width as u32,
+        (CONFIG.height + PANEL_HEIGHT_EXTENSION) as u32,
+    );
     layer_surface
         .set_anchor(zwlr_layer_surface_v1::Anchor::Top | zwlr_layer_surface_v1::Anchor::Left);
     layer_surface.set_margin(4, 0, 0, 4);
@@ -216,8 +218,9 @@ impl LayerShellApp {
     }
 
     fn refresh_surface(&mut self, qhandle: &QueueHandle<Self>) {
-        let buffer_width = (PANEL_WIDTH * self.cantus.scale_factor).round();
-        let buffer_height = (PANEL_HEIGHT * self.cantus.scale_factor).round();
+        let buffer_width = (CONFIG.width * self.cantus.scale_factor).round();
+        let buffer_height =
+            ((CONFIG.height + PANEL_HEIGHT_EXTENSION) * self.cantus.scale_factor).round();
 
         if let Err(err) = self.ensure_surface(buffer_width, buffer_height) {
             error!("Failed to prepare render surface: {err}");
@@ -237,8 +240,8 @@ impl LayerShellApp {
 
         let mut index = 0;
         let mut matched_target = false;
-        if let Ok(target) = env::var("TARGET_MONITOR")
-            && let Some(found) = self.outputs.iter().position(|info| info.matches(&target))
+        if let Some(target) = &CONFIG.monitor
+            && let Some(found) = self.outputs.iter().position(|info| info.matches(target))
         {
             index = found;
             matched_target = true;
@@ -253,8 +256,9 @@ impl LayerShellApp {
 
     fn try_render_frame(&mut self, qhandle: &QueueHandle<Self>) -> Result<()> {
         if self.cantus.render_surface.is_none() {
-            let buffer_width = (PANEL_WIDTH * self.cantus.scale_factor).round();
-            let buffer_height = (PANEL_HEIGHT * self.cantus.scale_factor).round();
+            let buffer_width = (CONFIG.width * self.cantus.scale_factor).round();
+            let buffer_height =
+                ((CONFIG.height + PANEL_HEIGHT_EXTENSION) * self.cantus.scale_factor).round();
             self.ensure_surface(buffer_width, buffer_height)?;
         }
 
@@ -276,8 +280,9 @@ impl LayerShellApp {
     }
 
     fn update_scale_and_viewport(&self) {
-        let buffer_width = (PANEL_WIDTH * self.cantus.scale_factor).round();
-        let buffer_height = (PANEL_HEIGHT * self.cantus.scale_factor).round();
+        let buffer_width = (CONFIG.width * self.cantus.scale_factor).round();
+        let buffer_height =
+            ((CONFIG.height + PANEL_HEIGHT_EXTENSION) * self.cantus.scale_factor).round();
 
         if let Some(surface) = &self.wl_surface {
             surface.set_buffer_scale(if self.viewport.is_some() {
@@ -288,7 +293,10 @@ impl LayerShellApp {
         }
         if let Some(viewport) = &self.viewport {
             viewport.set_source(0.0, 0.0, buffer_width, buffer_height);
-            viewport.set_destination(PANEL_WIDTH as i32, PANEL_HEIGHT as i32);
+            viewport.set_destination(
+                CONFIG.width as i32,
+                (CONFIG.height + PANEL_HEIGHT_EXTENSION) as i32,
+            );
         }
     }
 
