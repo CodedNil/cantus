@@ -5,9 +5,9 @@ A beautiful interactive music widget for Wayland
 
 ## Features
 
-**Graphics**: Powered by `wgpu` and `vello` for high-performance, beautiful rendering of the music widget.
+**Graphics**: Powered by `wgpu` and `vello` for high-performance, animated rendering of the music widget.
 
-**Queue Display**: Displays your spotify queue in a beautiful timeline, shows upcoming songs as well as the history.
+**Queue Display**: Displays your spotify queue in a visual timeline, shows upcoming songs as well as the history.
 
 **Playback Controls**: Provides playback controls for play/pause, skip forward/backward by clicking to seek to a song, and volume adjustment with scroll. You can also smoothly drag the whole bar to seek through the timeline.
 
