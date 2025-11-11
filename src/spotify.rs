@@ -6,9 +6,7 @@ use parking_lot::RwLock;
 use reqwest::Client;
 use rspotify::{
     AuthCodePkceSpotify, Config, Credentials, OAuth,
-    model::{
-        AdditionalType, ArtistId, Context, PlayableItem, PlaylistId, SimplifiedPlaylist, TrackId,
-    },
+    model::{AdditionalType, ArtistId, PlayableItem, PlaylistId, SimplifiedPlaylist, TrackId},
     prelude::{BaseClient, OAuthClient},
     scopes,
 };
@@ -78,7 +76,7 @@ pub struct PlaybackState {
     pub volume: Option<u8>,
     pub queue: Vec<Track>,
     pub queue_index: usize,
-    pub current_context: Option<Context>,
+    pub current_context: Option<String>,
     pub playlists: Vec<Playlist>,
 }
 
@@ -470,7 +468,8 @@ async fn update_state_from_spotify() {
 
     // Update the playback state
     update_playback_state(|state| {
-        if state.current_context == current_playback.context
+        let new_context = current_playback.context.map(|c| c.uri);
+        if state.current_context == new_context
             && let Some(new_index) = state.queue.iter().position(|t| t.title == current_title)
         {
             // Delete everything past the new_index, and append the new tracks at the end
@@ -482,7 +481,7 @@ async fn update_state_from_spotify() {
             info!("Context changed, resetting queue");
             state.queue = new_queue;
             state.queue_index = 0;
-            state.current_context = current_playback.context;
+            state.current_context = new_context;
         }
 
         state.shuffle = current_playback.shuffle_state;
