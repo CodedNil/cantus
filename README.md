@@ -20,3 +20,45 @@ https://github.com/user-attachments/assets/bca138db-197d-403d-a6e2-c0b025df3c74
 ## Usage
 
 `cantus` can be run in two different modes: Wayland native (using `layer-shell` protocol) or as a standard window using `winit`.
+
+
+## Installing with Nix
+
+As a flake:
+Add to flake.nix inputs `cantus.url = "github:CodedNil/cantus";`
+Enable it as a systemd module with home-manager:
+```
+  imports = [ inputs.cantus.homeManagerModules.default ];
+  programs.cantus = {
+    enable = true;
+    package = inputs.cantus.packages.${pkgs.stdenv.system}.cantus;
+    settings = {
+      monitor = "eDP-1";
+      width = 1050.0;
+      height = 40.0;
+      timeline_future_minutes = 12.0;
+      timeline_past_minutes = 1.5;
+      history_width = 100.0;
+      playlists = [ "Rock & Roll" "Instrumental" "Pop" ];
+      ratings_enabled = true;
+    };
+  };
+```
+    
+## Building from Source
+
+To build Cantus from source, ensure the following dependencies are installed:
+
+    Rust (with cargo)
+    wayland-protocols
+    clang
+    libxkbcommon
+    wayland
+    vulkan-loader
+
+Then, from the root of the repository, run:
+
+cargo build --release
+
+# To install it system-wide
+sudo cp target/release/cantus /usr/bin
