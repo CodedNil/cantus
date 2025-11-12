@@ -5,6 +5,10 @@ use tracing::warn;
 #[derive(Debug, Clone, Deserialize)]
 #[serde(default)]
 pub struct Config {
+    // Spotify client ID
+    pub spotify_client_id: Option<String>,
+
+    /// The monitor to display on.
     pub monitor: Option<String>,
 
     /// The width of the timeline in pixels.
@@ -38,6 +42,7 @@ pub struct Config {
 impl Default for Config {
     fn default() -> Self {
         Self {
+            spotify_client_id: None,
             monitor: None,
             width: 1050.0,
             height: 50.0,

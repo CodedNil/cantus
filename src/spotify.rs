@@ -190,7 +190,9 @@ pub async fn init() {
     // Initialize Spotify client with credentials and OAuth scopes
     let mut spotify = AuthCodePkceSpotify::with_config(
         Credentials {
-            id: String::from("84dab8c175424bdb94aa342369e4a0f8"),
+            id: CONFIG.spotify_client_id.clone().expect(
+                "Spotify client ID not set, set it in the config file under key `spotify_client_id`.",
+            ),
             secret: None,
         },
         OAuth {
@@ -495,7 +497,7 @@ async fn update_state_from_spotify() {
                 + if current_playback.is_playing {
                     (request_duration.as_millis() / 2) as u32
                 } else {
-                    0.0
+                    0
                 };
             state.last_updated = Instant::now();
         }
