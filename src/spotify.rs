@@ -491,8 +491,12 @@ async fn update_state_from_spotify() {
             let progress = current_playback
                 .progress
                 .map_or(0, |p| p.num_milliseconds()) as u32;
-            let http_delay = (request_duration.as_millis() / 2) as u32;
-            state.progress = progress + http_delay;
+            state.progress = progress
+                + if current_playback.is_playing {
+                    (request_duration.as_millis() / 2) as u32
+                } else {
+                    0.0
+                };
             state.last_updated = Instant::now();
         }
     });
