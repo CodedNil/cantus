@@ -12,6 +12,16 @@ pub struct Config {
     /// The height of the timeline in pixels.
     pub height: f64,
 
+    /// The layer the app should be on.
+    ///
+    /// Can be one of 'background', 'bottom', 'top', or 'overlay'.
+    pub layer: String,
+    /// The corner/edge the application should anchor to.
+    ///
+    /// Can be one of 'top', 'topright', 'right', 'bottomright', 'bottom',
+    /// 'bottomleft', 'left', or 'topleft'.
+    pub layer_anchor: String,
+
     /// How many minutes in the future to display in the timeline.
     pub timeline_future_minutes: f64,
     /// How many minutes before the current time to display in the timeline.
@@ -31,6 +41,8 @@ impl Default for Config {
             monitor: None,
             width: 1050.0,
             height: 50.0,
+            layer: "top".into(),
+            layer_anchor: "topleft".into(),
             timeline_future_minutes: 12.0,
             timeline_past_minutes: 1.5,
             history_width: 100.0,

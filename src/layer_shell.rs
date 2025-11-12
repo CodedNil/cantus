@@ -77,7 +77,16 @@ pub fn run() {
     let layer_surface = layer_shell.get_layer_surface(
         surface,
         app.outputs.get(app.active_output).map(|info| &info.handle),
-        zwlr_layer_shell_v1::Layer::Top,
+        match CONFIG.layer.as_str() {
+            "background" => zwlr_layer_shell_v1::Layer::Background,
+            "bottom" => zwlr_layer_shell_v1::Layer::Bottom,
+            "top" => zwlr_layer_shell_v1::Layer::Top,
+            "overlay" => zwlr_layer_shell_v1::Layer::Overlay,
+            other => {
+                error!("Invalid layer '{other}', defaulting to 'top'");
+                zwlr_layer_shell_v1::Layer::Top
+            }
+        },
         "cantus".into(),
         &qhandle,
         (),
@@ -86,8 +95,22 @@ pub fn run() {
         CONFIG.width as u32,
         (CONFIG.height + PANEL_HEIGHT_EXTENSION) as u32,
     );
-    layer_surface
-        .set_anchor(zwlr_layer_surface_v1::Anchor::Top | zwlr_layer_surface_v1::Anchor::Left);
+    layer_surface.set_anchor(match CONFIG.layer_anchor.as_str() {
+        "top" => zwlr_layer_surface_v1::Anchor::Top,
+        "topright" => zwlr_layer_surface_v1::Anchor::Top | zwlr_layer_surface_v1::Anchor::Right,
+        "right" => zwlr_layer_surface_v1::Anchor::Right,
+        "bottomright" => {
+            zwlr_layer_surface_v1::Anchor::Bottom | zwlr_layer_surface_v1::Anchor::Right
+        }
+        "bottom" => zwlr_layer_surface_v1::Anchor::Bottom,
+        "bottomleft" => zwlr_layer_surface_v1::Anchor::Bottom | zwlr_layer_surface_v1::Anchor::Left,
+        "left" => zwlr_layer_surface_v1::Anchor::Left,
+        "topleft" => zwlr_layer_surface_v1::Anchor::Top | zwlr_layer_surface_v1::Anchor::Left,
+        other => {
+            error!("Invalid layer anchor '{other}', defaulting to 'topleft'");
+            zwlr_layer_surface_v1::Anchor::Top | zwlr_layer_surface_v1::Anchor::Left
+        }
+    });
     layer_surface.set_margin(4, 0, 0, 4);
     layer_surface.set_exclusive_zone(-1);
 
