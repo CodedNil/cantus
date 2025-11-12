@@ -55,7 +55,7 @@ pub static PLAYBACK_STATE: LazyLock<RwLock<PlaybackState>> = LazyLock::new(|| {
 pub static IMAGES_CACHE: LazyLock<DashMap<String, ImageData>> = LazyLock::new(DashMap::new);
 pub static TRACK_DATA_CACHE: LazyLock<DashMap<TrackId<'static>, TrackData>> =
     LazyLock::new(DashMap::new);
-pub static ARTIST_DATA_CACHE: LazyLock<DashMap<ArtistId<'static>, String>> =
+pub static ARTIST_DATA_CACHE: LazyLock<DashMap<ArtistId<'static>, Option<String>>> =
     LazyLock::new(DashMap::new);
 
 pub const RATING_PLAYLISTS: [&str; 11] = [
@@ -443,16 +443,15 @@ async fn update_state_from_spotify() {
                     return;
                 };
                 for artist in artists {
-                    let artist_image = artist
-                        .images
-                        .into_iter()
-                        .min_by_key(|img| img.width)
-                        .unwrap();
-                    ARTIST_DATA_CACHE.insert(artist.id, artist_image.url.clone());
+                    let artist_image = artist.images.into_iter().min_by_key(|img| img.width);
+                    ARTIST_DATA_CACHE
+                        .insert(artist.id, artist_image.as_ref().map(|a| a.url.clone()));
                     set.spawn(async move {
-                        let url = artist_image.url.clone();
-                        if let Err(err) = ensure_image_cached(url.as_str()).await {
-                            warn!("failed to cache image {url}: {err}");
+                        if let Some(artist_image) = artist_image {
+                            let url = artist_image.url.clone();
+                            if let Err(err) = ensure_image_cached(url.as_str()).await {
+                                warn!("failed to cache image {url}: {err}");
+                            }
                         }
                     });
                 }

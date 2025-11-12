@@ -64,7 +64,6 @@ pub fn update_color_palettes() -> Result<()> {
         if !TRACK_DATA_CACHE.contains_key(&track.id)
             && let Some(image) = IMAGES_CACHE.get(&track.image_url)
             && let Some(artist_image_ref) = ARTIST_DATA_CACHE.get(&track.artist_id)
-            && let Some(artist_image) = IMAGES_CACHE.get(&*artist_image_ref)
         {
             // Merge the images side by side
             let width = image.width;
@@ -86,23 +85,27 @@ pub fn update_color_palettes() -> Result<()> {
                     let artist_new_width = (width as f32 * 0.1).round() as u32;
                     let mut new_img = RgbaImage::new(width + artist_new_width, height);
                     image::imageops::overlay(&mut new_img, &album_image, 0, 0);
-                    let artist_img_resized = image::imageops::resize(
-                        &image::RgbaImage::from_raw(
-                            artist_image.width,
-                            artist_image.height,
-                            artist_image.data.data().to_vec(),
-                        )
-                        .unwrap(),
-                        artist_new_width,
-                        height,
-                        image::imageops::FilterType::Nearest,
-                    );
-                    image::imageops::overlay(
-                        &mut new_img,
-                        &artist_img_resized,
-                        i64::from(width),
-                        0,
-                    );
+                    if let Some(artist_image_ref) = &*artist_image_ref
+                        && let Some(artist_image) = IMAGES_CACHE.get(artist_image_ref)
+                    {
+                        let artist_img_resized = image::imageops::resize(
+                            &image::RgbaImage::from_raw(
+                                artist_image.width,
+                                artist_image.height,
+                                artist_image.data.data().to_vec(),
+                            )
+                            .unwrap(),
+                            artist_new_width,
+                            height,
+                            image::imageops::FilterType::Nearest,
+                        );
+                        image::imageops::overlay(
+                            &mut new_img,
+                            &artist_img_resized,
+                            i64::from(width),
+                            0,
+                        );
+                    }
 
                     let palette: Palette<f64> = Palette::builder()
                         .algorithm(auto_palette::Algorithm::SLIC)
