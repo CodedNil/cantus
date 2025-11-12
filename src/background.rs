@@ -82,12 +82,14 @@ pub fn update_color_palettes() -> Result<()> {
                     .or_else(|_| palette.find_swatches(NUM_SWATCHES))?;
                 if swatches.len() < NUM_SWATCHES {
                     // Generate a new image with the artist image
-                    let artist_new_width = (width as f32 * 0.1).round() as u32;
-                    let mut new_img = RgbaImage::new(width + artist_new_width, height);
-                    image::imageops::overlay(&mut new_img, &album_image, 0, 0);
-                    if let Some(artist_image_ref) = &*artist_image_ref
-                        && let Some(artist_image) = IMAGES_CACHE.get(artist_image_ref)
-                    {
+                    let new_img = if let Some(artist_image_ref) = &*artist_image_ref {
+                        let Some(artist_image) = IMAGES_CACHE.get(artist_image_ref) else {
+                            // Wait for the image to be cached.
+                            continue;
+                        };
+                        let artist_new_width = (width as f32 * 0.1).round() as u32;
+                        let mut new_img = RgbaImage::new(width + artist_new_width, height);
+                        image::imageops::overlay(&mut new_img, &album_image, 0, 0);
                         let artist_img_resized = image::imageops::resize(
                             &image::RgbaImage::from_raw(
                                 artist_image.width,
@@ -105,14 +107,19 @@ pub fn update_color_palettes() -> Result<()> {
                             i64::from(width),
                             0,
                         );
-                    }
+                        new_img
+                    } else {
+                        let mut new_img = RgbaImage::new(width, height);
+                        image::imageops::overlay(&mut new_img, &album_image, 0, 0);
+                        new_img
+                    };
 
                     let palette: Palette<f64> = Palette::builder()
                         .algorithm(auto_palette::Algorithm::SLIC)
                         .filter(ChromaFilter { threshold: 20 })
                         .build(&auto_palette::ImageData::new(
-                            width + artist_new_width,
-                            height,
+                            new_img.width(),
+                            new_img.height(),
                             &new_img,
                         )?)?;
                     palette

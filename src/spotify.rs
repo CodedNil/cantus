@@ -447,11 +447,10 @@ async fn update_state_from_spotify() {
                     ARTIST_DATA_CACHE
                         .insert(artist.id, artist_image.as_ref().map(|a| a.url.clone()));
                     set.spawn(async move {
-                        if let Some(artist_image) = artist_image {
-                            let url = artist_image.url.clone();
-                            if let Err(err) = ensure_image_cached(url.as_str()).await {
-                                warn!("failed to cache image {url}: {err}");
-                            }
+                        if let Some(artist_image) = artist_image
+                            && let Err(err) = ensure_image_cached(artist_image.url.as_str()).await
+                        {
+                            warn!("failed to cache image {}: {err}", artist_image.url);
                         }
                     });
                 }

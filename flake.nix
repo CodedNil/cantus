@@ -22,6 +22,9 @@
         default = pkgs.mkShell {
           name = "cantus";
           inputsFrom = [ self.packages.${pkgs.stdenv.system}.cantus ];
+          packages = with pkgs; [
+            clippy
+          ];
           shellHook = ''
             export LD_LIBRARY_PATH=${
               pkgs.lib.makeLibraryPath [
