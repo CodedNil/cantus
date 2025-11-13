@@ -766,10 +766,7 @@ impl CantusApp {
         let Some(track_data) = TRACK_DATA_CACHE.get(&track.id) else {
             return;
         };
-        if track_data.primary_colors.is_empty() {
-            return;
-        }
-        let primary_colors: Vec<_> = track_data
+        let mut primary_colors: Vec<_> = track_data
             .primary_colors
             .iter()
             .map(|[r, g, b, _]| {
@@ -780,6 +777,11 @@ impl CantusApp {
                 ]
             })
             .collect();
+        if primary_colors.is_empty() {
+            primary_colors.push([100, 100, 100]);
+            primary_colors.push([150, 150, 150]);
+            primary_colors.push([200, 200, 200]);
+        }
 
         // Emit new particles while playing
         if track_move_speed.abs() > f64::EPSILON {

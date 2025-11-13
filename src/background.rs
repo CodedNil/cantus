@@ -4,8 +4,10 @@ use crate::spotify::{
 };
 use anyhow::Result;
 use auto_palette::Palette;
+use image::imageops::colorops;
 use image::{GrayImage, LumaA, RgbaImage, imageops};
 use itertools::Itertools;
+use palette::{Hsl, IntoColor, Srgb};
 use rand::{Rng, SeedableRng, rngs::SmallRng};
 use std::{
     collections::hash_map::DefaultHasher,
@@ -74,49 +76,44 @@ pub fn update_color_palettes() -> Result<()> {
             // Get palette, try on the album image or if that doesn't get enough colours include the artist image
             let swatches = {
                 let palette: Palette<f64> = Palette::builder()
-                    .algorithm(auto_palette::Algorithm::SNIC)
-                    .filter(ChromaFilter { threshold: 20 })
+                    .algorithm(auto_palette::Algorithm::KMeans)
+                    .filter(ChromaFilter { threshold: 30 })
                     .build(&auto_palette::ImageData::new(width, height, &album_image)?)?;
                 let swatches = palette
                     .find_swatches_with_theme(NUM_SWATCHES, auto_palette::Theme::Light)
                     .or_else(|_| palette.find_swatches(NUM_SWATCHES))?;
-                if swatches.len() < NUM_SWATCHES {
+                if swatches.len() < NUM_SWATCHES
+                    && let Some(artist_image_ref) = &*artist_image_ref
+                {
                     // Generate a new image with the artist image
-                    let new_img = if let Some(artist_image_ref) = &*artist_image_ref {
-                        let Some(artist_image) = IMAGES_CACHE.get(artist_image_ref) else {
-                            // Wait for the image to be cached.
-                            continue;
-                        };
-                        let artist_new_width = (width as f32 * 0.1).round() as u32;
-                        let mut new_img = RgbaImage::new(width + artist_new_width, height);
-                        image::imageops::overlay(&mut new_img, &album_image, 0, 0);
-                        let artist_img_resized = image::imageops::resize(
-                            &image::RgbaImage::from_raw(
-                                artist_image.width,
-                                artist_image.height,
-                                artist_image.data.data().to_vec(),
-                            )
-                            .unwrap(),
-                            artist_new_width,
-                            height,
-                            image::imageops::FilterType::Nearest,
-                        );
-                        image::imageops::overlay(
-                            &mut new_img,
-                            &artist_img_resized,
-                            i64::from(width),
-                            0,
-                        );
-                        new_img
-                    } else {
-                        let mut new_img = RgbaImage::new(width, height);
-                        image::imageops::overlay(&mut new_img, &album_image, 0, 0);
-                        new_img
+                    let Some(artist_image) = IMAGES_CACHE.get(artist_image_ref) else {
+                        // Wait for the image to be cached.
+                        continue;
                     };
+                    let artist_new_width = (width as f32 * 0.1).round() as u32;
+                    let mut new_img = RgbaImage::new(width + artist_new_width, height);
+                    image::imageops::overlay(&mut new_img, &album_image, 0, 0);
+                    let artist_img_resized = image::imageops::resize(
+                        &image::RgbaImage::from_raw(
+                            artist_image.width,
+                            artist_image.height,
+                            artist_image.data.data().to_vec(),
+                        )
+                        .unwrap(),
+                        artist_new_width,
+                        height,
+                        image::imageops::FilterType::Nearest,
+                    );
+                    image::imageops::overlay(
+                        &mut new_img,
+                        &artist_img_resized,
+                        i64::from(width),
+                        0,
+                    );
 
                     let palette: Palette<f64> = Palette::builder()
-                        .algorithm(auto_palette::Algorithm::SLIC)
-                        .filter(ChromaFilter { threshold: 20 })
+                        .algorithm(auto_palette::Algorithm::KMeans)
+                        .filter(ChromaFilter { threshold: 30 })
                         .build(&auto_palette::ImageData::new(
                             new_img.width(),
                             new_img.height(),
@@ -136,13 +133,8 @@ pub fn update_color_palettes() -> Result<()> {
                 .iter()
                 .map(|s| {
                     let rgb = s.color().to_rgb();
-                    // Sometimes ratios can be tiny like 0.05%, this brings them a little closer to even
-                    let lerped_ratio = lerp(
-                        0.5,
-                        (s.ratio() / total_ratio_sum) as f32,
-                        1.0 / swatches.len() as f32,
-                    );
-                    [rgb.r, rgb.g, rgb.b, (lerped_ratio * 255.0).round() as u8]
+                    let ratio = ((s.ratio() / total_ratio_sum) as f32 * 255.0).round() as u8;
+                    [rgb.r, rgb.g, rgb.b, ratio]
                 })
                 .sorted_by(|a, b| b[3].cmp(&a[3]))
                 .collect::<Vec<_>>();
@@ -195,7 +187,12 @@ fn generate_palette_image(colors: &[[u8; 4]], seed: u64) -> Vec<u8> {
     let palette_height = palette_image_height();
 
     if colors.is_empty() {
-        return RgbaImage::new(palette_width, palette_height).into_raw();
+        return RgbaImage::from_pixel(
+            palette_width,
+            palette_height,
+            image::Rgba([50, 50, 50, 255]),
+        )
+        .into_raw();
     }
 
     let mut rng = SmallRng::seed_from_u64(seed);
@@ -360,8 +357,41 @@ fn generate_palette_image(colors: &[[u8; 4]], seed: u64) -> Vec<u8> {
         }
     }
 
-    // Blur the image
-    imageops::contrast(&imageops::brighten(&imageops::blur(&canvas, 8.0), -30), 0.5).into_raw()
+    // Blur the image, and adjust its brightness, contrast & vibrancy
+    colorops::brighten_in_place(&mut canvas, -30);
+    colorops::contrast_in_place(&mut canvas, 0.5);
+    let mut raw_data = imageops::blur(&canvas, 10.0).into_raw();
+    apply_vibrancy(&mut raw_data, 4.0, 3.0);
+    raw_data
+}
+
+/// Apply vibrancy to an image in place.
+/// boost: The overall saturation increase factor (e.g., 1.5 for a 50% increase).
+/// weight: A value > 0 that controls the curve of the effect.
+///   - < 1.0: Reduces the preference for dull colors (more uniform boost).
+///   - > 1.0: Increases the preference for dull colors (stronger effect on low saturation).
+fn apply_vibrancy(raw_data: &mut [u8], boost: f32, weight: f32) {
+    for chunk in raw_data.chunks_exact_mut(4) {
+        // Convert Rgba<u8> to Srgba<f32>
+        let mut srgb: Srgb<f32> = Srgb::new(
+            f32::from(chunk[0]) / 255.0,
+            f32::from(chunk[1]) / 255.0,
+            f32::from(chunk[2]) / 255.0,
+        );
+
+        // Apply vibrancy boost
+        let mut hsl: Hsl = srgb.into_color();
+        let boost_factor = 1.0 + (boost - 1.0) * (1.0 - hsl.saturation).powf(weight);
+        hsl.saturation = (hsl.saturation * boost_factor).min(1.0);
+
+        // Convert back to Srgba<f32>
+        srgb = hsl.into_color();
+
+        // Update the raw Vec<u8> data in place
+        chunk[0] = (srgb.red * 255.0).round() as u8;
+        chunk[1] = (srgb.green * 255.0).round() as u8;
+        chunk[2] = (srgb.blue * 255.0).round() as u8;
+    }
 }
 
 fn lerp(t: f32, v0: f32, v1: f32) -> f32 {

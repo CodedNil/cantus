@@ -24,6 +24,8 @@
           inputsFrom = [ self.packages.${pkgs.stdenv.system}.cantus ];
           packages = with pkgs; [
             clippy
+            rustfmt
+            clippy
           ];
           shellHook = ''
             export LD_LIBRARY_PATH=${

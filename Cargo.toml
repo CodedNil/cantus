@@ -78,6 +78,7 @@ serde_json = "1.0.145"
 toml = "0.9.8"
 itertools = "0.14.0"
 dirs = "6.0.0"
+palette = "0.7.6"
 
 [lints.clippy]
 pedantic = { level = "warn", priority = -1 }
