@@ -393,6 +393,7 @@ impl CantusApp {
                 center_y + half_icon_size,
             );
             let hovered = button_rect.contains(mouse_pos);
+            icon_entry_extras.push((hovered, icon_origin_x));
             match entry {
                 IconEntry::Star { index } => {
                     if hovered {
@@ -400,7 +401,6 @@ impl CantusApp {
                         hover_rating_index =
                             Some(*index * 2 + 1 + usize::from(mouse_pos.x >= rect_center_x));
                     }
-                    icon_entry_extras.push((hovered, icon_origin_x));
                     self.interaction.icon_hitboxes.push(IconHitbox {
                         rect: button_rect,
                         track_id: track.id.clone(),
@@ -412,7 +412,6 @@ impl CantusApp {
                     playlist,
                     contained: _,
                 } => {
-                    icon_entry_extras.push((hovered, icon_origin_x));
                     self.interaction.icon_hitboxes.push(IconHitbox {
                         rect: button_rect,
                         track_id: track.id.clone(),
@@ -427,9 +426,9 @@ impl CantusApp {
         let display_rating_index = hover_rating_index.unwrap_or(track_rating_index);
         let display_full_stars = display_rating_index / 2;
         let display_has_half = display_rating_index % 2 == 1;
-        for (i, entry) in icon_entries.into_iter().enumerate() {
-            let (hovered, icon_origin_x) = icon_entry_extras[i];
-
+        for (entry, (hovered, icon_origin_x)) in
+            icon_entries.into_iter().zip(icon_entry_extras.into_iter())
+        {
             let icon_size = icon_size * if hovered { 1.6 } else { 1.0 };
             let half_icon_size = icon_size * 0.5;
             let icon_transform =

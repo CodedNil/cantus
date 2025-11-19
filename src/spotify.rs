@@ -614,6 +614,16 @@ async fn poll_playlists() {
 async fn refresh_playlists() {
     let spotify_client = SPOTIFY_CLIENT.get().unwrap();
 
+    let playlist_snapshots = {
+        let state = PLAYBACK_STATE.read();
+        state
+            .playlists
+            .iter()
+            .enumerate()
+            .map(|(idx, playlist)| (playlist.id.clone(), (idx, playlist.snapshot_id.clone())))
+            .collect::<HashMap<_, _>>()
+    };
+
     // Find playlists which have changed
     let changed_playlists: Vec<(usize, SimplifiedPlaylist)> = spotify_client
         .current_user_playlists_manual(Some(50), None)
@@ -622,19 +632,11 @@ async fn refresh_playlists() {
         .items
         .into_iter()
         .filter_map(|playlist| {
-            if let Some((playlist_idx, state_playlist)) = PLAYBACK_STATE
-                .read()
-                .playlists
-                .iter()
-                .enumerate()
-                .find(|(_, p)| p.id == playlist.id)
-            {
-                // Check if the snapshot ID has changed
-                (playlist.snapshot_id != state_playlist.snapshot_id)
-                    .then_some((playlist_idx, playlist))
-            } else {
-                None
-            }
+            playlist_snapshots
+                .get(&playlist.id)
+                .and_then(|(playlist_idx, state_snapshot)| {
+                    (playlist.snapshot_id != *state_snapshot).then_some((*playlist_idx, playlist))
+                })
         })
         .collect();
 

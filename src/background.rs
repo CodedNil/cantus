@@ -303,6 +303,7 @@ fn generate_palette_image(colors: &[[u8; 4]], seed: u64) -> Vec<u8> {
                 brush_size,
                 image::imageops::FilterType::Nearest,
             );
+            let top_raw = stamp.as_raw();
 
             // Overlay the stamp onto the canvas
             let fade_factor = rng.random_range(0.55..0.9);
@@ -333,7 +334,7 @@ fn generate_palette_image(colors: &[[u8; 4]], seed: u64) -> Vec<u8> {
                 let bottom_row_start = ((origin_bottom_y + y_offset) as usize) * bottom_stride;
                 let top_row_start = ((origin_top_y + y_offset) as usize) * top_stride;
                 for x_offset in 0..range_width {
-                    let alpha = stamp.as_raw()[top_row_start + (origin_top_x + x_offset) as usize];
+                    let alpha = top_raw[top_row_start + (origin_top_x + x_offset) as usize];
                     let adjusted_alpha =
                         (f32::from(alpha) * fade_factor).round().clamp(0.0, 255.0) as u8;
                     if adjusted_alpha == 0 {

@@ -252,12 +252,12 @@ impl CantusApp {
             };
 
         // Lerp track start based on the target and current start time
-        let mut current_ms = -playback_elapsed
-            - queue[..current_index]
-                .iter()
-                .map(|t| f64::from(t.milliseconds))
-                .sum::<f64>()
-            + drag_offset_ms
+        let past_tracks_duration: f64 = queue
+            .iter()
+            .take(current_index)
+            .map(|t| f64::from(t.milliseconds))
+            .sum();
+        let mut current_ms = -playback_elapsed - past_tracks_duration + drag_offset_ms
             - TRACK_SPACING_MS * current_index as f64;
         let difference = current_ms - self.render_state.track_offset;
         if !self.interaction.dragging && difference.abs() > 200.0 {

@@ -332,6 +332,8 @@ impl LayerShellApp {
             return;
         };
 
+        let scale = self.cantus.scale_factor;
+
         let region = compositor.create_region(qhandle, ());
         for rect in self
             .cantus
@@ -348,10 +350,10 @@ impl LayerShellApp {
             )
         {
             region.add(
-                (rect.x0 / self.cantus.scale_factor).round() as i32,
-                (rect.y0 / self.cantus.scale_factor).round() as i32,
-                ((rect.x1 - rect.x0) / self.cantus.scale_factor).round() as i32,
-                ((rect.y1 - rect.y0) / self.cantus.scale_factor).round() as i32,
+                (rect.x0 / scale).round() as i32,
+                (rect.y0 / scale).round() as i32,
+                ((rect.x1 - rect.x0) / scale).round() as i32,
+                ((rect.y1 - rect.y0) / scale).round() as i32,
             );
         }
 
