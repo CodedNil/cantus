@@ -1,15 +1,20 @@
 use crate::{background::update_color_palettes, config::CONFIG};
 use anyhow::Result;
+use base64::{
+    Engine, alphabet,
+    engine::{GeneralPurpose, general_purpose::NO_PAD},
+};
 use dashmap::DashMap;
 use image::GenericImageView;
 use parking_lot::RwLock;
-use reqwest::Client;
+use reqwest::{Client, Url};
 use rspotify::{
     AuthCodePkceSpotify, Config, Credentials, OAuth,
     model::{AdditionalType, ArtistId, PlayableItem, PlaylistId, SimplifiedPlaylist, TrackId},
     prelude::{BaseClient, OAuthClient},
     scopes,
 };
+use sha2::{Digest, Sha256};
 use std::{
     collections::{HashMap, HashSet},
     sync::LazyLock,
@@ -179,6 +184,22 @@ async fn persist_playlist_cache() {
     }
 }
 
+const URL_SAFE_NO_PAD: GeneralPurpose = GeneralPurpose::new(&alphabet::URL_SAFE, NO_PAD);
+
+/// Generate `length` random chars from the Operating System.
+///
+/// It is assumed that system always provides high-quality cryptographically
+/// secure random data, ideally backed by hardware entropy sources.
+fn generate_random_string(length: usize, alphabet: &[u8]) -> String {
+    let mut buf = vec![0u8; length];
+    getrandom::fill(&mut buf).unwrap();
+    let range = alphabet.len();
+
+    buf.iter()
+        .map(|byte| alphabet[*byte as usize % range] as char)
+        .collect()
+}
+
 /// Init the spotify client
 pub async fn init() {
     // Make sure the cantus directory exists
@@ -222,7 +243,45 @@ pub async fn init() {
     );
 
     // Prompt user for authorization and get the token
-    let url = spotify.get_authorize_url(None).unwrap();
+    let scopes = &spotify
+        .oauth
+        .scopes
+        .iter()
+        .map(String::as_str)
+        .collect::<Vec<_>>()
+        .join(" ");
+    // The code challenge is the code verifier hashed with SHA256 and then
+    // encoded with base64url.
+    let verifier = generate_random_string(
+        43,
+        b"abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789-._~",
+    );
+    let mut hasher = Sha256::new();
+    hasher.update(verifier.as_bytes());
+    let challenge = URL_SAFE_NO_PAD.encode(hasher.finalize());
+
+    // The verifier will be needed later when requesting the token
+    spotify.verifier = Some(verifier);
+
+    let mut payload: HashMap<&str, &str> = HashMap::with_capacity(7);
+    payload.insert("client_id", &spotify.creds.id);
+    payload.insert("response_type", "code");
+    payload.insert("redirect_uri", &spotify.oauth.redirect_uri);
+    payload.insert("code_challenge_method", "S256");
+    payload.insert("code_challenge", &challenge);
+    payload.insert("state", &spotify.oauth.state);
+    payload.insert("scope", scopes);
+
+    let mut base = spotify.get_config().auth_base_url.clone();
+    if !base.ends_with('/') {
+        base.push('/');
+    }
+    let request_url = base + "authorize";
+
+    let url = Url::parse_with_params(&request_url, payload)
+        .unwrap()
+        .to_string();
+
     spotify.prompt_for_token(&url).await.unwrap();
     SPOTIFY_CLIENT.set(spotify).unwrap();
 
