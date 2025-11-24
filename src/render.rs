@@ -46,6 +46,9 @@ pub struct RenderState {
     last_update: Instant,
     track_offset: f64,
     move_speeds: [f64; 16],
+    move_index: usize,
+    move_speed_sum: f64,
+    layout_cache: HashMap<TextLayoutKey, TextLayout>,
 }
 
 impl Default for RenderState {
@@ -54,6 +57,9 @@ impl Default for RenderState {
             last_update: Instant::now(),
             track_offset: 0.0,
             move_speeds: [0.0; 16],
+            move_index: 0,
+            move_speed_sum: 0.0,
+            layout_cache: HashMap::new(),
         }
     }
 }
@@ -64,39 +70,35 @@ pub struct FontEngine {
     weight_axis_index: Option<usize>,
 }
 
-#[allow(dead_code)]
 #[derive(Clone, Copy)]
 enum Align {
     Start,
-    Center,
     End,
 }
 
-#[allow(dead_code)]
-#[derive(Clone, Copy)]
-pub enum FontWeight {
-    Regular,
-    Bold,
-    Value(f32),
-}
-
-impl FontWeight {
-    const fn value_for(self, axis: &VariationAxis) -> f32 {
-        let target = match self {
-            Self::Regular => axis.def_value,
-            Self::Bold => 700.0,
-            Self::Value(v) => v,
-        };
-        target.clamp(axis.min_value, axis.max_value)
-    }
-}
-
-pub struct TextLayout {
+#[derive(Clone)]
+struct TextLayout {
     glyphs: Vec<Glyph>,
     width: f64,
     height: f64,
     font_size: f32,
     coords: Vec<i16>,
+}
+
+#[derive(Hash, PartialEq, Eq, Clone)]
+struct TextLayoutKey {
+    text: String,
+    font_size: u32,
+}
+
+impl TextLayoutKey {
+    fn new(text: &str, font_size: f64) -> Self {
+        let font_size_key = (font_size * 100.0).round() as u32;
+        Self {
+            text: text.to_owned(),
+            font_size: font_size_key,
+        }
+    }
 }
 
 impl Default for FontEngine {
@@ -236,13 +238,6 @@ impl CantusApp {
             self.interaction.drag_track = None;
         }
 
-        // Borrow playlists for quick lookups without cloning each entry.
-        let playlists: HashMap<&str, &Playlist> = playback_state
-            .playlists
-            .iter()
-            .map(|playlist| (playlist.name.as_str(), playlist))
-            .collect();
-
         // Lerp the progress based on when the data was last updated, get the start time of the current track
         let playback_elapsed = f64::from(playback_state.progress)
             + if playback_state.playing {
@@ -265,13 +260,15 @@ impl CantusApp {
         }
 
         // Add the new move speed to the array move_speeds, trim the previous ones
-        let track_move_speed = (current_ms - self.render_state.track_offset) * dt;
+        let frame_move_speed = (current_ms - self.render_state.track_offset) * dt;
         self.render_state.track_offset = current_ms;
-        self.render_state.move_speeds[0] = track_move_speed;
-        self.render_state.move_speeds.rotate_left(1);
+        let idx = self.render_state.move_index;
+        self.render_state.move_speed_sum += frame_move_speed - self.render_state.move_speeds[idx];
+        self.render_state.move_speeds[idx] = frame_move_speed;
+        self.render_state.move_index = (idx + 1) % self.render_state.move_speeds.len();
         // Get new average
-        let track_move_speed = self.render_state.move_speeds.iter().sum::<f64>()
-            / self.render_state.move_speeds.len() as f64;
+        let track_move_speed =
+            self.render_state.move_speed_sum / self.render_state.move_speeds.len() as f64;
 
         // Iterate over the tracks within the timeline.
         let mut track_renders = Vec::with_capacity(queue.len());
@@ -337,7 +334,7 @@ impl CantusApp {
                 history_width,
                 px_per_ms,
                 total_height,
-                &playlists,
+                &playback_state.playlists,
             );
         }
 
@@ -358,15 +355,14 @@ impl CantusApp {
         history_width: f64,
         px_per_ms: f64,
         height: f64,
-        playlists: &HashMap<&str, &Playlist>,
+        playlists: &HashMap<String, Playlist>,
     ) {
-        let track = track_render.track;
-
-        let start_x = track_render.start_x;
         let width = track_render.width;
         if width <= 0.0 {
             return;
         }
+        let track = track_render.track;
+        let start_x = track_render.start_x;
 
         let timeline_origin_x =
             history_width - (-CONFIG.timeline_past_minutes * 60_000.0) * px_per_ms;
@@ -410,10 +406,8 @@ impl CantusApp {
         let right_rounding = rounding * lerp((crop_right / buffer_px).clamp(0.0, 1.0), 1.0, 0.3);
         let radii =
             RoundedRectRadii::new(left_rounding, right_rounding, right_rounding, left_rounding);
-        let track_clip = RoundedRect::new(0.0, 0.0, width, height, radii);
-
         // --- BACKGROUND ---
-        if !track_render.art_only {
+        if !track_render.art_only && width > height {
             // Don't need to render all the way to the edge since the album art is at the right edge
             let background_width = width - height * 0.25;
             self.scene.push_clip_layer(
@@ -422,6 +416,7 @@ impl CantusApp {
             );
             let image_width = f64::from(track_data.palette_image.width);
             let background_aspect_ratio = background_width / height;
+            let extra_fade_alpha = ((width - height) / 30.0).min(1.0) as f32;
             self.scene.fill(
                 Fill::EvenOdd,
                 start_translation * Affine::scale(full_width / image_width),
@@ -431,7 +426,7 @@ impl CantusApp {
                         .palette_image
                         .brush
                         .sampler
-                        .with_alpha(fade_alpha),
+                        .with_alpha(fade_alpha * extra_fade_alpha),
                 },
                 None,
                 &Rect::new(0.0, 0.0, image_width, image_width * background_aspect_ratio),
@@ -439,87 +434,81 @@ impl CantusApp {
             self.scene.pop_layer();
         }
 
-        // --- Add a dark overlay for the dark_width, and expanding circles for animating clicks ---
-        let needs_overlay = !track_render.art_only
-            && (dark_width > 0.0
-                || track_render.is_current
-                || self.interaction.last_click.is_some());
-        if needs_overlay {
-            self.scene.push_clip_layer(start_translation, &track_clip);
+        // --- Render things within the track bounds ---
+        self.scene.push_clip_layer(
+            start_translation,
+            &RoundedRect::new(0.0, 0.0, width, height, radii),
+        );
 
-            if dark_width > 0.0 {
-                self.scene.fill(
-                    Fill::EvenOdd,
-                    start_translation,
-                    Color::from_rgb8(0, 0, 0).with_alpha(0.5 * fade_alpha),
-                    None,
-                    &Rect::new(0.0, 0.0, dark_width, height),
-                );
-            }
+        // Make the track dark to the left of the current time
+        if dark_width > 0.0 {
+            let extra_fade_alpha = ((width - height) / 30.0).min(1.0) as f32;
+            self.scene.fill(
+                Fill::EvenOdd,
+                start_translation,
+                Color::from_rgb8(0, 0, 0).with_alpha(0.5 * fade_alpha * extra_fade_alpha),
+                None,
+                &Rect::new(0.0, 0.0, dark_width, height),
+            );
+        }
 
-            // During animations add an expanding circle behind the line
-            if track_render.is_current {
-                let anim_lerp = match self.interaction.last_event {
-                    InteractionEvent::Pause(start) | InteractionEvent::Play(start) => {
-                        start.elapsed().as_millis() as f64
-                            / (ANIMATION_DURATION.as_millis() as f64 * 0.3)
-                    }
-                    InteractionEvent::PauseHover(_) | InteractionEvent::PlayHover(_) => 1.0,
-                };
-                if anim_lerp < 1.0 {
-                    self.scene.fill(
-                        Fill::EvenOdd,
-                        Affine::translate((timeline_origin_x, height * 0.5)),
-                        Color::from_rgb8(255, 224, 210)
-                            .with_alpha(1.0 - (anim_lerp + 0.4).min(1.0) as f32),
-                        None,
-                        &Circle::new(Point::default(), 500.0 * anim_lerp),
-                    );
+        // During animations add an expanding circle behind the line
+        if track_render.is_current {
+            let anim_lerp = match self.interaction.last_event {
+                InteractionEvent::Pause(start) | InteractionEvent::Play(start) => {
+                    start.elapsed().as_millis() as f64
+                        / (ANIMATION_DURATION.as_millis() as f64 * 0.3)
                 }
-            }
-            // After a click, add an expanding circle behind the click point
-            if let Some((start, track_id, point)) = &self.interaction.last_click
-                && track_id == &track.id
-                && let anim_lerp = start.elapsed().as_millis() as f64
-                    / (ANIMATION_DURATION.as_millis() as f64 * 0.3)
-                && anim_lerp < 1.0
-            {
+                InteractionEvent::PauseHover(_) | InteractionEvent::PlayHover(_) => 1.0,
+            };
+            if anim_lerp < 1.0 {
                 self.scene.fill(
                     Fill::EvenOdd,
-                    Affine::translate((start_x + point.x, point.y)),
+                    Affine::translate((timeline_origin_x, height * 0.5)),
                     Color::from_rgb8(255, 224, 210)
                         .with_alpha(1.0 - (anim_lerp + 0.4).min(1.0) as f32),
                     None,
                     &Circle::new(Point::default(), 500.0 * anim_lerp),
                 );
             }
-
-            self.scene.pop_layer();
+        }
+        // After a click, add an expanding circle behind the click point
+        if let Some((start, track_id, point)) = &self.interaction.last_click
+            && track_id == &track.id
+            && let anim_lerp =
+                start.elapsed().as_millis() as f64 / (ANIMATION_DURATION.as_millis() as f64 * 0.3)
+            && anim_lerp < 1.0
+        {
+            self.scene.fill(
+                Fill::EvenOdd,
+                Affine::translate((start_x + point.x, point.y)),
+                Color::from_rgb8(255, 224, 210).with_alpha(1.0 - (anim_lerp + 0.4).min(1.0) as f32),
+                None,
+                &Circle::new(Point::default(), 500.0 * anim_lerp),
+            );
         }
 
         // --- ALBUM ART SQUARE ---
         if fade_alpha > 0.0 {
-            let image_height = f64::from(image.height);
-            let transform = Affine::translate((start_x + width - height, 0.0));
-            self.scene.push_clip_layer(start_translation, &track_clip);
             self.scene.fill(
                 Fill::EvenOdd,
-                transform * Affine::scale(height / image_height),
+                Affine::translate((start_x + width - height, 0.0)),
                 ImageBrush {
                     image: &image.brush.image,
                     sampler: image.brush.sampler.with_alpha(fade_alpha),
                 },
-                None,
+                Some(Affine::scale(height / f64::from(image.height))),
                 &RoundedRect::new(
                     0.0,
                     0.0,
-                    image_height,
-                    image_height,
+                    height,
+                    height,
                     RoundedRectRadii::new(rounding, right_rounding, right_rounding, rounding),
                 ),
             );
-            self.scene.pop_layer();
         }
+
+        self.scene.pop_layer();
 
         // --- TEXT ---
         if !track_render.art_only && fade_alpha >= 1.0 {
@@ -538,9 +527,7 @@ impl CantusApp {
             let text_start_left = start_x + 12.0;
             let text_start_right = start_x + width - height - 8.0;
             let available_width = (text_start_right - text_start_left).max(0.0);
-
             let text_brush = Color::from_rgb8(240, 240, 240);
-            let font_weight = FontWeight::Bold;
 
             // Render the songs title (strip anything beyond a - or ( in the song title)
             let song_name = track.title[..track
@@ -551,13 +538,13 @@ impl CantusApp {
                 .trim();
             let font_size = 12.0;
             let text_height = (height * 0.2).floor();
-            let layout = self.layout_text(song_name, font_size, font_weight);
-            let width_ratio = available_width / layout.width;
+            let (layout, layout_width) = self.layout_text_cached(song_name, font_size);
+            let width_ratio = available_width / layout_width;
             if width_ratio <= 1.0 {
-                let layout =
-                    self.layout_text(song_name, font_size * width_ratio.max(0.8), font_weight);
+                let (layout, _) =
+                    self.layout_text_cached(song_name, font_size * width_ratio.max(0.8));
                 self.draw_text(
-                    layout,
+                    &layout,
                     text_start_left,
                     text_height,
                     Align::Start,
@@ -566,7 +553,7 @@ impl CantusApp {
                 );
             } else {
                 self.draw_text(
-                    layout,
+                    &layout,
                     text_start_right,
                     text_height,
                     Align::End,
@@ -579,9 +566,10 @@ impl CantusApp {
             let text_height = (height * 0.52).floor();
 
             let artist_text = &track.artist_name;
-            let artist_layout = self.layout_text(artist_text, font_size, font_weight);
+            let (artist_layout, artist_layout_width) =
+                self.layout_text_cached(artist_text, font_size);
             let dot_text = "\u{2004}•\u{2004}"; // Use thin spaces on either side of the bullet point
-            let dot_layout = self.layout_text(dot_text, font_size, font_weight);
+            let (_, dot_layout_width) = self.layout_text_cached(dot_text, font_size);
             let time_text = if track_render.seconds_until_start >= 60.0 {
                 format!(
                     "{}m{}s",
@@ -591,18 +579,17 @@ impl CantusApp {
             } else {
                 format!("{}s", track_render.seconds_until_start.round())
             };
-            let time_layout = self.layout_text(&time_text, font_size, font_weight);
+            let (time_layout, time_layout_width) = self.layout_text_cached(&time_text, font_size);
 
             let width_ratio =
-                available_width / (artist_layout.width + dot_layout.width + time_layout.width);
+                available_width / (artist_layout_width + dot_layout_width + time_layout_width);
             if width_ratio <= 1.0 || !track_render.is_current {
-                let layout = self.layout_text(
+                let (layout, _) = self.layout_text_cached(
                     &format!("{time_text}{dot_text}{artist_text}"),
                     font_size * width_ratio.clamp(0.8, 1.0),
-                    font_weight,
                 );
                 self.draw_text(
-                    layout,
+                    &layout,
                     if width_ratio >= 1.0 {
                         text_start_right
                     } else {
@@ -619,14 +606,14 @@ impl CantusApp {
                 );
             } else {
                 self.draw_text(
-                    time_layout,
+                    &time_layout,
                     start_x + 12.0,
                     text_height,
                     Align::Start,
                     text_brush,
                 );
                 self.draw_text(
-                    artist_layout,
+                    &artist_layout,
                     text_start_right,
                     text_height,
                     Align::End,
@@ -649,11 +636,12 @@ impl CantusApp {
     }
 
     /// Creates the text layout for a single-line string.
-    fn layout_text(&self, text: &str, font_size: f64, weight: FontWeight) -> TextLayout {
+    fn layout_text(&self, text: &str, font_size: f64) -> TextLayout {
+        let font_weight = 700.0f32;
         let mut face = self.font.base_face.clone();
         if let Some(index) = self.font.weight_axis_index {
             let axis = &self.font.axes[index];
-            face.set_variation(axis.tag, weight.value_for(axis));
+            face.set_variation(axis.tag, font_weight.clamp(axis.min_value, axis.max_value));
         }
 
         let font_size_px = (font_size * self.scale_factor) as f32;
@@ -714,7 +702,7 @@ impl CantusApp {
                 .axes
                 .iter()
                 .map(|axis| {
-                    let weight = weight.value_for(axis).clamp(axis.min_value, axis.max_value);
+                    let weight = font_weight.clamp(axis.min_value, axis.max_value);
                     let delta = weight - axis.def_value;
                     if delta.abs() < f32::EPSILON {
                         return 0;
@@ -733,15 +721,31 @@ impl CantusApp {
         }
     }
 
+    fn layout_text_cached(&mut self, text: &str, font_size: f64) -> (TextLayoutKey, f64) {
+        // All numbers replaced with zero since numbers are same width
+        let text_cleaned: String = text
+            .chars()
+            .map(|c| if c.is_ascii_digit() { '0' } else { c })
+            .collect();
+        let key = TextLayoutKey::new(&text_cleaned, font_size);
+        if !self.render_state.layout_cache.contains_key(&key) {
+            self.render_state
+                .layout_cache
+                .insert(key.clone(), self.layout_text(text, font_size));
+        }
+        (key.clone(), self.render_state.layout_cache[&key].width)
+    }
+
     /// Draw the text layout onto the scene.
     fn draw_text(
         &mut self,
-        layout: TextLayout,
+        layout_key: &TextLayoutKey,
         pos_x: f64,
         pos_y: f64,
         horizontal_align: Align,
         brush: Color,
     ) {
+        let layout = &self.render_state.layout_cache[layout_key];
         self.scene
             .draw_glyphs(&self.font.font_data)
             .font_size(layout.font_size)
@@ -751,13 +755,12 @@ impl CantusApp {
                     - match horizontal_align {
                         Align::Start => 0.0,
                         Align::End => layout.width,
-                        Align::Center => layout.width * 0.5,
                     },
                 pos_y - layout.height * 0.5,
             )))
             .hint(true)
             .brush(brush)
-            .draw(Fill::EvenOdd, layout.glyphs.into_iter());
+            .draw(Fill::EvenOdd, layout.glyphs.iter().copied());
     }
 
     fn render_playing_particles(

@@ -48,7 +48,7 @@ pub static PLAYBACK_STATE: LazyLock<RwLock<PlaybackState>> = LazyLock::new(|| {
         queue: Vec::new(),
         queue_index: 0,
         current_context: None,
-        playlists: Vec::new(),
+        playlists: HashMap::new(),
     })
 });
 pub static IMAGES_CACHE: LazyLock<DashMap<String, ImageBrushWrapper>> = LazyLock::new(DashMap::new);
@@ -75,7 +75,7 @@ pub struct PlaybackState {
     pub queue: Vec<Track>,
     pub queue_index: usize,
     pub current_context: Option<String>,
-    pub playlists: Vec<Playlist>,
+    pub playlists: HashMap<String, Playlist>,
 }
 
 pub struct Track {
@@ -146,7 +146,7 @@ async fn persist_playlist_cache() {
     let cache_payload: PlaylistCache = PLAYBACK_STATE
         .read()
         .playlists
-        .iter()
+        .values()
         .map(|playlist| {
             (
                 playlist.id.clone(),
@@ -609,7 +609,7 @@ async fn poll_playlists() {
 
     // Push the data to the global state
     update_playback_state(|state| {
-        state.playlists = playlists;
+        state.playlists = playlists.into_iter().map(|p| (p.name.clone(), p)).collect();
     });
 
     // Spawn loop to collect spotify playlist tracks
@@ -627,14 +627,13 @@ async fn refresh_playlists() {
         let state = PLAYBACK_STATE.read();
         state
             .playlists
-            .iter()
-            .enumerate()
-            .map(|(idx, playlist)| (playlist.id.clone(), (idx, playlist.snapshot_id.clone())))
+            .values()
+            .map(|playlist| (playlist.id.clone(), playlist.snapshot_id.clone()))
             .collect::<HashMap<_, _>>()
     };
 
     // Find playlists which have changed
-    let changed_playlists: Vec<(usize, SimplifiedPlaylist)> = spotify_client
+    let changed_playlists: Vec<SimplifiedPlaylist> = spotify_client
         .current_user_playlists_manual(Some(50), None)
         .await
         .unwrap()
@@ -643,14 +642,14 @@ async fn refresh_playlists() {
         .filter_map(|playlist| {
             playlist_snapshots
                 .get(&playlist.id)
-                .and_then(|(playlist_idx, state_snapshot)| {
-                    (playlist.snapshot_id != *state_snapshot).then_some((*playlist_idx, playlist))
+                .and_then(|state_snapshot| {
+                    (playlist.snapshot_id != *state_snapshot).then_some(playlist)
                 })
         })
         .collect();
 
     // Fetch all new tracks in one go for changed playlists
-    for (playlist_idx, playlist) in changed_playlists {
+    for playlist in changed_playlists {
         let chunk_size = 50;
         let num_pages = playlist.tracks.total.div_ceil(chunk_size) as usize;
         info!("Fetching {num_pages} pages from playlist {}", playlist.name);
@@ -690,9 +689,10 @@ async fn refresh_playlists() {
             .collect();
 
         update_playback_state(|state| {
-            state.playlists[playlist_idx].tracks = playlist_track_ids;
-            state.playlists[playlist_idx].tracks_total = new_total;
-            state.playlists[playlist_idx].snapshot_id = playlist.snapshot_id;
+            let state_playlist = state.playlists.get_mut(&playlist.name).unwrap();
+            state_playlist.tracks = playlist_track_ids;
+            state_playlist.tracks_total = new_total;
+            state_playlist.snapshot_id = playlist.snapshot_id;
         });
         persist_playlist_cache().await;
     }

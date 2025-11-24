@@ -284,7 +284,7 @@ impl CantusApp {
         &mut self,
         track: &Track,
         hovered: bool,
-        playlists: &HashMap<&str, &Playlist>,
+        playlists: &HashMap<String, Playlist>,
         width: f64,
         height: f64,
         pos_x: f64,
@@ -314,8 +314,8 @@ impl CantusApp {
         icon_entries.extend(
             playlists
                 .iter()
-                .filter_map(|(&key, &playlist)| {
-                    if ratings_enabled && RATING_PLAYLISTS.contains(&key) {
+                .filter_map(|(key, playlist)| {
+                    if ratings_enabled && RATING_PLAYLISTS.contains(&key.as_str()) {
                         return None;
                     }
                     let contained = playlist.tracks.contains(&track.id);
@@ -625,7 +625,7 @@ async fn update_star_rating(track_id: TrackId<'static>, rating_slot: usize) {
         write_state.last_interaction = Instant::now();
 
         // Remove tracks from existing playlists
-        for playlist in write_state.playlists.iter_mut().filter(|playlist| {
+        for playlist in write_state.playlists.values_mut().filter(|playlist| {
             RATING_PLAYLISTS.contains(&playlist.name.as_str())
                 && playlist.name != *rating_name
                 && playlist.tracks.contains(&track_id)
@@ -635,7 +635,7 @@ async fn update_star_rating(track_id: TrackId<'static>, rating_slot: usize) {
         }
 
         // Add the track to the target playlist if it's not already there
-        for playlist in write_state.playlists.iter_mut().filter(|playlist| {
+        for playlist in write_state.playlists.values_mut().filter(|playlist| {
             playlist.name == *rating_name && !playlist.tracks.contains(&track_id)
         }) {
             info!(
@@ -709,20 +709,15 @@ async fn toggle_playlist_membership(track_id: TrackId<'static>, playlist_id: Pla
     let Some(_guard) = try_acquire_spotify_guard() else {
         return;
     };
-    let Some((playlist_idx, (playlist_id, playlist_name, contained))) = PLAYBACK_STATE
+    let Some((playlist_name, (playlist_id, contained))) = PLAYBACK_STATE
         .read()
         .playlists
         .iter()
-        .enumerate()
         .find(|(_, p)| p.id == playlist_id)
-        .map(|(idx, playlist)| {
+        .map(|(key, playlist)| {
             (
-                idx,
-                (
-                    playlist.id.clone(),
-                    playlist.name.clone(),
-                    playlist.tracks.contains(&track_id),
-                ),
+                key.clone(),
+                (playlist.id.clone(), playlist.tracks.contains(&track_id)),
             )
         })
     else {
@@ -739,7 +734,7 @@ async fn toggle_playlist_membership(track_id: TrackId<'static>, playlist_id: Pla
     );
 
     update_playback_state(|state| {
-        let playlist_tracks = &mut state.playlists[playlist_idx].tracks;
+        let playlist_tracks = &mut state.playlists.get_mut(&playlist_name).unwrap().tracks;
         if contained {
             playlist_tracks.remove(&track_id);
         } else {
