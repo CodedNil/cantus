@@ -1,7 +1,6 @@
 use crate::{background::update_color_palettes, config::CONFIG};
 use anyhow::Result;
 use dashmap::DashMap;
-use image::GenericImageView;
 use parking_lot::RwLock;
 use reqwest::Client;
 use rspotify::{
@@ -22,7 +21,7 @@ use tokio::{
     time::{Duration, sleep},
 };
 use tracing::{error, info, warn};
-use vello::peniko::{Blob, ImageAlphaType, ImageData, ImageFormat};
+use vello::peniko::{Blob, ImageAlphaType, ImageBrush, ImageData, ImageFormat};
 use zbus::{
     Connection,
     fdo::{DBusProxy, PropertiesProxy},
@@ -52,7 +51,7 @@ pub static PLAYBACK_STATE: LazyLock<RwLock<PlaybackState>> = LazyLock::new(|| {
         playlists: Vec::new(),
     })
 });
-pub static IMAGES_CACHE: LazyLock<DashMap<String, ImageData>> = LazyLock::new(DashMap::new);
+pub static IMAGES_CACHE: LazyLock<DashMap<String, ImageBrushWrapper>> = LazyLock::new(DashMap::new);
 pub static TRACK_DATA_CACHE: LazyLock<DashMap<TrackId<'static>, TrackData>> =
     LazyLock::new(DashMap::new);
 pub static ARTIST_DATA_CACHE: LazyLock<DashMap<ArtistId<'static>, Option<String>>> =
@@ -65,7 +64,6 @@ pub const RATING_PLAYLISTS: [&str; 11] = [
 static HTTP_CLIENT: LazyLock<Client> = LazyLock::new(Client::new);
 pub static SPOTIFY_CLIENT: OnceCell<AuthCodePkceSpotify> = OnceCell::const_new();
 
-#[derive(Debug)]
 pub struct PlaybackState {
     pub is_local: bool, // Whether we are playing spotify on the local device
     pub last_updated: Instant,
@@ -80,7 +78,6 @@ pub struct PlaybackState {
     pub playlists: Vec<Playlist>,
 }
 
-#[derive(Debug)]
 pub struct Track {
     pub id: TrackId<'static>,
     pub title: String,
@@ -90,15 +87,19 @@ pub struct Track {
     pub milliseconds: u32,
 }
 
-#[derive(Debug)]
 pub struct TrackData {
     /// Simplified color palette (RGBA, alpha = percentage 0-100).
     pub primary_colors: Vec<[u8; 4]>,
     /// Generated texture derived from the palette for shader backgrounds.
-    pub palette_image: ImageData,
+    pub palette_image: ImageBrushWrapper,
 }
 
-#[derive(Debug)]
+pub struct ImageBrushWrapper {
+    pub brush: ImageBrush,
+    pub width: u32,
+    pub height: u32,
+}
+
 pub struct Playlist {
     pub id: PlaylistId<'static>,
     pub name: String,
@@ -510,28 +511,36 @@ async fn ensure_image_cached(url: &str) -> Result<()> {
     let response = HTTP_CLIENT.get(url).send().await?.error_for_status()?;
     let dynamic_image = image::load_from_memory(&response.bytes().await?)?;
     // If width or height more thant 64 pixels, resize the image
-    let (width, height) = dynamic_image.dimensions();
-    let image_data = if width > 64 || height > 64 {
-        let rgb = dynamic_image
-            .resize_to_fill(64, 64, image::imageops::FilterType::Lanczos3)
-            .to_rgba8();
-        ImageData {
-            data: Blob::from(rgb.into_raw()),
-            format: ImageFormat::Rgba8,
-            alpha_type: ImageAlphaType::Alpha,
-            width: 64,
-            height: 64,
-        }
+    let (rgb_data, width, height) = if dynamic_image.width() > 64 || dynamic_image.height() > 64 {
+        (
+            dynamic_image
+                .resize_to_fill(64, 64, image::imageops::FilterType::Lanczos3)
+                .to_rgba8()
+                .into_raw(),
+            64,
+            64,
+        )
     } else {
-        ImageData {
-            data: Blob::from(dynamic_image.to_rgba8().into_raw()),
-            format: ImageFormat::Rgba8,
-            alpha_type: ImageAlphaType::Alpha,
+        (
+            dynamic_image.to_rgba8().into_raw(),
+            dynamic_image.width(),
+            dynamic_image.height(),
+        )
+    };
+    IMAGES_CACHE.insert(
+        url.to_owned(),
+        ImageBrushWrapper {
+            brush: ImageBrush::new(ImageData {
+                data: Blob::from(rgb_data),
+                format: ImageFormat::Rgba8,
+                alpha_type: ImageAlphaType::Alpha,
+                width,
+                height,
+            }),
             width,
             height,
-        }
-    };
-    IMAGES_CACHE.insert(url.to_owned(), image_data);
+        },
+    );
     Ok(())
 }
 

@@ -261,14 +261,13 @@ impl LayerShellApp {
             return false;
         }
 
-        let mut index = 0;
-        let mut matched_target = false;
-        if let Some(target) = &CONFIG.monitor
+        let (index, matched_target) = if let Some(target) = &CONFIG.monitor
             && let Some(found) = self.outputs.iter().position(|info| info.matches(target))
         {
-            index = found;
-            matched_target = true;
-        }
+            (found, true)
+        } else {
+            (0, false)
+        };
 
         if self.active_output != index || (matched_target && !self.output_matched) {
             self.active_output = index;

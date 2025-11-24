@@ -498,7 +498,10 @@ impl CantusApp {
                         icon_transform
                             * Affine::translate((-zoom_pixels, -zoom_pixels))
                             * Affine::scale((icon_size + zoom_pixels * 2.0) / image_size),
-                        &ImageBrush::new(playlist_image.clone()).with_alpha(fade_alpha),
+                        ImageBrush {
+                            image: &playlist_image.brush.image,
+                            sampler: playlist_image.brush.sampler.with_alpha(fade_alpha),
+                        },
                         None,
                         &Rect::new(0.0, 0.0, image_size, image_size),
                     );

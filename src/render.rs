@@ -425,7 +425,14 @@ impl CantusApp {
             self.scene.fill(
                 Fill::EvenOdd,
                 start_translation * Affine::scale(full_width / image_width),
-                &ImageBrush::new(track_data.palette_image.clone()).with_alpha(fade_alpha),
+                ImageBrush {
+                    image: &track_data.palette_image.brush.image,
+                    sampler: track_data
+                        .palette_image
+                        .brush
+                        .sampler
+                        .with_alpha(fade_alpha),
+                },
                 None,
                 &Rect::new(0.0, 0.0, image_width, image_width * background_aspect_ratio),
             );
@@ -498,7 +505,10 @@ impl CantusApp {
             self.scene.fill(
                 Fill::EvenOdd,
                 transform * Affine::scale(height / image_height),
-                &ImageBrush::new(image.clone()).with_alpha(fade_alpha),
+                ImageBrush {
+                    image: &image.brush.image,
+                    sampler: image.brush.sampler.with_alpha(fade_alpha),
+                },
                 None,
                 &RoundedRect::new(
                     0.0,

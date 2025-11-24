@@ -1,6 +1,6 @@
 use crate::config::CONFIG;
 use crate::spotify::{
-    ARTIST_DATA_CACHE, IMAGES_CACHE, PLAYBACK_STATE, TRACK_DATA_CACHE, TrackData,
+    ARTIST_DATA_CACHE, IMAGES_CACHE, ImageBrushWrapper, PLAYBACK_STATE, TRACK_DATA_CACHE, TrackData,
 };
 use anyhow::Result;
 use auto_palette::Palette;
@@ -14,7 +14,7 @@ use std::{
     hash::{Hash, Hasher},
     sync::LazyLock,
 };
-use vello::peniko::{Blob, ImageAlphaType, ImageData, ImageFormat};
+use vello::peniko::{Blob, ImageAlphaType, ImageBrush, ImageData, ImageFormat};
 
 /// Number of swatches to use in colour palette generation.
 const NUM_SWATCHES: usize = 4;
@@ -71,12 +71,12 @@ pub fn update_color_palettes() -> Result<()> {
             let width = image.width;
             let height = image.height;
             let album_image =
-                RgbaImage::from_raw(width, height, image.data.data().to_vec()).unwrap();
+                RgbaImage::from_raw(width, height, image.brush.image.data.data().to_vec()).unwrap();
 
             // Get palette, try on the album image or if that doesn't get enough colours include the artist image
             let swatches = {
                 let palette: Palette<f64> = Palette::builder()
-                    .algorithm(auto_palette::Algorithm::KMeans)
+                    .algorithm(auto_palette::Algorithm::SLIC)
                     .filter(ChromaFilter { threshold: 30 })
                     .build(&auto_palette::ImageData::new(width, height, &album_image)?)?;
                 let swatches = palette
@@ -97,7 +97,7 @@ pub fn update_color_palettes() -> Result<()> {
                         &image::RgbaImage::from_raw(
                             artist_image.width,
                             artist_image.height,
-                            artist_image.data.data().to_vec(),
+                            artist_image.brush.image.data.data().to_vec(),
                         )
                         .unwrap(),
                         artist_new_width,
@@ -112,7 +112,7 @@ pub fn update_color_palettes() -> Result<()> {
                     );
 
                     let palette: Palette<f64> = Palette::builder()
-                        .algorithm(auto_palette::Algorithm::KMeans)
+                        .algorithm(auto_palette::Algorithm::SLIC)
                         .filter(ChromaFilter { threshold: 30 })
                         .build(&auto_palette::ImageData::new(
                             new_img.width(),
@@ -150,18 +150,24 @@ pub fn update_color_palettes() -> Result<()> {
     drop(state);
 
     for (track_id, primary_colors, palette_seed) in pending_palettes {
+        let width = palette_image_width();
+        let height = palette_image_height();
         let palette_image = ImageData {
             data: Blob::from(generate_palette_image(&primary_colors, palette_seed)),
             format: ImageFormat::Rgba8,
             alpha_type: ImageAlphaType::Alpha,
-            width: palette_image_width(),
-            height: palette_image_height(),
+            width,
+            height,
         };
         TRACK_DATA_CACHE.insert(
             track_id,
             TrackData {
                 primary_colors,
-                palette_image,
+                palette_image: ImageBrushWrapper {
+                    brush: ImageBrush::new(palette_image),
+                    width,
+                    height,
+                },
             },
         );
     }
