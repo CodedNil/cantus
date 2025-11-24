@@ -492,15 +492,15 @@ impl CantusApp {
                         &RoundedRect::new(0.0, 0.0, icon_size, icon_size, 6.0),
                     );
                     let zoom_pixels = 12.0;
-                    let image_size = f64::from(playlist_image.width);
+                    let image_size = f64::from(playlist_image.image.width);
                     self.scene.fill(
                         Fill::EvenOdd,
                         icon_transform
                             * Affine::translate((-zoom_pixels, -zoom_pixels))
                             * Affine::scale((icon_size + zoom_pixels * 2.0) / image_size),
                         ImageBrush {
-                            image: &playlist_image.brush.image,
-                            sampler: playlist_image.brush.sampler.with_alpha(fade_alpha),
+                            image: &playlist_image.image,
+                            sampler: playlist_image.sampler.with_alpha(fade_alpha),
                         },
                         None,
                         &Rect::new(0.0, 0.0, image_size, image_size),

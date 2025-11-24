@@ -137,7 +137,6 @@ impl Default for ParticlesState {
 }
 
 struct Particle {
-    alive: bool,
     position: [f32; 2],
     velocity: [f32; 2],
     color: usize,
@@ -390,7 +389,7 @@ impl CantusApp {
             self.interaction.drag_track = Some((track.id.clone(), position_within_track));
         }
 
-        let (Some(image), Some(track_data)) = (
+        let (Some(album_image), Some(track_data)) = (
             IMAGES_CACHE.get(&track.image_url),
             TRACK_DATA_CACHE.get(&track.id),
         ) else {
@@ -414,17 +413,16 @@ impl CantusApp {
                 start_translation,
                 &RoundedRect::new(0.0, 0.0, background_width, height, radii),
             );
-            let image_width = f64::from(track_data.palette_image.width);
+            let image_width = f64::from(track_data.palette_image.image.width);
             let background_aspect_ratio = background_width / height;
             let extra_fade_alpha = ((width - height) / 30.0).min(1.0) as f32;
             self.scene.fill(
                 Fill::EvenOdd,
                 start_translation * Affine::scale(full_width / image_width),
                 ImageBrush {
-                    image: &track_data.palette_image.brush.image,
+                    image: &track_data.palette_image.image,
                     sampler: track_data
                         .palette_image
-                        .brush
                         .sampler
                         .with_alpha(fade_alpha * extra_fade_alpha),
                 },
@@ -494,10 +492,10 @@ impl CantusApp {
                 Fill::EvenOdd,
                 Affine::translate((start_x + width - height, 0.0)),
                 ImageBrush {
-                    image: &image.brush.image,
-                    sampler: image.brush.sampler.with_alpha(fade_alpha),
+                    image: &album_image.image,
+                    sampler: album_image.sampler.with_alpha(fade_alpha),
                 },
-                Some(Affine::scale(height / f64::from(image.height))),
+                Some(Affine::scale(height / f64::from(album_image.image.height))),
                 &RoundedRect::new(
                     0.0,
                     0.0,
@@ -806,50 +804,29 @@ impl CantusApp {
             let horizontal_bias =
                 (track_move_speed.abs().powf(0.2) * spawn_offset * 0.5).clamp(-3.0, 3.0);
             for _ in 0..emit_count {
-                let position = [
-                    (x + spawn_offset) as f32,
-                    height_f32 * rng.random_range(0.05..0.95),
-                ];
-                let velocity = [
-                    rng.random_range(SPARK_VELOCITY_X) * scale * horizontal_bias as f32,
-                    -rng.random_range(SPARK_VELOCITY_Y) * scale,
-                ];
-                let life = rng.random_range(SPARK_LIFETIME);
-                let color_index = rng.random_range(0..primary_colors.len());
-                if let Some(dead_particle) = self
-                    .particles
-                    .particles
-                    .iter_mut()
-                    .find(|particle| !particle.alive)
-                {
-                    dead_particle.alive = true;
-                    dead_particle.position = position;
-                    dead_particle.velocity = velocity;
-                    dead_particle.life = life;
-                    dead_particle.color = color_index;
-                } else {
-                    self.particles.particles.push(Particle {
-                        alive: true,
-                        position,
-                        velocity,
-                        color: color_index,
-                        life,
-                    });
-                }
+                self.particles.particles.push(Particle {
+                    position: [
+                        (x + spawn_offset) as f32,
+                        height_f32 * rng.random_range(0.05..0.95),
+                    ],
+                    velocity: [
+                        rng.random_range(SPARK_VELOCITY_X) * scale * horizontal_bias as f32,
+                        -rng.random_range(SPARK_VELOCITY_Y) * scale,
+                    ],
+                    color: rng.random_range(0..primary_colors.len()),
+                    life: rng.random_range(SPARK_LIFETIME),
+                });
             }
         } else {
             self.particles.spawn_accumulator = 0.0;
         }
 
         // Kill dead particles, and update positions of others, then render them
-        for particle in &mut self.particles.particles {
-            if !particle.alive {
-                continue;
-            }
-
+        let mut remove_indexes = Vec::new();
+        for (index, particle) in self.particles.particles.iter_mut().enumerate().rev() {
             particle.life -= dt;
             if particle.life <= 0.0 {
-                particle.alive = false;
+                remove_indexes.push(index);
                 continue;
             }
 
@@ -882,6 +859,9 @@ impl CantusApp {
                     thickness * 0.5,
                 ),
             );
+        }
+        for index in remove_indexes {
+            self.particles.particles.swap_remove(index);
         }
 
         // Line at the now playing position to denote the cutoff

@@ -21,7 +21,9 @@ use tokio::{
     time::{Duration, sleep},
 };
 use tracing::{error, info, warn};
-use vello::peniko::{Blob, ImageAlphaType, ImageBrush, ImageData, ImageFormat};
+use vello::peniko::{
+    Blob, Extend, ImageAlphaType, ImageBrush, ImageData, ImageFormat, ImageQuality, ImageSampler,
+};
 use zbus::{
     Connection,
     fdo::{DBusProxy, PropertiesProxy},
@@ -51,7 +53,7 @@ pub static PLAYBACK_STATE: LazyLock<RwLock<PlaybackState>> = LazyLock::new(|| {
         playlists: HashMap::new(),
     })
 });
-pub static IMAGES_CACHE: LazyLock<DashMap<String, ImageBrushWrapper>> = LazyLock::new(DashMap::new);
+pub static IMAGES_CACHE: LazyLock<DashMap<String, ImageBrush>> = LazyLock::new(DashMap::new);
 pub static TRACK_DATA_CACHE: LazyLock<DashMap<TrackId<'static>, TrackData>> =
     LazyLock::new(DashMap::new);
 pub static ARTIST_DATA_CACHE: LazyLock<DashMap<ArtistId<'static>, Option<String>>> =
@@ -91,13 +93,7 @@ pub struct TrackData {
     /// Simplified color palette (RGBA, alpha = percentage 0-100).
     pub primary_colors: Vec<[u8; 4]>,
     /// Generated texture derived from the palette for shader backgrounds.
-    pub palette_image: ImageBrushWrapper,
-}
-
-pub struct ImageBrushWrapper {
-    pub brush: ImageBrush,
-    pub width: u32,
-    pub height: u32,
+    pub palette_image: ImageBrush,
 }
 
 pub struct Playlist {
@@ -511,34 +507,27 @@ async fn ensure_image_cached(url: &str) -> Result<()> {
     let response = HTTP_CLIENT.get(url).send().await?.error_for_status()?;
     let dynamic_image = image::load_from_memory(&response.bytes().await?)?;
     // If width or height more thant 64 pixels, resize the image
-    let (rgb_data, width, height) = if dynamic_image.width() > 64 || dynamic_image.height() > 64 {
-        (
-            dynamic_image
-                .resize_to_fill(64, 64, image::imageops::FilterType::Lanczos3)
-                .to_rgba8()
-                .into_raw(),
-            64,
-            64,
-        )
+    let dynamic_image = if dynamic_image.width() > 64 || dynamic_image.height() > 64 {
+        dynamic_image.resize_to_fill(64, 64, image::imageops::FilterType::Lanczos3)
     } else {
-        (
-            dynamic_image.to_rgba8().into_raw(),
-            dynamic_image.width(),
-            dynamic_image.height(),
-        )
+        dynamic_image
     };
     IMAGES_CACHE.insert(
         url.to_owned(),
-        ImageBrushWrapper {
-            brush: ImageBrush::new(ImageData {
-                data: Blob::from(rgb_data),
+        ImageBrush {
+            image: ImageData {
+                data: Blob::from(dynamic_image.to_rgba8().into_raw()),
                 format: ImageFormat::Rgba8,
                 alpha_type: ImageAlphaType::Alpha,
-                width,
-                height,
-            }),
-            width,
-            height,
+                width: dynamic_image.width(),
+                height: dynamic_image.height(),
+            },
+            sampler: ImageSampler {
+                x_extend: Extend::Pad,
+                y_extend: Extend::Pad,
+                quality: ImageQuality::Low,
+                alpha: 1.0,
+            },
         },
     );
     Ok(())
