@@ -219,24 +219,23 @@ impl InteractionState {
 
     /// Handle scrolling events to adjust volume.
     pub fn handle_scroll(delta: i32) {
-        if delta == 0 {
+        let scroll_direction = delta.signum();
+        if scroll_direction == 0 {
             return;
         }
         update_playback_state(|state| {
             if let Some(volume) = &mut state.volume {
-                *volume = if delta < 0 {
+                *volume = if scroll_direction < 0 {
                     volume.saturating_add(5).min(100)
                 } else {
                     volume.saturating_sub(5)
                 };
+                let volume = *volume;
+                tokio::spawn(async move {
+                    set_volume(volume).await;
+                });
             }
         });
-        let current_volume = PLAYBACK_STATE.read().volume;
-        if let Some(volume) = current_volume {
-            tokio::spawn(async move {
-                set_volume(volume).await;
-            });
-        }
     }
 
     pub fn cancel_drag(&mut self) {

@@ -197,7 +197,6 @@ impl LayerShellApp {
         if self.frame_callback.is_some() {
             return;
         }
-
         if let Some(surface) = &self.wl_surface {
             self.frame_callback = Some(surface.frame(qhandle, ()));
         }
@@ -261,13 +260,16 @@ impl LayerShellApp {
             return false;
         }
 
-        let (index, matched_target) = if let Some(target) = &CONFIG.monitor
-            && let Some(found) = self.outputs.iter().position(|info| info.matches(target))
-        {
-            (found, true)
-        } else {
-            (0, false)
-        };
+        let (index, matched_target) = CONFIG
+            .monitor
+            .as_ref()
+            .and_then(|target| {
+                self.outputs
+                    .iter()
+                    .position(|info| info.matches(target))
+                    .map(|found| (found, true))
+            })
+            .unwrap_or((0, false));
 
         if self.active_output != index || (matched_target && !self.output_matched) {
             self.active_output = index;

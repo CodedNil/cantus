@@ -64,18 +64,17 @@ fn load_config() -> Config {
         .expect("config directory unavailable")
         .join("cantus")
         .join("cantus.toml");
-    let contents = match fs::read_to_string(&path) {
-        Ok(raw) => raw,
+
+    match fs::read_to_string(&path) {
+        Ok(contents) => match toml::from_str::<Config>(&contents) {
+            Ok(config) => config,
+            Err(err) => {
+                warn!("Falling back to default config, failed to parse {path:?}: {err}");
+                Config::default()
+            }
+        },
         Err(err) => {
             warn!("Falling back to default config, unable to read {path:?}: {err}");
-            return Config::default();
-        }
-    };
-
-    match toml::from_str::<Config>(&contents) {
-        Ok(config) => config,
-        Err(err) => {
-            warn!("Falling back to default config, failed to parse {path:?}: {err}");
             Config::default()
         }
     }

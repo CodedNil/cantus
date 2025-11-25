@@ -32,6 +32,8 @@
               pkgs.lib.makeLibraryPath [
                 pkgs.wayland
                 pkgs.vulkan-loader
+                pkgs.libxkbcommon
+                pkgs.openssl
               ]
             }:$LD_LIBRARY_PATH
           '';
