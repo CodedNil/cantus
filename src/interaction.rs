@@ -219,24 +219,23 @@ impl InteractionState {
 
     /// Handle scrolling events to adjust volume.
     pub fn handle_scroll(delta: i32) {
-        if delta == 0 {
+        let scroll_direction = delta.signum();
+        if scroll_direction == 0 {
             return;
         }
         update_playback_state(|state| {
             if let Some(volume) = &mut state.volume {
-                *volume = if delta < 0 {
+                *volume = if scroll_direction < 0 {
                     volume.saturating_add(5).min(100)
                 } else {
                     volume.saturating_sub(5)
                 };
+                let volume = *volume;
+                tokio::spawn(async move {
+                    set_volume(volume).await;
+                });
             }
         });
-        let current_volume = PLAYBACK_STATE.read().volume;
-        if let Some(volume) = current_volume {
-            tokio::spawn(async move {
-                set_volume(volume).await;
-            });
-        }
     }
 
     pub fn cancel_drag(&mut self) {
@@ -548,7 +547,7 @@ async fn skip_to_track(track_id: TrackId<'static>, position: f64, always_seek: b
             state.queue_index = position_in_queue;
             state.progress = 0;
             state.last_updated = Instant::now();
-            state.last_interaction = Instant::now();
+            state.last_interaction = Instant::now() + Duration::from_millis(1500);
         });
         let forward = queue_index < position_in_queue;
         let skips = if forward {
@@ -571,7 +570,7 @@ async fn skip_to_track(track_id: TrackId<'static>, position: f64, always_seek: b
                 state.queue_index = position_in_queue;
                 state.progress = 0;
                 state.last_updated = Instant::now();
-                state.last_interaction = Instant::now();
+                state.last_interaction = Instant::now() + Duration::from_millis(1500);
             });
             if let Err(err) = result {
                 error!("Failed to skip to track: {err}");
@@ -593,7 +592,7 @@ async fn skip_to_track(track_id: TrackId<'static>, position: f64, always_seek: b
         update_playback_state(|state| {
             state.progress = milliseconds.round() as u32;
             state.last_updated = Instant::now();
-            state.last_interaction = Instant::now();
+            state.last_interaction = Instant::now() + Duration::from_millis(1500);
         });
         if let Err(err) = SPOTIFY_CLIENT
             .get()
@@ -770,7 +769,7 @@ async fn toggle_playing(play: bool) {
 
     info!("{} current track", if play { "Playing" } else { "Pausing" });
     update_playback_state(|state| {
-        state.last_interaction = Instant::now();
+        state.last_interaction = Instant::now() + Duration::from_millis(1500);
     });
     let spotify_client = SPOTIFY_CLIENT.get().unwrap();
     if play {

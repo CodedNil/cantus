@@ -382,10 +382,10 @@ async fn update_state_from_spotify() {
     let request_duration = request_start.elapsed();
 
     // Get current track and the upcoming queue
-    if queue.currently_playing.is_none() {
+    let Some(currently_playing) = queue.currently_playing else {
         return;
-    }
-    let new_queue: Vec<Track> = std::iter::once(queue.currently_playing.unwrap())
+    };
+    let new_queue: Vec<Track> = std::iter::once(currently_playing)
         .chain(queue.queue.into_iter())
         .filter_map(|item| match item {
             PlayableItem::Track(track) => Some({
@@ -411,16 +411,16 @@ async fn update_state_from_spotify() {
     let current_title = new_queue.first().unwrap().title.clone();
 
     // Start a task to fetch missing artists & images
-    let missing_urls = new_queue
-        .iter()
-        .filter(|track| !IMAGES_CACHE.contains_key(&track.image_url))
-        .map(|track| track.image_url.clone())
-        .collect::<HashSet<_>>();
-    let missing_artists = new_queue
-        .iter()
-        .filter(|&track| !ARTIST_DATA_CACHE.contains_key(&track.artist_id))
-        .map(|track| track.artist_id.clone())
-        .collect::<HashSet<_>>();
+    let mut missing_urls = HashSet::new();
+    let mut missing_artists = HashSet::new();
+    for track in &new_queue {
+        if !IMAGES_CACHE.contains_key(&track.image_url) {
+            missing_urls.insert(track.image_url.clone());
+        }
+        if !ARTIST_DATA_CACHE.contains_key(&track.artist_id) {
+            missing_artists.insert(track.artist_id.clone());
+        }
+    }
     if !missing_urls.is_empty() || !missing_artists.is_empty() {
         tokio::spawn(async move {
             let mut set = JoinSet::new();
@@ -525,7 +525,7 @@ async fn ensure_image_cached(url: &str) -> Result<()> {
             sampler: ImageSampler {
                 x_extend: Extend::Pad,
                 y_extend: Extend::Pad,
-                quality: ImageQuality::Low,
+                quality: ImageQuality::Medium,
                 alpha: 1.0,
             },
         },

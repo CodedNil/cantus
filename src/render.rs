@@ -2,9 +2,9 @@ use crate::{
     CantusApp,
     config::CONFIG,
     interaction::InteractionEvent,
+    lerpf64,
     spotify::{IMAGES_CACHE, PLAYBACK_STATE, Playlist, TRACK_DATA_CACHE, Track},
 };
-use rand::{Rng, SeedableRng, rngs::SmallRng};
 use std::{
     collections::HashMap,
     ops::Range,
@@ -22,15 +22,15 @@ use vello::{
 const TRACK_SPACING_MS: f64 = 4000.0;
 
 /// Particles emitted per second when playback is active.
-const SPARK_EMISSION: f32 = 60.0;
+const SPARK_EMISSION: f64 = 60.0;
 /// Downward acceleration applied to each particle (scaled by DPI).
-const SPARK_GRAVITY: f32 = 300.0;
+const SPARK_GRAVITY: f64 = 300.0;
 /// Horizontal velocity range applied at spawn.
-const SPARK_VELOCITY_X: Range<f32> = 75.0..100.0;
+const SPARK_VELOCITY_X: Range<usize> = 75..100;
 /// Vertical velocity range applied at spawn.
-const SPARK_VELOCITY_Y: Range<f32> = 30.0..70.0;
+const SPARK_VELOCITY_Y: Range<usize> = 30..70;
 /// Lifetime range for individual particles, in seconds.
-const SPARK_LIFETIME: Range<f32> = 0.3..0.6;
+const SPARK_LIFETIME: Range<f64> = 0.3..0.6;
 /// Rendered spark segment length range, in logical pixels.
 const SPARK_LENGTH_RANGE: Range<f64> = 6.0..10.0;
 /// Rendered spark thickness range, in logical pixels.
@@ -59,7 +59,7 @@ impl Default for RenderState {
             move_speeds: [0.0; 16],
             move_index: 0,
             move_speed_sum: 0.0,
-            layout_cache: HashMap::new(),
+            layout_cache: HashMap::with_capacity(200),
         }
     }
 }
@@ -121,26 +121,30 @@ impl Default for FontEngine {
 }
 
 pub struct ParticlesState {
-    particles: Vec<Particle>,
-    rng: SmallRng,
-    spawn_accumulator: f32,
+    particles: [Particle; 32],
+    spawn_accumulator: f64,
 }
 
 impl Default for ParticlesState {
     fn default() -> Self {
         Self {
-            particles: Vec::new(),
-            rng: SmallRng::from_os_rng(),
+            particles: [Particle {
+                life: 0.0,
+                position: [0.0, 0.0],
+                velocity: [0.0, 0.0],
+                color: 0,
+            }; 32],
             spawn_accumulator: 0.0,
         }
     }
 }
 
+#[derive(Copy, Clone)]
 struct Particle {
-    position: [f32; 2],
-    velocity: [f32; 2],
+    life: f64,
+    position: [f64; 2],
+    velocity: [f64; 2],
     color: usize,
-    life: f32,
 }
 
 struct TrackRender<'a> {
@@ -158,6 +162,10 @@ impl CantusApp {
     pub fn create_scene(&mut self) {
         let dt = self.render_state.last_update.elapsed().as_secs_f64();
         self.render_state.last_update = Instant::now();
+
+        if self.render_state.layout_cache.len() > 200 {
+            self.render_state.layout_cache.clear();
+        }
 
         let history_width = (CONFIG.history_width * self.scale_factor).ceil();
         let timeline_duration_ms = CONFIG.timeline_future_minutes * 60_000.0;
@@ -339,7 +347,7 @@ impl CantusApp {
 
         // Draw the particles
         self.render_playing_particles(
-            dt as f32,
+            dt,
             &queue[current_index],
             timeline_origin_x,
             total_height,
@@ -401,8 +409,8 @@ impl CantusApp {
         let crop_left = start_x - track_render.hitbox_range.0;
         let crop_right = track_render.hitbox_range.1 - (start_x + width);
         let full_width = track_render.hitbox_range.1 - track_render.hitbox_range.0;
-        let left_rounding = rounding * lerp((crop_left / buffer_px).clamp(0.0, 1.0), 1.0, 0.3);
-        let right_rounding = rounding * lerp((crop_right / buffer_px).clamp(0.0, 1.0), 1.0, 0.3);
+        let left_rounding = rounding * lerpf64((crop_left / buffer_px).clamp(0.0, 1.0), 1.0, 0.3);
+        let right_rounding = rounding * lerpf64((crop_right / buffer_px).clamp(0.0, 1.0), 1.0, 0.3);
         let radii =
             RoundedRectRadii::new(left_rounding, right_rounding, right_rounding, left_rounding);
         // --- BACKGROUND ---
@@ -726,12 +734,13 @@ impl CantusApp {
             .map(|c| if c.is_ascii_digit() { '0' } else { c })
             .collect();
         let key = TextLayoutKey::new(&text_cleaned, font_size);
-        if !self.render_state.layout_cache.contains_key(&key) {
-            self.render_state
-                .layout_cache
-                .insert(key.clone(), self.layout_text(text, font_size));
+        if let Some(layout) = self.render_state.layout_cache.get(&key) {
+            return (key, layout.width);
         }
-        (key.clone(), self.render_state.layout_cache[&key].width)
+        let layout = self.layout_text(text, font_size);
+        let width = layout.width;
+        self.render_state.layout_cache.insert(key.clone(), layout);
+        (key, width)
     }
 
     /// Draw the text layout onto the scene.
@@ -763,16 +772,13 @@ impl CantusApp {
 
     fn render_playing_particles(
         &mut self,
-        dt: f32,
+        dt: f64,
         track: &Track,
         x: f64,
         height: f64,
         track_move_speed: f64,
         volume: Option<u8>,
     ) {
-        let scale = self.scale_factor as f32;
-        let height_f32 = height as f32;
-
         let lightness_boost = 50.0;
         let Some(track_data) = TRACK_DATA_CACHE.get(&track.id) else {
             return;
@@ -782,74 +788,75 @@ impl CantusApp {
             .iter()
             .map(|[r, g, b, _]| {
                 [
-                    (lerp(0.3, f64::from(*r) + lightness_boost, 255.0)).min(255.0) as u8,
-                    (lerp(0.3, f64::from(*g) + lightness_boost, 210.0)).min(255.0) as u8,
-                    (lerp(0.3, f64::from(*b) + lightness_boost, 160.0)).min(255.0) as u8,
+                    (lerpf64(0.3, f64::from(*r) + lightness_boost, 255.0)).min(255.0) as u8,
+                    (lerpf64(0.3, f64::from(*g) + lightness_boost, 210.0)).min(255.0) as u8,
+                    (lerpf64(0.3, f64::from(*b) + lightness_boost, 160.0)).min(255.0) as u8,
                 ]
             })
             .collect();
         if primary_colors.is_empty() {
-            primary_colors.push([100, 100, 100]);
-            primary_colors.push([150, 150, 150]);
-            primary_colors.push([200, 200, 200]);
+            primary_colors.extend_from_slice(&[[100, 100, 100], [150, 150, 150], [200, 200, 200]]);
         }
 
         // Emit new particles while playing
-        if track_move_speed.abs() > f64::EPSILON {
-            let rng = &mut self.particles.rng;
+        let mut emit_count = if track_move_speed.abs() > f64::EPSILON {
             self.particles.spawn_accumulator += dt * SPARK_EMISSION;
-            let emit_count = self.particles.spawn_accumulator.floor() as u16;
-            self.particles.spawn_accumulator -= f32::from(emit_count);
-            let spawn_offset = track_move_speed.signum() * 2.0;
-            let horizontal_bias =
-                (track_move_speed.abs().powf(0.2) * spawn_offset * 0.5).clamp(-3.0, 3.0);
-            for _ in 0..emit_count {
-                self.particles.particles.push(Particle {
-                    position: [
-                        (x + spawn_offset) as f32,
-                        height_f32 * rng.random_range(0.05..0.95),
-                    ],
-                    velocity: [
-                        rng.random_range(SPARK_VELOCITY_X) * scale * horizontal_bias as f32,
-                        -rng.random_range(SPARK_VELOCITY_Y) * scale,
-                    ],
-                    color: rng.random_range(0..primary_colors.len()),
-                    life: rng.random_range(SPARK_LIFETIME),
-                });
-            }
+            let emit_count = self.particles.spawn_accumulator.floor() as u8;
+            self.particles.spawn_accumulator -= f64::from(emit_count);
+            emit_count
         } else {
             self.particles.spawn_accumulator = 0.0;
-        }
+            0
+        };
 
-        // Kill dead particles, and update positions of others, then render them
-        let mut remove_indexes = Vec::new();
-        for (index, particle) in self.particles.particles.iter_mut().enumerate().rev() {
+        // Spawn new particles, kill dead particles, update positions of others, then render them
+        let spawn_offset = track_move_speed.signum() * 2.0;
+        let horizontal_bias =
+            (track_move_speed.abs().powf(0.2) * spawn_offset * 0.5).clamp(-3.0, 3.0);
+        for particle in &mut self.particles.particles {
             particle.life -= dt;
+
+            // Emit a new particle
+            if emit_count > 0 && particle.life <= 0.0 {
+                particle.position = [
+                    x + spawn_offset,
+                    height * lerpf64(fastrand::f64(), 0.05, 0.95),
+                ];
+                particle.velocity = [
+                    fastrand::usize(SPARK_VELOCITY_X) as f64 * self.scale_factor * horizontal_bias,
+                    fastrand::usize(SPARK_VELOCITY_Y) as f64 * -self.scale_factor,
+                ];
+                particle.color = fastrand::usize(0..primary_colors.len());
+                particle.life = lerpf64(fastrand::f64(), SPARK_LIFETIME.start, SPARK_LIFETIME.end);
+                emit_count -= 1;
+            }
             if particle.life <= 0.0 {
-                remove_indexes.push(index);
                 continue;
             }
 
-            particle.velocity[1] += SPARK_GRAVITY * scale * dt;
+            particle.velocity[1] += SPARK_GRAVITY * self.scale_factor * dt;
             particle.position[0] += particle.velocity[0] * dt;
             particle.position[1] += particle.velocity[1] * dt;
 
             let fade = (particle.life / SPARK_LIFETIME.end).clamp(0.0, 1.0);
-            let length = lerp_range(SPARK_LENGTH_RANGE, f64::from(fade)) * self.scale_factor;
-            let thickness = lerp_range(SPARK_THICKNESS_RANGE, f64::from(fade)) * self.scale_factor;
+            let length =
+                lerpf64(fade, SPARK_LENGTH_RANGE.start, SPARK_LENGTH_RANGE.end) * self.scale_factor;
+            let thickness = lerpf64(fade, SPARK_THICKNESS_RANGE.start, SPARK_THICKNESS_RANGE.end)
+                * self.scale_factor;
             let rgb = primary_colors
                 .get(particle.color)
                 .unwrap_or(&[255, 210, 160]);
-            let angle = f64::from(particle.velocity[1].atan2(particle.velocity[0]));
-            let opacity = (fade.powf(1.1) * 235.0).round().clamp(0.0, 255.0) as u8;
             self.scene.fill(
                 Fill::EvenOdd,
-                Affine::translate((
-                    f64::from(particle.position[0]),
-                    f64::from(particle.position[1]),
-                )) * Affine::rotate(angle)
+                Affine::translate((particle.position[0], particle.position[1]))
+                    * Affine::rotate(particle.velocity[1].atan2(particle.velocity[0]))
                     * Affine::translate((-length * 0.5, 0.0)),
-                Color::from_rgba8(rgb[0], rgb[1], rgb[2], opacity),
+                Color::from_rgba8(
+                    rgb[0],
+                    rgb[1],
+                    rgb[2],
+                    (fade.powf(1.1) * 235.0).round().clamp(0.0, 255.0) as u8,
+                ),
                 None,
                 &RoundedRect::new(
                     0.0,
@@ -859,9 +866,6 @@ impl CantusApp {
                     thickness * 0.5,
                 ),
             );
-        }
-        for index in remove_indexes {
-            self.particles.particles.swap_remove(index);
         }
 
         // Line at the now playing position to denote the cutoff
@@ -883,7 +887,7 @@ impl CantusApp {
         };
         if anim_lerp < 1.0 {
             // Start with the lines split, then 3/4 way through close them again
-            let line_height = height * lerp(((anim_lerp - 0.75) * 4.0).max(0.0), 0.2, 0.5);
+            let line_height = height * lerpf64(((anim_lerp - 0.75) * 4.0).max(0.0), 0.2, 0.5);
             self.scene.fill(
                 Fill::EvenOdd,
                 Affine::translate((line_x, 0.0)),
@@ -970,12 +974,4 @@ impl CantusApp {
             );
         }
     }
-}
-
-fn lerp_range(range: Range<f64>, t: f64) -> f64 {
-    range.start + (range.end - range.start) * t.clamp(0.0, 1.0)
-}
-
-fn lerp(t: f64, v0: f64, v1: f64) -> f64 {
-    (1.0 - t) * v0 + t * v1
 }

@@ -3,7 +3,7 @@ use crate::{
     render::{FontEngine, ParticlesState, RenderState},
 };
 use anyhow::Result;
-use std::collections::{HashMap, hash_map};
+use std::collections::HashMap;
 use tracing_subscriber::EnvFilter;
 use vello::{
     AaConfig, Renderer, RendererOptions, Scene,
@@ -157,11 +157,14 @@ impl CantusApp {
         };
 
         let dev_id = render_surface.dev_id;
-        if let hash_map::Entry::Vacant(entry) = self.render_devices.entry(dev_id) {
-            entry.insert(Renderer::new(
-                &self.render_context.devices[dev_id].device,
-                RendererOptions::default(),
-            )?);
+        if !self.render_devices.contains_key(&dev_id) {
+            self.render_devices.insert(
+                dev_id,
+                Renderer::new(
+                    &self.render_context.devices[dev_id].device,
+                    RendererOptions::default(),
+                )?,
+            );
         }
 
         self.scene.reset();
@@ -211,4 +214,8 @@ impl CantusApp {
         self.render_surface = Some(render_surface);
         Ok(true)
     }
+}
+
+fn lerpf64(t: f64, v0: f64, v1: f64) -> f64 {
+    (1.0 - t) * v0 + t * v1
 }

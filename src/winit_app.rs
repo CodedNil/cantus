@@ -197,13 +197,11 @@ impl ApplicationHandler for WinitApp {
                 | MouseButton::Other(_) => {}
             },
             WindowEvent::MouseWheel { delta, .. } => {
-                let delta_y = match delta {
-                    MouseScrollDelta::LineDelta(_, y) => f64::from(y),
-                    MouseScrollDelta::PixelDelta(pos) => pos.y,
+                let signum_y = match delta {
+                    MouseScrollDelta::LineDelta(_, y) => y.signum() as i32,
+                    MouseScrollDelta::PixelDelta(pos) => pos.y.signum() as i32,
                 };
-                if delta_y.abs() > f64::EPSILON {
-                    InteractionState::handle_scroll(-(delta_y.signum() as i32));
-                }
+                InteractionState::handle_scroll(-signum_y);
             }
             WindowEvent::ActivationTokenDone { .. }
             | WindowEvent::Moved(_)

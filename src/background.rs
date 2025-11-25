@@ -1,4 +1,5 @@
 use crate::config::CONFIG;
+use crate::lerpf64;
 use crate::spotify::{
     ARTIST_DATA_CACHE, IMAGES_CACHE, PLAYBACK_STATE, TRACK_DATA_CACHE, TrackData,
 };
@@ -8,12 +9,7 @@ use image::imageops::colorops;
 use image::{GrayImage, LumaA, RgbaImage, imageops};
 use itertools::Itertools;
 use palette::{Hsl, IntoColor, Srgb};
-use rand::{Rng, SeedableRng, rngs::SmallRng};
-use std::{
-    collections::hash_map::DefaultHasher,
-    hash::{Hash, Hasher},
-    sync::LazyLock,
-};
+use std::sync::LazyLock;
 use vello::peniko::{Blob, ImageAlphaType, ImageBrush, ImageData, ImageFormat};
 
 /// Number of swatches to use in colour palette generation.
@@ -63,97 +59,88 @@ pub fn update_color_palettes() -> Result<()> {
     let state = PLAYBACK_STATE.read();
     let mut pending_palettes = Vec::new();
     for track in &state.queue {
-        if !TRACK_DATA_CACHE.contains_key(&track.id)
-            && let Some(image) = IMAGES_CACHE.get(&track.image_url)
-            && let Some(artist_image_ref) = ARTIST_DATA_CACHE.get(&track.artist_id)
-        {
-            // Merge the images side by side
-            let width = image.image.width;
-            let height = image.image.height;
-            let album_image =
-                RgbaImage::from_raw(width, height, image.image.data.data().to_vec()).unwrap();
-
-            // Get palette, try on the album image or if that doesn't get enough colours include the artist image
-            let swatches = {
-                let palette: Palette<f64> = Palette::builder()
-                    .algorithm(auto_palette::Algorithm::SLIC)
-                    .filter(ChromaFilter { threshold: 30 })
-                    .build(&auto_palette::ImageData::new(width, height, &album_image)?)?;
-                let swatches = palette
-                    .find_swatches_with_theme(NUM_SWATCHES, auto_palette::Theme::Light)
-                    .or_else(|_| palette.find_swatches(NUM_SWATCHES))?;
-                if swatches.len() < NUM_SWATCHES
-                    && let Some(artist_image_ref) = &*artist_image_ref
-                {
-                    // Generate a new image with the artist image
-                    let Some(artist_image) = IMAGES_CACHE.get(artist_image_ref) else {
-                        // Wait for the image to be cached.
-                        continue;
-                    };
-                    let artist_new_width = (width as f32 * 0.1).round() as u32;
-                    let mut new_img = RgbaImage::new(width + artist_new_width, height);
-                    image::imageops::overlay(&mut new_img, &album_image, 0, 0);
-                    let artist_img_resized = image::imageops::resize(
-                        &image::RgbaImage::from_raw(
-                            artist_image.image.width,
-                            artist_image.image.height,
-                            artist_image.image.data.data().to_vec(),
-                        )
-                        .unwrap(),
-                        artist_new_width,
-                        height,
-                        image::imageops::FilterType::Nearest,
-                    );
-                    image::imageops::overlay(
-                        &mut new_img,
-                        &artist_img_resized,
-                        i64::from(width),
-                        0,
-                    );
-
-                    let palette: Palette<f64> = Palette::builder()
-                        .algorithm(auto_palette::Algorithm::SLIC)
-                        .filter(ChromaFilter { threshold: 30 })
-                        .build(&auto_palette::ImageData::new(
-                            new_img.width(),
-                            new_img.height(),
-                            &new_img,
-                        )?)?;
-                    palette
-                        .find_swatches_with_theme(NUM_SWATCHES, auto_palette::Theme::Light)
-                        .or_else(|_| palette.find_swatches(NUM_SWATCHES))?
-                } else {
-                    swatches
-                }
-            };
-
-            // Sort out the ratios
-            let total_ratio_sum: f64 = swatches.iter().map(auto_palette::Swatch::ratio).sum();
-            let primary_colors = swatches
-                .iter()
-                .map(|s| {
-                    let rgb = s.color().to_rgb();
-                    let ratio = ((s.ratio() / total_ratio_sum) as f32 * 255.0).round() as u8;
-                    [rgb.r, rgb.g, rgb.b, ratio]
-                })
-                .sorted_by(|a, b| b[3].cmp(&a[3]))
-                .collect::<Vec<_>>();
-
-            let palette_seed = {
-                let mut hasher = DefaultHasher::new();
-                track.id.hash(&mut hasher);
-                hasher.finish()
-            };
-            pending_palettes.push((track.id.clone(), primary_colors, palette_seed));
+        if TRACK_DATA_CACHE.contains_key(&track.id) {
+            continue;
         }
+        let Some(image) = IMAGES_CACHE.get(&track.image_url) else {
+            continue;
+        };
+        let Some(artist_image_ref) = ARTIST_DATA_CACHE
+            .get(&track.artist_id)
+            .map(|entry| entry.value().clone())
+        else {
+            continue;
+        };
+
+        let width = image.image.width;
+        let height = image.image.height;
+        let album_image =
+            RgbaImage::from_raw(width, height, image.image.data.data().to_vec()).unwrap();
+
+        let mut swatches = {
+            let palette: Palette<f64> = Palette::builder()
+                .algorithm(auto_palette::Algorithm::SLIC)
+                .filter(ChromaFilter { threshold: 30 })
+                .build(&auto_palette::ImageData::new(width, height, &album_image)?)?;
+            palette
+                .find_swatches_with_theme(NUM_SWATCHES, auto_palette::Theme::Light)
+                .or_else(|_| palette.find_swatches(NUM_SWATCHES))?
+        };
+        if swatches.len() < NUM_SWATCHES
+            && let Some(artist_image_url) = artist_image_ref.as_ref()
+        {
+            let Some(artist_image) = IMAGES_CACHE.get(artist_image_url) else {
+                continue;
+            };
+            let artist_new_width = (width as f32 * 0.1).round() as u32;
+            let mut new_img = RgbaImage::new(width + artist_new_width, height);
+            image::imageops::overlay(&mut new_img, &album_image, 0, 0);
+            let artist_img_resized = image::imageops::resize(
+                &image::RgbaImage::from_raw(
+                    artist_image.image.width,
+                    artist_image.image.height,
+                    artist_image.image.data.data().to_vec(),
+                )
+                .unwrap(),
+                artist_new_width,
+                height,
+                image::imageops::FilterType::Nearest,
+            );
+            image::imageops::overlay(&mut new_img, &artist_img_resized, i64::from(width), 0);
+
+            let palette: Palette<f64> = Palette::builder()
+                .algorithm(auto_palette::Algorithm::SLIC)
+                .filter(ChromaFilter { threshold: 30 })
+                .build(&auto_palette::ImageData::new(
+                    new_img.width(),
+                    new_img.height(),
+                    &new_img,
+                )?)?;
+            swatches = palette
+                .find_swatches_with_theme(NUM_SWATCHES, auto_palette::Theme::Light)
+                .or_else(|_| palette.find_swatches(NUM_SWATCHES))?;
+        }
+
+        let total_ratio_sum: f64 = swatches.iter().map(auto_palette::Swatch::ratio).sum();
+        let primary_colors = swatches
+            .iter()
+            .map(|s| {
+                let rgb = s.color().to_rgb();
+                let ratio = ((s.ratio() / total_ratio_sum) as f32 * 255.0).round() as u8;
+                [rgb.r, rgb.g, rgb.b, ratio]
+            })
+            .sorted_by(|a, b| b[3].cmp(&a[3]))
+            .collect::<Vec<_>>();
+
+        pending_palettes.push((track.id.clone(), primary_colors));
     }
     drop(state);
 
-    for (track_id, primary_colors, palette_seed) in pending_palettes {
+    for (track_id, primary_colors) in pending_palettes {
         let width = palette_image_width();
         let height = palette_image_height();
         let palette_image = ImageData {
-            data: Blob::from(generate_palette_image(&primary_colors, palette_seed)),
+            data: Blob::from(generate_palette_image(&primary_colors)),
             format: ImageFormat::Rgba8,
             alpha_type: ImageAlphaType::Alpha,
             width,
@@ -184,7 +171,7 @@ impl auto_palette::Filter for ChromaFilter {
     }
 }
 
-fn generate_palette_image(colors: &[[u8; 4]], seed: u64) -> Vec<u8> {
+fn generate_palette_image(colors: &[[u8; 4]]) -> Vec<u8> {
     let palette_width = palette_image_width();
     let palette_height = palette_image_height();
 
@@ -196,8 +183,6 @@ fn generate_palette_image(colors: &[[u8; 4]], seed: u64) -> Vec<u8> {
         )
         .into_raw();
     }
-
-    let mut rng = SmallRng::seed_from_u64(seed);
 
     let mut targets = colors
         .iter()
@@ -225,10 +210,10 @@ fn generate_palette_image(colors: &[[u8; 4]], seed: u64) -> Vec<u8> {
     let mut per_color_strokes = vec![0; colors.len()];
     let mut available_indices = Vec::with_capacity(colors.len());
     for pass in 0..PALETTE_PASS_COUNT {
-        let base_height = lerp(
-            pass as f32 / PALETTE_PASS_COUNT as f32,
-            palette_height as f32 * 0.5,
-            palette_height as f32 * 0.2,
+        let base_height = lerpf64(
+            pass as f64 / PALETTE_PASS_COUNT as f64,
+            f64::from(palette_height) * 0.5,
+            f64::from(palette_height) * 0.2,
         );
 
         // Count pixels for each color, to get ratios
@@ -285,7 +270,7 @@ fn generate_palette_image(colors: &[[u8; 4]], seed: u64) -> Vec<u8> {
             }
 
             // Randomly select an index from the available candidates
-            let index_to_pick = rng.random_range(0..available_indices.len());
+            let index_to_pick = fastrand::usize(0..available_indices.len());
             let color_index = available_indices[index_to_pick];
             let strokes_left = &mut per_color_strokes[color_index];
             *strokes_left = strokes_left.saturating_sub(1);
@@ -295,12 +280,12 @@ fn generate_palette_image(colors: &[[u8; 4]], seed: u64) -> Vec<u8> {
             let color = colors[color_index];
 
             // Pick a random brush
-            let brush_factor = rng.random_range(0.75..1.2);
+            let brush_factor = lerpf64(fastrand::f64(), 0.75, 1.2);
             let brush_size = (base_height * brush_factor)
                 .round()
-                .clamp(6.0, palette_height as f32) as u32;
+                .clamp(6.0, f64::from(palette_height)) as u32;
             let stamp = image::imageops::resize(
-                &BRUSHES[rng.random_range(0..BRUSHES.len())],
+                &BRUSHES[fastrand::usize(0..BRUSHES.len())],
                 brush_size,
                 brush_size,
                 image::imageops::FilterType::Nearest,
@@ -308,9 +293,9 @@ fn generate_palette_image(colors: &[[u8; 4]], seed: u64) -> Vec<u8> {
             let top_raw = stamp.as_raw();
 
             // Overlay the stamp onto the canvas
-            let fade_factor = rng.random_range(0.55..0.9);
-            let x = i64::from(rng.random_range(0..=palette_width)) - i64::from(brush_size / 2);
-            let y = i64::from(rng.random_range(0..=palette_height)) - i64::from(brush_size / 2);
+            let fade_factor = lerpf64(fastrand::f64(), 0.55, 0.9);
+            let x = fastrand::i64(0..=i64::from(palette_width)) - i64::from(brush_size / 2);
+            let y = fastrand::i64(0..=i64::from(palette_height)) - i64::from(brush_size / 2);
             let (bottom_width, bottom_height) = canvas.dimensions();
             let (top_width, top_height) = stamp.dimensions();
 
@@ -338,7 +323,7 @@ fn generate_palette_image(colors: &[[u8; 4]], seed: u64) -> Vec<u8> {
                 for x_offset in 0..range_width {
                     let alpha = top_raw[top_row_start + (origin_top_x + x_offset) as usize];
                     let adjusted_alpha =
-                        (f32::from(alpha) * fade_factor).round().clamp(0.0, 255.0) as u8;
+                        (f64::from(alpha) * fade_factor).round().clamp(0.0, 255.0) as u8;
                     if adjusted_alpha == 0 {
                         continue;
                     }
@@ -395,8 +380,4 @@ fn apply_vibrancy(raw_data: &mut [u8], boost: f32, weight: f32) {
         chunk[1] = (srgb.green * 255.0).round() as u8;
         chunk[2] = (srgb.blue * 255.0).round() as u8;
     }
-}
-
-fn lerp(t: f32, v0: f32, v1: f32) -> f32 {
-    (1.0 - t).mul_add(v0, t * v1)
 }
