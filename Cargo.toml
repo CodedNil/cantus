@@ -1,6 +1,6 @@
 [package]
 name = "cantus"
-version = "0.1.0"
+version = "0.2.0"
 edition = "2024"
 
 [features]
@@ -43,15 +43,13 @@ winit = { version = "0.30.12", default-features = false, features = [
     "x11",
 ], optional = true }
 
-wgpu = { version = "27.0.1", default-features = false, features = [
+wgpu = { version = "26.0.1", default-features = false, features = [
     "parking_lot",
     "std",
     "vulkan",
     "wgsl",
 ] }
-vello = { git = "https://github.com/linebender/vello", default-features = false, features = [
-    "wgpu",
-] }
+vello = { version = "0.6.0", default-features = false, features = ["wgpu"] }
 
 ttf-parser = { version = "0.25.1", default-features = false, features = [
     "std",
