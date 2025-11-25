@@ -547,7 +547,7 @@ async fn skip_to_track(track_id: TrackId<'static>, position: f64, always_seek: b
             state.queue_index = position_in_queue;
             state.progress = 0;
             state.last_updated = Instant::now();
-            state.last_interaction = Instant::now();
+            state.last_interaction = Instant::now() + Duration::from_millis(1500);
         });
         let forward = queue_index < position_in_queue;
         let skips = if forward {
@@ -570,7 +570,7 @@ async fn skip_to_track(track_id: TrackId<'static>, position: f64, always_seek: b
                 state.queue_index = position_in_queue;
                 state.progress = 0;
                 state.last_updated = Instant::now();
-                state.last_interaction = Instant::now();
+                state.last_interaction = Instant::now() + Duration::from_millis(1500);
             });
             if let Err(err) = result {
                 error!("Failed to skip to track: {err}");
@@ -592,7 +592,7 @@ async fn skip_to_track(track_id: TrackId<'static>, position: f64, always_seek: b
         update_playback_state(|state| {
             state.progress = milliseconds.round() as u32;
             state.last_updated = Instant::now();
-            state.last_interaction = Instant::now();
+            state.last_interaction = Instant::now() + Duration::from_millis(1500);
         });
         if let Err(err) = SPOTIFY_CLIENT
             .get()
@@ -769,7 +769,7 @@ async fn toggle_playing(play: bool) {
 
     info!("{} current track", if play { "Playing" } else { "Pausing" });
     update_playback_state(|state| {
-        state.last_interaction = Instant::now();
+        state.last_interaction = Instant::now() + Duration::from_millis(1500);
     });
     let spotify_client = SPOTIFY_CLIENT.get().unwrap();
     if play {
