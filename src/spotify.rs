@@ -5,7 +5,9 @@ use parking_lot::RwLock;
 use reqwest::Client;
 use rspotify::{
     AuthCodePkceSpotify, Config, Credentials, OAuth,
-    model::{AdditionalType, ArtistId, PlayableItem, PlaylistId, SimplifiedPlaylist, TrackId},
+    model::{
+        AdditionalType, AlbumId, ArtistId, PlayableItem, PlaylistId, SimplifiedPlaylist, TrackId,
+    },
     prelude::{BaseClient, OAuthClient},
     scopes,
 };
@@ -44,7 +46,6 @@ pub static PLAYBACK_STATE: LazyLock<RwLock<PlaybackState>> = LazyLock::new(|| {
         last_updated: Instant::now(),
         last_interaction: Instant::now(),
         playing: false,
-        shuffle: false,
         progress: 0,
         volume: None,
         queue: Vec::new(),
@@ -54,13 +55,13 @@ pub static PLAYBACK_STATE: LazyLock<RwLock<PlaybackState>> = LazyLock::new(|| {
     })
 });
 pub static IMAGES_CACHE: LazyLock<DashMap<String, ImageBrush>> = LazyLock::new(DashMap::new);
-pub static TRACK_DATA_CACHE: LazyLock<DashMap<TrackId<'static>, TrackData>> =
+pub static ALBUM_DATA_CACHE: LazyLock<DashMap<AlbumId<'static>, AlbumData>> =
     LazyLock::new(DashMap::new);
 pub static ARTIST_DATA_CACHE: LazyLock<DashMap<ArtistId<'static>, Option<String>>> =
     LazyLock::new(DashMap::new);
 
-pub const RATING_PLAYLISTS: [&str; 11] = [
-    "0.0", "0.5", "1.0", "1.5", "2.0", "2.5", "3.0", "3.5", "4.0", "4.5", "5.0",
+pub const RATING_PLAYLISTS: [&str; 10] = [
+    "0.5", "1.0", "1.5", "2.0", "2.5", "3.0", "3.5", "4.0", "4.5", "5.0",
 ];
 
 static HTTP_CLIENT: LazyLock<Client> = LazyLock::new(Client::new);
@@ -71,7 +72,6 @@ pub struct PlaybackState {
     pub last_updated: Instant,
     pub last_interaction: Instant,
     pub playing: bool,
-    pub shuffle: bool,
     pub progress: u32,
     pub volume: Option<u8>,
     pub queue: Vec<Track>,
@@ -85,11 +85,12 @@ pub struct Track {
     pub title: String,
     pub artist_id: ArtistId<'static>,
     pub artist_name: String,
+    pub album_id: AlbumId<'static>,
     pub image_url: String,
     pub milliseconds: u32,
 }
 
-pub struct TrackData {
+pub struct AlbumData {
     /// Simplified color palette (RGBA, alpha = percentage 0-100).
     pub primary_colors: Vec<[u8; 4]>,
     /// Generated texture derived from the palette for shader backgrounds.
@@ -395,6 +396,7 @@ async fn update_state_from_spotify() {
                     title: track.name,
                     artist_id: artist.id.clone().unwrap(),
                     artist_name: artist.name.clone(),
+                    album_id: track.album.id.unwrap(),
                     image_url: track
                         .album
                         .images
@@ -481,7 +483,6 @@ async fn update_state_from_spotify() {
             state.current_context = new_context;
         }
 
-        state.shuffle = current_playback.shuffle_state;
         state.volume = current_playback.device.volume_percent.map(|v| v as u8);
         if !state.is_local {
             state.playing = current_playback.is_playing;

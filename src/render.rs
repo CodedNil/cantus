@@ -3,7 +3,7 @@ use crate::{
     config::CONFIG,
     interaction::InteractionEvent,
     lerpf64,
-    spotify::{IMAGES_CACHE, PLAYBACK_STATE, Playlist, TRACK_DATA_CACHE, Track},
+    spotify::{ALBUM_DATA_CACHE, IMAGES_CACHE, PLAYBACK_STATE, Playlist, Track},
 };
 use std::{
     collections::HashMap,
@@ -377,7 +377,7 @@ impl CantusApp {
 
         let (Some(album_image), Some(track_data)) = (
             IMAGES_CACHE.get(&track.image_url),
-            TRACK_DATA_CACHE.get(&track.id),
+            ALBUM_DATA_CACHE.get(&track.album_id),
         ) else {
             return;
         };
@@ -743,7 +743,7 @@ impl CantusApp {
         volume: Option<u8>,
     ) {
         let lightness_boost = 50.0;
-        let Some(track_data) = TRACK_DATA_CACHE.get(&track.id) else {
+        let Some(track_data) = ALBUM_DATA_CACHE.get(&track.album_id) else {
             return;
         };
         let mut primary_colors: Vec<_> = track_data

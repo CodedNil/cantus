@@ -1,7 +1,7 @@
 use crate::config::CONFIG;
 use crate::lerpf64;
 use crate::spotify::{
-    ARTIST_DATA_CACHE, IMAGES_CACHE, PLAYBACK_STATE, TRACK_DATA_CACHE, TrackData,
+    ALBUM_DATA_CACHE, ARTIST_DATA_CACHE, AlbumData, IMAGES_CACHE, PLAYBACK_STATE,
 };
 use anyhow::Result;
 use auto_palette::Palette;
@@ -9,6 +9,7 @@ use image::imageops::colorops;
 use image::{GrayImage, LumaA, RgbaImage, imageops};
 use itertools::Itertools;
 use palette::{Hsl, IntoColor, Srgb};
+use std::collections::HashMap;
 use std::sync::LazyLock;
 use vello::peniko::{Blob, ImageAlphaType, ImageBrush, ImageData, ImageFormat};
 
@@ -57,9 +58,11 @@ static BRUSHES: LazyLock<[GrayImage; 5]> = LazyLock::new(|| {
 /// Downloads and caches an image from the given URL.
 pub fn update_color_palettes() -> Result<()> {
     let state = PLAYBACK_STATE.read();
-    let mut pending_palettes = Vec::new();
+    let mut pending_palettes = HashMap::new();
     for track in &state.queue {
-        if TRACK_DATA_CACHE.contains_key(&track.id) {
+        if ALBUM_DATA_CACHE.contains_key(&track.album_id)
+            || pending_palettes.contains_key(&track.album_id)
+        {
             continue;
         }
         let Some(image) = IMAGES_CACHE.get(&track.image_url) else {
@@ -132,23 +135,21 @@ pub fn update_color_palettes() -> Result<()> {
             .sorted_by(|a, b| b[3].cmp(&a[3]))
             .collect::<Vec<_>>();
 
-        pending_palettes.push((track.id.clone(), primary_colors));
+        pending_palettes.insert(track.album_id.clone(), primary_colors);
     }
     drop(state);
 
-    for (track_id, primary_colors) in pending_palettes {
-        let width = palette_image_width();
-        let height = palette_image_height();
+    for (album_id, primary_colors) in pending_palettes {
         let palette_image = ImageData {
             data: Blob::from(generate_palette_image(&primary_colors)),
             format: ImageFormat::Rgba8,
             alpha_type: ImageAlphaType::Alpha,
-            width,
-            height,
+            width: palette_image_width(),
+            height: palette_image_height(),
         };
-        TRACK_DATA_CACHE.insert(
-            track_id,
-            TrackData {
+        ALBUM_DATA_CACHE.insert(
+            album_id,
+            AlbumData {
                 primary_colors,
                 palette_image: ImageBrush::new(palette_image),
             },
