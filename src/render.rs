@@ -48,7 +48,6 @@ pub struct RenderState {
     move_speeds: [f64; 16],
     move_index: usize,
     move_speed_sum: f64,
-    layout_cache: HashMap<TextLayoutKey, TextLayout>,
 }
 
 impl Default for RenderState {
@@ -59,7 +58,6 @@ impl Default for RenderState {
             move_speeds: [0.0; 16],
             move_index: 0,
             move_speed_sum: 0.0,
-            layout_cache: HashMap::with_capacity(200),
         }
     }
 }
@@ -83,22 +81,6 @@ struct TextLayout {
     height: f64,
     font_size: f32,
     coords: Vec<i16>,
-}
-
-#[derive(Hash, PartialEq, Eq, Clone)]
-struct TextLayoutKey {
-    text: String,
-    font_size: u32,
-}
-
-impl TextLayoutKey {
-    fn new(text: &str, font_size: f64) -> Self {
-        let font_size_key = (font_size * 100.0).round() as u32;
-        Self {
-            text: text.to_owned(),
-            font_size: font_size_key,
-        }
-    }
 }
 
 impl Default for FontEngine {
@@ -162,10 +144,6 @@ impl CantusApp {
     pub fn create_scene(&mut self) {
         let dt = self.render_state.last_update.elapsed().as_secs_f64();
         self.render_state.last_update = Instant::now();
-
-        if self.render_state.layout_cache.len() > 200 {
-            self.render_state.layout_cache.clear();
-        }
 
         let history_width = (CONFIG.history_width * self.scale_factor).ceil();
         let timeline_duration_ms = CONFIG.timeline_future_minutes * 60_000.0;
@@ -544,11 +522,10 @@ impl CantusApp {
                 .trim();
             let font_size = 12.0;
             let text_height = (height * 0.2).floor();
-            let (layout, layout_width) = self.layout_text_cached(song_name, font_size);
-            let width_ratio = available_width / layout_width;
+            let layout = self.layout_text(song_name, font_size);
+            let width_ratio = available_width / layout.width;
             if width_ratio <= 1.0 {
-                let (layout, _) =
-                    self.layout_text_cached(song_name, font_size * width_ratio.max(0.8));
+                let layout = self.layout_text(song_name, font_size * width_ratio.max(0.8));
                 self.draw_text(
                     &layout,
                     text_start_left,
@@ -572,10 +549,6 @@ impl CantusApp {
             let text_height = (height * 0.52).floor();
 
             let artist_text = &track.artist_name;
-            let (artist_layout, artist_layout_width) =
-                self.layout_text_cached(artist_text, font_size);
-            let dot_text = "\u{2004}•\u{2004}"; // Use thin spaces on either side of the bullet point
-            let (_, dot_layout_width) = self.layout_text_cached(dot_text, font_size);
             let time_text = if track_render.seconds_until_start >= 60.0 {
                 format!(
                     "{}m{}s",
@@ -585,15 +558,22 @@ impl CantusApp {
             } else {
                 format!("{}s", track_render.seconds_until_start.round())
             };
-            let (time_layout, time_layout_width) = self.layout_text_cached(&time_text, font_size);
+            let dot_text = "\u{2004}•\u{2004}"; // Use thin spaces on either side of the bullet point
 
-            let width_ratio =
-                available_width / (artist_layout_width + dot_layout_width + time_layout_width);
+            let layout = self.layout_text(
+                &format!("{time_text}{dot_text}{artist_text}"),
+                font_size * width_ratio.clamp(0.8, 1.0),
+            );
+            let width_ratio = available_width / layout.width;
             if width_ratio <= 1.0 || !track_render.is_current {
-                let (layout, _) = self.layout_text_cached(
-                    &format!("{time_text}{dot_text}{artist_text}"),
-                    font_size * width_ratio.clamp(0.8, 1.0),
-                );
+                let layout = if width_ratio >= 1.0 {
+                    layout
+                } else {
+                    self.layout_text(
+                        &format!("{time_text}{dot_text}{artist_text}"),
+                        font_size * width_ratio.clamp(0.8, 1.0),
+                    )
+                };
                 self.draw_text(
                     &layout,
                     if width_ratio >= 1.0 {
@@ -612,14 +592,14 @@ impl CantusApp {
                 );
             } else {
                 self.draw_text(
-                    &time_layout,
+                    &self.layout_text(&time_text, font_size),
                     start_x + 12.0,
                     text_height,
                     Align::Start,
                     text_brush,
                 );
                 self.draw_text(
-                    &artist_layout,
+                    &self.layout_text(artist_text, font_size),
                     text_start_right,
                     text_height,
                     Align::End,
@@ -727,32 +707,15 @@ impl CantusApp {
         }
     }
 
-    fn layout_text_cached(&mut self, text: &str, font_size: f64) -> (TextLayoutKey, f64) {
-        // All numbers replaced with zero since numbers are same width
-        let text_cleaned: String = text
-            .chars()
-            .map(|c| if c.is_ascii_digit() { '0' } else { c })
-            .collect();
-        let key = TextLayoutKey::new(&text_cleaned, font_size);
-        if let Some(layout) = self.render_state.layout_cache.get(&key) {
-            return (key, layout.width);
-        }
-        let layout = self.layout_text(text, font_size);
-        let width = layout.width;
-        self.render_state.layout_cache.insert(key.clone(), layout);
-        (key, width)
-    }
-
     /// Draw the text layout onto the scene.
     fn draw_text(
         &mut self,
-        layout_key: &TextLayoutKey,
+        layout: &TextLayout,
         pos_x: f64,
         pos_y: f64,
         horizontal_align: Align,
         brush: Color,
     ) {
-        let layout = &self.render_state.layout_cache[layout_key];
         self.scene
             .draw_glyphs(&self.font.font_data)
             .font_size(layout.font_size)
