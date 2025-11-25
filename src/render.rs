@@ -762,7 +762,7 @@ impl CantusApp {
         }
 
         // Emit new particles while playing
-        let mut emit_count = if track_move_speed.abs() > f64::EPSILON {
+        let mut emit_count = if track_move_speed.abs() > 0.000_001 {
             self.particles.spawn_accumulator += dt * SPARK_EMISSION;
             let emit_count = self.particles.spawn_accumulator.floor() as u8;
             self.particles.spawn_accumulator -= f64::from(emit_count);
