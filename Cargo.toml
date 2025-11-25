@@ -18,10 +18,7 @@ tracing = "0.1.41"
 tracing-subscriber = { version = "0.3.20", features = ["env-filter"] }
 anyhow = "1.0.100"
 
-tokio = { version = "1.48.0", features = ["macros", "rt-multi-thread"] }
-reqwest = { version = "0.12.24", default-features = false, features = [
-    "default-tls",
-] }
+ureq = "3.1.4"
 pollster = "0.4.0"
 raw-window-handle = "0.6.2"
 
@@ -57,12 +54,15 @@ ttf-parser = { version = "0.25.1", default-features = false, features = [
 ] }
 
 rspotify = { version = "0.15.3", default-features = false, features = [
-    "client-reqwest",
-    "reqwest-native-tls",
+    "client-ureq",
+    "ureq-rustls-tls",
     "cli",
 ] }
 chrono = { version = "0.4.42", default-features = false }
-zbus = { version = "5.12.0", default-features = false, features = ["tokio"] }
+# zbus = { version = "5.12.0", default-features = false, features = [
+#     "blocking",
+#     "blocking-api",
+# ] }
 image = { version = "0.25.9", default-features = false, features = [
     "jpeg",
     "png",

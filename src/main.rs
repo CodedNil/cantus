@@ -37,15 +37,14 @@ mod winit_app;
 /// Additional height allocated for extended content.
 const PANEL_HEIGHT_EXTENSION: f64 = 10.0;
 
-#[tokio::main]
-async fn main() {
+fn main() {
     tracing_subscriber::fmt()
         .with_env_filter(EnvFilter::new(
             ["warn", "cantus=info", "wgpu_hal=error"].join(","),
         ))
         .init();
 
-    spotify::init().await;
+    spotify::init();
 
     #[cfg(feature = "wayland")]
     layer_shell::run();
