@@ -619,12 +619,11 @@ async fn update_star_rating(track_id: TrackId<'static>, rating_slot: usize) {
 
     let mut playlists_to_remove_from = Vec::new();
     let mut playlists_to_add_to = Vec::new();
-    {
-        let mut write_state = PLAYBACK_STATE.write();
-        write_state.last_interaction = Instant::now();
+    update_playback_state(|state| {
+        state.last_interaction = Instant::now();
 
         // Remove tracks from existing playlists
-        for playlist in write_state.playlists.values_mut().filter(|playlist| {
+        for playlist in state.playlists.values_mut().filter(|playlist| {
             RATING_PLAYLISTS.contains(&playlist.name.as_str())
                 && playlist.name != *rating_name
                 && playlist.tracks.contains(&track_id)
@@ -634,7 +633,7 @@ async fn update_star_rating(track_id: TrackId<'static>, rating_slot: usize) {
         }
 
         // Add the track to the target playlist if it's not already there
-        for playlist in write_state.playlists.values_mut().filter(|playlist| {
+        for playlist in state.playlists.values_mut().filter(|playlist| {
             playlist.name == *rating_name && !playlist.tracks.contains(&track_id)
         }) {
             info!(
@@ -644,7 +643,7 @@ async fn update_star_rating(track_id: TrackId<'static>, rating_slot: usize) {
             playlist.tracks.insert(track_id.clone());
             playlists_to_add_to.push((playlist.id.clone(), playlist.name.clone()));
         }
-    }
+    });
 
     // Make the changes
     let spotify_client = SPOTIFY_CLIENT.get().unwrap();

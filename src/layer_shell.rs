@@ -76,7 +76,7 @@ pub fn run() {
 
     let layer_surface = layer_shell.get_layer_surface(
         surface,
-        app.outputs.get(app.active_output).map(|info| &info.handle),
+        app.outputs.get(app.output_index).map(|info| &info.handle),
         match CONFIG.layer.as_str() {
             "background" => zwlr_layer_shell_v1::Layer::Background,
             "bottom" => zwlr_layer_shell_v1::Layer::Bottom,
@@ -91,10 +91,9 @@ pub fn run() {
         &qhandle,
         (),
     );
-    layer_surface.set_size(
-        CONFIG.width as u32,
-        (CONFIG.height + PANEL_HEIGHT_EXTENSION) as u32,
-    );
+    let width = CONFIG.width;
+    let total_height = CONFIG.height + PANEL_HEIGHT_EXTENSION;
+    layer_surface.set_size(width as u32, total_height as u32);
     layer_surface.set_anchor(match CONFIG.layer_anchor.as_str() {
         "top" => zwlr_layer_surface_v1::Anchor::Top,
         "topright" => zwlr_layer_surface_v1::Anchor::Top | zwlr_layer_surface_v1::Anchor::Right,
@@ -154,21 +153,20 @@ pub struct LayerShellApp {
 
     compositor: Option<WlCompositor>,
     layer_shell: Option<ZwlrLayerShellV1>,
-    viewporter: Option<WpViewporter>,
-    fractional_manager: Option<WpFractionalScaleManagerV1>,
     seat: Option<WlSeat>,
     pointer: Option<WlPointer>,
     outputs: Vec<OutputInfo>,
-    active_output: usize,
+    output_index: usize,
     output_matched: bool,
 
+    surface_ptr: Option<NonNull<c_void>>,
     wl_surface: Option<WlSurface>,
     viewport: Option<WpViewport>,
     fractional: Option<WpFractionalScaleV1>,
     frame_callback: Option<WlCallback>,
-
+    viewporter: Option<WpViewporter>,
+    fractional_manager: Option<WpFractionalScaleManagerV1>,
     display_ptr: NonNull<c_void>,
-    surface_ptr: Option<NonNull<c_void>>,
 }
 
 impl LayerShellApp {
@@ -177,19 +175,19 @@ impl LayerShellApp {
             cantus: CantusApp::default(),
             compositor: None,
             layer_shell: None,
-            viewporter: None,
-            fractional_manager: None,
             seat: None,
             pointer: None,
             outputs: Vec::new(),
-            active_output: 0,
+            output_index: 0,
             output_matched: false,
+            surface_ptr: None,
             wl_surface: None,
             viewport: None,
             fractional: None,
             frame_callback: None,
+            viewporter: None,
+            fractional_manager: None,
             display_ptr,
-            surface_ptr: None,
         }
     }
 
@@ -197,9 +195,10 @@ impl LayerShellApp {
         if self.frame_callback.is_some() {
             return;
         }
-        if let Some(surface) = &self.wl_surface {
-            self.frame_callback = Some(surface.frame(qhandle, ()));
-        }
+        let Some(surface) = &self.wl_surface else {
+            return;
+        };
+        self.frame_callback = Some(surface.frame(qhandle, ()));
     }
 
     fn ensure_surface(&mut self, width: f64, height: f64) -> Result<()> {
@@ -240,9 +239,11 @@ impl LayerShellApp {
     }
 
     fn refresh_surface(&mut self, qhandle: &QueueHandle<Self>) {
-        let buffer_width = (CONFIG.width * self.cantus.scale_factor).round();
-        let buffer_height =
-            ((CONFIG.height + PANEL_HEIGHT_EXTENSION) * self.cantus.scale_factor).round();
+        let scale = self.cantus.scale_factor;
+        let width = CONFIG.width;
+        let total_height = CONFIG.height + PANEL_HEIGHT_EXTENSION;
+        let buffer_width = (width * scale).round();
+        let buffer_height = (total_height * scale).round();
 
         if let Err(err) = self.ensure_surface(buffer_width, buffer_height) {
             error!("Failed to prepare render surface: {err}");
@@ -271,8 +272,8 @@ impl LayerShellApp {
             })
             .unwrap_or((0, false));
 
-        if self.active_output != index || (matched_target && !self.output_matched) {
-            self.active_output = index;
+        if self.output_index != index || (matched_target && !self.output_matched) {
+            self.output_index = index;
             self.output_matched = matched_target;
         }
         true
@@ -280,9 +281,11 @@ impl LayerShellApp {
 
     fn try_render_frame(&mut self, qhandle: &QueueHandle<Self>) -> Result<()> {
         if self.cantus.render_surface.is_none() {
-            let buffer_width = (CONFIG.width * self.cantus.scale_factor).round();
-            let buffer_height =
-                ((CONFIG.height + PANEL_HEIGHT_EXTENSION) * self.cantus.scale_factor).round();
+            let scale = self.cantus.scale_factor;
+            let width = CONFIG.width;
+            let total_height = CONFIG.height + PANEL_HEIGHT_EXTENSION;
+            let buffer_width = (width * scale).round();
+            let buffer_height = (total_height * scale).round();
             self.ensure_surface(buffer_width, buffer_height)?;
         }
 
@@ -304,23 +307,23 @@ impl LayerShellApp {
     }
 
     fn update_scale_and_viewport(&self) {
-        let buffer_width = (CONFIG.width * self.cantus.scale_factor).round();
-        let buffer_height =
-            ((CONFIG.height + PANEL_HEIGHT_EXTENSION) * self.cantus.scale_factor).round();
+        let scale = self.cantus.scale_factor;
+        let width = CONFIG.width;
+        let total_height = CONFIG.height + PANEL_HEIGHT_EXTENSION;
+        let buffer_width = (width * scale).round();
+        let buffer_height = (total_height * scale).round();
 
+        let viewport = &self.viewport;
         if let Some(surface) = &self.wl_surface {
-            surface.set_buffer_scale(if self.viewport.is_some() {
+            surface.set_buffer_scale(if viewport.is_some() {
                 1
             } else {
-                self.cantus.scale_factor.ceil() as i32
+                scale.ceil() as i32
             });
         }
-        if let Some(viewport) = &self.viewport {
+        if let Some(viewport) = viewport {
             viewport.set_source(0.0, 0.0, buffer_width, buffer_height);
-            viewport.set_destination(
-                CONFIG.width as i32,
-                (CONFIG.height + PANEL_HEIGHT_EXTENSION) as i32,
-            );
+            viewport.set_destination(width as i32, total_height as i32);
         }
     }
 
@@ -334,28 +337,24 @@ impl LayerShellApp {
         };
 
         let scale = self.cantus.scale_factor;
+        let inv_scale = 1.0 / scale;
 
         let region = compositor.create_region(qhandle, ());
-        for rect in self
-            .cantus
-            .interaction
-            .track_hitboxes
-            .iter()
-            .map(|(_, rect, _)| rect)
-            .chain(
-                self.cantus
-                    .interaction
-                    .icon_hitboxes
-                    .iter()
-                    .map(|hitbox| &hitbox.rect),
-            )
         {
-            region.add(
-                (rect.x0 / scale).round() as i32,
-                (rect.y0 / scale).round() as i32,
-                ((rect.x1 - rect.x0) / scale).round() as i32,
-                ((rect.y1 - rect.y0) / scale).round() as i32,
-            );
+            let interaction = &self.cantus.interaction;
+            for rect in interaction
+                .track_hitboxes
+                .iter()
+                .map(|(_, rect, _)| rect)
+                .chain(interaction.icon_hitboxes.iter().map(|hitbox| &hitbox.rect))
+            {
+                region.add(
+                    (rect.x0 * inv_scale).round() as i32,
+                    (rect.y0 * inv_scale).round() as i32,
+                    ((rect.x1 - rect.x0) * inv_scale).round() as i32,
+                    ((rect.y1 - rect.y0) * inv_scale).round() as i32,
+                );
+            }
         }
 
         wl_surface.set_input_region(Some(&region));
@@ -503,6 +502,9 @@ impl Dispatch<WlPointer, ()> for LayerShellApp {
         _conn: &Connection,
         _qhandle: &QueueHandle<Self>,
     ) {
+        let interaction = &mut state.cantus.interaction;
+        let scale = state.cantus.scale_factor;
+        let surface_id = state.wl_surface.as_ref().map(wayland_client::Proxy::id);
         match event {
             wl_pointer::Event::Enter {
                 surface,
@@ -510,15 +512,8 @@ impl Dispatch<WlPointer, ()> for LayerShellApp {
                 surface_y,
                 ..
             } => {
-                if state
-                    .wl_surface
-                    .as_ref()
-                    .is_some_and(|wl_surface| wl_surface.id() == surface.id())
-                {
-                    state.cantus.interaction.mouse_position = Point::new(
-                        surface_x * state.cantus.scale_factor,
-                        surface_y * state.cantus.scale_factor,
-                    );
+                if surface_id == Some(surface.id()) {
+                    interaction.mouse_position = Point::new(surface_x * scale, surface_y * scale);
                 }
             }
             wl_pointer::Event::Motion {
@@ -526,53 +521,46 @@ impl Dispatch<WlPointer, ()> for LayerShellApp {
                 surface_y,
                 ..
             } => {
-                state.cantus.interaction.mouse_position = Point::new(
-                    surface_x * state.cantus.scale_factor,
-                    surface_y * state.cantus.scale_factor,
-                );
-                state.cantus.interaction.handle_mouse_drag();
+                interaction.mouse_position = Point::new(surface_x * scale, surface_y * scale);
+                interaction.handle_mouse_drag();
             }
             wl_pointer::Event::Leave { .. } => {
-                state.cantus.interaction.mouse_position = Point::new(-100.0, -100.0);
-                state.cantus.interaction.cancel_drag();
-                state.cantus.interaction.mouse_down = false;
+                interaction.mouse_position = Point::new(-100.0, -100.0);
+                interaction.cancel_drag();
+                interaction.mouse_down = false;
             }
             wl_pointer::Event::Button {
                 button: 0x110,
-                state: button_state,
-                ..
-            } => match button_state {
-                WEnum::Value(wl_pointer::ButtonState::Pressed) => {
-                    state.cantus.interaction.left_click();
-                }
-                WEnum::Value(wl_pointer::ButtonState::Released) => {
-                    state
-                        .cantus
-                        .interaction
-                        .left_click_released(state.cantus.scale_factor);
-                }
-                WEnum::Value(_) | WEnum::Unknown(_) => {}
-            },
-            wl_pointer::Event::Button {
-                button: 0x111,
-                state: button_state,
+                state: WEnum::Value(wl_pointer::ButtonState::Pressed),
                 ..
             } => {
-                if state.cantus.interaction.dragging
-                    && button_state == WEnum::Value(wl_pointer::ButtonState::Pressed)
-                {
-                    state.cantus.interaction.right_click();
-                }
+                interaction.left_click();
             }
-            wl_pointer::Event::AxisDiscrete { axis, discrete, .. } => {
-                if axis == WEnum::Value(wl_pointer::Axis::VerticalScroll) {
-                    InteractionState::handle_scroll(discrete.signum());
-                }
+            wl_pointer::Event::Button {
+                button: 0x110,
+                state: WEnum::Value(wl_pointer::ButtonState::Released),
+                ..
+            } => {
+                interaction.left_click_released(scale);
             }
-            wl_pointer::Event::AxisValue120 { axis, value120, .. } => {
-                if axis == WEnum::Value(wl_pointer::Axis::VerticalScroll) {
-                    InteractionState::handle_scroll(value120.signum());
-                }
+            wl_pointer::Event::Button {
+                button: 0x111,
+                state: WEnum::Value(wl_pointer::ButtonState::Pressed),
+                ..
+            } if interaction.dragging => {
+                interaction.right_click();
+            }
+            wl_pointer::Event::AxisDiscrete {
+                axis: WEnum::Value(wl_pointer::Axis::VerticalScroll),
+                discrete,
+                ..
+            }
+            | wl_pointer::Event::AxisValue120 {
+                axis: WEnum::Value(wl_pointer::Axis::VerticalScroll),
+                value120: discrete,
+                ..
+            } => {
+                InteractionState::handle_scroll(discrete.signum());
             }
             wl_pointer::Event::Axis { .. }
             | wl_pointer::Event::Frame
