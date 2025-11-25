@@ -59,7 +59,7 @@ impl Default for RenderState {
             move_speeds: [0.0; 16],
             move_index: 0,
             move_speed_sum: 0.0,
-            layout_cache: HashMap::new(),
+            layout_cache: HashMap::with_capacity(200),
         }
     }
 }
@@ -121,24 +121,30 @@ impl Default for FontEngine {
 }
 
 pub struct ParticlesState {
-    particles: Vec<Particle>,
+    particles: [Particle; 32],
     spawn_accumulator: f64,
 }
 
 impl Default for ParticlesState {
     fn default() -> Self {
         Self {
-            particles: Vec::new(),
+            particles: [Particle {
+                life: 0.0,
+                position: [0.0, 0.0],
+                velocity: [0.0, 0.0],
+                color: 0,
+            }; 32],
             spawn_accumulator: 0.0,
         }
     }
 }
 
+#[derive(Copy, Clone)]
 struct Particle {
+    life: f64,
     position: [f64; 2],
     velocity: [f64; 2],
     color: usize,
-    life: f64,
 }
 
 struct TrackRender<'a> {
@@ -156,6 +162,10 @@ impl CantusApp {
     pub fn create_scene(&mut self) {
         let dt = self.render_state.last_update.elapsed().as_secs_f64();
         self.render_state.last_update = Instant::now();
+
+        if self.render_state.layout_cache.len() > 200 {
+            self.render_state.layout_cache.clear();
+        }
 
         let history_width = (CONFIG.history_width * self.scale_factor).ceil();
         let timeline_duration_ms = CONFIG.timeline_future_minutes * 60_000.0;
@@ -789,39 +799,38 @@ impl CantusApp {
         }
 
         // Emit new particles while playing
-        if track_move_speed.abs() > f64::EPSILON {
+        let mut emit_count = if track_move_speed.abs() > f64::EPSILON {
             self.particles.spawn_accumulator += dt * SPARK_EMISSION;
-            let emit_count = self.particles.spawn_accumulator.floor() as u16;
+            let emit_count = self.particles.spawn_accumulator.floor() as u8;
             self.particles.spawn_accumulator -= f64::from(emit_count);
-            let spawn_offset = track_move_speed.signum() * 2.0;
-            let horizontal_bias =
-                (track_move_speed.abs().powf(0.2) * spawn_offset * 0.5).clamp(-3.0, 3.0);
-            for _ in 0..emit_count {
-                self.particles.particles.push(Particle {
-                    position: [
-                        x + spawn_offset,
-                        height * lerpf64(fastrand::f64(), 0.05, 0.95),
-                    ],
-                    velocity: [
-                        fastrand::usize(SPARK_VELOCITY_X) as f64
-                            * self.scale_factor
-                            * horizontal_bias,
-                        fastrand::usize(SPARK_VELOCITY_Y) as f64 * -self.scale_factor,
-                    ],
-                    color: fastrand::usize(0..primary_colors.len()),
-                    life: lerpf64(fastrand::f64(), SPARK_LIFETIME.start, SPARK_LIFETIME.end),
-                });
-            }
+            emit_count
         } else {
             self.particles.spawn_accumulator = 0.0;
-        }
+            0
+        };
 
-        // Kill dead particles, and update positions of others, then render them
-        let mut remove_indexes = Vec::new();
-        for (index, particle) in self.particles.particles.iter_mut().enumerate().rev() {
+        // Spawn new particles, kill dead particles, update positions of others, then render them
+        let spawn_offset = track_move_speed.signum() * 2.0;
+        let horizontal_bias =
+            (track_move_speed.abs().powf(0.2) * spawn_offset * 0.5).clamp(-3.0, 3.0);
+        for particle in &mut self.particles.particles {
             particle.life -= dt;
+
+            // Emit a new particle
+            if emit_count > 0 && particle.life <= 0.0 {
+                particle.position = [
+                    x + spawn_offset,
+                    height * lerpf64(fastrand::f64(), 0.05, 0.95),
+                ];
+                particle.velocity = [
+                    fastrand::usize(SPARK_VELOCITY_X) as f64 * self.scale_factor * horizontal_bias,
+                    fastrand::usize(SPARK_VELOCITY_Y) as f64 * -self.scale_factor,
+                ];
+                particle.color = fastrand::usize(0..primary_colors.len());
+                particle.life = lerpf64(fastrand::f64(), SPARK_LIFETIME.start, SPARK_LIFETIME.end);
+                emit_count -= 1;
+            }
             if particle.life <= 0.0 {
-                remove_indexes.push(index);
                 continue;
             }
 
@@ -837,14 +846,17 @@ impl CantusApp {
             let rgb = primary_colors
                 .get(particle.color)
                 .unwrap_or(&[255, 210, 160]);
-            let angle = particle.velocity[1].atan2(particle.velocity[0]);
-            let opacity = (fade.powf(1.1) * 235.0).round().clamp(0.0, 255.0) as u8;
             self.scene.fill(
                 Fill::EvenOdd,
                 Affine::translate((particle.position[0], particle.position[1]))
-                    * Affine::rotate(angle)
+                    * Affine::rotate(particle.velocity[1].atan2(particle.velocity[0]))
                     * Affine::translate((-length * 0.5, 0.0)),
-                Color::from_rgba8(rgb[0], rgb[1], rgb[2], opacity),
+                Color::from_rgba8(
+                    rgb[0],
+                    rgb[1],
+                    rgb[2],
+                    (fade.powf(1.1) * 235.0).round().clamp(0.0, 255.0) as u8,
+                ),
                 None,
                 &RoundedRect::new(
                     0.0,
@@ -854,9 +866,6 @@ impl CantusApp {
                     thickness * 0.5,
                 ),
             );
-        }
-        for index in remove_indexes {
-            self.particles.particles.swap_remove(index);
         }
 
         // Line at the now playing position to denote the cutoff

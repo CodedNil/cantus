@@ -525,7 +525,7 @@ async fn ensure_image_cached(url: &str) -> Result<()> {
             sampler: ImageSampler {
                 x_extend: Extend::Pad,
                 y_extend: Extend::Pad,
-                quality: ImageQuality::Low,
+                quality: ImageQuality::Medium,
                 alpha: 1.0,
             },
         },
