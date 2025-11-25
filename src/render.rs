@@ -726,12 +726,13 @@ impl CantusApp {
             .map(|c| if c.is_ascii_digit() { '0' } else { c })
             .collect();
         let key = TextLayoutKey::new(&text_cleaned, font_size);
-        if !self.render_state.layout_cache.contains_key(&key) {
-            self.render_state
-                .layout_cache
-                .insert(key.clone(), self.layout_text(text, font_size));
+        if let Some(layout) = self.render_state.layout_cache.get(&key) {
+            return (key, layout.width);
         }
-        (key.clone(), self.render_state.layout_cache[&key].width)
+        let layout = self.layout_text(text, font_size);
+        let width = layout.width;
+        self.render_state.layout_cache.insert(key.clone(), layout);
+        (key, width)
     }
 
     /// Draw the text layout onto the scene.

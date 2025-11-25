@@ -382,10 +382,10 @@ async fn update_state_from_spotify() {
     let request_duration = request_start.elapsed();
 
     // Get current track and the upcoming queue
-    if queue.currently_playing.is_none() {
+    let Some(currently_playing) = queue.currently_playing else {
         return;
-    }
-    let new_queue: Vec<Track> = std::iter::once(queue.currently_playing.unwrap())
+    };
+    let new_queue: Vec<Track> = std::iter::once(currently_playing)
         .chain(queue.queue.into_iter())
         .filter_map(|item| match item {
             PlayableItem::Track(track) => Some({
