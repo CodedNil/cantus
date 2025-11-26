@@ -136,7 +136,7 @@ impl InteractionState {
                 && let Some(index) = hitbox.rating_index
             {
                 let center_x = (hitbox.rect.x0 + hitbox.rect.x1) * 0.5;
-                let rating_slot = index * 2 + 1 + usize::from(mouse_pos.x >= center_x);
+                let rating_slot = index * 2 + usize::from(mouse_pos.x >= center_x);
                 spawn(move || {
                     update_star_rating(&track_id, rating_slot);
                 });
@@ -352,6 +352,9 @@ impl CantusApp {
         }
         // Try fitting again
         let num_icons = icon_entries.len();
+        if num_icons == 0 {
+            return;
+        }
         let needed_width = icon_size * num_icons as f64;
         if width < needed_width {
             return;
@@ -422,7 +425,7 @@ impl CantusApp {
         }
 
         // Render out the icons
-        let display_rating_index = hover_rating_index.unwrap_or(track_rating_index);
+        let display_rating_index = hover_rating_index.unwrap_or(track_rating_index + 1);
         let display_full_stars = display_rating_index / 2;
         let display_has_half = display_rating_index % 2 == 1;
         for (entry, (hovered, icon_origin_x)) in
@@ -640,10 +643,6 @@ fn update_star_rating(track_id: &TrackId<'static>, rating_slot: usize) {
             .values_mut()
             .filter(|playlist| playlist.name == *rating_name && !playlist.tracks.contains(track_id))
         {
-            info!(
-                "Adding track {track_id} to rating playlist {}",
-                playlist.name
-            );
             playlist.tracks.insert(track_id.clone());
             playlists_to_add_to.push((playlist.id.clone(), playlist.name.clone()));
         }
@@ -674,7 +673,7 @@ fn update_star_rating(track_id: &TrackId<'static>, rating_slot: usize) {
 
     // Add the track the liked songs if its rated above 3 stars
     match spotify_client.current_user_saved_tracks_contains([track_id.clone()]) {
-        Ok(already_liked) => match (already_liked[0], rating_slot >= 6) {
+        Ok(already_liked) => match (already_liked[0], rating_slot >= 5) {
             (true, false) => {
                 info!("Removing track {track_id} from liked songs");
                 if let Err(err) =

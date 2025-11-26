@@ -142,8 +142,11 @@ struct TrackRender<'a> {
 /// Build the scene for rendering.
 impl CantusApp {
     pub fn create_scene(&mut self) {
-        let dt = self.render_state.last_update.elapsed().as_secs_f64();
-        self.render_state.last_update = Instant::now();
+        let now = Instant::now();
+        let dt = now
+            .duration_since(self.render_state.last_update)
+            .as_secs_f64();
+        self.render_state.last_update = now;
 
         let history_width = (CONFIG.history_width * self.scale_factor).ceil();
         let timeline_duration_ms = CONFIG.timeline_future_minutes * 60_000.0;
@@ -187,12 +190,12 @@ impl CantusApp {
             if playback_state.playing
                 && !matches!(self.interaction.last_event, InteractionEvent::PauseHover(_))
             {
-                self.interaction.last_event = InteractionEvent::PauseHover(Instant::now());
+                self.interaction.last_event = InteractionEvent::PauseHover(now);
             }
             if !playback_state.playing
                 && !matches!(self.interaction.last_event, InteractionEvent::PlayHover(_))
             {
-                self.interaction.last_event = InteractionEvent::PlayHover(Instant::now());
+                self.interaction.last_event = InteractionEvent::PlayHover(now);
             }
         }
 
@@ -200,17 +203,17 @@ impl CantusApp {
         match self.interaction.last_event {
             InteractionEvent::Pause(_) => {
                 if playback_state.playing {
-                    self.interaction.last_event = InteractionEvent::Play(Instant::now());
+                    self.interaction.last_event = InteractionEvent::Play(now);
                 }
             }
             InteractionEvent::Play(_) => {
                 if !playback_state.playing {
-                    self.interaction.last_event = InteractionEvent::Pause(Instant::now());
+                    self.interaction.last_event = InteractionEvent::Pause(now);
                 }
             }
             InteractionEvent::PauseHover(_) | InteractionEvent::PlayHover(_) => {
                 if !play_button_hovered {
-                    let instant = Instant::now().checked_sub(Duration::from_secs(5)).unwrap();
+                    let instant = now.checked_sub(Duration::from_secs(5)).unwrap();
                     self.interaction.last_event = if playback_state.playing {
                         InteractionEvent::Play(instant)
                     } else {
@@ -263,6 +266,9 @@ impl CantusApp {
             current_ms = track_end_ms + TRACK_SPACING_MS;
 
             // Queue up the tracks positions
+            if track_start_ms > timeline_end_ms {
+                break;
+            }
             let visible_start_px = track_start_ms.max(timeline_start_ms) * px_per_ms;
             let visible_end_px = track_end_ms.min(timeline_end_ms) * px_per_ms;
             let hitbox_range = (
@@ -342,13 +348,13 @@ impl CantusApp {
         height: f64,
         playlists: &HashMap<String, Playlist>,
     ) {
-        let width = track_render.width;
-        if width <= 0.0 {
+        if track_render.width <= 0.0 {
             return;
         }
+        let width = track_render.width;
         let track = track_render.track;
         let start_x = track_render.start_x;
-
+        let hitbox = Rect::new(start_x, 0.0, start_x + width, height);
         let timeline_origin_x =
             history_width - (-CONFIG.timeline_past_minutes * 60_000.0) * px_per_ms;
         let start_translation = Affine::translate((start_x, 0.0));
@@ -364,14 +370,16 @@ impl CantusApp {
         let dark_width = (timeline_origin_x - start_x).max(0.0);
 
         // Add hitbox
-        let hitbox = Rect::new(start_x, 0.0, start_x + width, height);
+        let (hit_start, hit_end) = track_render.hitbox_range;
+        let full_width = hit_end - hit_start;
+        let crop_left = start_x - hit_start;
+        let crop_right = hit_end - (start_x + width);
         self.interaction
             .track_hitboxes
             .push((track.id.clone(), hitbox, track_render.hitbox_range));
         // If dragging, set the drag target to this track, and the position within the track
         if self.interaction.dragging && track_render.is_current {
-            let position_within_track = (start_x + dark_width - track_render.hitbox_range.0)
-                / (track_render.hitbox_range.1 - track_render.hitbox_range.0);
+            let position_within_track = (start_x + dark_width - hit_start) / full_width;
             self.interaction.drag_track = Some((track.id.clone(), position_within_track));
         }
 
@@ -390,13 +398,11 @@ impl CantusApp {
 
         let rounding = 14.0 * self.scale_factor;
         let buffer_px = 20.0;
-        let crop_left = start_x - track_render.hitbox_range.0;
-        let crop_right = track_render.hitbox_range.1 - (start_x + width);
-        let full_width = track_render.hitbox_range.1 - track_render.hitbox_range.0;
         let left_rounding = rounding * lerpf64((crop_left / buffer_px).clamp(0.0, 1.0), 1.0, 0.3);
         let right_rounding = rounding * lerpf64((crop_right / buffer_px).clamp(0.0, 1.0), 1.0, 0.3);
         let radii =
             RoundedRectRadii::new(left_rounding, right_rounding, right_rounding, left_rounding);
+
         // --- BACKGROUND ---
         if !track_render.art_only && width > height {
             // Don't need to render all the way to the edge since the album art is at the right edge
@@ -501,7 +507,7 @@ impl CantusApp {
         self.scene.pop_layer();
 
         // --- TEXT ---
-        if !track_render.art_only && fade_alpha >= 1.0 {
+        if !track_render.art_only && fade_alpha >= 1.0 && width > height {
             // Clipping mask to the edge of the background rectangle, shrunk by a margin
             self.scene.push_clip_layer(
                 start_translation,
