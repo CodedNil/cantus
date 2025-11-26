@@ -6,7 +6,6 @@
   wayland,
   vulkan-loader,
   libxkbcommon,
-  openssl,
 }:
 rustPlatform.buildRustPackage rec {
   pname = "cantus";
@@ -33,7 +32,6 @@ rustPlatform.buildRustPackage rec {
     wayland
     vulkan-loader
     libxkbcommon
-    openssl
   ];
 
   postInstall = "wrapProgram $out/bin/cantus --set LD_LIBRARY_PATH ${lib.makeLibraryPath buildInputs}";

@@ -2,7 +2,6 @@ use crate::{background::update_color_palettes, config::CONFIG};
 use anyhow::Result;
 use dashmap::DashMap;
 use parking_lot::RwLock;
-use reqwest::Client;
 use rspotify::{
     AuthCodePkceSpotify, Config, Credentials, OAuth,
     model::{
@@ -13,49 +12,38 @@ use rspotify::{
 };
 use std::{
     collections::{HashMap, HashSet},
-    sync::LazyLock,
-    time::Instant,
-};
-use tokio::{
     fs,
-    sync::OnceCell,
-    task::JoinSet,
-    time::{Duration, sleep},
+    sync::{LazyLock, OnceLock},
+    thread::{sleep, spawn},
+    time::{Duration, Instant},
 };
 use tracing::{error, info, warn};
+use ureq::Agent;
 use vello::peniko::{
     Blob, Extend, ImageAlphaType, ImageBrush, ImageData, ImageFormat, ImageQuality, ImageSampler,
 };
-use zbus::{
-    Connection,
-    fdo::{DBusProxy, PropertiesProxy},
-    names::InterfaceName,
-    zvariant::OwnedValue,
-};
-
-/// Root MPRIS interface that exposes metadata and identity.
-const ROOT_INTERFACE: InterfaceName<'static> =
-    InterfaceName::from_static_str_unchecked("org.mpris.MediaPlayer2");
-/// MPRIS interface identifier used for playback control.
-const PLAYER_INTERFACE: InterfaceName<'static> =
-    InterfaceName::from_static_str_unchecked("org.mpris.MediaPlayer2.Player");
 
 pub static PLAYBACK_STATE: LazyLock<RwLock<PlaybackState>> = LazyLock::new(|| {
     RwLock::new(PlaybackState {
-        is_local: false,
-        last_updated: Instant::now(),
-        last_interaction: Instant::now(),
         playing: false,
         progress: 0,
         volume: None,
         queue: Vec::new(),
         queue_index: 0,
-        current_context: None,
         playlists: HashMap::new(),
+
+        current_context: None,
+        context_updated: false,
+
+        last_progress_update: Instant::now(),
+        last_interaction: Instant::now(),
+        last_grabbed_playback: Instant::now().checked_sub(Duration::from_secs(60)).unwrap(),
+        last_grabbed_queue: Instant::now().checked_sub(Duration::from_secs(60)).unwrap(),
     })
 });
-pub static IMAGES_CACHE: LazyLock<DashMap<String, ImageBrush>> = LazyLock::new(DashMap::new);
-pub static ALBUM_DATA_CACHE: LazyLock<DashMap<AlbumId<'static>, AlbumData>> =
+pub static IMAGES_CACHE: LazyLock<DashMap<String, Option<ImageBrush>>> =
+    LazyLock::new(DashMap::new);
+pub static ALBUM_DATA_CACHE: LazyLock<DashMap<AlbumId<'static>, Option<AlbumData>>> =
     LazyLock::new(DashMap::new);
 pub static ARTIST_DATA_CACHE: LazyLock<DashMap<ArtistId<'static>, Option<String>>> =
     LazyLock::new(DashMap::new);
@@ -64,20 +52,24 @@ pub const RATING_PLAYLISTS: [&str; 10] = [
     "0.5", "1.0", "1.5", "2.0", "2.5", "3.0", "3.5", "4.0", "4.5", "5.0",
 ];
 
-static HTTP_CLIENT: LazyLock<Client> = LazyLock::new(Client::new);
-pub static SPOTIFY_CLIENT: OnceCell<AuthCodePkceSpotify> = OnceCell::const_new();
+static HTTP_CLIENT: LazyLock<Agent> = LazyLock::new(Agent::new_with_defaults);
+pub static SPOTIFY_CLIENT: OnceLock<AuthCodePkceSpotify> = OnceLock::new();
 
 pub struct PlaybackState {
-    pub is_local: bool, // Whether we are playing spotify on the local device
-    pub last_updated: Instant,
-    pub last_interaction: Instant,
     pub playing: bool,
     pub progress: u32,
     pub volume: Option<u8>,
     pub queue: Vec<Track>,
     pub queue_index: usize,
-    pub current_context: Option<String>,
     pub playlists: HashMap<String, Playlist>,
+
+    current_context: Option<String>,
+    context_updated: bool,
+
+    pub last_progress_update: Instant,
+    pub last_interaction: Instant,
+    last_grabbed_playback: Instant,
+    last_grabbed_queue: Instant,
 }
 
 pub struct Track {
@@ -117,12 +109,12 @@ where
 
 type PlaylistCache = HashMap<PlaylistId<'static>, (String, HashSet<TrackId<'static>>)>;
 
-async fn load_cached_playlist_tracks() -> PlaylistCache {
+fn load_cached_playlist_tracks() -> PlaylistCache {
     let cache_path = dirs::config_dir()
         .unwrap()
         .join("cantus")
         .join("cantus_playlist_tracks.json");
-    let bytes = match fs::read(cache_path.clone()).await {
+    let bytes = match fs::read(cache_path.clone()) {
         Ok(bytes) => bytes,
         Err(err) => {
             warn!("Failed to read playlist cache at {cache_path:?}: {err}");
@@ -139,7 +131,7 @@ async fn load_cached_playlist_tracks() -> PlaylistCache {
     }
 }
 
-async fn persist_playlist_cache() {
+fn persist_playlist_cache() {
     let cache_payload: PlaylistCache = PLAYBACK_STATE
         .read()
         .playlists
@@ -164,7 +156,7 @@ async fn persist_playlist_cache() {
         .join("cantus_playlist_tracks.json");
     match serde_json::to_vec(&cache_payload) {
         Ok(serialized) => {
-            if let Err(err) = fs::write(cache_path.clone(), serialized).await {
+            if let Err(err) = fs::write(cache_path.clone(), serialized) {
                 warn!("Failed to write playlist cache at {cache_path:?}: {err}");
             }
         }
@@ -178,7 +170,7 @@ async fn persist_playlist_cache() {
 }
 
 /// Init the spotify client
-pub async fn init() {
+pub fn init() {
     // Make sure the cantus directory exists
     let cantus_dir = dirs::config_dir().unwrap().join("cantus");
     if !cantus_dir.exists() {
@@ -221,173 +213,118 @@ pub async fn init() {
 
     // Prompt user for authorization and get the token
     let url = spotify.get_authorize_url(None).unwrap();
-    spotify.prompt_for_token(&url).await.unwrap();
+    spotify.prompt_for_token(&url).unwrap();
     SPOTIFY_CLIENT.set(spotify).unwrap();
 
     // Begin polling
-    tokio::spawn(polling_task());
-}
-
-/// Asynchronous task to poll MPRIS every 100ms and Spotify API every X seconds or on song change.
-async fn polling_task() {
-    let mut last_mpris_track_id: Option<String> = None; // Local state for track ID
-    let connection = Connection::session().await.ok();
-    let dbus_proxy = if let Some(connection) = &connection {
-        match DBusProxy::new(connection).await {
-            Ok(proxy) => Some(proxy),
-            Err(err) => panic!("Failed creating D-Bus proxy: {err}"),
+    spawn(poll_playlists);
+    spawn(|| {
+        loop {
+            get_spotify_playback();
+            get_spotify_queue();
+            sleep(Duration::from_millis(100));
         }
-    } else {
-        None
-    };
-
-    tokio::spawn(async move {
-        poll_playlists().await;
     });
-
-    let mut spotify_poll_counter = 100; // Counter for Spotify API polling
-    loop {
-        // --- MPRIS Polling Logic ---
-        let should_refresh_spotify = if let Some(connection) = &connection
-            && let Some(dbus_proxy) = &dbus_proxy
-        {
-            update_state_from_mpris(connection, dbus_proxy, &mut last_mpris_track_id).await
-        } else {
-            false
-        };
-
-        // --- Spotify API Polling Logic ---
-        spotify_poll_counter += 1;
-        if spotify_poll_counter >= 20 || should_refresh_spotify {
-            spotify_poll_counter = 0; // Reset counter
-            update_state_from_spotify().await;
-        }
-
-        sleep(Duration::from_millis(100)).await;
-    }
-}
-
-/// Synchronizes playback information with the MPRIS interface and returns whether Spotify data should refresh.
-async fn update_state_from_mpris(
-    connection: &Connection,
-    dbus_proxy: &DBusProxy<'_>,
-    last_track_id: &mut Option<String>,
-) -> bool {
-    let Ok(names) = dbus_proxy.list_names().await else {
-        update_playback_state(|state| {
-            state.is_local = false;
-        });
-        return false;
-    };
-
-    let mut properties_proxy = None;
-    for name in names {
-        if !name.starts_with("org.mpris.MediaPlayer2.") {
-            continue;
-        }
-
-        let Ok(builder) = PropertiesProxy::builder(connection)
-            .destination(name)
-            .and_then(|builder| builder.path("/org/mpris/MediaPlayer2"))
-        else {
-            continue;
-        };
-        let Ok(proxy) = builder.build().await else {
-            continue;
-        };
-        let Ok(identity) = proxy.get(ROOT_INTERFACE, "Identity").await else {
-            continue;
-        };
-        if identity.to_string() == "\"Spotify\"" {
-            properties_proxy = Some(proxy);
-            break;
-        }
-    }
-    let Some(properties_proxy) = properties_proxy else {
-        update_playback_state(|state| {
-            state.is_local = false;
-        });
-        return false;
-    };
-
-    // Get data from dbus
-    let (new_track_id, playing, progress) = tokio::join!(
-        properties_proxy.get(PLAYER_INTERFACE, "Metadata"),
-        properties_proxy.get(PLAYER_INTERFACE, "PlaybackStatus"),
-        properties_proxy.get(PLAYER_INTERFACE, "Position"),
-    );
-    let mut should_refresh = new_track_id
-        .ok()
-        .and_then(|metadata| HashMap::<String, OwnedValue>::try_from(metadata).ok())
-        .and_then(|metadata| Some(metadata.get("mpris:trackid")?.to_string()))
-        .filter(|track_id| last_track_id.as_ref() != Some(track_id))
-        .is_some_and(|track_id| {
-            *last_track_id = Some(track_id);
-            true
-        });
-    let playing = playing
-        .ok()
-        .and_then(|value| value.try_into().ok())
-        .map(|status: String| status == "Playing");
-    let progress = progress
-        .ok()
-        .and_then(|value| value.try_into().ok())
-        .map(|position: i64| position / 1_000);
-
-    if playing.is_some() || progress.is_some() {
-        update_playback_state(|state| {
-            state.is_local = true;
-            if let Some(playing) = playing
-                && playing != state.playing
-            {
-                should_refresh = true;
-                state.playing = playing;
-            }
-            if let Some(progress) = progress {
-                state.progress = progress as u32;
-                state.last_updated = Instant::now();
-            }
-        });
-    }
-
-    should_refresh
 }
 
 /// Pulls the current playback queue and status from the Spotify Web API and updates shared state.
-async fn update_state_from_spotify() {
+fn get_spotify_playback() {
     // Wait if we have recently interacted with spotify
-    let min_duration = Duration::from_millis(500);
-    let mut last_interaction = PLAYBACK_STATE.read().last_interaction.elapsed();
-    while last_interaction < min_duration {
-        tokio::time::sleep(min_duration - last_interaction).await;
-        last_interaction = PLAYBACK_STATE.read().last_interaction.elapsed();
+    let now = Instant::now();
+    if now < PLAYBACK_STATE.read().last_interaction {
+        return;
+    }
+    if now < PLAYBACK_STATE.read().last_grabbed_playback + Duration::from_secs(1) {
+        return;
     }
 
     // Fetch current playback and queue concurrently
-    let request_start = Instant::now();
-    let spotify_client = SPOTIFY_CLIENT.get().unwrap();
-    let (current_playback, queue) = match tokio::try_join!(
-        spotify_client.current_playback(None, None::<Vec<&AdditionalType>>),
-        spotify_client.current_user_queue(),
-    ) {
-        Ok((Some(playback), queue)) => (playback, queue),
-        Ok((None, _)) => {
+    let current_playback = match SPOTIFY_CLIENT
+        .get()
+        .unwrap()
+        .current_playback(None, None::<Vec<&AdditionalType>>)
+    {
+        Ok(Some(playback)) => playback,
+        Ok(None) => {
             // Spotify is not playing anything
             return;
         }
         Err(err) => {
-            error!("Failed to fetch current playback and queue: {err}");
+            error!("Failed to fetch current playback: {err}");
             return;
         }
     };
-    let request_duration = request_start.elapsed();
+    let request_duration = now.elapsed();
+
+    // Update the playback state
+    update_playback_state(|state| {
+        let new_context = current_playback.context.map(|c| c.uri);
+        if state.current_context != new_context {
+            state.context_updated = true;
+            state.current_context = new_context;
+            state.last_grabbed_queue = Instant::now().checked_sub(Duration::from_secs(60)).unwrap();
+        }
+
+        // Song has changed, lets update to the new index and force a queue refresh
+        if let Some(item) = current_playback.item
+            && let PlayableItem::Track(track) = item
+        {
+            let index_found = state.queue.iter().position(|t| t.title == track.name);
+            if let Some(new_index) = index_found
+                && state.queue_index != new_index
+            {
+                state.queue_index = new_index;
+                state.last_grabbed_queue =
+                    Instant::now().checked_sub(Duration::from_secs(60)).unwrap();
+            } else if index_found.is_none() {
+                state.last_grabbed_queue =
+                    Instant::now().checked_sub(Duration::from_secs(60)).unwrap();
+            }
+        }
+
+        state.volume = current_playback.device.volume_percent.map(|v| v as u8);
+        state.playing = current_playback.is_playing;
+        let progress = current_playback
+            .progress
+            .map_or(0, |p| p.num_milliseconds()) as u32;
+        state.progress = progress
+            + if current_playback.is_playing {
+                (request_duration.as_millis() / 2) as u32
+            } else {
+                0
+            };
+        state.last_progress_update = Instant::now();
+        state.last_grabbed_playback = Instant::now();
+    });
+}
+
+/// Pulls the current playback queue and status from the Spotify Web API and updates shared state.
+fn get_spotify_queue() {
+    // Wait if we have recently interacted with spotify
+    let now = Instant::now();
+    if now < PLAYBACK_STATE.read().last_interaction {
+        return;
+    }
+    if now < PLAYBACK_STATE.read().last_grabbed_queue + Duration::from_secs(15) {
+        return;
+    }
+
+    // Fetch current playback and queue concurrently
+    let spotify_client = SPOTIFY_CLIENT.get().unwrap();
+    let queue = match spotify_client.current_user_queue() {
+        Ok(queue) => queue,
+        Err(err) => {
+            error!("Failed to fetch current queue: {err}");
+            return;
+        }
+    };
 
     // Get current track and the upcoming queue
     let Some(currently_playing) = queue.currently_playing else {
         return;
     };
     let new_queue: Vec<Track> = std::iter::once(currently_playing)
-        .chain(queue.queue.into_iter())
+        .chain(queue.queue)
         .filter_map(|item| match item {
             PlayableItem::Track(track) => Some({
                 let artist = track.artists.first().unwrap();
@@ -423,52 +360,38 @@ async fn update_state_from_spotify() {
             missing_artists.insert(track.artist_id.clone());
         }
     }
-    if !missing_urls.is_empty() || !missing_artists.is_empty() {
-        tokio::spawn(async move {
-            let mut set = JoinSet::new();
+    // Start downloading missing album images
+    for url in missing_urls {
+        spawn(move || {
+            if let Err(err) = ensure_image_cached(url.as_str()) {
+                warn!("failed to cache image {url}: {err}");
+            }
+        });
+    }
 
-            // Start downloading missing album images
-            for url in missing_urls {
-                set.spawn(async move {
-                    if let Err(err) = ensure_image_cached(url.as_str()).await {
-                        warn!("failed to cache image {url}: {err}");
+    // Cache artists, and download images
+    if !missing_artists.is_empty() {
+        spawn(move || {
+            let Ok(artists) = spotify_client.artists(missing_artists) else {
+                return;
+            };
+            for artist in artists {
+                let artist_image = artist.images.into_iter().min_by_key(|img| img.width);
+                ARTIST_DATA_CACHE.insert(artist.id, artist_image.as_ref().map(|a| a.url.clone()));
+                spawn(move || {
+                    if let Some(artist_image) = artist_image
+                        && let Err(err) = ensure_image_cached(artist_image.url.as_str())
+                    {
+                        warn!("failed to cache image {}: {err}", artist_image.url);
                     }
                 });
-            }
-
-            // Cache artists, and download images
-            if !missing_artists.is_empty() {
-                let Ok(artists) = spotify_client.artists(missing_artists).await else {
-                    return;
-                };
-                for artist in artists {
-                    let artist_image = artist.images.into_iter().min_by_key(|img| img.width);
-                    ARTIST_DATA_CACHE
-                        .insert(artist.id, artist_image.as_ref().map(|a| a.url.clone()));
-                    set.spawn(async move {
-                        if let Some(artist_image) = artist_image
-                            && let Err(err) = ensure_image_cached(artist_image.url.as_str()).await
-                        {
-                            warn!("failed to cache image {}: {err}", artist_image.url);
-                        }
-                    });
-                }
-            }
-
-            // Concurrently run all tasks
-            while set.join_next().await.is_some() {}
-
-            // Now that we have both the album and artist images downloaded, update track color palette
-            if let Err(err) = update_color_palettes() {
-                warn!("failed to update color palettes: {err}");
             }
         });
     }
 
     // Update the playback state
     update_playback_state(|state| {
-        let new_context = current_playback.context.map(|c| c.uri);
-        if state.current_context == new_context
+        if !state.context_updated
             && let Some(new_index) = state.queue.iter().position(|t| t.title == current_title)
         {
             // Delete everything past the new_index, and append the new tracks at the end
@@ -478,35 +401,23 @@ async fn update_state_from_spotify() {
         } else {
             // Context switched - reset queue entirely
             info!("Context changed, resetting queue");
+            state.context_updated = false;
             state.queue = new_queue;
             state.queue_index = 0;
-            state.current_context = new_context;
         }
 
-        state.volume = current_playback.device.volume_percent.map(|v| v as u8);
-        if !state.is_local {
-            state.playing = current_playback.is_playing;
-            let progress = current_playback
-                .progress
-                .map_or(0, |p| p.num_milliseconds()) as u32;
-            state.progress = progress
-                + if current_playback.is_playing {
-                    (request_duration.as_millis() / 2) as u32
-                } else {
-                    0
-                };
-            state.last_updated = Instant::now();
-        }
+        state.last_grabbed_queue = Instant::now();
     });
 }
 
 /// Downloads and caches an image from the given URL.
-async fn ensure_image_cached(url: &str) -> Result<()> {
+fn ensure_image_cached(url: &str) -> Result<()> {
     if IMAGES_CACHE.contains_key(url) {
         return Ok(());
     }
-    let response = HTTP_CLIENT.get(url).send().await?.error_for_status()?;
-    let dynamic_image = image::load_from_memory(&response.bytes().await?)?;
+    IMAGES_CACHE.insert(url.to_owned(), None);
+    let mut response = HTTP_CLIENT.get(url).call()?;
+    let dynamic_image = image::load_from_memory(&response.body_mut().read_to_vec()?)?;
     // If width or height more thant 64 pixels, resize the image
     let dynamic_image = if dynamic_image.width() > 64 || dynamic_image.height() > 64 {
         dynamic_image.resize_to_fill(64, 64, image::imageops::FilterType::Lanczos3)
@@ -515,7 +426,7 @@ async fn ensure_image_cached(url: &str) -> Result<()> {
     };
     IMAGES_CACHE.insert(
         url.to_owned(),
-        ImageBrush {
+        Some(ImageBrush {
             image: ImageData {
                 data: Blob::from(dynamic_image.to_rgba8().into_raw()),
                 format: ImageFormat::Rgba8,
@@ -529,12 +440,15 @@ async fn ensure_image_cached(url: &str) -> Result<()> {
                 quality: ImageQuality::Medium,
                 alpha: 1.0,
             },
-        },
+        }),
     );
+    if let Err(err) = update_color_palettes() {
+        warn!("failed to update color palettes: {err}");
+    }
     Ok(())
 }
 
-async fn poll_playlists() {
+fn poll_playlists() {
     // Get initial playlist data
     let config = &*CONFIG;
     let target_playlists = config
@@ -543,14 +457,13 @@ async fn poll_playlists() {
         .map(String::as_str)
         .collect::<HashSet<_>>();
     let include_ratings = config.ratings_enabled;
-    let mut cached_playlist_tracks = load_cached_playlist_tracks().await;
+    let mut cached_playlist_tracks = load_cached_playlist_tracks();
 
     // Grab the current users playlists from spotify
     let playlists: Vec<Playlist> = SPOTIFY_CLIENT
         .get()
         .unwrap()
         .current_user_playlists_manual(Some(50), None)
-        .await
         .unwrap()
         .items
         .into_iter()
@@ -584,18 +497,13 @@ async fn poll_playlists() {
         .iter()
         .map(|p| p.image_url.clone())
         .collect::<Vec<_>>();
-    tokio::spawn(async move {
-        let mut set = JoinSet::new();
-        for url in image_urls {
-            set.spawn(async move {
-                if let Err(err) = ensure_image_cached(&url).await {
-                    warn!("failed to cache image {url}: {err}");
-                }
-            });
-        }
-        // Concurrently run all tasks
-        while set.join_next().await.is_some() {}
-    });
+    for url in image_urls {
+        spawn(move || {
+            if let Err(err) = ensure_image_cached(&url) {
+                warn!("failed to cache image {url}: {err}");
+            }
+        });
+    }
 
     // Push the data to the global state
     update_playback_state(|state| {
@@ -604,13 +512,13 @@ async fn poll_playlists() {
 
     // Spawn loop to collect spotify playlist tracks
     loop {
-        refresh_playlists().await;
+        refresh_playlists();
 
-        sleep(Duration::from_secs(12)).await;
+        sleep(Duration::from_secs(12));
     }
 }
 
-async fn refresh_playlists() {
+fn refresh_playlists() {
     let spotify_client = SPOTIFY_CLIENT.get().unwrap();
 
     let playlist_snapshots = {
@@ -625,7 +533,6 @@ async fn refresh_playlists() {
     // Find playlists which have changed
     let changed_playlists: Vec<SimplifiedPlaylist> = spotify_client
         .current_user_playlists_manual(Some(50), None)
-        .await
         .unwrap()
         .items
         .into_iter()
@@ -645,16 +552,13 @@ async fn refresh_playlists() {
         info!("Fetching {num_pages} pages from playlist {}", playlist.name);
         let mut pages = Vec::new();
         for page in 0..num_pages {
-            match spotify_client
-                .playlist_items_manual(
-                    playlist.id.clone(),
-                    Some("href,limit,offset,total,items(is_local,track(id))"),
-                    None,
-                    Some(chunk_size),
-                    Some((page as u32) * chunk_size),
-                )
-                .await
-            {
+            match spotify_client.playlist_items_manual(
+                playlist.id.clone(),
+                Some("href,limit,offset,total,items(is_local,track(id))"),
+                None,
+                Some(chunk_size),
+                Some((page as u32) * chunk_size),
+            ) {
                 Ok(page) => pages.push(page),
                 Err(err) => {
                     error!("Failed to fetch playlist page: {:?}", err);
@@ -684,6 +588,6 @@ async fn refresh_playlists() {
             state_playlist.tracks_total = new_total;
             state_playlist.snapshot_id = playlist.snapshot_id;
         });
-        persist_playlist_cache().await;
+        persist_playlist_cache();
     }
 }

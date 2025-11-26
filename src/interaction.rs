@@ -12,7 +12,7 @@ use rspotify::{
     model::{PlayableId, PlaylistId, TrackId},
     prelude::OAuthClient,
 };
-use std::{cmp::Ordering, collections::HashMap, sync::LazyLock, time::Instant};
+use std::{cmp::Ordering, collections::HashMap, sync::LazyLock, thread::spawn, time::Instant};
 use std::{
     sync::atomic::{AtomicBool, Ordering as AtomicOrdering},
     time::Duration,
@@ -105,8 +105,8 @@ impl InteractionState {
         }
         if let Some((track_id, position)) = self.drag_track.take() {
             let track_id = track_id.clone();
-            tokio::spawn(async move {
-                skip_to_track(track_id, position, false).await;
+            spawn(move || {
+                skip_to_track(&track_id, position, false);
             });
         }
         self.drag_origin = None;
@@ -136,13 +136,13 @@ impl InteractionState {
                 && let Some(index) = hitbox.rating_index
             {
                 let center_x = (hitbox.rect.x0 + hitbox.rect.x1) * 0.5;
-                let rating_slot = index * 2 + 1 + usize::from(mouse_pos.x >= center_x);
-                tokio::spawn(async move {
-                    update_star_rating(track_id, rating_slot).await;
+                let rating_slot = index * 2 + usize::from(mouse_pos.x >= center_x);
+                spawn(move || {
+                    update_star_rating(&track_id, rating_slot);
                 });
             } else if let Some(playlist_id) = hitbox.playlist_id.clone() {
-                tokio::spawn(async move {
-                    toggle_playlist_membership(track_id, playlist_id).await;
+                spawn(move || {
+                    toggle_playlist_membership(&track_id, &playlist_id);
                 });
             }
             return true;
@@ -168,8 +168,8 @@ impl InteractionState {
             } else {
                 self.last_event = InteractionEvent::Play(Instant::now());
             }
-            tokio::spawn(async move {
-                toggle_playing(!playing).await;
+            spawn(move || {
+                toggle_playing(!playing);
             });
             return true;
         }
@@ -194,8 +194,8 @@ impl InteractionState {
                 (mouse_pos.x - track_range_a) / (track_range_b - track_range_a)
             };
             let track_id = track_id.clone();
-            tokio::spawn(async move {
-                skip_to_track(track_id, position, false).await;
+            spawn(move || {
+                skip_to_track(&track_id, position, false);
             });
             return true;
         }
@@ -231,8 +231,8 @@ impl InteractionState {
                     volume.saturating_sub(5)
                 };
                 let volume = *volume;
-                tokio::spawn(async move {
-                    set_volume(volume).await;
+                spawn(move || {
+                    set_volume(volume);
                 });
             }
         });
@@ -352,6 +352,9 @@ impl CantusApp {
         }
         // Try fitting again
         let num_icons = icon_entries.len();
+        if num_icons == 0 {
+            return;
+        }
         let needed_width = icon_size * num_icons as f64;
         if width < needed_width {
             return;
@@ -422,7 +425,7 @@ impl CantusApp {
         }
 
         // Render out the icons
-        let display_rating_index = hover_rating_index.unwrap_or(track_rating_index);
+        let display_rating_index = hover_rating_index.unwrap_or(track_rating_index + 1);
         let display_full_stars = display_rating_index / 2;
         let display_has_half = display_rating_index % 2 == 1;
         for (entry, (hovered, icon_origin_x)) in
@@ -473,7 +476,10 @@ impl CantusApp {
                     playlist,
                     contained,
                 } => {
-                    let Some(playlist_image) = IMAGES_CACHE.get(&playlist.image_url) else {
+                    let Some(playlist_image_ref) = IMAGES_CACHE.get(&playlist.image_url) else {
+                        continue;
+                    };
+                    let Some(playlist_image) = playlist_image_ref.as_ref() else {
                         continue;
                     };
 
@@ -521,7 +527,7 @@ impl CantusApp {
 }
 
 /// Skip to the specified track in the queue.
-async fn skip_to_track(track_id: TrackId<'static>, position: f64, always_seek: bool) {
+fn skip_to_track(track_id: &TrackId<'static>, position: f64, always_seek: bool) {
     let Some(_guard) = try_acquire_spotify_guard() else {
         return;
     };
@@ -529,7 +535,7 @@ async fn skip_to_track(track_id: TrackId<'static>, position: f64, always_seek: b
     let (queue_index, position_in_queue, ms_lookup) = {
         let state = PLAYBACK_STATE.read();
         let queue_index = state.queue_index;
-        let Some(position_in_queue) = state.queue.iter().position(|t| t.id == track_id) else {
+        let Some(position_in_queue) = state.queue.iter().position(|t| &t.id == track_id) else {
             error!("Track not found in queue");
             return;
         };
@@ -546,8 +552,8 @@ async fn skip_to_track(track_id: TrackId<'static>, position: f64, always_seek: b
         update_playback_state(|state| {
             state.queue_index = position_in_queue;
             state.progress = 0;
-            state.last_updated = Instant::now();
-            state.last_interaction = Instant::now() + Duration::from_millis(1500);
+            state.last_progress_update = Instant::now();
+            state.last_interaction = Instant::now() + Duration::from_millis(2000);
         });
         let forward = queue_index < position_in_queue;
         let skips = if forward {
@@ -562,15 +568,15 @@ async fn skip_to_track(track_id: TrackId<'static>, position: f64, always_seek: b
         let client = SPOTIFY_CLIENT.get().unwrap();
         for _ in 0..skips.min(10) {
             let result = if forward {
-                client.next_track(None).await
+                client.next_track(None)
             } else {
-                client.previous_track(None).await
+                client.previous_track(None)
             };
             update_playback_state(|state| {
                 state.queue_index = position_in_queue;
                 state.progress = 0;
-                state.last_updated = Instant::now();
-                state.last_interaction = Instant::now() + Duration::from_millis(1500);
+                state.last_progress_update = Instant::now();
+                state.last_interaction = Instant::now() + Duration::from_millis(2000);
             });
             if let Err(err) = result {
                 error!("Failed to skip to track: {err}");
@@ -591,14 +597,13 @@ async fn skip_to_track(track_id: TrackId<'static>, position: f64, always_seek: b
         );
         update_playback_state(|state| {
             state.progress = milliseconds.round() as u32;
-            state.last_updated = Instant::now();
-            state.last_interaction = Instant::now() + Duration::from_millis(1500);
+            state.last_progress_update = Instant::now();
+            state.last_interaction = Instant::now() + Duration::from_millis(2000);
         });
         if let Err(err) = SPOTIFY_CLIENT
             .get()
             .unwrap()
             .seek_track(TimeDelta::milliseconds(milliseconds as i64), None)
-            .await
         {
             error!("Failed to seek track: {err}");
         }
@@ -606,7 +611,7 @@ async fn skip_to_track(track_id: TrackId<'static>, position: f64, always_seek: b
 }
 
 /// Update Spotify rating playlists for the given track.
-async fn update_star_rating(track_id: TrackId<'static>, rating_slot: usize) {
+fn update_star_rating(track_id: &TrackId<'static>, rating_slot: usize) {
     if !CONFIG.ratings_enabled {
         return;
     }
@@ -620,26 +625,24 @@ async fn update_star_rating(track_id: TrackId<'static>, rating_slot: usize) {
     let mut playlists_to_remove_from = Vec::new();
     let mut playlists_to_add_to = Vec::new();
     update_playback_state(|state| {
-        state.last_interaction = Instant::now();
+        state.last_interaction = Instant::now() + Duration::from_millis(500);
 
         // Remove tracks from existing playlists
         for playlist in state.playlists.values_mut().filter(|playlist| {
             RATING_PLAYLISTS.contains(&playlist.name.as_str())
                 && playlist.name != *rating_name
-                && playlist.tracks.contains(&track_id)
+                && playlist.tracks.contains(track_id)
         }) {
-            playlist.tracks.remove(&track_id);
+            playlist.tracks.remove(track_id);
             playlists_to_remove_from.push((playlist.id.clone(), playlist.name.clone()));
         }
 
         // Add the track to the target playlist if it's not already there
-        for playlist in state.playlists.values_mut().filter(|playlist| {
-            playlist.name == *rating_name && !playlist.tracks.contains(&track_id)
-        }) {
-            info!(
-                "Adding track {track_id} to rating playlist {}",
-                playlist.name
-            );
+        for playlist in state
+            .playlists
+            .values_mut()
+            .filter(|playlist| playlist.name == *rating_name && !playlist.tracks.contains(track_id))
+        {
             playlist.tracks.insert(track_id.clone());
             playlists_to_add_to.push((playlist.id.clone(), playlist.name.clone()));
         }
@@ -649,48 +652,39 @@ async fn update_star_rating(track_id: TrackId<'static>, rating_slot: usize) {
     let spotify_client = SPOTIFY_CLIENT.get().unwrap();
     for (playlist_id, playlist_name) in playlists_to_remove_from {
         info!("Removing track {track_id} from rating playlist {playlist_name}");
-        if let Err(err) = spotify_client
-            .playlist_remove_all_occurrences_of_items(
-                playlist_id,
-                [PlayableId::Track(track_id.clone())],
-                None,
-            )
-            .await
-        {
+        if let Err(err) = spotify_client.playlist_remove_all_occurrences_of_items(
+            playlist_id,
+            [PlayableId::Track(track_id.clone())],
+            None,
+        ) {
             error!("Failed to remove track {track_id} from rating playlist {playlist_name}: {err}");
         }
     }
     for (playlist_id, playlist_name) in playlists_to_add_to {
         info!("Adding track {track_id} to rating playlist {playlist_name}");
-        if let Err(err) = spotify_client
-            .playlist_add_items(playlist_id, [PlayableId::Track(track_id.clone())], None)
-            .await
-        {
+        if let Err(err) = spotify_client.playlist_add_items(
+            playlist_id,
+            [PlayableId::Track(track_id.clone())],
+            None,
+        ) {
             error!("Failed to add track {track_id} to rating playlist {playlist_name}: {err}");
         }
     }
 
     // Add the track the liked songs if its rated above 3 stars
-    match spotify_client
-        .current_user_saved_tracks_contains([track_id.clone()])
-        .await
-    {
-        Ok(already_liked) => match (already_liked[0], rating_slot >= 6) {
+    match spotify_client.current_user_saved_tracks_contains([track_id.clone()]) {
+        Ok(already_liked) => match (already_liked[0], rating_slot >= 5) {
             (true, false) => {
                 info!("Removing track {track_id} from liked songs");
-                if let Err(err) = spotify_client
-                    .current_user_saved_tracks_delete([track_id.clone()])
-                    .await
+                if let Err(err) =
+                    spotify_client.current_user_saved_tracks_delete([track_id.clone()])
                 {
                     error!("Failed to remove track {track_id} from liked songs: {err}");
                 }
             }
             (false, true) => {
                 info!("Adding track {track_id} to liked songs");
-                if let Err(err) = spotify_client
-                    .current_user_saved_tracks_add([track_id.clone()])
-                    .await
-                {
+                if let Err(err) = spotify_client.current_user_saved_tracks_add([track_id.clone()]) {
                     error!("Failed to add track {track_id} to liked songs: {err}");
                 }
             }
@@ -703,7 +697,7 @@ async fn update_star_rating(track_id: TrackId<'static>, rating_slot: usize) {
 }
 
 /// Toggle Spotify playlist membership for the given track.
-async fn toggle_playlist_membership(track_id: TrackId<'static>, playlist_id: PlaylistId<'static>) {
+fn toggle_playlist_membership(track_id: &TrackId<'static>, playlist_id: &PlaylistId<'static>) {
     let Some(_guard) = try_acquire_spotify_guard() else {
         return;
     };
@@ -711,11 +705,11 @@ async fn toggle_playlist_membership(track_id: TrackId<'static>, playlist_id: Pla
         .read()
         .playlists
         .iter()
-        .find(|(_, p)| p.id == playlist_id)
+        .find(|(_, p)| &p.id == playlist_id)
         .map(|(key, playlist)| {
             (
                 key.clone(),
-                (playlist.id.clone(), playlist.tracks.contains(&track_id)),
+                (playlist.id.clone(), playlist.tracks.contains(track_id)),
             )
         })
     else {
@@ -734,11 +728,11 @@ async fn toggle_playlist_membership(track_id: TrackId<'static>, playlist_id: Pla
     update_playback_state(|state| {
         let playlist_tracks = &mut state.playlists.get_mut(&playlist_name).unwrap().tracks;
         if contained {
-            playlist_tracks.remove(&track_id);
+            playlist_tracks.remove(track_id);
         } else {
             playlist_tracks.insert(track_id.clone());
         }
-        state.last_interaction = Instant::now();
+        state.last_interaction = Instant::now() + Duration::from_millis(500);
     });
 
     let spotify_client = SPOTIFY_CLIENT.get().unwrap();
@@ -751,7 +745,7 @@ async fn toggle_playlist_membership(track_id: TrackId<'static>, playlist_id: Pla
     } else {
         spotify_client.playlist_add_items(playlist_id.clone(), [track_playable], None)
     };
-    if let Err(err) = result.await {
+    if let Err(err) = result {
         error!(
             "Failed to {} track {track_id} {} playlist {playlist_name}: {err}",
             if contained { "remove" } else { "add" },
@@ -761,37 +755,37 @@ async fn toggle_playlist_membership(track_id: TrackId<'static>, playlist_id: Pla
 }
 
 /// Toggle Spotify playlist membership for the given track.
-async fn toggle_playing(play: bool) {
+fn toggle_playing(play: bool) {
     let Some(_guard) = try_acquire_spotify_guard() else {
         return;
     };
 
     info!("{} current track", if play { "Playing" } else { "Pausing" });
     update_playback_state(|state| {
-        state.last_interaction = Instant::now() + Duration::from_millis(1500);
+        state.last_interaction = Instant::now() + Duration::from_millis(2000);
     });
     let spotify_client = SPOTIFY_CLIENT.get().unwrap();
     if play {
-        if let Err(err) = spotify_client.resume_playback(None, None).await {
+        if let Err(err) = spotify_client.resume_playback(None, None) {
             error!("Failed to play playback: {err}");
         }
-    } else if let Err(err) = spotify_client.pause_playback(None).await {
+    } else if let Err(err) = spotify_client.pause_playback(None) {
         error!("Failed to pause playback: {err}");
     }
 }
 
 /// Set the volume of the current playback device.
-async fn set_volume(volume: u8) {
+fn set_volume(volume: u8) {
     let Some(_guard) = try_acquire_spotify_guard() else {
         return;
     };
 
     info!("Setting volume to {}%", volume);
     update_playback_state(|state| {
-        state.last_interaction = Instant::now();
+        state.last_interaction = Instant::now() + Duration::from_millis(500);
     });
     let spotify_client = SPOTIFY_CLIENT.get().unwrap();
-    if let Err(err) = spotify_client.volume(volume, None).await {
+    if let Err(err) = spotify_client.volume(volume, None) {
         error!("Failed to set volume: {err}");
     }
 }
