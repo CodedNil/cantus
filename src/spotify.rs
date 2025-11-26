@@ -210,7 +210,7 @@ pub fn init() {
     spawn(|| {
         loop {
             update_state_from_spotify();
-            sleep(Duration::from_millis(2000));
+            sleep(Duration::from_millis(200));
         }
     });
 }
@@ -218,15 +218,15 @@ pub fn init() {
 /// Pulls the current playback queue and status from the Spotify Web API and updates shared state.
 fn update_state_from_spotify() {
     // Wait if we have recently interacted with spotify
-    let min_duration = Duration::from_millis(500);
-    let mut last_interaction = PLAYBACK_STATE.read().last_interaction.elapsed();
-    while last_interaction < min_duration {
-        sleep(min_duration - last_interaction);
-        last_interaction = PLAYBACK_STATE.read().last_interaction.elapsed();
+    let now = Instant::now();
+    if now < PLAYBACK_STATE.read().last_interaction {
+        return;
+    }
+    if now < PLAYBACK_STATE.read().last_updated + Duration::from_millis(2000) {
+        return;
     }
 
     // Fetch current playback and queue concurrently
-    let request_start = Instant::now();
     let spotify_client = SPOTIFY_CLIENT.get().unwrap();
     let (current_playback, queue) = match (
         spotify_client.current_playback(None, None::<Vec<&AdditionalType>>),
@@ -246,7 +246,7 @@ fn update_state_from_spotify() {
             return;
         }
     };
-    let request_duration = request_start.elapsed();
+    let request_duration = now.elapsed();
 
     // Get current track and the upcoming queue
     let Some(currently_playing) = queue.currently_playing else {

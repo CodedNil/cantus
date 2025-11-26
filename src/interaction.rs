@@ -547,7 +547,7 @@ fn skip_to_track(track_id: &TrackId<'static>, position: f64, always_seek: bool) 
             state.queue_index = position_in_queue;
             state.progress = 0;
             state.last_updated = Instant::now();
-            state.last_interaction = Instant::now() + Duration::from_millis(1500);
+            state.last_interaction = Instant::now() + Duration::from_millis(2000);
         });
         let forward = queue_index < position_in_queue;
         let skips = if forward {
@@ -570,7 +570,7 @@ fn skip_to_track(track_id: &TrackId<'static>, position: f64, always_seek: bool) 
                 state.queue_index = position_in_queue;
                 state.progress = 0;
                 state.last_updated = Instant::now();
-                state.last_interaction = Instant::now() + Duration::from_millis(1500);
+                state.last_interaction = Instant::now() + Duration::from_millis(2000);
             });
             if let Err(err) = result {
                 error!("Failed to skip to track: {err}");
@@ -592,7 +592,7 @@ fn skip_to_track(track_id: &TrackId<'static>, position: f64, always_seek: bool) 
         update_playback_state(|state| {
             state.progress = milliseconds.round() as u32;
             state.last_updated = Instant::now();
-            state.last_interaction = Instant::now() + Duration::from_millis(1500);
+            state.last_interaction = Instant::now() + Duration::from_millis(2000);
         });
         if let Err(err) = SPOTIFY_CLIENT
             .get()
@@ -619,7 +619,7 @@ fn update_star_rating(track_id: &TrackId<'static>, rating_slot: usize) {
     let mut playlists_to_remove_from = Vec::new();
     let mut playlists_to_add_to = Vec::new();
     update_playback_state(|state| {
-        state.last_interaction = Instant::now();
+        state.last_interaction = Instant::now() + Duration::from_millis(500);
 
         // Remove tracks from existing playlists
         for playlist in state.playlists.values_mut().filter(|playlist| {
@@ -730,7 +730,7 @@ fn toggle_playlist_membership(track_id: &TrackId<'static>, playlist_id: &Playlis
         } else {
             playlist_tracks.insert(track_id.clone());
         }
-        state.last_interaction = Instant::now();
+        state.last_interaction = Instant::now() + Duration::from_millis(500);
     });
 
     let spotify_client = SPOTIFY_CLIENT.get().unwrap();
@@ -760,7 +760,7 @@ fn toggle_playing(play: bool) {
 
     info!("{} current track", if play { "Playing" } else { "Pausing" });
     update_playback_state(|state| {
-        state.last_interaction = Instant::now() + Duration::from_millis(1500);
+        state.last_interaction = Instant::now() + Duration::from_millis(2000);
     });
     let spotify_client = SPOTIFY_CLIENT.get().unwrap();
     if play {
@@ -780,7 +780,7 @@ fn set_volume(volume: u8) {
 
     info!("Setting volume to {}%", volume);
     update_playback_state(|state| {
-        state.last_interaction = Instant::now();
+        state.last_interaction = Instant::now() + Duration::from_millis(500);
     });
     let spotify_client = SPOTIFY_CLIENT.get().unwrap();
     if let Err(err) = spotify_client.volume(volume, None) {
