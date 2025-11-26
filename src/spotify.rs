@@ -37,8 +37,8 @@ pub static PLAYBACK_STATE: LazyLock<RwLock<PlaybackState>> = LazyLock::new(|| {
 
         last_progress_update: Instant::now(),
         last_interaction: Instant::now(),
-        last_grabbed_playback: Instant::now(),
-        last_grabbed_queue: Instant::now(),
+        last_grabbed_playback: Instant::now().checked_sub(Duration::from_secs(60)).unwrap(),
+        last_grabbed_queue: Instant::now().checked_sub(Duration::from_secs(60)).unwrap(),
     })
 });
 pub static IMAGES_CACHE: LazyLock<DashMap<String, Option<ImageBrush>>> =
@@ -234,7 +234,7 @@ fn get_spotify_playback() {
     if now < PLAYBACK_STATE.read().last_interaction {
         return;
     }
-    if now < PLAYBACK_STATE.read().last_grabbed_playback + Duration::from_millis(1000) {
+    if now < PLAYBACK_STATE.read().last_grabbed_playback + Duration::from_secs(1) {
         return;
     }
 
@@ -262,6 +262,24 @@ fn get_spotify_playback() {
         if state.current_context != new_context {
             state.context_updated = true;
             state.current_context = new_context;
+            state.last_grabbed_queue = Instant::now().checked_sub(Duration::from_secs(60)).unwrap();
+        }
+
+        // Song has changed, lets update to the new index and force a queue refresh
+        if let Some(item) = current_playback.item
+            && let PlayableItem::Track(track) = item
+        {
+            let index_found = state.queue.iter().position(|t| t.title == track.name);
+            if let Some(new_index) = index_found
+                && state.queue_index != new_index
+            {
+                state.queue_index = new_index;
+                state.last_grabbed_queue =
+                    Instant::now().checked_sub(Duration::from_secs(60)).unwrap();
+            } else if index_found.is_none() {
+                state.last_grabbed_queue =
+                    Instant::now().checked_sub(Duration::from_secs(60)).unwrap();
+            }
         }
 
         state.volume = current_playback.device.volume_percent.map(|v| v as u8);
@@ -287,7 +305,7 @@ fn get_spotify_queue() {
     if now < PLAYBACK_STATE.read().last_interaction {
         return;
     }
-    if now < PLAYBACK_STATE.read().last_grabbed_queue + Duration::from_millis(4000) {
+    if now < PLAYBACK_STATE.read().last_grabbed_queue + Duration::from_secs(15) {
         return;
     }
 
