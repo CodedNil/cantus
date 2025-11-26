@@ -11,10 +11,11 @@ use vello::{
     util::{RenderContext, RenderSurface},
     wgpu::{
         BlendComponent, BlendFactor, BlendOperation, BlendState, CommandEncoderDescriptor,
-        CompositeAlphaMode, InstanceDescriptor, PollType, PresentMode, TextureViewDescriptor,
-        util::TextureBlitterBuilder,
+        CompositeAlphaMode, Instance, InstanceDescriptor, PollType, PresentMode, Surface,
+        TextureViewDescriptor, util::TextureBlitterBuilder,
     },
 };
+use wgpu::Backends;
 
 #[cfg(not(any(feature = "wayland", feature = "winit")))]
 compile_error!("Enable at least one of the `wayland` or `winit` features.");
@@ -60,7 +61,6 @@ struct CantusApp {
     scene: Scene,
     font: FontEngine,
     scale_factor: f64,
-    frame_index: u64,
     render_state: RenderState,
     interaction: InteractionState,
     particles: ParticlesState,
@@ -69,8 +69,8 @@ struct CantusApp {
 impl Default for CantusApp {
     fn default() -> Self {
         let mut render_context = RenderContext::new();
-        render_context.instance = vello::wgpu::Instance::new(&InstanceDescriptor {
-            backends: vello::wgpu::Backends::VULKAN,
+        render_context.instance = Instance::new(&InstanceDescriptor {
+            backends: Backends::PRIMARY,
             ..Default::default()
         });
 
@@ -81,7 +81,6 @@ impl Default for CantusApp {
             scene: Scene::new(),
             font: FontEngine::default(),
             scale_factor: 1.0,
-            frame_index: 0,
             render_state: RenderState::default(),
             interaction: InteractionState::default(),
             particles: ParticlesState::default(),
@@ -91,7 +90,7 @@ impl Default for CantusApp {
 impl CantusApp {
     fn configure_render_surface(
         &mut self,
-        surface: vello::wgpu::Surface<'static>,
+        surface: Surface<'static>,
         width: u32,
         height: u32,
         present_mode: PresentMode,
@@ -137,17 +136,13 @@ impl CantusApp {
         Ok(())
     }
 
-    fn render<G>(&mut self, on_surface_lost: G) -> Result<bool>
-    where
-        G: FnOnce(),
-    {
-        self.frame_index = self.frame_index.wrapping_add(1);
+    /// Try to render out the app
+    fn render(&mut self) -> Result<()> {
+        if self.render_surface.is_none() {
+            return Ok(());
+        }
 
-        let Some(render_surface) = self.render_surface.take() else {
-            return Ok(false);
-        };
-
-        let dev_id = render_surface.dev_id;
+        let dev_id = self.render_surface.as_ref().unwrap().dev_id;
         if !self.render_devices.contains_key(&dev_id) {
             self.render_devices.insert(
                 dev_id,
@@ -162,9 +157,10 @@ impl CantusApp {
         self.create_scene();
 
         let handle = &self.render_context.devices[dev_id];
+        let render_surface = self.render_surface.as_mut().unwrap();
         self.render_devices
             .get_mut(&dev_id)
-            .expect("render device must exist")
+            .unwrap()
             .render_to_texture(
                 &handle.device,
                 &handle.queue,
@@ -180,8 +176,7 @@ impl CantusApp {
 
         let Ok(acquired) = render_surface.surface.get_current_texture() else {
             self.render_surface = None;
-            on_surface_lost();
-            return Ok(false);
+            return Ok(());
         };
 
         let mut encoder = handle
@@ -202,8 +197,7 @@ impl CantusApp {
         acquired.present();
         handle.device.poll(PollType::Poll)?;
 
-        self.render_surface = Some(render_surface);
-        Ok(true)
+        Ok(())
     }
 }
 

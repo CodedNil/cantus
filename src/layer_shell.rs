@@ -296,16 +296,9 @@ impl LayerShellApp {
 
         self.update_input_region(qhandle);
 
-        let mut surface_lost = false;
-        let rendered = self.cantus.render(|| surface_lost = true)?;
+        self.cantus.render()?;
         self.request_frame(qhandle);
-        if surface_lost {
-            if let Some(surface) = &self.wl_surface {
-                surface.commit();
-            }
-            return Ok(());
-        }
-        if rendered && let Some(surface) = &self.wl_surface {
+        if let Some(surface) = &self.wl_surface {
             surface.commit();
         }
         Ok(())

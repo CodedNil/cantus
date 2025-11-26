@@ -44,7 +44,6 @@ wgpu = { version = "26.0.1", default-features = false, features = [
     "parking_lot",
     "std",
     "vulkan",
-    "wgsl",
 ] }
 vello = { version = "0.6.0", default-features = false, features = ["wgpu"] }
 
