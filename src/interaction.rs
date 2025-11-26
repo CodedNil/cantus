@@ -473,7 +473,10 @@ impl CantusApp {
                     playlist,
                     contained,
                 } => {
-                    let Some(playlist_image) = IMAGES_CACHE.get(&playlist.image_url) else {
+                    let Some(playlist_image_ref) = IMAGES_CACHE.get(&playlist.image_url) else {
+                        continue;
+                    };
+                    let Some(playlist_image) = playlist_image_ref.as_ref() else {
                         continue;
                     };
 
@@ -546,7 +549,7 @@ fn skip_to_track(track_id: &TrackId<'static>, position: f64, always_seek: bool) 
         update_playback_state(|state| {
             state.queue_index = position_in_queue;
             state.progress = 0;
-            state.last_updated = Instant::now();
+            state.last_progress_update = Instant::now();
             state.last_interaction = Instant::now() + Duration::from_millis(2000);
         });
         let forward = queue_index < position_in_queue;
@@ -569,7 +572,7 @@ fn skip_to_track(track_id: &TrackId<'static>, position: f64, always_seek: bool) 
             update_playback_state(|state| {
                 state.queue_index = position_in_queue;
                 state.progress = 0;
-                state.last_updated = Instant::now();
+                state.last_progress_update = Instant::now();
                 state.last_interaction = Instant::now() + Duration::from_millis(2000);
             });
             if let Err(err) = result {
@@ -591,7 +594,7 @@ fn skip_to_track(track_id: &TrackId<'static>, position: f64, always_seek: bool) 
         );
         update_playback_state(|state| {
             state.progress = milliseconds.round() as u32;
-            state.last_updated = Instant::now();
+            state.last_progress_update = Instant::now();
             state.last_interaction = Instant::now() + Duration::from_millis(2000);
         });
         if let Err(err) = SPOTIFY_CLIENT

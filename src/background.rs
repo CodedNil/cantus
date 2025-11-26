@@ -61,10 +61,13 @@ pub fn update_color_palettes() -> Result<()> {
         if ALBUM_DATA_CACHE.contains_key(&track.album_id) {
             continue;
         }
-        let Some(image) = IMAGES_CACHE.get(&track.image_url) else {
+        let Some(image_ref) = IMAGES_CACHE.get(&track.image_url) else {
             continue;
         };
-        let Some(artist_image_ref) = ARTIST_DATA_CACHE
+        let Some(image) = image_ref.as_ref() else {
+            continue;
+        };
+        let Some(artist_image_url_ref) = ARTIST_DATA_CACHE
             .get(&track.artist_id)
             .map(|entry| entry.value().clone())
         else {
@@ -87,9 +90,13 @@ pub fn update_color_palettes() -> Result<()> {
                 .or_else(|_| palette.find_swatches(NUM_SWATCHES))?
         };
         if swatches.len() < NUM_SWATCHES
-            && let Some(artist_image_url) = artist_image_ref.as_ref()
+            && let Some(artist_image_url) = artist_image_url_ref.as_ref()
         {
-            let Some(artist_image) = IMAGES_CACHE.get(artist_image_url) else {
+            let Some(artist_image_ref) = IMAGES_CACHE.get(artist_image_url) else {
+                ALBUM_DATA_CACHE.remove(&track.album_id);
+                continue;
+            };
+            let Some(artist_image) = artist_image_ref.as_ref() else {
                 ALBUM_DATA_CACHE.remove(&track.album_id);
                 continue;
             };

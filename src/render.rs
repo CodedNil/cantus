@@ -226,7 +226,7 @@ impl CantusApp {
         // Lerp the progress based on when the data was last updated, get the start time of the current track
         let playback_elapsed = f64::from(playback_state.progress)
             + if playback_state.playing {
-                playback_state.last_updated.elapsed().as_millis() as f64
+                playback_state.last_progress_update.elapsed().as_millis() as f64
             } else {
                 0.0
             };
@@ -375,10 +375,13 @@ impl CantusApp {
             self.interaction.drag_track = Some((track.id.clone(), position_within_track));
         }
 
-        let (Some(album_image), Some(track_data_ref)) = (
+        let (Some(album_image_ref), Some(track_data_ref)) = (
             IMAGES_CACHE.get(&track.image_url),
             ALBUM_DATA_CACHE.get(&track.album_id),
         ) else {
+            return;
+        };
+        let Some(album_image) = album_image_ref.as_ref() else {
             return;
         };
         let Some(track_data) = track_data_ref.as_ref() else {
