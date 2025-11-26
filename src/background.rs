@@ -9,7 +9,6 @@ use image::imageops::colorops;
 use image::{GrayImage, LumaA, RgbaImage, imageops};
 use itertools::Itertools;
 use palette::{Hsl, IntoColor, Srgb};
-use std::collections::HashMap;
 use std::sync::LazyLock;
 use vello::peniko::{Blob, ImageAlphaType, ImageBrush, ImageData, ImageFormat};
 
@@ -28,7 +27,7 @@ fn palette_image_width() -> u32 {
 /// Number of refinement passes when synthesising the background texture.
 const PALETTE_PASS_COUNT: usize = 6;
 /// Maximum number of brush placements per pass.
-const PALETTE_STROKES_PER_PASS: usize = 30;
+const PALETTE_STROKES_PER_PASS: usize = 80;
 
 static BRUSHES: LazyLock<[GrayImage; 5]> = LazyLock::new(|| {
     // Helper function to load and extract the alpha channel
@@ -58,11 +57,8 @@ static BRUSHES: LazyLock<[GrayImage; 5]> = LazyLock::new(|| {
 /// Downloads and caches an image from the given URL.
 pub fn update_color_palettes() -> Result<()> {
     let state = PLAYBACK_STATE.read();
-    let mut pending_palettes = HashMap::new();
     for track in &state.queue {
-        if ALBUM_DATA_CACHE.contains_key(&track.album_id)
-            || pending_palettes.contains_key(&track.album_id)
-        {
+        if ALBUM_DATA_CACHE.contains_key(&track.album_id) {
             continue;
         }
         let Some(image) = IMAGES_CACHE.get(&track.image_url) else {
@@ -74,6 +70,7 @@ pub fn update_color_palettes() -> Result<()> {
         else {
             continue;
         };
+        ALBUM_DATA_CACHE.insert(track.album_id.clone(), None);
 
         let width = image.image.width;
         let height = image.image.height;
@@ -93,6 +90,7 @@ pub fn update_color_palettes() -> Result<()> {
             && let Some(artist_image_url) = artist_image_ref.as_ref()
         {
             let Some(artist_image) = IMAGES_CACHE.get(artist_image_url) else {
+                ALBUM_DATA_CACHE.remove(&track.album_id);
                 continue;
             };
             let artist_new_width = (width as f32 * 0.1).round() as u32;
@@ -135,11 +133,6 @@ pub fn update_color_palettes() -> Result<()> {
             .sorted_by(|a, b| b[3].cmp(&a[3]))
             .collect::<Vec<_>>();
 
-        pending_palettes.insert(track.album_id.clone(), primary_colors);
-    }
-    drop(state);
-
-    for (album_id, primary_colors) in pending_palettes {
         let palette_image = ImageData {
             data: Blob::from(generate_palette_image(&primary_colors)),
             format: ImageFormat::Rgba8,
@@ -148,13 +141,14 @@ pub fn update_color_palettes() -> Result<()> {
             height: palette_image_height(),
         };
         ALBUM_DATA_CACHE.insert(
-            album_id,
-            AlbumData {
+            track.album_id.clone(),
+            Some(AlbumData {
                 primary_colors,
                 palette_image: ImageBrush::new(palette_image),
-            },
+            }),
         );
     }
+    drop(state);
 
     Ok(())
 }
@@ -213,9 +207,12 @@ fn generate_palette_image(colors: &[[u8; 4]]) -> Vec<u8> {
     for pass in 0..PALETTE_PASS_COUNT {
         let base_height = lerpf64(
             pass as f64 / PALETTE_PASS_COUNT as f64,
-            f64::from(palette_height) * 0.5,
+            f64::from(palette_height) * 0.7,
             f64::from(palette_height) * 0.2,
         );
+
+        // Blur the image slightly on each pass
+        canvas = imageops::blur(&canvas, 6.0);
 
         // Count pixels for each color, to get ratios
         let mut counts = vec![0u32; colors.len()];
@@ -349,7 +346,7 @@ fn generate_palette_image(colors: &[[u8; 4]]) -> Vec<u8> {
     // Blur the image, and adjust its brightness, contrast & vibrancy
     colorops::brighten_in_place(&mut canvas, -30);
     colorops::contrast_in_place(&mut canvas, 0.5);
-    let mut raw_data = imageops::blur(&canvas, 10.0).into_raw();
+    let mut raw_data = imageops::blur(&canvas, 8.0).into_raw();
     apply_vibrancy(&mut raw_data, 4.0, 3.0);
     raw_data
 }

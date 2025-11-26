@@ -22,23 +22,9 @@ use ureq::Agent;
 use vello::peniko::{
     Blob, Extend, ImageAlphaType, ImageBrush, ImageData, ImageFormat, ImageQuality, ImageSampler,
 };
-// use zbus::{
-//     Connection,
-//     fdo::{DBusProxy, PropertiesProxy},
-//     names::InterfaceName,
-//     zvariant::OwnedValue,
-// };
-
-// /// Root MPRIS interface that exposes metadata and identity.
-// const ROOT_INTERFACE: InterfaceName<'static> =
-//     InterfaceName::from_static_str_unchecked("org.mpris.MediaPlayer2");
-// /// MPRIS interface identifier used for playback control.
-// const PLAYER_INTERFACE: InterfaceName<'static> =
-//     InterfaceName::from_static_str_unchecked("org.mpris.MediaPlayer2.Player");
 
 pub static PLAYBACK_STATE: LazyLock<RwLock<PlaybackState>> = LazyLock::new(|| {
     RwLock::new(PlaybackState {
-        is_local: false,
         last_updated: Instant::now(),
         last_interaction: Instant::now(),
         playing: false,
@@ -51,7 +37,7 @@ pub static PLAYBACK_STATE: LazyLock<RwLock<PlaybackState>> = LazyLock::new(|| {
     })
 });
 pub static IMAGES_CACHE: LazyLock<DashMap<String, ImageBrush>> = LazyLock::new(DashMap::new);
-pub static ALBUM_DATA_CACHE: LazyLock<DashMap<AlbumId<'static>, AlbumData>> =
+pub static ALBUM_DATA_CACHE: LazyLock<DashMap<AlbumId<'static>, Option<AlbumData>>> =
     LazyLock::new(DashMap::new);
 pub static ARTIST_DATA_CACHE: LazyLock<DashMap<ArtistId<'static>, Option<String>>> =
     LazyLock::new(DashMap::new);
@@ -64,7 +50,6 @@ static HTTP_CLIENT: LazyLock<Agent> = LazyLock::new(Agent::new_with_defaults);
 pub static SPOTIFY_CLIENT: OnceLock<AuthCodePkceSpotify> = OnceLock::new();
 
 pub struct PlaybackState {
-    pub is_local: bool, // Whether we are playing spotify on the local device
     pub last_updated: Instant,
     pub last_interaction: Instant,
     pub playing: bool,
@@ -221,132 +206,14 @@ pub fn init() {
     SPOTIFY_CLIENT.set(spotify).unwrap();
 
     // Begin polling
-    spawn(polling_task);
-}
-
-/// Asynchronous task to poll MPRIS every 100ms and Spotify API every X seconds or on song change.
-fn polling_task() {
-    // let mut last_mpris_track_id: Option<String> = None; // Local state for track ID
-    // let connection = Connection::session().ok();
-    // let dbus_proxy = if let Some(connection) = &connection {
-    //     match DBusProxy::new(connection) {
-    //         Ok(proxy) => Some(proxy),
-    //         Err(err) => panic!("Failed creating D-Bus proxy: {err}"),
-    //     }
-    // } else {
-    //     None
-    // };
-
     spawn(poll_playlists);
-
-    let mut spotify_poll_counter = 100; // Counter for Spotify API polling
-    loop {
-        // --- MPRIS Polling Logic ---
-        // let should_refresh_spotify = if let Some(connection) = &connection
-        //     && let Some(dbus_proxy) = &dbus_proxy
-        // {
-        //     update_state_from_mpris(connection, dbus_proxy, &mut last_mpris_track_id)
-        // } else {
-        //     false
-        // };
-
-        // --- Spotify API Polling Logic ---
-        spotify_poll_counter += 1;
-        if spotify_poll_counter >= 20 {
-            // || should_refresh_spotify {
-            spotify_poll_counter = 0; // Reset counter
+    spawn(|| {
+        loop {
             update_state_from_spotify();
+            sleep(Duration::from_millis(2000));
         }
-
-        sleep(Duration::from_millis(100));
-    }
+    });
 }
-
-// /// Synchronizes playback information with the MPRIS interface and returns whether Spotify data should refresh.
-// fn update_state_from_mpris(
-//     connection: &Connection,
-//     dbus_proxy: &DBusProxy<'_>,
-//     last_track_id: &mut Option<String>,
-// ) -> bool {
-//     let Ok(names) = dbus_proxy.list_names() else {
-//         update_playback_state(|state| {
-//             state.is_local = false;
-//         });
-//         return false;
-//     };
-
-//     let mut properties_proxy = None;
-//     for name in names {
-//         if !name.starts_with("org.mpris.MediaPlayer2.") {
-//             continue;
-//         }
-
-//         let Ok(builder) = PropertiesProxy::builder(connection)
-//             .destination(name)
-//             .and_then(|builder| builder.path("/org/mpris/MediaPlayer2"))
-//         else {
-//             continue;
-//         };
-//         let Ok(proxy) = builder.build() else {
-//             continue;
-//         };
-//         let Ok(identity) = proxy.get(ROOT_INTERFACE, "Identity") else {
-//             continue;
-//         };
-//         if identity.to_string() == "\"Spotify\"" {
-//             properties_proxy = Some(proxy);
-//             break;
-//         }
-//     }
-//     let Some(properties_proxy) = properties_proxy else {
-//         update_playback_state(|state| {
-//             state.is_local = false;
-//         });
-//         return false;
-//     };
-
-//     // Get data from dbus
-//     let (new_track_id, playing, progress) = (
-//         properties_proxy.get(PLAYER_INTERFACE, "Metadata"),
-//         properties_proxy.get(PLAYER_INTERFACE, "PlaybackStatus"),
-//         properties_proxy.get(PLAYER_INTERFACE, "Position"),
-//     );
-//     let mut should_refresh = new_track_id
-//         .ok()
-//         .and_then(|metadata| HashMap::<String, OwnedValue>::try_from(metadata).ok())
-//         .and_then(|metadata| Some(metadata.get("mpris:trackid")?.to_string()))
-//         .filter(|track_id| last_track_id.as_ref() != Some(track_id))
-//         .is_some_and(|track_id| {
-//             *last_track_id = Some(track_id);
-//             true
-//         });
-//     let playing = playing
-//         .ok()
-//         .and_then(|value| value.try_into().ok())
-//         .map(|status: String| status == "Playing");
-//     let progress = progress
-//         .ok()
-//         .and_then(|value| value.try_into().ok())
-//         .map(|position: i64| position / 1_000);
-
-//     if playing.is_some() || progress.is_some() {
-//         update_playback_state(|state| {
-//             state.is_local = true;
-//             if let Some(playing) = playing
-//                 && playing != state.playing
-//             {
-//                 should_refresh = true;
-//                 state.playing = playing;
-//             }
-//             if let Some(progress) = progress {
-//                 state.progress = progress as u32;
-//                 state.last_updated = Instant::now();
-//             }
-//         });
-//     }
-
-//     should_refresh
-// }
 
 /// Pulls the current playback queue and status from the Spotify Web API and updates shared state.
 fn update_state_from_spotify() {
@@ -428,9 +295,6 @@ fn update_state_from_spotify() {
             if let Err(err) = ensure_image_cached(url.as_str()) {
                 warn!("failed to cache image {url}: {err}");
             }
-            if let Err(err) = update_color_palettes() {
-                warn!("failed to update color palettes: {err}");
-            }
         });
     }
 
@@ -447,9 +311,6 @@ fn update_state_from_spotify() {
                     && let Err(err) = ensure_image_cached(artist_image.url.as_str())
                 {
                     warn!("failed to cache image {}: {err}", artist_image.url);
-                }
-                if let Err(err) = update_color_palettes() {
-                    warn!("failed to update color palettes: {err}");
                 }
             });
         }
@@ -474,19 +335,17 @@ fn update_state_from_spotify() {
         }
 
         state.volume = current_playback.device.volume_percent.map(|v| v as u8);
-        if !state.is_local {
-            state.playing = current_playback.is_playing;
-            let progress = current_playback
-                .progress
-                .map_or(0, |p| p.num_milliseconds()) as u32;
-            state.progress = progress
-                + if current_playback.is_playing {
-                    (request_duration.as_millis() / 2) as u32
-                } else {
-                    0
-                };
-            state.last_updated = Instant::now();
-        }
+        state.playing = current_playback.is_playing;
+        let progress = current_playback
+            .progress
+            .map_or(0, |p| p.num_milliseconds()) as u32;
+        state.progress = progress
+            + if current_playback.is_playing {
+                (request_duration.as_millis() / 2) as u32
+            } else {
+                0
+            };
+        state.last_updated = Instant::now();
     });
 }
 
@@ -521,6 +380,9 @@ fn ensure_image_cached(url: &str) -> Result<()> {
             },
         },
     );
+    if let Err(err) = update_color_palettes() {
+        warn!("failed to update color palettes: {err}");
+    }
     Ok(())
 }
 

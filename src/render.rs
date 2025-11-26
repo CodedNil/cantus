@@ -375,10 +375,13 @@ impl CantusApp {
             self.interaction.drag_track = Some((track.id.clone(), position_within_track));
         }
 
-        let (Some(album_image), Some(track_data)) = (
+        let (Some(album_image), Some(track_data_ref)) = (
             IMAGES_CACHE.get(&track.image_url),
             ALBUM_DATA_CACHE.get(&track.album_id),
         ) else {
+            return;
+        };
+        let Some(track_data) = track_data_ref.as_ref() else {
             return;
         };
 
@@ -743,7 +746,10 @@ impl CantusApp {
         volume: Option<u8>,
     ) {
         let lightness_boost = 50.0;
-        let Some(track_data) = ALBUM_DATA_CACHE.get(&track.album_id) else {
+        let Some(track_data_ref) = ALBUM_DATA_CACHE.get(&track.album_id) else {
+            return;
+        };
+        let Some(track_data) = track_data_ref.as_ref() else {
             return;
         };
         let mut primary_colors: Vec<_> = track_data
