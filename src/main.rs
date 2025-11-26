@@ -6,12 +6,12 @@ use anyhow::Result;
 use std::collections::HashMap;
 use tracing_subscriber::EnvFilter;
 use vello::{
-    AaConfig, Renderer, RendererOptions, Scene,
+    AaConfig, AaSupport, Renderer, RendererOptions, Scene,
     peniko::color::palette,
     util::{RenderContext, RenderSurface},
     wgpu::{
         BlendComponent, BlendFactor, BlendOperation, BlendState, CommandEncoderDescriptor,
-        CompositeAlphaMode, Instance, InstanceDescriptor, PollType, PresentMode, Surface,
+        CompositeAlphaMode, Instance, InstanceDescriptor, PresentMode, Surface,
         TextureViewDescriptor, util::TextureBlitterBuilder,
     },
 };
@@ -132,30 +132,34 @@ impl CantusApp {
                 .build();
         }
         rs.surface.configure(&device_handle.device, &rs.config);
+        if !self.render_devices.contains_key(&rs.dev_id) {
+            self.render_devices.insert(
+                rs.dev_id,
+                Renderer::new(
+                    &self.render_context.devices[rs.dev_id].device,
+                    RendererOptions {
+                        use_cpu: false,
+                        antialiasing_support: AaSupport::area_only(),
+                        num_init_threads: None,
+                        pipeline_cache: None,
+                    },
+                )?,
+            );
+        }
         self.render_surface = Some(rs);
         Ok(())
     }
 
     /// Try to render out the app
-    fn render(&mut self) -> Result<()> {
+    fn render(&mut self) {
         if self.render_surface.is_none() {
-            return Ok(());
-        }
-
-        let dev_id = self.render_surface.as_ref().unwrap().dev_id;
-        if !self.render_devices.contains_key(&dev_id) {
-            self.render_devices.insert(
-                dev_id,
-                Renderer::new(
-                    &self.render_context.devices[dev_id].device,
-                    RendererOptions::default(),
-                )?,
-            );
+            return;
         }
 
         self.scene.reset();
         self.create_scene();
 
+        let dev_id = self.render_surface.as_ref().unwrap().dev_id;
         let handle = &self.render_context.devices[dev_id];
         let render_surface = self.render_surface.as_mut().unwrap();
         self.render_devices
@@ -172,32 +176,33 @@ impl CantusApp {
                     height: render_surface.config.height,
                     antialiasing_method: AaConfig::Area,
                 },
-            )?;
+            )
+            .expect("failed to render to surface");
 
-        let Ok(acquired) = render_surface.surface.get_current_texture() else {
-            self.render_surface = None;
-            return Ok(());
+        let Ok(surface_texture) = render_surface.surface.get_current_texture() else {
+            render_surface.surface.configure(
+                &self.render_context.devices[render_surface.dev_id].device,
+                &render_surface.config,
+            );
+            return;
         };
 
         let mut encoder = handle
             .device
             .create_command_encoder(&CommandEncoderDescriptor {
-                label: Some("Cantus blit"),
+                label: Some("Surface Blit"),
             });
         render_surface.blitter.copy(
             &handle.device,
             &mut encoder,
             &render_surface.target_view,
-            &acquired
+            &surface_texture
                 .texture
                 .create_view(&TextureViewDescriptor::default()),
         );
 
         handle.queue.submit([encoder.finish()]);
-        acquired.present();
-        handle.device.poll(PollType::Poll)?;
-
-        Ok(())
+        surface_texture.present();
     }
 }
 

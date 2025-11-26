@@ -296,7 +296,7 @@ impl LayerShellApp {
 
         self.update_input_region(qhandle);
 
-        self.cantus.render()?;
+        self.cantus.render();
         self.request_frame(qhandle);
         if let Some(surface) = &self.wl_surface {
             surface.commit();

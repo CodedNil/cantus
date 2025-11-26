@@ -147,10 +147,7 @@ impl ApplicationHandler for WinitApp {
                     error!("Recreate surface failed: {err}");
                     return;
                 }
-                if let Err(err) = self.cantus.render() {
-                    error!("Recreate surface failed: {err}");
-                    return;
-                }
+                self.cantus.render();
                 self.window().request_redraw();
             }
             WindowEvent::CursorMoved { position, .. } => {
