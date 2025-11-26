@@ -68,13 +68,6 @@ pub struct FontEngine {
     weight_axis_index: Option<usize>,
 }
 
-#[derive(Clone, Copy)]
-enum Align {
-    Start,
-    End,
-}
-
-#[derive(Clone)]
 struct TextLayout {
     glyphs: Vec<Glyph>,
     width: f64,
@@ -537,23 +530,16 @@ impl CantusApp {
             let layout = self.layout_text(song_name, font_size);
             let width_ratio = available_width / layout.width;
             if width_ratio <= 1.0 {
-                let layout = self.layout_text(song_name, font_size * width_ratio.max(0.8));
                 self.draw_text(
-                    &layout,
+                    &self.layout_text(song_name, font_size * width_ratio.max(0.8)),
                     text_start_left,
                     text_height,
-                    Align::Start,
+                    false,
                     // Fade out when it gets too small, 0.6-0.4
                     text_brush.with_alpha(((width_ratio - 0.4) / 0.2) as f32),
                 );
             } else {
-                self.draw_text(
-                    &layout,
-                    text_start_right,
-                    text_height,
-                    Align::End,
-                    text_brush,
-                );
+                self.draw_text(&layout, text_start_right, text_height, true, text_brush);
             }
 
             // Get text layouts for bottom row of text
@@ -594,11 +580,7 @@ impl CantusApp {
                         text_start_left
                     },
                     text_height,
-                    if width_ratio >= 1.0 {
-                        Align::End
-                    } else {
-                        Align::Start
-                    },
+                    width_ratio >= 1.0,
                     // Fade out when it gets too small, 0.6-0.4
                     text_brush.with_alpha(((width_ratio - 0.4) / 0.2) as f32),
                 );
@@ -607,14 +589,14 @@ impl CantusApp {
                     &self.layout_text(&time_text, font_size),
                     start_x + 12.0,
                     text_height,
-                    Align::Start,
+                    false,
                     text_brush,
                 );
                 self.draw_text(
                     &self.layout_text(artist_text, font_size),
                     text_start_right,
                     text_height,
-                    Align::End,
+                    true,
                     text_brush,
                 );
             }
@@ -725,7 +707,7 @@ impl CantusApp {
         layout: &TextLayout,
         pos_x: f64,
         pos_y: f64,
-        horizontal_align: Align,
+        align_end: bool,
         brush: Color,
     ) {
         self.scene
@@ -733,11 +715,7 @@ impl CantusApp {
             .font_size(layout.font_size)
             .normalized_coords(&layout.coords)
             .transform(Affine::translate((
-                pos_x
-                    - match horizontal_align {
-                        Align::Start => 0.0,
-                        Align::End => layout.width,
-                    },
+                pos_x - (layout.width * f64::from(u8::from(align_end))),
                 pos_y - layout.height * 0.5,
             )))
             .hint(true)

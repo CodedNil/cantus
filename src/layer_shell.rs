@@ -118,7 +118,7 @@ pub fn run() {
 
     app.compositor = Some(compositor);
 
-    while !app.cantus.should_exit {
+    while !app.should_exit {
         event_queue
             .blocking_dispatch(&mut app)
             .expect("Wayland dispatch error");
@@ -151,6 +151,9 @@ impl OutputInfo {
 pub struct LayerShellApp {
     pub cantus: CantusApp,
 
+    is_configured: bool,
+    should_exit: bool,
+
     compositor: Option<WlCompositor>,
     layer_shell: Option<ZwlrLayerShellV1>,
     seat: Option<WlSeat>,
@@ -173,6 +176,8 @@ impl LayerShellApp {
     fn new(display_ptr: NonNull<c_void>) -> Self {
         Self {
             cantus: CantusApp::default(),
+            is_configured: false,
+            should_exit: false,
             compositor: None,
             layer_shell: None,
             seat: None,
@@ -202,7 +207,7 @@ impl LayerShellApp {
     }
 
     fn ensure_surface(&mut self, width: f64, height: f64) -> Result<()> {
-        if width == 0.0 || height == 0.0 || !self.cantus.is_configured {
+        if width == 0.0 || height == 0.0 || !self.is_configured {
             return Ok(());
         }
 
@@ -247,7 +252,7 @@ impl LayerShellApp {
 
         if let Err(err) = self.ensure_surface(buffer_width, buffer_height) {
             error!("Failed to prepare render surface: {err}");
-            self.cantus.should_exit = true;
+            self.should_exit = true;
             return;
         }
 
@@ -383,12 +388,12 @@ impl Dispatch<ZwlrLayerSurfaceV1, ()> for LayerShellApp {
                 if let Some(surface) = &state.wl_surface {
                     surface.commit();
                 }
-                state.cantus.is_configured = true;
+                state.is_configured = true;
 
                 state.refresh_surface(qhandle);
             }
             zwlr_layer_surface_v1::Event::Closed => {
-                state.cantus.should_exit = true;
+                state.should_exit = true;
             }
             _ => {}
         }
@@ -407,7 +412,7 @@ impl Dispatch<WpFractionalScaleV1, ()> for LayerShellApp {
         if let wp_fractional_scale_v1::Event::PreferredScale { scale } = event {
             state.cantus.scale_factor = f64::from(scale) / 120.0;
 
-            if state.cantus.is_configured {
+            if state.is_configured {
                 state.update_scale_and_viewport();
 
                 if let Some(surface) = &state.wl_surface {

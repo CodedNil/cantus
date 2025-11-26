@@ -60,10 +60,6 @@ struct CantusApp {
     scene: Scene,
     font: FontEngine,
     scale_factor: f64,
-    #[cfg(feature = "wayland")]
-    is_configured: bool,
-    #[cfg(feature = "wayland")]
-    should_exit: bool,
     frame_index: u64,
     render_state: RenderState,
     interaction: InteractionState,
@@ -85,10 +81,6 @@ impl Default for CantusApp {
             scene: Scene::new(),
             font: FontEngine::default(),
             scale_factor: 1.0,
-            #[cfg(feature = "wayland")]
-            is_configured: false,
-            #[cfg(feature = "wayland")]
-            should_exit: false,
             frame_index: 0,
             render_state: RenderState::default(),
             interaction: InteractionState::default(),
