@@ -1,5 +1,4 @@
 use crate::{CantusApp, PANEL_HEIGHT_EXTENSION, config::CONFIG, interaction::InteractionState};
-use anyhow::Result;
 use raw_window_handle::{HasDisplayHandle, HasWindowHandle};
 use tracing::error;
 use vello::{
@@ -25,7 +24,6 @@ pub fn run() {
 struct WinitApp {
     cantus: CantusApp,
     window: Option<Window>,
-    needs_surface_recreate: bool,
 }
 
 impl WinitApp {
@@ -33,7 +31,6 @@ impl WinitApp {
         Self {
             cantus: CantusApp::default(),
             window: None,
-            needs_surface_recreate: true,
         }
     }
 
@@ -41,7 +38,7 @@ impl WinitApp {
         self.window.as_ref().expect("window not created")
     }
 
-    fn recreate_surface(&mut self) -> Result<()> {
+    fn recreate_surface(&mut self) {
         let (raw_display_handle, raw_window_handle, size) = {
             let window = self.window();
             let display_handle = window
@@ -57,7 +54,7 @@ impl WinitApp {
         };
 
         if size.width == 0 || size.height == 0 {
-            return Ok(());
+            return;
         }
 
         self.cantus.render_surface = None;
@@ -70,32 +67,15 @@ impl WinitApp {
             self.cantus
                 .render_context
                 .instance
-                .create_surface_unsafe(target)?
+                .create_surface_unsafe(target)
+                .expect("Failed to create surface")
         };
         self.cantus.configure_render_surface(
             surface,
             size.width,
             size.height,
             PresentMode::AutoVsync,
-        )?;
-        self.needs_surface_recreate = false;
-        Ok(())
-    }
-
-    fn render(&mut self) -> Result<()> {
-        if self.needs_surface_recreate || self.cantus.render_surface.is_none() {
-            self.recreate_surface()?;
-        }
-
-        if self.cantus.render_surface.is_none() {
-            return Ok(());
-        }
-
-        let rendered = self.cantus.render(|| self.needs_surface_recreate = true)?;
-        if rendered {
-            self.window().request_redraw();
-        }
-        Ok(())
+        );
     }
 }
 
@@ -134,8 +114,7 @@ impl ApplicationHandler for WinitApp {
             error!("Failed to set inner size");
         }
         self.window = Some(window);
-        self.needs_surface_recreate = true;
-        let _ = self.recreate_surface();
+        self.recreate_surface();
         if let Some(window) = &self.window {
             window.request_redraw();
         }
@@ -154,16 +133,18 @@ impl ApplicationHandler for WinitApp {
         match event {
             WindowEvent::CloseRequested => event_loop.exit(),
             WindowEvent::Resized(_size) => {
-                self.needs_surface_recreate = true;
+                self.cantus.render_surface = None;
             }
             WindowEvent::ScaleFactorChanged { scale_factor, .. } => {
                 self.cantus.scale_factor = scale_factor;
-                self.needs_surface_recreate = true;
+                self.cantus.render_surface = None;
             }
             WindowEvent::RedrawRequested => {
-                if let Err(err) = self.render() {
-                    error!("Rendering failed: {err}");
+                if self.cantus.render_surface.is_none() {
+                    self.recreate_surface();
                 }
+                self.cantus.render();
+                self.window().request_redraw();
             }
             WindowEvent::CursorMoved { position, .. } => {
                 self.cantus.interaction.mouse_position = Point::new(position.x, position.y);

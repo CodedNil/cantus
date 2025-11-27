@@ -1,5 +1,4 @@
 use crate::{background::update_color_palettes, config::CONFIG};
-use anyhow::Result;
 use dashmap::DashMap;
 use parking_lot::RwLock;
 use rspotify::{
@@ -362,11 +361,7 @@ fn get_spotify_queue() {
     }
     // Start downloading missing album images
     for url in missing_urls {
-        spawn(move || {
-            if let Err(err) = ensure_image_cached(url.as_str()) {
-                warn!("failed to cache image {url}: {err}");
-            }
-        });
+        spawn(move || ensure_image_cached(url.as_str()));
     }
 
     // Cache artists, and download images
@@ -379,10 +374,8 @@ fn get_spotify_queue() {
                 let artist_image = artist.images.into_iter().min_by_key(|img| img.width);
                 ARTIST_DATA_CACHE.insert(artist.id, artist_image.as_ref().map(|a| a.url.clone()));
                 spawn(move || {
-                    if let Some(artist_image) = artist_image
-                        && let Err(err) = ensure_image_cached(artist_image.url.as_str())
-                    {
-                        warn!("failed to cache image {}: {err}", artist_image.url);
+                    if let Some(artist_image) = artist_image {
+                        ensure_image_cached(artist_image.url.as_str());
                     }
                 });
             }
@@ -411,13 +404,23 @@ fn get_spotify_queue() {
 }
 
 /// Downloads and caches an image from the given URL.
-fn ensure_image_cached(url: &str) -> Result<()> {
+fn ensure_image_cached(url: &str) {
     if IMAGES_CACHE.contains_key(url) {
-        return Ok(());
+        return;
     }
     IMAGES_CACHE.insert(url.to_owned(), None);
-    let mut response = HTTP_CLIENT.get(url).call()?;
-    let dynamic_image = image::load_from_memory(&response.body_mut().read_to_vec()?)?;
+    let mut response = match HTTP_CLIENT.get(url).call() {
+        Ok(response) => response,
+        Err(err) => {
+            warn!("Failed to cache image {url}: {err}");
+            return;
+        }
+    };
+    let Ok(dynamic_image) = image::load_from_memory(&response.body_mut().read_to_vec().unwrap())
+    else {
+        warn!("Failed to cache image {url}: failed to read image");
+        return;
+    };
     // If width or height more thant 64 pixels, resize the image
     let dynamic_image = if dynamic_image.width() > 64 || dynamic_image.height() > 64 {
         dynamic_image.resize_to_fill(64, 64, image::imageops::FilterType::Lanczos3)
@@ -442,10 +445,7 @@ fn ensure_image_cached(url: &str) -> Result<()> {
             },
         }),
     );
-    if let Err(err) = update_color_palettes() {
-        warn!("failed to update color palettes: {err}");
-    }
-    Ok(())
+    update_color_palettes();
 }
 
 fn poll_playlists() {
@@ -498,11 +498,7 @@ fn poll_playlists() {
         .map(|p| p.image_url.clone())
         .collect::<Vec<_>>();
     for url in image_urls {
-        spawn(move || {
-            if let Err(err) = ensure_image_cached(&url) {
-                warn!("failed to cache image {url}: {err}");
-            }
-        });
+        spawn(move || ensure_image_cached(&url));
     }
 
     // Push the data to the global state

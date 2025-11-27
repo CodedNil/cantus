@@ -2,19 +2,18 @@ use crate::{
     interaction::InteractionState,
     render::{FontEngine, ParticlesState, RenderState},
 };
-use anyhow::Result;
-use std::collections::HashMap;
 use tracing_subscriber::EnvFilter;
 use vello::{
-    AaConfig, Renderer, RendererOptions, Scene,
+    AaConfig, AaSupport, Renderer, RendererOptions, Scene,
     peniko::color::palette,
     util::{RenderContext, RenderSurface},
     wgpu::{
         BlendComponent, BlendFactor, BlendOperation, BlendState, CommandEncoderDescriptor,
-        CompositeAlphaMode, InstanceDescriptor, PollType, PresentMode, TextureViewDescriptor,
-        util::TextureBlitterBuilder,
+        CompositeAlphaMode, Instance, InstanceDescriptor, PresentMode, Surface,
+        TextureViewDescriptor, util::TextureBlitterBuilder,
     },
 };
+use wgpu::Backends;
 
 #[cfg(not(any(feature = "wayland", feature = "winit")))]
 compile_error!("Enable at least one of the `wayland` or `winit` features.");
@@ -56,11 +55,10 @@ fn main() {
 struct CantusApp {
     render_context: RenderContext,
     render_surface: Option<RenderSurface<'static>>,
-    render_devices: HashMap<usize, Renderer>,
+    render_device: Option<Renderer>,
     scene: Scene,
     font: FontEngine,
     scale_factor: f64,
-    frame_index: u64,
     render_state: RenderState,
     interaction: InteractionState,
     particles: ParticlesState,
@@ -69,19 +67,18 @@ struct CantusApp {
 impl Default for CantusApp {
     fn default() -> Self {
         let mut render_context = RenderContext::new();
-        render_context.instance = vello::wgpu::Instance::new(&InstanceDescriptor {
-            backends: vello::wgpu::Backends::VULKAN,
+        render_context.instance = Instance::new(&InstanceDescriptor {
+            backends: Backends::PRIMARY,
             ..Default::default()
         });
 
         Self {
             render_context,
             render_surface: None,
-            render_devices: HashMap::new(),
+            render_device: None,
             scene: Scene::new(),
             font: FontEngine::default(),
             scale_factor: 1.0,
-            frame_index: 0,
             render_state: RenderState::default(),
             interaction: InteractionState::default(),
             particles: ParticlesState::default(),
@@ -91,19 +88,20 @@ impl Default for CantusApp {
 impl CantusApp {
     fn configure_render_surface(
         &mut self,
-        surface: vello::wgpu::Surface<'static>,
+        surface: Surface<'static>,
         width: u32,
         height: u32,
         present_mode: PresentMode,
-    ) -> Result<()> {
-        let mut rs = pollster::block_on(self.render_context.create_render_surface(
+    ) {
+        let mut render_surface = pollster::block_on(self.render_context.create_render_surface(
             surface,
             width,
             height,
             present_mode,
-        ))?;
-        let device_handle = &self.render_context.devices[rs.dev_id];
-        let alpha_modes = rs
+        ))
+        .expect("Failed to create render surface");
+        let device_handle = &self.render_context.devices[render_surface.dev_id];
+        let alpha_modes = render_surface
             .surface
             .get_capabilities(device_handle.adapter())
             .alpha_modes;
@@ -115,56 +113,57 @@ impl CantusApp {
         .find(|mode| alpha_modes.contains(mode))
         .or_else(|| alpha_modes.first().copied())
         .unwrap_or(CompositeAlphaMode::Auto);
-        rs.config.alpha_mode = alpha_mode;
+        render_surface.config.alpha_mode = alpha_mode;
         if alpha_mode != CompositeAlphaMode::PostMultiplied {
-            rs.blitter = TextureBlitterBuilder::new(&device_handle.device, rs.config.format)
-                .blend_state(BlendState {
-                    color: BlendComponent {
-                        src_factor: BlendFactor::SrcAlpha,
-                        dst_factor: BlendFactor::Zero,
-                        operation: BlendOperation::Add,
-                    },
-                    alpha: BlendComponent {
-                        src_factor: BlendFactor::One,
-                        dst_factor: BlendFactor::Zero,
-                        operation: BlendOperation::Add,
-                    },
-                })
-                .build();
+            render_surface.blitter =
+                TextureBlitterBuilder::new(&device_handle.device, render_surface.config.format)
+                    .blend_state(BlendState {
+                        color: BlendComponent {
+                            src_factor: BlendFactor::SrcAlpha,
+                            dst_factor: BlendFactor::Zero,
+                            operation: BlendOperation::Add,
+                        },
+                        alpha: BlendComponent {
+                            src_factor: BlendFactor::One,
+                            dst_factor: BlendFactor::Zero,
+                            operation: BlendOperation::Add,
+                        },
+                    })
+                    .build();
         }
-        rs.surface.configure(&device_handle.device, &rs.config);
-        self.render_surface = Some(rs);
-        Ok(())
+        render_surface
+            .surface
+            .configure(&device_handle.device, &render_surface.config);
+        self.render_device = Some(
+            Renderer::new(
+                &self.render_context.devices[render_surface.dev_id].device,
+                RendererOptions {
+                    use_cpu: false,
+                    antialiasing_support: AaSupport::area_only(),
+                    num_init_threads: None,
+                    pipeline_cache: None,
+                },
+            )
+            .expect("Failed to create renderer"),
+        );
+        self.render_surface = Some(render_surface);
     }
 
-    fn render<G>(&mut self, on_surface_lost: G) -> Result<bool>
-    where
-        G: FnOnce(),
-    {
-        self.frame_index = self.frame_index.wrapping_add(1);
-
-        let Some(render_surface) = self.render_surface.take() else {
-            return Ok(false);
-        };
-
-        let dev_id = render_surface.dev_id;
-        if !self.render_devices.contains_key(&dev_id) {
-            self.render_devices.insert(
-                dev_id,
-                Renderer::new(
-                    &self.render_context.devices[dev_id].device,
-                    RendererOptions::default(),
-                )?,
-            );
+    /// Try to render out the app
+    fn render(&mut self) {
+        if self.render_surface.is_none() {
+            return;
         }
 
         self.scene.reset();
         self.create_scene();
 
+        let dev_id = self.render_surface.as_ref().unwrap().dev_id;
         let handle = &self.render_context.devices[dev_id];
-        self.render_devices
-            .get_mut(&dev_id)
-            .expect("render device must exist")
+        let render_surface = self.render_surface.as_mut().unwrap();
+        self.render_device
+            .as_mut()
+            .unwrap()
             .render_to_texture(
                 &handle.device,
                 &handle.queue,
@@ -176,37 +175,36 @@ impl CantusApp {
                     height: render_surface.config.height,
                     antialiasing_method: AaConfig::Area,
                 },
-            )?;
+            )
+            .expect("failed to render to surface");
 
-        let Ok(acquired) = render_surface.surface.get_current_texture() else {
-            self.render_surface = None;
-            on_surface_lost();
-            return Ok(false);
+        let Ok(surface_texture) = render_surface.surface.get_current_texture() else {
+            render_surface.surface.configure(
+                &self.render_context.devices[render_surface.dev_id].device,
+                &render_surface.config,
+            );
+            return;
         };
 
         let mut encoder = handle
             .device
             .create_command_encoder(&CommandEncoderDescriptor {
-                label: Some("Cantus blit"),
+                label: Some("Surface Blit"),
             });
         render_surface.blitter.copy(
             &handle.device,
             &mut encoder,
             &render_surface.target_view,
-            &acquired
+            &surface_texture
                 .texture
                 .create_view(&TextureViewDescriptor::default()),
         );
 
         handle.queue.submit([encoder.finish()]);
-        acquired.present();
-        handle.device.poll(PollType::Poll)?;
-
-        self.render_surface = Some(render_surface);
-        Ok(true)
+        surface_texture.present();
     }
 }
 
 fn lerpf64(t: f64, v0: f64, v1: f64) -> f64 {
-    (1.0 - t) * v0 + t * v1
+    (1.0 - t).mul_add(v0, t * v1)
 }
