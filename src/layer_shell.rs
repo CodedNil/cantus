@@ -1,5 +1,4 @@
 use crate::{CantusApp, PANEL_HEIGHT_EXTENSION, config::CONFIG, interaction::InteractionState};
-use anyhow::Result;
 use raw_window_handle::{
     RawDisplayHandle, RawWindowHandle, WaylandDisplayHandle, WaylandWindowHandle,
 };
@@ -206,20 +205,20 @@ impl LayerShellApp {
         self.frame_callback = Some(surface.frame(qhandle, ()));
     }
 
-    fn ensure_surface(&mut self, width: f64, height: f64) -> Result<()> {
+    fn ensure_surface(&mut self, width: f64, height: f64) {
         if width == 0.0 || height == 0.0 || !self.is_configured {
-            return Ok(());
+            return;
         }
 
         let recreate = self.cantus.render_surface.as_ref().is_none_or(|surface| {
             surface.config.width != width as u32 || surface.config.height != height as u32
         });
         if !recreate {
-            return Ok(());
+            return;
         }
 
         let Some(surface_ptr) = self.surface_ptr else {
-            return Ok(());
+            return;
         };
         let target = SurfaceTargetUnsafe::RawHandle {
             raw_display_handle: RawDisplayHandle::Wayland(WaylandDisplayHandle::new(
@@ -232,15 +231,15 @@ impl LayerShellApp {
                 .render_context
                 .instance
                 .create_surface_unsafe(target)
-        }?;
+        }
+        .expect("Failed to create surface");
 
         self.cantus.configure_render_surface(
             surface,
             width as u32,
             height as u32,
             PresentMode::AutoVsync,
-        )?;
-        Ok(())
+        );
     }
 
     fn refresh_surface(&mut self, qhandle: &QueueHandle<Self>) {
@@ -250,15 +249,8 @@ impl LayerShellApp {
         let buffer_width = (width * scale).round();
         let buffer_height = (total_height * scale).round();
 
-        if let Err(err) = self.ensure_surface(buffer_width, buffer_height) {
-            error!("Failed to prepare render surface: {err}");
-            self.should_exit = true;
-            return;
-        }
-
-        if let Err(err) = self.try_render_frame(qhandle) {
-            error!("Rendering step failed: {err}");
-        }
+        self.ensure_surface(buffer_width, buffer_height);
+        self.try_render_frame(qhandle);
     }
 
     fn try_select_output(&mut self) -> bool {
@@ -284,14 +276,14 @@ impl LayerShellApp {
         true
     }
 
-    fn try_render_frame(&mut self, qhandle: &QueueHandle<Self>) -> Result<()> {
+    fn try_render_frame(&mut self, qhandle: &QueueHandle<Self>) {
         if self.cantus.render_surface.is_none() {
             let scale = self.cantus.scale_factor;
             let width = CONFIG.width;
             let total_height = CONFIG.height + PANEL_HEIGHT_EXTENSION;
             let buffer_width = (width * scale).round();
             let buffer_height = (total_height * scale).round();
-            self.ensure_surface(buffer_width, buffer_height)?;
+            self.ensure_surface(buffer_width, buffer_height);
         }
 
         self.update_input_region(qhandle);
@@ -301,7 +293,6 @@ impl LayerShellApp {
         if let Some(surface) = &self.wl_surface {
             surface.commit();
         }
-        Ok(())
     }
 
     fn update_scale_and_viewport(&self) {
@@ -427,11 +418,9 @@ impl Dispatch<WlCallback, ()> for LayerShellApp {
         _conn: &Connection,
         qhandle: &QueueHandle<Self>,
     ) {
-        if matches!(event, wl_callback::Event::Done { .. })
-            && state.frame_callback.take().is_some()
-            && let Err(err) = state.try_render_frame(qhandle)
+        if matches!(event, wl_callback::Event::Done { .. }) && state.frame_callback.take().is_some()
         {
-            error!("Rendering failed: {err}");
+            state.try_render_frame(qhandle);
         }
     }
 }

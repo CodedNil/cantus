@@ -3,7 +3,6 @@ use crate::lerpf64;
 use crate::spotify::{
     ALBUM_DATA_CACHE, ARTIST_DATA_CACHE, AlbumData, IMAGES_CACHE, PLAYBACK_STATE,
 };
-use anyhow::Result;
 use auto_palette::Palette;
 use image::imageops::colorops;
 use image::{GrayImage, LumaA, RgbaImage, imageops};
@@ -55,7 +54,7 @@ static BRUSHES: LazyLock<[GrayImage; 5]> = LazyLock::new(|| {
 });
 
 /// Downloads and caches an image from the given URL.
-pub fn update_color_palettes() -> Result<()> {
+pub fn update_color_palettes() {
     let state = PLAYBACK_STATE.read();
     for track in &state.queue {
         if ALBUM_DATA_CACHE.contains_key(&track.album_id) {
@@ -80,15 +79,20 @@ pub fn update_color_palettes() -> Result<()> {
         let album_image =
             RgbaImage::from_raw(width, height, image.image.data.data().to_vec()).unwrap();
 
-        let mut swatches = {
+        let get_swatches = |img_data| {
             let palette: Palette<f64> = Palette::builder()
                 .algorithm(auto_palette::Algorithm::SLIC)
                 .filter(ChromaFilter { threshold: 30 })
-                .build(&auto_palette::ImageData::new(width, height, &album_image)?)?;
+                .build(&img_data)
+                .unwrap();
             palette
                 .find_swatches_with_theme(NUM_SWATCHES, auto_palette::Theme::Light)
-                .or_else(|_| palette.find_swatches(NUM_SWATCHES))?
+                .or_else(|_| palette.find_swatches(NUM_SWATCHES))
+                .unwrap()
         };
+
+        let mut swatches =
+            get_swatches(auto_palette::ImageData::new(width, height, &album_image).unwrap());
         if swatches.len() < NUM_SWATCHES
             && let Some(artist_image_url) = artist_image_url_ref.as_ref()
         {
@@ -116,17 +120,9 @@ pub fn update_color_palettes() -> Result<()> {
             );
             image::imageops::overlay(&mut new_img, &artist_img_resized, i64::from(width), 0);
 
-            let palette: Palette<f64> = Palette::builder()
-                .algorithm(auto_palette::Algorithm::SLIC)
-                .filter(ChromaFilter { threshold: 30 })
-                .build(&auto_palette::ImageData::new(
-                    new_img.width(),
-                    new_img.height(),
-                    &new_img,
-                )?)?;
-            swatches = palette
-                .find_swatches_with_theme(NUM_SWATCHES, auto_palette::Theme::Light)
-                .or_else(|_| palette.find_swatches(NUM_SWATCHES))?;
+            swatches = get_swatches(
+                auto_palette::ImageData::new(new_img.width(), new_img.height(), &new_img).unwrap(),
+            );
         }
 
         let total_ratio_sum: f64 = swatches.iter().map(auto_palette::Swatch::ratio).sum();
@@ -156,8 +152,6 @@ pub fn update_color_palettes() -> Result<()> {
         );
     }
     drop(state);
-
-    Ok(())
 }
 
 /// A filter that filters chroma values.

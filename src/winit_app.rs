@@ -1,5 +1,4 @@
 use crate::{CantusApp, PANEL_HEIGHT_EXTENSION, config::CONFIG, interaction::InteractionState};
-use anyhow::Result;
 use raw_window_handle::{HasDisplayHandle, HasWindowHandle};
 use tracing::error;
 use vello::{
@@ -39,7 +38,7 @@ impl WinitApp {
         self.window.as_ref().expect("window not created")
     }
 
-    fn recreate_surface(&mut self) -> Result<()> {
+    fn recreate_surface(&mut self) {
         let (raw_display_handle, raw_window_handle, size) = {
             let window = self.window();
             let display_handle = window
@@ -55,7 +54,7 @@ impl WinitApp {
         };
 
         if size.width == 0 || size.height == 0 {
-            return Ok(());
+            return;
         }
 
         self.cantus.render_surface = None;
@@ -68,15 +67,15 @@ impl WinitApp {
             self.cantus
                 .render_context
                 .instance
-                .create_surface_unsafe(target)?
+                .create_surface_unsafe(target)
+                .expect("Failed to create surface")
         };
         self.cantus.configure_render_surface(
             surface,
             size.width,
             size.height,
             PresentMode::AutoVsync,
-        )?;
-        Ok(())
+        );
     }
 }
 
@@ -115,7 +114,7 @@ impl ApplicationHandler for WinitApp {
             error!("Failed to set inner size");
         }
         self.window = Some(window);
-        let _ = self.recreate_surface();
+        self.recreate_surface();
         if let Some(window) = &self.window {
             window.request_redraw();
         }
@@ -141,11 +140,8 @@ impl ApplicationHandler for WinitApp {
                 self.cantus.render_surface = None;
             }
             WindowEvent::RedrawRequested => {
-                if self.cantus.render_surface.is_none()
-                    && let Err(err) = self.recreate_surface()
-                {
-                    error!("Recreate surface failed: {err}");
-                    return;
+                if self.cantus.render_surface.is_none() {
+                    self.recreate_surface();
                 }
                 self.cantus.render();
                 self.window().request_redraw();

@@ -2,8 +2,6 @@ use crate::{
     interaction::InteractionState,
     render::{FontEngine, ParticlesState, RenderState},
 };
-use anyhow::Result;
-use std::collections::HashMap;
 use tracing_subscriber::EnvFilter;
 use vello::{
     AaConfig, AaSupport, Renderer, RendererOptions, Scene,
@@ -57,7 +55,7 @@ fn main() {
 struct CantusApp {
     render_context: RenderContext,
     render_surface: Option<RenderSurface<'static>>,
-    render_devices: HashMap<usize, Renderer>,
+    render_device: Option<Renderer>,
     scene: Scene,
     font: FontEngine,
     scale_factor: f64,
@@ -77,7 +75,7 @@ impl Default for CantusApp {
         Self {
             render_context,
             render_surface: None,
-            render_devices: HashMap::new(),
+            render_device: None,
             scene: Scene::new(),
             font: FontEngine::default(),
             scale_factor: 1.0,
@@ -94,15 +92,16 @@ impl CantusApp {
         width: u32,
         height: u32,
         present_mode: PresentMode,
-    ) -> Result<()> {
-        let mut rs = pollster::block_on(self.render_context.create_render_surface(
+    ) {
+        let mut render_surface = pollster::block_on(self.render_context.create_render_surface(
             surface,
             width,
             height,
             present_mode,
-        ))?;
-        let device_handle = &self.render_context.devices[rs.dev_id];
-        let alpha_modes = rs
+        ))
+        .expect("Failed to create render surface");
+        let device_handle = &self.render_context.devices[render_surface.dev_id];
+        let alpha_modes = render_surface
             .surface
             .get_capabilities(device_handle.adapter())
             .alpha_modes;
@@ -114,40 +113,40 @@ impl CantusApp {
         .find(|mode| alpha_modes.contains(mode))
         .or_else(|| alpha_modes.first().copied())
         .unwrap_or(CompositeAlphaMode::Auto);
-        rs.config.alpha_mode = alpha_mode;
+        render_surface.config.alpha_mode = alpha_mode;
         if alpha_mode != CompositeAlphaMode::PostMultiplied {
-            rs.blitter = TextureBlitterBuilder::new(&device_handle.device, rs.config.format)
-                .blend_state(BlendState {
-                    color: BlendComponent {
-                        src_factor: BlendFactor::SrcAlpha,
-                        dst_factor: BlendFactor::Zero,
-                        operation: BlendOperation::Add,
-                    },
-                    alpha: BlendComponent {
-                        src_factor: BlendFactor::One,
-                        dst_factor: BlendFactor::Zero,
-                        operation: BlendOperation::Add,
-                    },
-                })
-                .build();
+            render_surface.blitter =
+                TextureBlitterBuilder::new(&device_handle.device, render_surface.config.format)
+                    .blend_state(BlendState {
+                        color: BlendComponent {
+                            src_factor: BlendFactor::SrcAlpha,
+                            dst_factor: BlendFactor::Zero,
+                            operation: BlendOperation::Add,
+                        },
+                        alpha: BlendComponent {
+                            src_factor: BlendFactor::One,
+                            dst_factor: BlendFactor::Zero,
+                            operation: BlendOperation::Add,
+                        },
+                    })
+                    .build();
         }
-        rs.surface.configure(&device_handle.device, &rs.config);
-        if !self.render_devices.contains_key(&rs.dev_id) {
-            self.render_devices.insert(
-                rs.dev_id,
-                Renderer::new(
-                    &self.render_context.devices[rs.dev_id].device,
-                    RendererOptions {
-                        use_cpu: false,
-                        antialiasing_support: AaSupport::area_only(),
-                        num_init_threads: None,
-                        pipeline_cache: None,
-                    },
-                )?,
-            );
-        }
-        self.render_surface = Some(rs);
-        Ok(())
+        render_surface
+            .surface
+            .configure(&device_handle.device, &render_surface.config);
+        self.render_device = Some(
+            Renderer::new(
+                &self.render_context.devices[render_surface.dev_id].device,
+                RendererOptions {
+                    use_cpu: false,
+                    antialiasing_support: AaSupport::area_only(),
+                    num_init_threads: None,
+                    pipeline_cache: None,
+                },
+            )
+            .expect("Failed to create renderer"),
+        );
+        self.render_surface = Some(render_surface);
     }
 
     /// Try to render out the app
@@ -162,8 +161,8 @@ impl CantusApp {
         let dev_id = self.render_surface.as_ref().unwrap().dev_id;
         let handle = &self.render_context.devices[dev_id];
         let render_surface = self.render_surface.as_mut().unwrap();
-        self.render_devices
-            .get_mut(&dev_id)
+        self.render_device
+            .as_mut()
             .unwrap()
             .render_to_texture(
                 &handle.device,
@@ -207,5 +206,5 @@ impl CantusApp {
 }
 
 fn lerpf64(t: f64, v0: f64, v1: f64) -> f64 {
-    (1.0 - t) * v0 + t * v1
+    (1.0 - t).mul_add(v0, t * v1)
 }
