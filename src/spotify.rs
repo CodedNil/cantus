@@ -221,7 +221,7 @@ pub fn init() {
         loop {
             get_spotify_playback();
             get_spotify_queue();
-            sleep(Duration::from_millis(100));
+            sleep(Duration::from_millis(500));
         }
     });
 }
@@ -246,9 +246,15 @@ fn get_spotify_playback() {
         Ok(Some(playback)) => playback,
         Ok(None) => {
             // Spotify is not playing anything
+            update_playback_state(|state| {
+                state.last_grabbed_playback = Instant::now();
+            });
             return;
         }
         Err(err) => {
+            update_playback_state(|state| {
+                state.last_grabbed_playback = Instant::now();
+            });
             error!("Failed to fetch current playback: {err}");
             return;
         }
@@ -313,6 +319,9 @@ fn get_spotify_queue() {
     let queue = match spotify_client.current_user_queue() {
         Ok(queue) => queue,
         Err(err) => {
+            update_playback_state(|state| {
+                state.last_grabbed_queue = Instant::now();
+            });
             error!("Failed to fetch current queue: {err}");
             return;
         }
