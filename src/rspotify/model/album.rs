@@ -9,5 +9,6 @@ pub struct Album {
     pub id: AlbumId,
     pub name: String,
     pub artists: Vec<Artist>,
+    #[serde(default)]
     pub images: Vec<Image>,
 }

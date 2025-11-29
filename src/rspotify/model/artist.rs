@@ -8,6 +8,7 @@ pub type ArtistId = ArrayString<22>;
 pub struct Artist {
     pub id: ArtistId,
     pub name: String,
+    #[serde(default)]
     pub images: Vec<Image>,
 }
 

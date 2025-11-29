@@ -4,6 +4,6 @@ use serde::Deserialize;
 #[derive(Deserialize)]
 pub struct Image {
     pub url: String,
-    pub height: Option<u32>,
     pub width: Option<u32>,
+    pub height: Option<u32>,
 }

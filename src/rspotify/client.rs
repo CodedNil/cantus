@@ -9,10 +9,9 @@ use crate::rspotify::{
         track::TrackId,
     },
 };
-use base64::{Engine as _, engine::general_purpose};
+use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
 use chrono::Utc;
 use parking_lot::RwLock;
-use serde::Deserialize;
 use serde_json::{Map, Value, json};
 use sha2::{Digest, Sha256};
 use std::fmt::Write as _;
@@ -25,11 +24,6 @@ use std::{
 use tracing::error;
 use ureq::Agent;
 use url::Url;
-
-/// Converts a JSON response from Spotify into its model.
-fn convert_result<'a, T: Deserialize<'a>>(input: &'a str) -> ClientResult<T> {
-    serde_json::from_str::<T>(input).map_err(Into::into)
-}
 
 /// Append device ID to an API path.
 fn append_device_id(path: &str, device_id: Option<&str>) -> String {
@@ -47,11 +41,6 @@ fn append_device_id(path: &str, device_id: Option<&str>) -> String {
 /// Returns the absolute URL for an endpoint in the API.
 pub fn api_url(url: &str) -> String {
     format!("https://api.spotify.com/v1/{url}")
-}
-
-/// Returns the absolute URL for an authentication step in the API.
-pub fn auth_url(url: &str) -> String {
-    format!("https://accounts.spotify.com/{url}")
 }
 
 /// The [Authorization Code Flow with Proof Key for Code Exchange
@@ -302,7 +291,7 @@ impl SpotifyClient {
         let params = [("limit", limit.as_deref()), ("offset", offset.as_deref())];
 
         let result = self.api_get("me/playlists", &params)?;
-        convert_result(&result)
+        serde_json::from_str(&result).map_err(Into::into)
     }
 
     /// Adds items to a playlist.
@@ -330,7 +319,7 @@ impl SpotifyClient {
 
         let url = format!("playlists/{playlist_id}/tracks");
         let result = self.api_post(&url, &params)?;
-        convert_result(&result)
+        serde_json::from_str(&result).map_err(Into::into)
     }
 
     /// Removes all occurrences of the given items from the given playlist.
@@ -363,7 +352,7 @@ impl SpotifyClient {
 
         let url = format!("playlists/{playlist_id}/tracks");
         let result = self.api_delete(&url, &params)?;
-        convert_result(&result)
+        serde_json::from_str(&result).map_err(Into::into)
     }
 
     /// Remove one or more tracks from the current user's "Your Music" library.
@@ -392,7 +381,7 @@ impl SpotifyClient {
     ) -> ClientResult<Vec<bool>> {
         let url = format!("me/tracks/contains/?ids={}", track_ids.join(","));
         let result = self.api_get(&url, &[])?;
-        convert_result(&result)
+        serde_json::from_str(&result).map_err(Into::into)
     }
 
     /// Save one or more tracks to the current user's "Your Music" library.
@@ -422,7 +411,7 @@ impl SpotifyClient {
         if result.is_empty() {
             Ok(None)
         } else {
-            convert_result(&result)
+            serde_json::from_str(&result).map_err(Into::into)
         }
     }
 
@@ -431,7 +420,7 @@ impl SpotifyClient {
     /// [Reference](https://developer.spotify.com/documentation/web-api/reference/#/operations/get-queue)
     pub fn current_user_queue(&self) -> ClientResult<CurrentUserQueue> {
         let result = self.api_get("me/player/queue", &[])?;
-        convert_result(&result)
+        serde_json::from_str(&result).map_err(Into::into)
     }
 
     /// Pause a User’s Playback.
@@ -624,24 +613,6 @@ impl SpotifyClient {
         Ok(response.into_body().read_to_string()?)
     }
 
-    /// Convenience method to send POST requests related to the authentication process.
-    pub fn auth_post(
-        &self,
-        url: &str,
-        headers: Option<&HashMap<String, String>>,
-        payload: &[(&str, &str)],
-    ) -> ClientResult<String> {
-        let url = auth_url(url);
-        let mut request = self.http.post(url);
-        if let Some(headers) = headers {
-            for (key, val) in headers {
-                request = request.header(key, val);
-            }
-        }
-        let response = request.send_json(payload)?;
-        Ok(response.into_body().read_to_string()?)
-    }
-
     /// Updates the cache file at the internal cache path.
     ///
     /// This should be used whenever it's possible to, even if the cached token
@@ -656,13 +627,13 @@ impl SpotifyClient {
     }
 
     /// Sends a request to Spotify for an access token.
-    pub fn fetch_access_token(
-        &self,
-        payload: &[(&str, &str)],
-        headers: Option<&HashMap<String, String>>,
-    ) -> ClientResult<Token> {
-        let response = self.auth_post("api/token", headers, payload)?;
-
+    pub fn fetch_access_token(&self, payload: &[(&str, &str)]) -> ClientResult<Token> {
+        let response = self
+            .http
+            .post("https://accounts.spotify.com/api/token".to_owned())
+            .send_form(payload.to_owned())?
+            .into_body()
+            .read_to_string()?;
         let mut tok = serde_json::from_str::<Token>(&response)?;
         tok.expires_at = Utc::now().checked_add_signed(tok.expires_in);
         Ok(tok)
@@ -679,7 +650,9 @@ impl SpotifyClient {
         let url = format!("artists/?ids={ids}");
         let result = self.api_get(&url, &[])?;
 
-        convert_result::<Artists>(&result).map(|x| x.artists)
+        serde_json::from_str::<Artists>(&result)
+            .map_err(Into::into)
+            .map(|x| x.artists)
     }
 
     /// Get full details of the items of a playlist owned by a user.
@@ -712,7 +685,7 @@ impl SpotifyClient {
 
         let url = format!("playlists/{playlist_id}/tracks");
         let result = self.api_get(&url, &params)?;
-        convert_result(&result)
+        serde_json::from_str(&result).map_err(Into::into)
     }
 
     pub const fn get_config(&self) -> &Config {
@@ -725,14 +698,11 @@ impl SpotifyClient {
                 refresh_token: Some(refresh_token),
                 ..
             }) => {
-                let token = self.fetch_access_token(
-                    &[
-                        ("grant_type", "refresh_token"),
-                        ("refresh_token", refresh_token),
-                        ("client_id", &self.creds.id),
-                    ],
-                    None,
-                )?;
+                let token = self.fetch_access_token(&[
+                    ("grant_type", "refresh_token"),
+                    ("refresh_token", refresh_token),
+                    ("client_id", &self.creds.id),
+                ])?;
 
                 if let Some(callback_fn) = &*self.get_config().token_callback_fn.clone() {
                     callback_fn.0(token.clone())?;
@@ -758,16 +728,13 @@ impl SpotifyClient {
             yourself.",
         );
 
-        let token = self.fetch_access_token(
-            &[
-                ("client_id", self.creds.id.as_str()),
-                ("grant_type", "authorization_code"),
-                ("code", code),
-                ("redirect_uri", &self.oauth.redirect_uri),
-                ("code_verifier", verifier),
-            ],
-            None,
-        )?;
+        let token = self.fetch_access_token(&[
+            ("client_id", self.creds.id.as_str()),
+            ("grant_type", "authorization_code"),
+            ("code", code),
+            ("redirect_uri", &self.oauth.redirect_uri),
+            ("code_verifier", verifier),
+        ])?;
 
         if let Some(callback_fn) = &*self.get_config().token_callback_fn.clone() {
             callback_fn.0(token.clone())?;
@@ -804,7 +771,7 @@ impl SpotifyClient {
         hasher.update(verifier.as_bytes());
         let challenge = hasher.finalize();
 
-        let challenge = general_purpose::URL_SAFE_NO_PAD.encode(challenge);
+        let challenge = URL_SAFE_NO_PAD.encode(challenge);
 
         (verifier, challenge)
     }
@@ -834,7 +801,7 @@ impl SpotifyClient {
         self.verifier = Some(verifier);
 
         let parsed = Url::parse_with_params(
-            &auth_url("authorize"),
+            "https://accounts.spotify.com/authorize",
             &[
                 ("client_id", self.creds.id.as_str()),
                 ("response_type", "code"),
