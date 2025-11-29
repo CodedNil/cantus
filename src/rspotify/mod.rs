@@ -149,7 +149,7 @@ mod http;
 pub mod model;
 mod util;
 
-use crate::rspotify::model::{Id, auth::Token};
+use crate::rspotify::model::auth::Token;
 use std::{collections::HashSet, fmt, net::SocketAddr, path::PathBuf, sync::Arc};
 use thiserror::Error;
 
@@ -310,13 +310,6 @@ pub fn generate_random_string(length: usize, alphabet: &[u8]) -> String {
         .collect()
 }
 
-#[inline]
-pub fn join_ids<'a, T: Id + 'a>(ids: impl IntoIterator<Item = T>) -> String {
-    let ids = ids.into_iter().collect::<Vec<_>>();
-    ids.iter().map(Id::id).collect::<Vec<_>>().join(",")
-}
-
-#[inline]
 pub fn join_scopes(scopes: &HashSet<String>) -> String {
     scopes
         .iter()

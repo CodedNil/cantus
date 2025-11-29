@@ -1,4 +1,3 @@
-use super::DeviceType;
 use serde::{Deserialize, Serialize};
 
 /// Device object
@@ -9,13 +8,5 @@ pub struct Device {
     pub is_private_session: bool,
     pub is_restricted: bool,
     pub name: String,
-    #[serde(rename = "type")]
-    pub _type: DeviceType,
     pub volume_percent: Option<u32>,
-}
-
-/// Intermediate device payload object
-#[derive(Deserialize)]
-pub struct DevicePayload {
-    pub devices: Vec<Device>,
 }

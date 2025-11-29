@@ -369,11 +369,11 @@ impl CantusApp {
         let crop_right = hit_end - (start_x + width);
         self.interaction
             .track_hitboxes
-            .push((track.id.clone(), hitbox, track_render.hitbox_range));
+            .push((track.id, hitbox, track_render.hitbox_range));
         // If dragging, set the drag target to this track, and the position within the track
         if self.interaction.dragging && track_render.is_current {
             let position_within_track = (start_x + dark_width - hit_start) / full_width;
-            self.interaction.drag_track = Some((track.id.clone(), position_within_track));
+            self.interaction.drag_track = Some((track.id, position_within_track));
         }
 
         let (Some(album_image_ref), Some(track_data_ref)) = (

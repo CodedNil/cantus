@@ -28,11 +28,11 @@ impl HttpClient {
     ) -> Result<String, Error> {
         let mut request = self.agent.get(url);
         if let Some(headers) = headers {
-            for (key, val) in headers.iter() {
+            for (key, val) in headers {
                 request = request.header(key, val);
             }
         }
-        for (key, val) in payload.iter() {
+        for (key, val) in payload {
             request = request.query(key, val);
         }
         match request.call() {
@@ -49,7 +49,7 @@ impl HttpClient {
     ) -> Result<String, Error> {
         let mut request = self.agent.post(url);
         if let Some(headers) = headers {
-            for (key, val) in headers.iter() {
+            for (key, val) in headers {
                 request = request.header(key, val);
             }
         }
@@ -67,7 +67,7 @@ impl HttpClient {
     ) -> Result<String, Error> {
         let mut request = self.agent.post(url);
         if let Some(headers) = headers {
-            for (key, val) in headers.iter() {
+            for (key, val) in headers {
                 request = request.header(key, val);
             }
         }
@@ -89,7 +89,7 @@ impl HttpClient {
     ) -> Result<String, Error> {
         let mut request = self.agent.put(url);
         if let Some(headers) = headers {
-            for (key, val) in headers.iter() {
+            for (key, val) in headers {
                 request = request.header(key, val);
             }
         }
@@ -107,7 +107,7 @@ impl HttpClient {
     ) -> Result<String, Error> {
         let mut request = self.agent.delete(url).force_send_body();
         if let Some(headers) = headers {
-            for (key, val) in headers.iter() {
+            for (key, val) in headers {
                 request = request.header(key, val);
             }
         }

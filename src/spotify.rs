@@ -1,9 +1,7 @@
 use crate::rspotify::{
     Config, Credentials, OAuth,
     auth_code_pkce::SpotifyClient,
-    model::{
-        AdditionalType, AlbumId, ArtistId, PlayableItem, PlaylistId, SimplifiedPlaylist, TrackId,
-    },
+    model::{AlbumId, ArtistId, PlaylistId, SimplifiedPlaylist, TrackId},
 };
 use crate::{background::update_color_palettes, config::CONFIG};
 use dashmap::DashMap;
@@ -41,9 +39,9 @@ pub static PLAYBACK_STATE: LazyLock<RwLock<PlaybackState>> = LazyLock::new(|| {
 });
 pub static IMAGES_CACHE: LazyLock<DashMap<String, Option<ImageBrush>>> =
     LazyLock::new(DashMap::new);
-pub static ALBUM_DATA_CACHE: LazyLock<DashMap<AlbumId<'static>, Option<AlbumData>>> =
+pub static ALBUM_DATA_CACHE: LazyLock<DashMap<AlbumId, Option<AlbumData>>> =
     LazyLock::new(DashMap::new);
-pub static ARTIST_DATA_CACHE: LazyLock<DashMap<ArtistId<'static>, Option<String>>> =
+pub static ARTIST_DATA_CACHE: LazyLock<DashMap<ArtistId, Option<String>>> =
     LazyLock::new(DashMap::new);
 
 pub const RATING_PLAYLISTS: [&str; 10] = [
@@ -71,11 +69,11 @@ pub struct PlaybackState {
 }
 
 pub struct Track {
-    pub id: TrackId<'static>,
+    pub id: TrackId,
     pub title: String,
-    pub artist_id: ArtistId<'static>,
+    pub artist_id: ArtistId,
     pub artist_name: String,
-    pub album_id: AlbumId<'static>,
+    pub album_id: AlbumId,
     pub image_url: String,
     pub milliseconds: u32,
 }
@@ -88,10 +86,10 @@ pub struct AlbumData {
 }
 
 pub struct Playlist {
-    pub id: PlaylistId<'static>,
+    pub id: PlaylistId,
     pub name: String,
     pub image_url: String,
-    pub tracks: HashSet<TrackId<'static>>,
+    pub tracks: HashSet<TrackId>,
     pub tracks_total: u32,
     snapshot_id: String,
 }
@@ -105,7 +103,7 @@ where
     update(&mut state);
 }
 
-type PlaylistCache = HashMap<PlaylistId<'static>, (String, HashSet<TrackId<'static>>)>;
+type PlaylistCache = HashMap<PlaylistId, (String, HashSet<TrackId>)>;
 
 fn load_cached_playlist_tracks() -> PlaylistCache {
     let cache_path = dirs::config_dir()
@@ -136,10 +134,10 @@ fn persist_playlist_cache() {
         .values()
         .map(|playlist| {
             (
-                playlist.id.clone(),
+                playlist.id,
                 (
                     playlist.snapshot_id.clone(),
-                    playlist.tracks.iter().cloned().collect(),
+                    playlist.tracks.iter().copied().collect(),
                 ),
             )
         })
@@ -236,11 +234,7 @@ fn get_spotify_playback() {
     }
 
     // Fetch current playback and queue concurrently
-    let current_playback = match SPOTIFY_CLIENT
-        .get()
-        .unwrap()
-        .current_playback(None, None::<Vec<&AdditionalType>>)
-    {
+    let current_playback = match SPOTIFY_CLIENT.get().unwrap().current_playback() {
         Ok(Some(playback)) => playback,
         Ok(None) => {
             // Spotify is not playing anything
@@ -269,9 +263,7 @@ fn get_spotify_playback() {
         }
 
         // Song has changed, lets update to the new index and force a queue refresh
-        if let Some(item) = current_playback.item
-            && let PlayableItem::Track(track) = item
-        {
+        if let Some(track) = current_playback.item {
             let index_found = state.queue.iter().position(|t| t.title == track.name);
             if let Some(new_index) = index_found
                 && state.queue_index != new_index
@@ -331,26 +323,23 @@ fn get_spotify_queue() {
     };
     let new_queue: Vec<Track> = std::iter::once(currently_playing)
         .chain(queue.queue)
-        .filter_map(|item| match item {
-            PlayableItem::Track(track) => Some({
-                let artist = track.artists.first().unwrap();
-                Track {
-                    id: track.id.unwrap(),
-                    title: track.name,
-                    artist_id: artist.id.clone().unwrap(),
-                    artist_name: artist.name.clone(),
-                    album_id: track.album.id.unwrap(),
-                    image_url: track
-                        .album
-                        .images
-                        .into_iter()
-                        .min_by_key(|img| img.width)
-                        .map(|img| img.url)
-                        .unwrap(),
-                    milliseconds: track.duration.num_milliseconds() as u32,
-                }
-            }),
-            PlayableItem::Episode(_) | PlayableItem::Unknown(_) => None,
+        .map(|track| {
+            let artist = track.artists.first().unwrap();
+            Track {
+                id: track.id,
+                title: track.name,
+                artist_id: artist.id.unwrap(),
+                artist_name: artist.name.clone(),
+                album_id: track.album.id.unwrap(),
+                image_url: track
+                    .album
+                    .images
+                    .into_iter()
+                    .min_by_key(|img| img.width)
+                    .map(|img| img.url)
+                    .unwrap(),
+                milliseconds: track.duration.num_milliseconds() as u32,
+            }
         })
         .collect();
     let current_title = new_queue.first().unwrap().title.clone();
@@ -363,7 +352,7 @@ fn get_spotify_queue() {
             missing_urls.insert(track.image_url.clone());
         }
         if !ARTIST_DATA_CACHE.contains_key(&track.artist_id) {
-            missing_artists.insert(track.artist_id.clone());
+            missing_artists.insert(track.artist_id);
         }
     }
     // Start downloading missing album images
@@ -483,7 +472,7 @@ fn poll_playlists() {
                 .remove(&playlist.id)
                 .unwrap_or_default();
             Playlist {
-                id: playlist.id.clone(),
+                id: playlist.id,
                 name: playlist.name,
                 image_url: playlist
                     .images
@@ -529,7 +518,7 @@ fn refresh_playlists() {
         state
             .playlists
             .values()
-            .map(|playlist| (playlist.id.clone(), playlist.snapshot_id.clone()))
+            .map(|playlist| (playlist.id, playlist.snapshot_id.clone()))
             .collect::<HashMap<_, _>>()
     };
 
@@ -556,9 +545,8 @@ fn refresh_playlists() {
         let mut pages = Vec::new();
         for page in 0..num_pages {
             match spotify_client.playlist_items_manual(
-                playlist.id.clone(),
+                &playlist.id,
                 Some("href,limit,offset,total,items(is_local,track(id))"),
-                None,
                 Some(chunk_size),
                 Some((page as u32) * chunk_size),
             ) {
@@ -576,12 +564,10 @@ fn refresh_playlists() {
             .into_iter()
             .flat_map(|page| page.items)
             .filter_map(|item| {
-                let Some(PlayableItem::Unknown(track)) = &item.track else {
+                let Some(track) = &item.track else {
                     return None;
                 };
-                TrackId::from_id(track.get("id")?.as_str()?)
-                    .ok()
-                    .map(TrackId::into_static)
+                Some(track.id)
             })
             .collect();
 

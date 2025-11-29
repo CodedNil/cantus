@@ -31,18 +31,22 @@ pub mod duration_ms {
         where
             E: de::Error,
         {
-            match i64::try_from(v) {
-                Ok(val) => Duration::try_milliseconds(val).ok_or_else(|| {
-                    E::invalid_value(
-                        serde::de::Unexpected::Signed(val),
-                        &"a valid duration in
+            i64::try_from(v).map_or_else(
+                |_| {
+                    Err(E::custom(format!(
+                        "Conversion error: u64 to i64 conversion failed for value {v}"
+                    )))
+                },
+                |val| {
+                    Duration::try_milliseconds(val).ok_or_else(|| {
+                        E::invalid_value(
+                            serde::de::Unexpected::Signed(val),
+                            &"a valid duration in
         milliseconds",
-                    )
-                }),
-                Err(_) => Err(E::custom(format!(
-                    "Conversion error: u64 to i64 conversion failed for value {v}"
-                ))),
-            }
+                        )
+                    })
+                },
+            )
         }
     }
 
@@ -65,7 +69,7 @@ pub mod duration_ms {
 
 pub mod option_duration_ms {
     use chrono::Duration;
-    use serde::{Serializer, de};
+    use serde::de;
     use std::fmt;
 
     use crate::rspotify::model::custom_serde::duration_ms;
@@ -109,51 +113,6 @@ pub mod option_duration_ms {
     {
         d.deserialize_option(OptionDurationVisitor)
     }
-
-    /// Serialize `Option<chrono::Duration>` to milliseconds (represented as
-    /// i64)
-    pub fn serialize<S>(x: &Option<Duration>, s: S) -> Result<S::Ok, S::Error>
-    where
-        S: Serializer,
-    {
-        match *x {
-            Some(duration) => s.serialize_i64(duration.num_milliseconds()),
-            None => s.serialize_none(),
-        }
-    }
-}
-
-/// Deserialize/Serialize `Modality` to integer(0, 1, -1).
-pub mod modality {
-    use crate::rspotify::model::Modality;
-    use serde::{Deserialize, Serializer, de};
-
-    pub fn deserialize<'de, D>(d: D) -> Result<Modality, D::Error>
-    where
-        D: de::Deserializer<'de>,
-    {
-        let v = i8::deserialize(d)?;
-        match v {
-            0 => Ok(Modality::Minor),
-            1 => Ok(Modality::Major),
-            -1 => Ok(Modality::NoResult),
-            _ => Err(de::Error::invalid_value(
-                de::Unexpected::Signed(v.into()),
-                &"valid value: 0, 1, -1",
-            )),
-        }
-    }
-
-    pub fn serialize<S>(x: &Modality, s: S) -> Result<S::Ok, S::Error>
-    where
-        S: Serializer,
-    {
-        match x {
-            Modality::Minor => s.serialize_i8(0),
-            Modality::Major => s.serialize_i8(1),
-            Modality::NoResult => s.serialize_i8(-1),
-        }
-    }
 }
 
 pub mod duration_second {
@@ -166,10 +125,12 @@ pub mod duration_second {
         D: de::Deserializer<'de>,
     {
         let duration: i64 = Deserialize::deserialize(d)?;
-        Duration::try_seconds(duration).ok_or(serde::de::Error::invalid_value(
-            serde::de::Unexpected::Signed(duration),
-            &"an invalid duration in seconds",
-        ))
+        Duration::try_seconds(duration).ok_or_else(|| {
+            serde::de::Error::invalid_value(
+                serde::de::Unexpected::Signed(duration),
+                &"an invalid duration in seconds",
+            )
+        })
     }
 
     /// Serialize `chrono::Duration` to seconds (represented as u64)

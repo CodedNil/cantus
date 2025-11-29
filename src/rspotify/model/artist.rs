@@ -1,5 +1,5 @@
 //! All objects related to artist defined by Spotify API
-use super::{ArtistId, CursorBasedPage, Followers, Image};
+use super::{ArtistId, Followers, Image};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
@@ -8,7 +8,7 @@ use std::collections::HashMap;
 pub struct SimplifiedArtist {
     pub external_urls: HashMap<String, String>,
     pub href: Option<String>,
-    pub id: Option<ArtistId<'static>>,
+    pub id: Option<ArtistId>,
     pub name: String,
 }
 
@@ -19,7 +19,7 @@ pub struct FullArtist {
     pub followers: Followers,
     pub genres: Vec<String>,
     pub href: String,
-    pub id: ArtistId<'static>,
+    pub id: ArtistId,
     pub images: Vec<Image>,
     pub name: String,
     pub popularity: u32,
@@ -29,10 +29,4 @@ pub struct FullArtist {
 #[derive(Deserialize)]
 pub struct FullArtists {
     pub artists: Vec<FullArtist>,
-}
-
-/// Intermediate full Artists vector wrapped by cursor-based-page object
-#[derive(Deserialize)]
-pub struct CursorPageFullArtists {
-    pub artists: CursorBasedPage<FullArtist>,
 }

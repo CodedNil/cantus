@@ -19,8 +19,7 @@ tracing-subscriber = { version = "0.3.22", features = ["env-filter"] }
 
 ureq = { version = "3.1.4", default-features = false, features = [
     "json",
-    "cookies",
-    "socks-proxy",
+    "rustls",
 ] }
 pollster = "0.4.0"
 raw-window-handle = "0.6.2"
@@ -79,9 +78,9 @@ base64 = "0.22.1"
 url = "2.5.7"
 sha2 = "0.10.9"
 strum = { version = "0.27.2", features = ["derive"] }
-enum_dispatch = "0.3.13"
 getrandom = "0.3.4"
 webbrowser = "1.0.6"
+arrayvec = { version = "0.7.6", features = ["serde"] }
 
 [lints.clippy]
 pedantic = { level = "warn", priority = -1 }
@@ -93,7 +92,6 @@ cast-sign-loss = "allow"
 suboptimal_flops = "allow"
 
 doc-markdown = "allow"
-unused-self = "allow"
 
 separated_literal_suffix = "warn"
 wildcard_enum_match_arm = "warn"

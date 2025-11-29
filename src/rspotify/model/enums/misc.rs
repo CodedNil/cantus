@@ -1,4 +1,3 @@
-use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use strum::IntoStaticStr;
 
@@ -99,11 +98,4 @@ impl From<Market> for &'static str {
             Market::FromToken => "from_token",
         }
     }
-}
-
-/// Time limits in miliseconds (unix timestamps)
-#[derive(Clone, Debug, Serialize, Deserialize, Copy, PartialEq, Eq)]
-pub enum TimeLimits {
-    Before(DateTime<Utc>),
-    After(DateTime<Utc>),
 }

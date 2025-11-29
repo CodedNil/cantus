@@ -72,7 +72,7 @@ pub fn update_color_palettes() {
         else {
             continue;
         };
-        ALBUM_DATA_CACHE.insert(track.album_id.clone(), None);
+        ALBUM_DATA_CACHE.insert(track.album_id, None);
 
         let width = image.image.width;
         let height = image.image.height;
@@ -144,7 +144,7 @@ pub fn update_color_palettes() {
             height: palette_image_height(),
         };
         ALBUM_DATA_CACHE.insert(
-            track.album_id.clone(),
+            track.album_id,
             Some(AlbumData {
                 primary_colors,
                 palette_image: ImageBrush::new(palette_image),
