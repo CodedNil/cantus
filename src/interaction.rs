@@ -564,9 +564,9 @@ fn skip_to_track(track_id: &TrackId, position: f64, always_seek: bool) {
         let client = SPOTIFY_CLIENT.get().unwrap();
         for _ in 0..skips.min(10) {
             let result = if forward {
-                client.next_track(None)
+                client.next_track()
             } else {
-                client.previous_track(None)
+                client.previous_track()
             };
             update_playback_state(|state| {
                 state.queue_index = position_in_queue;
@@ -599,7 +599,7 @@ fn skip_to_track(track_id: &TrackId, position: f64, always_seek: bool) {
         if let Err(err) = SPOTIFY_CLIENT
             .get()
             .unwrap()
-            .seek_track(TimeDelta::milliseconds(milliseconds as i64), None)
+            .seek_track(TimeDelta::milliseconds(milliseconds as i64))
         {
             error!("Failed to seek track: {err}");
         }
@@ -748,10 +748,10 @@ fn toggle_playing(play: bool) {
     });
     let spotify_client = SPOTIFY_CLIENT.get().unwrap();
     if play {
-        if let Err(err) = spotify_client.resume_playback(None, None) {
+        if let Err(err) = spotify_client.resume_playback() {
             error!("Failed to play playback: {err}");
         }
-    } else if let Err(err) = spotify_client.pause_playback(None) {
+    } else if let Err(err) = spotify_client.pause_playback() {
         error!("Failed to pause playback: {err}");
     }
 }
@@ -767,7 +767,7 @@ fn set_volume(volume: u8) {
         state.last_interaction = Instant::now() + Duration::from_millis(500);
     });
     let spotify_client = SPOTIFY_CLIENT.get().unwrap();
-    if let Err(err) = spotify_client.volume(volume, None) {
+    if let Err(err) = spotify_client.volume(volume) {
         error!("Failed to set volume: {err}");
     }
 }

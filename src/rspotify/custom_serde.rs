@@ -64,7 +64,7 @@ pub mod option_duration_ms {
     use serde::de;
     use std::fmt;
 
-    use crate::rspotify::model::custom_serde::duration_ms;
+    use super::duration_ms;
 
     /// Vistor to help deserialize duration represented as milliseconds to
     /// `Option<chrono::Duration>`

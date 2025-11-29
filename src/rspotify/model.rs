@@ -1,9 +1,6 @@
-pub mod auth;
-pub mod custom_serde;
-
+use super::custom_serde::{duration_ms, option_duration_ms};
 use arrayvec::ArrayString;
 use chrono::Duration;
-use custom_serde::{duration_ms, option_duration_ms};
 use serde::{Deserialize, de::DeserializeOwned};
 use thiserror::Error;
 

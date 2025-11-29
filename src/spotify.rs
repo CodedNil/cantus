@@ -2,7 +2,7 @@ use crate::{
     background::update_color_palettes,
     config::CONFIG,
     rspotify::{
-        Config, Credentials, OAuth,
+        Config, OAuth,
         client::SpotifyClient,
         model::{AlbumId, ArtistId, Playlist, PlaylistId, TrackId},
     },
@@ -188,11 +188,9 @@ pub fn init() {
     scopes.insert("user-library-read".to_owned());
     scopes.insert("user-library-modify".to_owned());
     let mut spotify = SpotifyClient::with_config(
-        Credentials {
-            id: CONFIG.spotify_client_id.clone().expect(
-                "Spotify client ID not set, set it in the config file under key `spotify_client_id`.",
-            ),
-        },
+        CONFIG.spotify_client_id.clone().expect(
+            "Spotify client ID not set, set it in the config file under key `spotify_client_id`.",
+        ),
         OAuth {
             redirect_uri: String::from("http://127.0.0.1:7474/callback"),
             scopes,

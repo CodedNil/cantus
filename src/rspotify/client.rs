@@ -1,6 +1,5 @@
 use crate::rspotify::{
-    ClientError, ClientResult, Config, Credentials, OAuth, Token, alphabets,
-    generate_random_string,
+    ClientError, ClientResult, Config, OAuth, Token, alphabets, generate_random_string,
     model::{
         Artist, ArtistId, Artists, CurrentPlaybackContext, CurrentUserQueue, Page, Playlist,
         PlaylistId, PlaylistItem, TrackId,
@@ -11,9 +10,7 @@ use chrono::Utc;
 use parking_lot::RwLock;
 use serde_json::{Map, Value, json};
 use sha2::{Digest, Sha256};
-use std::fmt::Write as _;
 use std::{
-    collections::HashMap,
     io::{BufRead, BufReader, Write},
     net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr, TcpListener},
     sync::Arc,
@@ -23,19 +20,6 @@ use ureq::Agent;
 use url::Url;
 
 const VERIFIER_BYTES: usize = 43;
-
-/// Append device ID to an API path.
-fn append_device_id(path: &str, device_id: Option<&str>) -> String {
-    let mut new_path = path.to_owned();
-    if let Some(device_id) = device_id {
-        if path.contains('?') {
-            let _ = write!(new_path, "&device_id={device_id}");
-        } else {
-            let _ = write!(new_path, "?device_id={device_id}");
-        }
-    }
-    new_path
-}
 
 /// Returns the absolute URL for an endpoint in the API.
 pub fn api_url(url: &str) -> String {
@@ -59,7 +43,7 @@ pub fn api_url(url: &str) -> String {
 /// [example-main]: https://github.com/ramsayleung/rspotify/blob/master/examples/auth_code_pkce.rs
 #[derive(Debug)]
 pub struct SpotifyClient {
-    pub creds: Credentials,
+    pub client_id: String,
     pub oauth: OAuth,
     pub config: Config,
     pub token: Arc<RwLock<Option<Token>>>,
@@ -70,7 +54,7 @@ pub struct SpotifyClient {
 impl Default for SpotifyClient {
     fn default() -> Self {
         Self {
-            creds: Credentials::default(),
+            client_id: String::new(),
             oauth: OAuth::default(),
             config: Config::default(),
             token: Arc::new(RwLock::new(None)),
@@ -121,20 +105,22 @@ impl SpotifyClient {
     // the state should be the same between the request and the callback. This
     // will also return `None` if this is not true.
     pub fn parse_response_code(&self, url: &str) -> Option<String> {
-        let url = Url::parse(url).ok()?;
-        let params = url.query_pairs().collect::<HashMap<_, _>>();
-
-        let code = params.get("code")?;
+        let mut code = None;
+        let mut state = None;
+        for (key, value) in Url::parse(url).ok()?.query_pairs() {
+            if key == "code" {
+                code = Some(value.to_string());
+            } else if key == "state" {
+                state = Some(value.to_string());
+            }
+        }
 
         // Making sure the state is the same
-        let expected_state = &self.oauth.state;
-        let state = params.get("state").map(AsRef::as_ref);
-        if state != Some(expected_state) {
+        if state.as_deref() != Some(&self.oauth.state) {
             tracing::error!("Request state doesn't match the callback state");
             return None;
         }
-
-        Some(code.to_string())
+        code
     }
 
     /// Spawn HTTP server at provided socket address to accept OAuth callback and return auth code.
@@ -432,10 +418,8 @@ impl SpotifyClient {
     /// - device_id - device target for playback
     ///
     /// [Reference](https://developer.spotify.com/documentation/web-api/reference/#/operations/pause-a-users-playback)
-    pub fn pause_playback(&self, device_id: Option<&str>) -> ClientResult<()> {
-        let url = append_device_id("me/player/pause", device_id);
-        self.api_put(&url, &Value::Null)?;
-
+    pub fn pause_playback(&self) -> ClientResult<()> {
+        self.api_put("me/player/pause", &Value::Null)?;
         Ok(())
     }
 
@@ -446,20 +430,8 @@ impl SpotifyClient {
     /// - position
     ///
     /// [Reference](https://developer.spotify.com/documentation/web-api/reference/#/operations/start-a-users-playback)
-    pub fn resume_playback(
-        &self,
-        device_id: Option<&str>,
-        position: Option<chrono::Duration>,
-    ) -> ClientResult<()> {
-        let params = position.map_or(Value::Null, |position| {
-            json!({
-                "position_ms": position.num_milliseconds()
-            })
-        });
-
-        let url = append_device_id("me/player/play", device_id);
-        self.api_put(&url, &params)?;
-
+    pub fn resume_playback(&self) -> ClientResult<()> {
+        self.api_put("me/player/play", &Value::Null)?;
         Ok(())
     }
 
@@ -469,10 +441,8 @@ impl SpotifyClient {
     /// - device_id - device target for playback
     ///
     /// [Reference](https://developer.spotify.com/documentation/web-api/reference/#/operations/skip-users-playback-to-next-track)
-    pub fn next_track(&self, device_id: Option<&str>) -> ClientResult<()> {
-        let url = append_device_id("me/player/next", device_id);
-        self.api_post(&url, &Value::Null)?;
-
+    pub fn next_track(&self) -> ClientResult<()> {
+        self.api_post("me/player/next", &Value::Null)?;
         Ok(())
     }
 
@@ -482,10 +452,8 @@ impl SpotifyClient {
     /// - device_id - device target for playback
     ///
     /// [Reference](https://developer.spotify.com/documentation/web-api/reference/#/operations/skip-users-playback-to-previous-track)
-    pub fn previous_track(&self, device_id: Option<&str>) -> ClientResult<()> {
-        let url = append_device_id("me/player/previous", device_id);
-        self.api_post(&url, &Value::Null)?;
-
+    pub fn previous_track(&self) -> ClientResult<()> {
+        self.api_post("me/player/previous", &Value::Null)?;
         Ok(())
     }
 
@@ -496,17 +464,11 @@ impl SpotifyClient {
     /// - device_id - device target for playback
     ///
     /// [Reference](https://developer.spotify.com/documentation/web-api/reference/#/operations/seek-to-position-in-currently-playing-track)
-    pub fn seek_track(
-        &self,
-        position: chrono::Duration,
-        device_id: Option<&str>,
-    ) -> ClientResult<()> {
-        let url = append_device_id(
+    pub fn seek_track(&self, position: chrono::Duration) -> ClientResult<()> {
+        self.api_put(
             &format!("me/player/seek?position_ms={}", position.num_milliseconds()),
-            device_id,
-        );
-        self.api_put(&url, &Value::Null)?;
-
+            &Value::Null,
+        )?;
         Ok(())
     }
 
@@ -517,17 +479,15 @@ impl SpotifyClient {
     /// - device_id - device target for playback
     ///
     /// [Reference](https://developer.spotify.com/documentation/web-api/reference/#/operations/set-volume-for-users-playback)
-    pub fn volume(&self, volume_percent: u8, device_id: Option<&str>) -> ClientResult<()> {
+    pub fn volume(&self, volume_percent: u8) -> ClientResult<()> {
         debug_assert!(
             volume_percent <= 100u8,
             "volume must be between 0 and 100, inclusive"
         );
-        let url = append_device_id(
+        self.api_put(
             &format!("me/player/volume?volume_percent={volume_percent}"),
-            device_id,
-        );
-        self.api_put(&url, &Value::Null)?;
-
+            &Value::Null,
+        )?;
         Ok(())
     }
 
@@ -697,7 +657,7 @@ impl SpotifyClient {
                 let token = self.fetch_access_token(&[
                     ("grant_type", "refresh_token"),
                     ("refresh_token", refresh_token),
-                    ("client_id", &self.creds.id),
+                    ("client_id", &self.client_id),
                 ])?;
 
                 if let Some(callback_fn) = &*self.config.token_callback_fn.clone() {
@@ -721,10 +681,10 @@ impl SpotifyClient {
         );
 
         let token = self.fetch_access_token(&[
-            ("client_id", self.creds.id.as_str()),
             ("grant_type", "authorization_code"),
             ("code", code),
             ("redirect_uri", &self.oauth.redirect_uri),
+            ("client_id", self.client_id.as_str()),
             ("code_verifier", verifier),
         ])?;
 
@@ -738,9 +698,9 @@ impl SpotifyClient {
     }
 
     /// Same as [`Self::new`] but with an extra parameter to configure the client.
-    pub fn with_config(creds: Credentials, oauth: OAuth, config: Config) -> Self {
+    pub fn with_config(client_id: String, oauth: OAuth, config: Config) -> Self {
         Self {
-            creds,
+            client_id,
             oauth,
             config,
             ..Default::default()
@@ -786,7 +746,7 @@ impl SpotifyClient {
         let parsed = Url::parse_with_params(
             "https://accounts.spotify.com/authorize",
             &[
-                ("client_id", self.creds.id.as_str()),
+                ("client_id", self.client_id.as_str()),
                 ("response_type", "code"),
                 ("redirect_uri", self.oauth.redirect_uri.as_str()),
                 ("code_challenge_method", "S256"),

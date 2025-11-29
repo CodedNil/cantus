@@ -1,7 +1,7 @@
 //! All objects related to the auth flows defined by Spotify API
 use super::{
-    ModelResult,
     custom_serde::{duration_second, space_separated_scopes},
+    model::ModelResult,
 };
 use chrono::{DateTime, Duration, TimeDelta, Utc};
 use serde::{Deserialize, Serialize};

@@ -1,7 +1,9 @@
+pub mod auth;
 pub mod client;
+pub mod custom_serde;
 pub mod model;
 
-use model::auth::Token;
+use auth::Token;
 use std::{collections::HashSet, fmt, net::SocketAddr, path::PathBuf, sync::Arc};
 use thiserror::Error;
 
@@ -110,12 +112,6 @@ pub fn generate_random_string(length: usize, alphabet: &[u8]) -> String {
     (0..length)
         .map(|_| alphabet[fastrand::usize(..range)] as char)
         .collect()
-}
-
-/// Simple client credentials object for Spotify.
-#[derive(Debug, Clone, Default)]
-pub struct Credentials {
-    pub id: String,
 }
 
 /// Structure that holds the required information for requests with OAuth.
