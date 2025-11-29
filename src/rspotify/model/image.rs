@@ -1,11 +1,9 @@
-//! Image object
-
-use serde::{Deserialize, Serialize};
+use serde::Deserialize;
 
 /// Image object
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq, Default)]
+#[derive(Deserialize)]
 pub struct Image {
-    pub height: Option<u32>,
     pub url: String,
+    pub height: Option<u32>,
     pub width: Option<u32>,
 }

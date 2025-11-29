@@ -1,5 +1,4 @@
-//! All kinds of page object
-use serde::{Deserialize, Serialize, de::DeserializeOwned};
+use serde::{Deserialize, de::DeserializeOwned};
 
 /// Custom deserializer to handle `Vec<Option<T>>` and filter out `None` values
 /// This is useful for deserializing lists that may contain null values that are not relevants
@@ -12,17 +11,9 @@ where
     Ok(v.into_iter().flatten().collect())
 }
 
-/// Paging object
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq, Default)]
+#[derive(Deserialize)]
 pub struct Page<T: DeserializeOwned> {
-    pub href: String,
     #[serde(deserialize_with = "vec_without_nulls")]
     pub items: Vec<T>,
-    pub limit: u32,
-    pub next: Option<String>,
-    pub offset: u32,
-    pub previous: Option<String>,
-    /// This field could mismatch the actual number of items in `items` field
-    /// because sometimes the API returns `null` items that are not included in the `items` field.
     pub total: u32,
 }

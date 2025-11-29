@@ -1,32 +1,17 @@
-//! All objects related to artist defined by Spotify API
-use super::{Followers, idtypes::ArtistId, image::Image};
-use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
+use super::image::Image;
+use arrayvec::ArrayString;
+use serde::Deserialize;
 
-/// Simplified Artist Object
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq, Default)]
-pub struct SimplifiedArtist {
-    pub external_urls: HashMap<String, String>,
-    pub href: Option<String>,
-    pub id: Option<ArtistId>,
-    pub name: String,
-}
+pub type ArtistId = ArrayString<22>;
 
-/// Full Artist Object
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
-pub struct FullArtist {
-    pub external_urls: HashMap<String, String>,
-    pub followers: Followers,
-    pub genres: Vec<String>,
-    pub href: String,
-    pub id: ArtistId,
-    pub images: Vec<Image>,
-    pub name: String,
-    pub popularity: u32,
-}
-
-/// Intermediate full artist object wrapped by `Vec`
 #[derive(Deserialize)]
-pub struct FullArtists {
-    pub artists: Vec<FullArtist>,
+pub struct Artist {
+    pub id: ArtistId,
+    pub name: String,
+    pub images: Vec<Image>,
+}
+
+#[derive(Deserialize)]
+pub struct Artists {
+    pub artists: Vec<Artist>,
 }

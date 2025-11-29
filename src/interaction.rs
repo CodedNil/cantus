@@ -1,9 +1,9 @@
 use crate::{
     CantusApp,
     config::CONFIG,
-    rspotify::model::idtypes::{PlaylistId, TrackId},
+    rspotify::model::{playlist::PlaylistId, track::TrackId},
     spotify::{
-        IMAGES_CACHE, PLAYBACK_STATE, Playlist, RATING_PLAYLISTS, SPOTIFY_CLIENT, Track,
+        CondensedPlaylist, IMAGES_CACHE, PLAYBACK_STATE, RATING_PLAYLISTS, SPOTIFY_CLIENT, Track,
         update_playback_state,
     },
 };
@@ -262,7 +262,7 @@ enum IconEntry<'a> {
         index: usize,
     },
     Playlist {
-        playlist: &'a Playlist,
+        playlist: &'a CondensedPlaylist,
         contained: bool,
     },
 }
@@ -279,7 +279,7 @@ impl CantusApp {
         &mut self,
         track: &Track,
         hovered: bool,
-        playlists: &HashMap<String, Playlist>,
+        playlists: &HashMap<String, CondensedPlaylist>,
         width: f64,
         height: f64,
         pos_x: f64,
@@ -649,30 +649,30 @@ fn update_star_rating(track_id: &TrackId, rating_slot: usize) {
     for (playlist_id, playlist_name) in playlists_to_remove_from {
         info!("Removing track {track_id} from rating playlist {playlist_name}");
         if let Err(err) =
-            spotify_client.playlist_remove_all_occurrences_of_items(&playlist_id, [*track_id], None)
+            spotify_client.playlist_remove_all_occurrences_of_items(&playlist_id, &[track_id], None)
         {
             error!("Failed to remove track {track_id} from rating playlist {playlist_name}: {err}");
         }
     }
     for (playlist_id, playlist_name) in playlists_to_add_to {
         info!("Adding track {track_id} to rating playlist {playlist_name}");
-        if let Err(err) = spotify_client.playlist_add_items(&playlist_id, [*track_id], None) {
+        if let Err(err) = spotify_client.playlist_add_items(&playlist_id, &[track_id], None) {
             error!("Failed to add track {track_id} to rating playlist {playlist_name}: {err}");
         }
     }
 
     // Add the track the liked songs if its rated above 3 stars
-    match spotify_client.current_user_saved_tracks_contains([*track_id]) {
+    match spotify_client.current_user_saved_tracks_contains(&[*track_id]) {
         Ok(already_liked) => match (already_liked[0], rating_slot >= 5) {
             (true, false) => {
                 info!("Removing track {track_id} from liked songs");
-                if let Err(err) = spotify_client.current_user_saved_tracks_delete([*track_id]) {
+                if let Err(err) = spotify_client.current_user_saved_tracks_delete(&[*track_id]) {
                     error!("Failed to remove track {track_id} from liked songs: {err}");
                 }
             }
             (false, true) => {
                 info!("Adding track {track_id} to liked songs");
-                if let Err(err) = spotify_client.current_user_saved_tracks_add([*track_id]) {
+                if let Err(err) = spotify_client.current_user_saved_tracks_add(&[*track_id]) {
                     error!("Failed to add track {track_id} to liked songs: {err}");
                 }
             }
@@ -723,9 +723,9 @@ fn toggle_playlist_membership(track_id: &TrackId, playlist_id: &PlaylistId) {
 
     let spotify_client = SPOTIFY_CLIENT.get().unwrap();
     let result = if contained {
-        spotify_client.playlist_remove_all_occurrences_of_items(&playlist_id, [*track_id], None)
+        spotify_client.playlist_remove_all_occurrences_of_items(&playlist_id, &[track_id], None)
     } else {
-        spotify_client.playlist_add_items(&playlist_id, [*track_id], None)
+        spotify_client.playlist_add_items(&playlist_id, &[track_id], None)
     };
     if let Err(err) = result {
         error!(

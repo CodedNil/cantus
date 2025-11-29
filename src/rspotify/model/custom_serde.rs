@@ -2,7 +2,7 @@
 
 pub mod duration_ms {
     use chrono::Duration;
-    use serde::{Serializer, de};
+    use serde::de;
     use std::convert::TryFrom;
     use std::fmt;
 
@@ -56,14 +56,6 @@ pub mod duration_ms {
         D: de::Deserializer<'de>,
     {
         d.deserialize_i64(DurationVisitor)
-    }
-
-    /// Serialize `chrono::Duration` to milliseconds (represented as i64)
-    pub fn serialize<S>(x: &Duration, s: S) -> Result<S::Ok, S::Error>
-    where
-        S: Serializer,
-    {
-        s.serialize_i64(x.num_milliseconds())
     }
 }
 

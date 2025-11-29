@@ -1,18 +1,12 @@
 //! All kinds of playlists objects
-use super::{idtypes::PlaylistId, image::Image, track::FullTrack};
-use chrono::prelude::*;
-use serde::{Deserialize, Serialize};
+use super::{image::Image, track::PartialTrack};
+use arrayvec::ArrayString;
+use serde::Deserialize;
 
-/// Playlist result object
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq, Default)]
-pub struct PlaylistResult {
-    pub snapshot_id: String,
-}
+pub type PlaylistId = ArrayString<22>;
 
-/// Playlist Track Reference Object
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq, Default)]
+#[derive(Deserialize, Default)]
 pub struct PlaylistTracksRef {
-    pub href: String,
     pub total: u32,
 }
 
@@ -25,9 +19,8 @@ where
 }
 
 /// Simplified playlist object
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
-pub struct SimplifiedPlaylist {
-    pub href: String,
+#[derive(Deserialize)]
+pub struct Playlist {
     pub id: PlaylistId,
     #[serde(deserialize_with = "deserialize_null_default")]
     pub images: Vec<Image>,
@@ -37,9 +30,7 @@ pub struct SimplifiedPlaylist {
 }
 
 /// Playlist track object
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq, Default)]
+#[derive(Deserialize, Default)]
 pub struct PlaylistItem {
-    pub added_at: Option<DateTime<Utc>>,
-    pub is_local: bool,
-    pub track: Option<FullTrack>,
+    pub track: Option<PartialTrack>,
 }

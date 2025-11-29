@@ -6,7 +6,7 @@ use super::{
 use chrono::{DateTime, Duration, TimeDelta, Utc};
 use serde::{Deserialize, Serialize};
 use std::{
-    collections::{HashMap, HashSet},
+    collections::HashSet,
     fs,
     io::{Read, Write},
     path::Path,
@@ -79,20 +79,8 @@ impl Token {
 
     /// Check if the token is expired. It includes a margin of 10 seconds (which
     /// is how much a request would take in the worst case scenario).
-    #[must_use]
     pub fn is_expired(&self) -> bool {
         self.expires_at
             .is_none_or(|expiration| Utc::now() + TimeDelta::try_seconds(10).unwrap() >= expiration)
-    }
-
-    /// Generates an HTTP token authorization header with proper formatting
-    #[must_use]
-    pub fn auth_headers(&self) -> HashMap<String, String> {
-        let auth = "authorization".to_owned();
-        let value = format!("Bearer {}", self.access_token);
-
-        let mut headers = HashMap::new();
-        headers.insert(auth, value);
-        headers
     }
 }

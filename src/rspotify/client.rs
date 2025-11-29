@@ -1,30 +1,58 @@
 use crate::rspotify::{
-    ClientError, ClientResult, Config, Credentials, OAuth, Token, alphabets, auth_urls,
-    clients::{append_device_id, convert_result},
+    ClientError, ClientResult, Config, Credentials, OAuth, Token, alphabets,
     generate_random_string,
-    http::{Form, Headers, HttpClient, Query},
-    join_scopes,
     model::{
-        artist::{FullArtist, FullArtists},
+        artist::{Artist, ArtistId, Artists},
         context::{CurrentPlaybackContext, CurrentUserQueue},
-        idtypes::{ArtistId, PlaylistId, TrackId},
         page::Page,
-        playlist::{PlaylistItem, PlaylistResult, SimplifiedPlaylist},
+        playlist::{Playlist, PlaylistId, PlaylistItem},
+        track::TrackId,
     },
-    params,
-    util::{JsonBuilder, build_map},
 };
 use base64::{Engine as _, engine::general_purpose};
 use chrono::Utc;
+use parking_lot::RwLock;
+use serde::Deserialize;
 use serde_json::{Map, Value, json};
 use sha2::{Digest, Sha256};
+use std::fmt::Write as _;
 use std::{
     collections::HashMap,
     io::{BufRead, BufReader, Write},
     net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr, TcpListener},
-    sync::{Arc, Mutex},
+    sync::Arc,
 };
+use tracing::error;
+use ureq::Agent;
 use url::Url;
+
+/// Converts a JSON response from Spotify into its model.
+fn convert_result<'a, T: Deserialize<'a>>(input: &'a str) -> ClientResult<T> {
+    serde_json::from_str::<T>(input).map_err(Into::into)
+}
+
+/// Append device ID to an API path.
+fn append_device_id(path: &str, device_id: Option<&str>) -> String {
+    let mut new_path = path.to_owned();
+    if let Some(device_id) = device_id {
+        if path.contains('?') {
+            let _ = write!(new_path, "&device_id={device_id}");
+        } else {
+            let _ = write!(new_path, "?device_id={device_id}");
+        }
+    }
+    new_path
+}
+
+/// Returns the absolute URL for an endpoint in the API.
+pub fn api_url(url: &str) -> String {
+    format!("https://api.spotify.com/v1/{url}")
+}
+
+/// Returns the absolute URL for an authentication step in the API.
+pub fn auth_url(url: &str) -> String {
+    format!("https://accounts.spotify.com/{url}")
+}
 
 /// The [Authorization Code Flow with Proof Key for Code Exchange
 /// (PKCE)][reference] client for the Spotify API.
@@ -41,15 +69,27 @@ use url::Url;
 ///
 /// [reference]: https://developer.spotify.com/documentation/general/guides/authorization/code-flow
 /// [example-main]: https://github.com/ramsayleung/rspotify/blob/master/examples/auth_code_pkce.rs
-#[derive(Clone, Debug, Default)]
+#[derive(Debug)]
 pub struct SpotifyClient {
     pub creds: Credentials,
     pub oauth: OAuth,
     pub config: Config,
-    pub token: Arc<Mutex<Option<Token>>>,
-    /// The code verifier for the authentication process
+    pub token: Arc<RwLock<Option<Token>>>,
     pub verifier: Option<String>,
-    pub http: HttpClient,
+    pub http: Agent,
+}
+
+impl Default for SpotifyClient {
+    fn default() -> Self {
+        Self {
+            creds: Credentials::default(),
+            oauth: OAuth::default(),
+            config: Config::default(),
+            token: Arc::new(RwLock::new(None)),
+            verifier: None,
+            http: Agent::new_with_defaults(),
+        }
+    }
 }
 
 impl SpotifyClient {
@@ -75,12 +115,6 @@ impl SpotifyClient {
     ///
     /// [`ClientCredsSpotify::read_token_cache`]: crate::client_creds::ClientCredsSpotify::read_token_cache
     pub fn read_token_cache(&self, allow_expired: bool) -> ClientResult<Option<Token>> {
-        if !self.get_config().token_cached {
-            tracing::info!("Auth token cache read ignored (not configured)");
-            return Ok(None);
-        }
-
-        tracing::info!("Reading auth token cache");
         let token = Token::from_cache(&self.get_config().cache_path)?;
         if !self.get_oauth().scopes.is_subset(&token.scopes)
             || (!allow_expired && token.is_expired())
@@ -124,7 +158,6 @@ impl SpotifyClient {
                 addr: socket_address,
                 e,
             })?;
-        tracing::info!("OAuth server listening on {:?}", socket_address);
 
         // The server will terminate itself after collecting the first code.
         let mut stream = listener
@@ -143,7 +176,6 @@ impl SpotifyClient {
             .nth(1)
             .ok_or(ClientError::AuthCodeListenerRead)?;
         let redirect_full_url = format!("{}{}", self.get_oauth().redirect_uri, redirect_url);
-        tracing::info!("redirect_full_url {}", redirect_full_url);
 
         let code = self
             .parse_response_code(&redirect_full_url)
@@ -164,9 +196,9 @@ impl SpotifyClient {
 
     // If the specified `redirect_url` is HTTP, loopback, and contains a port,
     // then the corresponding socket address is returned.
-    pub fn get_socket_address(&self, redirect_url: &str) -> Option<SocketAddr> {
+    pub fn get_socket_address(&self) -> Option<SocketAddr> {
         let (host, port) = {
-            let parsed_url = Url::parse(redirect_url).ok()?;
+            let parsed_url = Url::parse(&self.get_oauth().redirect_uri).ok()?;
             let port = match parsed_url.scheme() {
                 "http" => parsed_url.port().unwrap_or(80),
                 "https" => parsed_url.port().unwrap_or(443),
@@ -200,7 +232,6 @@ impl SpotifyClient {
     ///
     /// Note: this method requires the `cli` feature.
     pub fn get_code_from_user(&self, url: &str) -> ClientResult<String> {
-        tracing::info!("Opening brower with auth URL");
         match webbrowser::open(url) {
             Ok(()) => println!("Opened {url} in your browser."),
             Err(why) => eprintln!(
@@ -209,10 +240,9 @@ impl SpotifyClient {
             ),
         }
 
-        if let Some(addr) = self.get_socket_address(&self.get_oauth().redirect_uri) {
+        if let Some(addr) = self.get_socket_address() {
             self.get_authcode_listener(addr)
         } else {
-            tracing::info!("Prompting user for code");
             println!("Please enter the URL you were redirected to: ");
             let mut input = String::new();
             std::io::stdin().read_line(&mut input)?;
@@ -241,15 +271,14 @@ impl SpotifyClient {
 
             // Load token into client regardless of whether it's expired o
             // not, since it will be refreshed later anyway.
-            *self.get_token().lock().unwrap() = Some(new_token);
+            *self.token.write() = Some(new_token);
 
             if expired {
                 // Ensure that we actually got a token from the refetch
                 if let Some(refreshed_token) = self.refetch_token()? {
-                    tracing::info!("Successfully refreshed expired token from token cache");
-                    *self.get_token().lock().unwrap() = Some(refreshed_token);
+                    *self.token.write() = Some(refreshed_token);
                 } else {
-                    tracing::info!("Unable to refresh expired token from token cache");
+                    error!("Unable to refresh expired token from token cache");
                     let code = self.get_code_from_user(url)?;
                     self.request_token(&code)?;
                 }
@@ -267,10 +296,10 @@ impl SpotifyClient {
         &self,
         limit: Option<u32>,
         offset: Option<u32>,
-    ) -> ClientResult<Page<SimplifiedPlaylist>> {
+    ) -> ClientResult<Page<Playlist>> {
         let limit = limit.map(|s| s.to_string());
         let offset = offset.map(|s| s.to_string());
-        let params = build_map([("limit", limit.as_deref()), ("offset", offset.as_deref())]);
+        let params = [("limit", limit.as_deref()), ("offset", offset.as_deref())];
 
         let result = self.api_get("me/playlists", &params)?;
         convert_result(&result)
@@ -287,16 +316,19 @@ impl SpotifyClient {
     pub fn playlist_add_items(
         &self,
         playlist_id: &PlaylistId,
-        items: impl IntoIterator<Item = TrackId> + Send,
+        items: &[&TrackId],
         position: Option<u32>,
-    ) -> ClientResult<PlaylistResult> {
-        let uris = items.into_iter().map(|id| id.uri()).collect::<Vec<_>>();
-        let params = JsonBuilder::new()
-            .required("uris", uris)
-            .optional("position", position)
-            .build();
+    ) -> ClientResult<()> {
+        let uris = items
+            .iter()
+            .map(|id| format!("spotify:track:{id}"))
+            .collect::<Vec<_>>();
+        let params = json!({
+            "uris": uris,
+            "position": position
+        });
 
-        let url = format!("playlists/{}/tracks", playlist_id.id());
+        let url = format!("playlists/{playlist_id}/tracks");
         let result = self.api_post(&url, &params)?;
         convert_result(&result)
     }
@@ -312,24 +344,24 @@ impl SpotifyClient {
     pub fn playlist_remove_all_occurrences_of_items(
         &self,
         playlist_id: &PlaylistId,
-        track_ids: impl IntoIterator<Item = TrackId> + Send,
+        track_ids: &[&TrackId],
         snapshot_id: Option<&str>,
-    ) -> ClientResult<PlaylistResult> {
+    ) -> ClientResult<()> {
         let tracks = track_ids
-            .into_iter()
+            .iter()
             .map(|id| {
                 let mut map = Map::with_capacity(1);
-                map.insert("uri".to_owned(), id.uri().into());
+                map.insert("uri".to_owned(), format!("spotify:track:{id}").into());
                 map
             })
             .collect::<Vec<_>>();
 
-        let params = JsonBuilder::new()
-            .required("tracks", tracks)
-            .optional("snapshot_id", snapshot_id)
-            .build();
+        let params = json!({
+            "tracks": tracks,
+            "snapshot_id": snapshot_id
+        });
 
-        let url = format!("playlists/{}/tracks", playlist_id.id());
+        let url = format!("playlists/{playlist_id}/tracks");
         let result = self.api_delete(&url, &params)?;
         convert_result(&result)
     }
@@ -340,12 +372,9 @@ impl SpotifyClient {
     /// - track_ids - a list of track URIs, URLs or IDs
     ///
     /// [Reference](https://developer.spotify.com/documentation/web-api/reference/#/operations/remove-tracks-user)
-    pub fn current_user_saved_tracks_delete(
-        &self,
-        track_ids: impl IntoIterator<Item = TrackId> + Send,
-    ) -> ClientResult<()> {
-        let url = format!("me/tracks/?ids={}", TrackId::join_ids(track_ids));
-        self.api_delete(&url, &json!({}))?;
+    pub fn current_user_saved_tracks_delete(&self, track_ids: &[TrackId]) -> ClientResult<()> {
+        let url = format!("me/tracks/?ids={}", track_ids.join(","));
+        self.api_delete(&url, &Value::Null)?;
 
         Ok(())
     }
@@ -359,10 +388,10 @@ impl SpotifyClient {
     /// [Reference](https://developer.spotify.com/documentation/web-api/reference/#/operations/check-users-saved-tracks)
     pub fn current_user_saved_tracks_contains(
         &self,
-        track_ids: impl IntoIterator<Item = TrackId> + Send,
+        track_ids: &[TrackId],
     ) -> ClientResult<Vec<bool>> {
-        let url = format!("me/tracks/contains/?ids={}", TrackId::join_ids(track_ids));
-        let result = self.api_get(&url, &Query::new())?;
+        let url = format!("me/tracks/contains/?ids={}", track_ids.join(","));
+        let result = self.api_get(&url, &[])?;
         convert_result(&result)
     }
 
@@ -372,12 +401,9 @@ impl SpotifyClient {
     /// - track_ids - a list of track URIs, URLs or IDs
     ///
     /// [Reference](https://developer.spotify.com/documentation/web-api/reference/#/operations/save-tracks-user)
-    pub fn current_user_saved_tracks_add(
-        &self,
-        track_ids: impl IntoIterator<Item = TrackId> + Send,
-    ) -> ClientResult<()> {
-        let url = format!("me/tracks/?ids={}", TrackId::join_ids(track_ids));
-        self.api_put(&url, &json!({}))?;
+    pub fn current_user_saved_tracks_add(&self, track_ids: &[TrackId]) -> ClientResult<()> {
+        let url = format!("me/tracks/?ids={}", track_ids.join(","));
+        self.api_put(&url, &Value::Null)?;
 
         Ok(())
     }
@@ -392,7 +418,7 @@ impl SpotifyClient {
     ///
     /// [Reference](https://developer.spotify.com/documentation/web-api/reference/#/operations/get-information-about-the-users-current-playback)
     pub fn current_playback(&self) -> ClientResult<Option<CurrentPlaybackContext>> {
-        let result = self.api_get("me/player", &Query::new())?;
+        let result = self.api_get("me/player", &[])?;
         if result.is_empty() {
             Ok(None)
         } else {
@@ -404,8 +430,7 @@ impl SpotifyClient {
     ///
     /// [Reference](https://developer.spotify.com/documentation/web-api/reference/#/operations/get-queue)
     pub fn current_user_queue(&self) -> ClientResult<CurrentUserQueue> {
-        let params = build_map([]);
-        let result = self.api_get("me/player/queue", &params)?;
+        let result = self.api_get("me/player/queue", &[])?;
         convert_result(&result)
     }
 
@@ -417,7 +442,7 @@ impl SpotifyClient {
     /// [Reference](https://developer.spotify.com/documentation/web-api/reference/#/operations/pause-a-users-playback)
     pub fn pause_playback(&self, device_id: Option<&str>) -> ClientResult<()> {
         let url = append_device_id("me/player/pause", device_id);
-        self.api_put(&url, &json!({}))?;
+        self.api_put(&url, &Value::Null)?;
 
         Ok(())
     }
@@ -434,9 +459,11 @@ impl SpotifyClient {
         device_id: Option<&str>,
         position: Option<chrono::Duration>,
     ) -> ClientResult<()> {
-        let params = JsonBuilder::new()
-            .optional("position_ms", position.map(|p| p.num_milliseconds()))
-            .build();
+        let params = position.map_or(Value::Null, |position| {
+            json!({
+                "position_ms": position.num_milliseconds()
+            })
+        });
 
         let url = append_device_id("me/player/play", device_id);
         self.api_put(&url, &params)?;
@@ -452,7 +479,7 @@ impl SpotifyClient {
     /// [Reference](https://developer.spotify.com/documentation/web-api/reference/#/operations/skip-users-playback-to-next-track)
     pub fn next_track(&self, device_id: Option<&str>) -> ClientResult<()> {
         let url = append_device_id("me/player/next", device_id);
-        self.api_post(&url, &json!({}))?;
+        self.api_post(&url, &Value::Null)?;
 
         Ok(())
     }
@@ -465,7 +492,7 @@ impl SpotifyClient {
     /// [Reference](https://developer.spotify.com/documentation/web-api/reference/#/operations/skip-users-playback-to-previous-track)
     pub fn previous_track(&self, device_id: Option<&str>) -> ClientResult<()> {
         let url = append_device_id("me/player/previous", device_id);
-        self.api_post(&url, &json!({}))?;
+        self.api_post(&url, &Value::Null)?;
 
         Ok(())
     }
@@ -486,7 +513,7 @@ impl SpotifyClient {
             &format!("me/player/seek?position_ms={}", position.num_milliseconds()),
             device_id,
         );
-        self.api_put(&url, &json!({}))?;
+        self.api_put(&url, &Value::Null)?;
 
         Ok(())
     }
@@ -507,45 +534,17 @@ impl SpotifyClient {
             &format!("me/player/volume?volume_percent={volume_percent}"),
             device_id,
         );
-        self.api_put(&url, &json!({}))?;
+        self.api_put(&url, &Value::Null)?;
 
         Ok(())
-    }
-
-    /// Returns the absolute URL for an endpoint in the API.
-    pub fn api_url(&self, url: &str) -> String {
-        let mut base = self.get_config().api_base_url.clone();
-        if !base.ends_with('/') {
-            base.push('/');
-        }
-        base + url
-    }
-
-    /// Returns the absolute URL for an authentication step in the API.
-    pub fn auth_url(&self, url: &str) -> String {
-        let mut base = self.get_config().auth_base_url.clone();
-        if !base.ends_with('/') {
-            base.push('/');
-        }
-        base + url
     }
 
     /// Re-authenticate the client automatically if it's configured to do so,
     /// which uses the refresh token to obtain a new access token.
     pub fn auto_reauth(&self) -> ClientResult<()> {
-        if !self.get_config().token_refreshing {
-            return Ok(());
-        }
-
         // NOTE: It's important to not leave the token locked, or else a
         // deadlock when calling `refresh_token` will occur.
-        let should_reauth = self
-            .get_token()
-            .lock()
-            .unwrap()
-            .as_ref()
-            .is_some_and(Token::is_expired);
-
+        let should_reauth = self.token.read().as_ref().is_some_and(Token::is_expired);
         if should_reauth {
             self.refresh_token()
         } else {
@@ -557,7 +556,7 @@ impl SpotifyClient {
     /// token will be saved internally.
     pub fn refresh_token(&self) -> ClientResult<()> {
         let token = self.refetch_token()?;
-        *self.get_token().lock().unwrap() = token;
+        *self.token.write() = token;
         self.write_token_cache()
     }
 
@@ -565,70 +564,82 @@ impl SpotifyClient {
     ///
     /// Since this is accessed by authenticated requests always, it's where the
     /// automatic reauthentication takes place, if enabled.
-    #[doc(hidden)]
-    pub fn auth_headers(&self) -> ClientResult<Headers> {
+    pub fn auth_headers(&self) -> ClientResult<(String, String)> {
         self.auto_reauth()?;
 
-        Ok(self
-            .get_token()
-            .lock()
-            .unwrap()
-            .as_ref()
-            .ok_or(ClientError::InvalidToken)?
-            .auth_headers())
+        Ok((
+            "authorization".to_owned(),
+            format!(
+                "Bearer {}",
+                self.token
+                    .read()
+                    .as_ref()
+                    .ok_or(ClientError::InvalidToken)?
+                    .access_token
+            ),
+        ))
     }
 
     // HTTP-related methods for the Spotify client. They wrap up the basic HTTP
     // client with its specific usage for endpoints or authentication.
 
-    /// Convenience method to send GET requests related to an endpoint in the
-    /// API.
-    #[doc(hidden)]
-    pub fn api_get(&self, url: &str, payload: &Query<'_>) -> ClientResult<String> {
-        let url = self.api_url(url);
-        let headers = self.auth_headers()?;
-        Ok(self.get_http().get(&url, Some(&headers), payload)?)
+    /// Convenience method to send GET requests related to an endpoint in the  API.
+    pub fn api_get(&self, url: &str, payload: &[(&str, Option<&str>)]) -> ClientResult<String> {
+        let mut request = self.http.get(api_url(url));
+        let (key, val) = self.auth_headers()?;
+        request = request.header(key, val);
+        for (key, val) in payload {
+            if let Some(val) = val {
+                request = request.query(key, val);
+            }
+        }
+        let response = request.call()?;
+        Ok(response.into_body().read_to_string()?)
     }
 
-    /// Convenience method to send POST requests related to an endpoint in the
-    /// API.
-    #[doc(hidden)]
+    /// Convenience method to send POST requests related to an endpoint in the API.
     pub fn api_post(&self, url: &str, payload: &Value) -> ClientResult<String> {
-        let url = self.api_url(url);
-        let headers = self.auth_headers()?;
-        Ok(self.get_http().post(&url, Some(&headers), payload)?)
+        let mut request = self.http.post(api_url(url));
+        let (key, val) = self.auth_headers()?;
+        request = request.header(key, val);
+        let response = request.send_json(payload)?;
+        Ok(response.into_body().read_to_string()?)
     }
 
-    /// Convenience method to send PUT requests related to an endpoint in the
-    /// API.
-    #[doc(hidden)]
+    /// Convenience method to send PUT requests related to an endpoint in the API.
     pub fn api_put(&self, url: &str, payload: &Value) -> ClientResult<String> {
-        let url = self.api_url(url);
-        let headers = self.auth_headers()?;
-        Ok(self.get_http().put(&url, Some(&headers), payload)?)
+        let mut request = self.http.put(&api_url(url));
+        let (key, val) = self.auth_headers()?;
+        request = request.header(key, val);
+        let response = request.send_json(payload.clone())?;
+        Ok(response.into_body().read_to_string()?)
     }
 
-    /// Convenience method to send DELETE requests related to an endpoint in the
-    /// API.
-    #[doc(hidden)]
+    /// Convenience method to send DELETE requests related to an endpoint in the API.
     pub fn api_delete(&self, url: &str, payload: &Value) -> ClientResult<String> {
-        let url = self.api_url(url);
-        let headers = self.auth_headers()?;
-        Ok(self.get_http().delete(&url, Some(&headers), payload)?)
+        let mut request = self.http.delete(&api_url(url)).force_send_body();
+        let (key, val) = self.auth_headers()?;
+        request = request.header(key, val);
+        let response = request.send_json(payload.clone())?;
+        Ok(response.into_body().read_to_string()?)
     }
 
-    /// Convenience method to send POST requests related to the authentication
-    /// process.
-    #[doc(hidden)]
-    #[inline]
+    /// Convenience method to send POST requests related to the authentication process.
     pub fn auth_post(
         &self,
         url: &str,
-        headers: Option<&Headers>,
-        payload: &Form<'_>,
+        headers: Option<&HashMap<String, String>>,
+        payload: &[(&str, &str)],
     ) -> ClientResult<String> {
-        let url = self.auth_url(url);
-        Ok(self.get_http().post_form(&url, headers, payload)?)
+        let url = auth_url(url);
+        let mut request = self.http.post(url);
+        if let Some(headers) = headers {
+            for (key, val) in headers {
+                request = request.header(key, val);
+            }
+        }
+        let response = request.send_json(payload)?;
+        Ok(response.into_body().read_to_string()?)
     }
 
     /// Updates the cache file at the internal cache path.
@@ -637,13 +648,7 @@ impl SpotifyClient {
     /// isn't configured, because this will already check `Config::token_cached`
     /// and do nothing in that case already.
     pub fn write_token_cache(&self) -> ClientResult<()> {
-        if !self.get_config().token_cached {
-            tracing::info!("Token cache write ignored (not configured)");
-            return Ok(());
-        }
-
-        tracing::info!("Writing token cache");
-        if let Some(tok) = self.get_token().lock().unwrap().as_ref() {
+        if let Some(tok) = self.token.read().as_ref() {
             tok.write_cache(&self.get_config().cache_path)?;
         }
 
@@ -653,10 +658,10 @@ impl SpotifyClient {
     /// Sends a request to Spotify for an access token.
     pub fn fetch_access_token(
         &self,
-        payload: &Form<'_>,
-        headers: Option<&Headers>,
+        payload: &[(&str, &str)],
+        headers: Option<&HashMap<String, String>>,
     ) -> ClientResult<Token> {
-        let response = self.auth_post(auth_urls::TOKEN, headers, payload)?;
+        let response = self.auth_post("api/token", headers, payload)?;
 
         let mut tok = serde_json::from_str::<Token>(&response)?;
         tok.expires_at = Utc::now().checked_add_signed(tok.expires_in);
@@ -669,15 +674,12 @@ impl SpotifyClient {
     /// - artist_ids - a list of artist IDs, URIs or URLs
     ///
     /// [Reference](https://developer.spotify.com/documentation/web-api/reference/#/operations/get-multiple-artists)
-    pub fn artists(
-        &self,
-        artist_ids: impl IntoIterator<Item = ArtistId> + Send,
-    ) -> ClientResult<Vec<FullArtist>> {
-        let ids = ArtistId::join_ids(artist_ids);
+    pub fn artists(&self, artist_ids: &[ArtistId]) -> ClientResult<Vec<Artist>> {
+        let ids = artist_ids.join(",");
         let url = format!("artists/?ids={ids}");
-        let result = self.api_get(&url, &Query::new())?;
+        let result = self.api_get(&url, &[])?;
 
-        convert_result::<FullArtists>(&result).map(|x| x.artists)
+        convert_result::<Artists>(&result).map(|x| x.artists)
     }
 
     /// Get full details of the items of a playlist owned by a user.
@@ -702,23 +704,15 @@ impl SpotifyClient {
     ) -> ClientResult<Page<PlaylistItem>> {
         let limit = limit.map(|s| s.to_string());
         let offset = offset.map(|s| s.to_string());
-        let params = build_map([
+        let params = [
             ("fields", fields),
             ("limit", limit.as_deref()),
             ("offset", offset.as_deref()),
-        ]);
+        ];
 
-        let url = format!("playlists/{}/tracks", playlist_id.id());
+        let url = format!("playlists/{playlist_id}/tracks");
         let result = self.api_get(&url, &params)?;
         convert_result(&result)
-    }
-
-    pub const fn get_http(&self) -> &HttpClient {
-        &self.http
-    }
-
-    pub fn get_token(&self) -> Arc<Mutex<Option<Token>>> {
-        Arc::clone(&self.token)
     }
 
     pub const fn get_config(&self) -> &Config {
@@ -726,17 +720,19 @@ impl SpotifyClient {
     }
 
     pub fn refetch_token(&self) -> ClientResult<Option<Token>> {
-        match self.token.lock().unwrap().as_ref() {
+        match self.token.read().as_ref() {
             Some(Token {
                 refresh_token: Some(refresh_token),
                 ..
             }) => {
-                let mut data = Form::new();
-                data.insert(params::GRANT_TYPE, params::GRANT_TYPE_REFRESH_TOKEN);
-                data.insert(params::REFRESH_TOKEN, refresh_token);
-                data.insert(params::CLIENT_ID, &self.creds.id);
-
-                let token = self.fetch_access_token(&data, None)?;
+                let token = self.fetch_access_token(
+                    &[
+                        ("grant_type", "refresh_token"),
+                        ("refresh_token", refresh_token),
+                        ("client_id", &self.creds.id),
+                    ],
+                    None,
+                )?;
 
                 if let Some(callback_fn) = &*self.get_config().token_callback_fn.clone() {
                     callback_fn.0(token.clone())?;
@@ -756,28 +752,28 @@ impl SpotifyClient {
     /// or with [`Self::get_authorize_url`]. Otherwise, this function will
     /// panic.
     pub fn request_token(&self, code: &str) -> ClientResult<()> {
-        tracing::info!("Requesting PKCE Auth Code token");
-
         let verifier = self.verifier.as_ref().expect(
             "Unknown code verifier. Try calling \
             `AuthCodePkceSpotify::get_authorize_url` first or setting it \
             yourself.",
         );
 
-        let mut data = Form::new();
-        data.insert(params::CLIENT_ID, &self.creds.id);
-        data.insert(params::GRANT_TYPE, params::GRANT_TYPE_AUTH_CODE);
-        data.insert(params::CODE, code);
-        data.insert(params::REDIRECT_URI, &self.oauth.redirect_uri);
-        data.insert(params::CODE_VERIFIER, verifier);
-
-        let token = self.fetch_access_token(&data, None)?;
+        let token = self.fetch_access_token(
+            &[
+                ("client_id", self.creds.id.as_str()),
+                ("grant_type", "authorization_code"),
+                ("code", code),
+                ("redirect_uri", &self.oauth.redirect_uri),
+                ("code_verifier", verifier),
+            ],
+            None,
+        )?;
 
         if let Some(callback_fn) = &*self.get_config().token_callback_fn.clone() {
             callback_fn.0(token.clone())?;
         }
 
-        *self.token.lock().unwrap() = Some(token);
+        *self.token.write() = Some(token);
 
         self.write_token_cache()
     }
@@ -794,8 +790,6 @@ impl SpotifyClient {
 
     /// Generate the verifier code and the challenge code.
     pub fn generate_codes(verifier_bytes: usize) -> (String, String) {
-        tracing::info!("Generating PKCE codes");
-
         debug_assert!(verifier_bytes >= 43);
         debug_assert!(verifier_bytes <= 128);
         // The code verifier is just the randomly generated string.
@@ -827,28 +821,30 @@ impl SpotifyClient {
     /// [reference]: https://developer.spotify.com/documentation/general/guides/authorization/code-flow
     /// [rfce]: https://datatracker.ietf.org/doc/html/rfc7636#section-4.1
     pub fn get_authorize_url(&mut self, verifier_bytes: Option<usize>) -> ClientResult<String> {
-        tracing::info!("Building auth URL");
-
-        let scopes = join_scopes(&self.oauth.scopes);
+        let scopes = self
+            .oauth
+            .scopes
+            .iter()
+            .map(String::as_str)
+            .collect::<Vec<_>>()
+            .join(" ");
         let verifier_bytes = verifier_bytes.unwrap_or(43);
         let (verifier, challenge) = Self::generate_codes(verifier_bytes);
         // The verifier will be needed later when requesting the token
         self.verifier = Some(verifier);
 
-        let mut payload: HashMap<&str, &str> = HashMap::new();
-        payload.insert(params::CLIENT_ID, &self.creds.id);
-        payload.insert(params::RESPONSE_TYPE, params::RESPONSE_TYPE_CODE);
-        payload.insert(params::REDIRECT_URI, &self.oauth.redirect_uri);
-        payload.insert(
-            params::CODE_CHALLENGE_METHOD,
-            params::CODE_CHALLENGE_METHOD_S256,
-        );
-        payload.insert(params::CODE_CHALLENGE, &challenge);
-        payload.insert(params::STATE, &self.oauth.state);
-        payload.insert(params::SCOPE, &scopes);
-
-        let request_url = self.auth_url(auth_urls::AUTHORIZE);
-        let parsed = Url::parse_with_params(&request_url, payload)?;
+        let parsed = Url::parse_with_params(
+            &auth_url("authorize"),
+            &[
+                ("client_id", self.creds.id.as_str()),
+                ("response_type", "code"),
+                ("redirect_uri", self.oauth.redirect_uri.as_str()),
+                ("code_challenge_method", "S256"),
+                ("code_challenge", challenge.as_str()),
+                ("state", self.oauth.state.as_str()),
+                ("scope", scopes.as_str()),
+            ],
+        )?;
         Ok(parsed.into())
     }
 }

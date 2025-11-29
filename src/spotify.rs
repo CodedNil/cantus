@@ -3,10 +3,12 @@ use crate::{
     config::CONFIG,
     rspotify::{
         Config, Credentials, OAuth,
-        auth_code_pkce::SpotifyClient,
+        client::SpotifyClient,
         model::{
-            idtypes::{AlbumId, ArtistId, PlaylistId, TrackId},
-            playlist::SimplifiedPlaylist,
+            album::AlbumId,
+            artist::ArtistId,
+            playlist::{Playlist, PlaylistId},
+            track::TrackId,
         },
     },
 };
@@ -63,7 +65,7 @@ pub struct PlaybackState {
     pub volume: Option<u8>,
     pub queue: Vec<Track>,
     pub queue_index: usize,
-    pub playlists: HashMap<String, Playlist>,
+    pub playlists: HashMap<String, CondensedPlaylist>,
 
     current_context: Option<String>,
     context_updated: bool,
@@ -91,7 +93,7 @@ pub struct AlbumData {
     pub palette_image: ImageBrush,
 }
 
-pub struct Playlist {
+pub struct CondensedPlaylist {
     pub id: PlaylistId,
     pub name: String,
     pub image_url: String,
@@ -202,12 +204,10 @@ pub fn init() {
             ..Default::default()
         },
         Config {
-            token_cached: true,
             cache_path: dirs::config_dir()
                 .unwrap()
                 .join("cantus")
                 .join("spotify_cache.json"),
-            token_refreshing: true,
             ..Default::default()
         },
     );
@@ -334,9 +334,9 @@ fn get_spotify_queue() {
             Track {
                 id: track.id,
                 title: track.name,
-                artist_id: artist.id.unwrap(),
+                artist_id: artist.id,
                 artist_name: artist.name.clone(),
-                album_id: track.album.id.unwrap(),
+                album_id: track.album.id,
                 image_url: track
                     .album
                     .images
@@ -352,13 +352,15 @@ fn get_spotify_queue() {
 
     // Start a task to fetch missing artists & images
     let mut missing_urls = HashSet::new();
-    let mut missing_artists = HashSet::new();
+    let mut missing_artists = Vec::new();
     for track in &new_queue {
         if !IMAGES_CACHE.contains_key(&track.image_url) {
             missing_urls.insert(track.image_url.clone());
         }
-        if !ARTIST_DATA_CACHE.contains_key(&track.artist_id) {
-            missing_artists.insert(track.artist_id);
+        if !ARTIST_DATA_CACHE.contains_key(&track.artist_id)
+            && !missing_artists.contains(&track.artist_id)
+        {
+            missing_artists.push(track.artist_id);
         }
     }
     // Start downloading missing album images
@@ -369,7 +371,7 @@ fn get_spotify_queue() {
     // Cache artists, and download images
     if !missing_artists.is_empty() {
         spawn(move || {
-            let Ok(artists) = spotify_client.artists(missing_artists) else {
+            let Ok(artists) = spotify_client.artists(&missing_artists) else {
                 return;
             };
             for artist in artists {
@@ -462,7 +464,7 @@ fn poll_playlists() {
     let mut cached_playlist_tracks = load_cached_playlist_tracks();
 
     // Grab the current users playlists from spotify
-    let playlists: Vec<Playlist> = SPOTIFY_CLIENT
+    let playlists: Vec<CondensedPlaylist> = SPOTIFY_CLIENT
         .get()
         .unwrap()
         .current_user_playlists_manual(Some(50), None)
@@ -477,7 +479,7 @@ fn poll_playlists() {
             let cached = cached_playlist_tracks
                 .remove(&playlist.id)
                 .unwrap_or_default();
-            Playlist {
+            CondensedPlaylist {
                 id: playlist.id,
                 name: playlist.name,
                 image_url: playlist
@@ -529,7 +531,7 @@ fn refresh_playlists() {
     };
 
     // Find playlists which have changed
-    let changed_playlists: Vec<SimplifiedPlaylist> = spotify_client
+    let changed_playlists: Vec<Playlist> = spotify_client
         .current_user_playlists_manual(Some(50), None)
         .unwrap()
         .items

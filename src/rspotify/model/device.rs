@@ -1,12 +1,8 @@
-use serde::{Deserialize, Serialize};
+use serde::Deserialize;
 
 /// Device object
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Deserialize)]
 pub struct Device {
-    pub id: Option<String>,
-    pub is_active: bool,
-    pub is_private_session: bool,
-    pub is_restricted: bool,
     pub name: String,
     pub volume_percent: Option<u32>,
 }

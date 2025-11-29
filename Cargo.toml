@@ -65,22 +65,21 @@ image = { version = "0.25.9", default-features = false, features = [
 auto-palette = { version = "0.9.2", default-features = false }
 palette = { version = "0.7.6", default-features = false, features = ["std"] }
 
-fastrand = "2.3.0"
-parking_lot = "0.12.5"
-dashmap = "6.1.0"
 serde = { version = "1.0.228", features = ["derive"] }
 serde_json = "1.0.145"
 toml = "0.9.8"
+
+fastrand = "2.3.0"
+parking_lot = "0.12.5"
+dashmap = "6.1.0"
+arrayvec = { version = "0.7.6", features = ["serde"] }
 itertools = "0.14.0"
 dirs = "6.0.0"
 thiserror = "2.0.17"
 base64 = "0.22.1"
 url = "2.5.7"
 sha2 = "0.10.9"
-strum = { version = "0.27.2", features = ["derive"] }
-getrandom = "0.3.4"
 webbrowser = "1.0.6"
-arrayvec = { version = "0.7.6", features = ["serde"] }
 
 [lints.clippy]
 pedantic = { level = "warn", priority = -1 }
@@ -90,7 +89,6 @@ cast-possible-truncation = "allow"
 cast-precision-loss = "allow"
 cast-sign-loss = "allow"
 suboptimal_flops = "allow"
-
 doc-markdown = "allow"
 
 separated_literal_suffix = "warn"
