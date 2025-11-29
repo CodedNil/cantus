@@ -38,7 +38,7 @@ pub enum ClientError {
     TokenCallbackFn(#[from] CallbackError),
 
     #[error("model error: {0}")]
-    Model(#[from] model::error::ModelError),
+    Model(#[from] model::ModelError),
 
     #[error("Token is not valid")]
     InvalidToken,

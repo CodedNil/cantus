@@ -1,7 +1,7 @@
 use crate::{
     CantusApp,
     config::CONFIG,
-    rspotify::model::{playlist::PlaylistId, track::TrackId},
+    rspotify::model::{PlaylistId, TrackId},
     spotify::{
         CondensedPlaylist, IMAGES_CACHE, PLAYBACK_STATE, RATING_PLAYLISTS, SPOTIFY_CLIENT, Track,
         update_playback_state,

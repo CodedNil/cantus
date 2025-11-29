@@ -4,12 +4,7 @@ use crate::{
     rspotify::{
         Config, Credentials, OAuth,
         client::SpotifyClient,
-        model::{
-            album::AlbumId,
-            artist::ArtistId,
-            playlist::{Playlist, PlaylistId},
-            track::TrackId,
-        },
+        model::{AlbumId, ArtistId, Playlist, PlaylistId, TrackId},
     },
 };
 use dashmap::DashMap;
@@ -118,7 +113,7 @@ fn load_cached_playlist_tracks() -> PlaylistCache {
         .unwrap()
         .join("cantus")
         .join("cantus_playlist_tracks.json");
-    let bytes = match fs::read(cache_path.clone()) {
+    let bytes = match fs::read(&cache_path) {
         Ok(bytes) => bytes,
         Err(err) => {
             warn!("Failed to read playlist cache at {cache_path:?}: {err}");
@@ -213,7 +208,7 @@ pub fn init() {
     );
 
     // Prompt user for authorization and get the token
-    let url = spotify.get_authorize_url(None).unwrap();
+    let url = spotify.get_authorize_url().unwrap();
     spotify.prompt_for_token(&url).unwrap();
     SPOTIFY_CLIENT.set(spotify).unwrap();
 
@@ -467,7 +462,7 @@ fn poll_playlists() {
     let playlists: Vec<CondensedPlaylist> = SPOTIFY_CLIENT
         .get()
         .unwrap()
-        .current_user_playlists_manual(Some(50), None)
+        .current_user_playlists(Some(50), None)
         .unwrap()
         .items
         .into_iter()
@@ -532,7 +527,7 @@ fn refresh_playlists() {
 
     // Find playlists which have changed
     let changed_playlists: Vec<Playlist> = spotify_client
-        .current_user_playlists_manual(Some(50), None)
+        .current_user_playlists(Some(50), None)
         .unwrap()
         .items
         .into_iter()
@@ -552,7 +547,7 @@ fn refresh_playlists() {
         info!("Fetching {num_pages} pages from playlist {}", playlist.name);
         let mut pages = Vec::new();
         for page in 0..num_pages {
-            match spotify_client.playlist_items_manual(
+            match spotify_client.playlist_items(
                 &playlist.id,
                 Some("href,limit,offset,total,items(is_local,track(id))"),
                 Some(chunk_size),

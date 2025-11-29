@@ -2,11 +2,8 @@ use crate::rspotify::{
     ClientError, ClientResult, Config, Credentials, OAuth, Token, alphabets,
     generate_random_string,
     model::{
-        artist::{Artist, ArtistId, Artists},
-        context::{CurrentPlaybackContext, CurrentUserQueue},
-        page::Page,
-        playlist::{Playlist, PlaylistId, PlaylistItem},
-        track::TrackId,
+        Artist, ArtistId, Artists, CurrentPlaybackContext, CurrentUserQueue, Page, Playlist,
+        PlaylistId, PlaylistItem, TrackId,
     },
 };
 use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
@@ -24,6 +21,8 @@ use std::{
 use tracing::error;
 use ureq::Agent;
 use url::Url;
+
+const VERIFIER_BYTES: usize = 43;
 
 /// Append device ID to an API path.
 fn append_device_id(path: &str, device_id: Option<&str>) -> String {
@@ -104,10 +103,8 @@ impl SpotifyClient {
     ///
     /// [`ClientCredsSpotify::read_token_cache`]: crate::client_creds::ClientCredsSpotify::read_token_cache
     pub fn read_token_cache(&self, allow_expired: bool) -> ClientResult<Option<Token>> {
-        let token = Token::from_cache(&self.get_config().cache_path)?;
-        if !self.get_oauth().scopes.is_subset(&token.scopes)
-            || (!allow_expired && token.is_expired())
-        {
+        let token = Token::from_cache(&self.config.cache_path)?;
+        if !self.oauth.scopes.is_subset(&token.scopes) || (!allow_expired && token.is_expired()) {
             // Invalid token, since it doesn't have at least the currently
             // required scopes or it's expired.
             Ok(None)
@@ -130,7 +127,7 @@ impl SpotifyClient {
         let code = params.get("code")?;
 
         // Making sure the state is the same
-        let expected_state = &self.get_oauth().state;
+        let expected_state = &self.oauth.state;
         let state = params.get("state").map(AsRef::as_ref);
         if state != Some(expected_state) {
             tracing::error!("Request state doesn't match the callback state");
@@ -164,7 +161,7 @@ impl SpotifyClient {
             .split_whitespace()
             .nth(1)
             .ok_or(ClientError::AuthCodeListenerRead)?;
-        let redirect_full_url = format!("{}{}", self.get_oauth().redirect_uri, redirect_url);
+        let redirect_full_url = format!("{}{}", self.oauth.redirect_uri, redirect_url);
 
         let code = self
             .parse_response_code(&redirect_full_url)
@@ -187,7 +184,7 @@ impl SpotifyClient {
     // then the corresponding socket address is returned.
     pub fn get_socket_address(&self) -> Option<SocketAddr> {
         let (host, port) = {
-            let parsed_url = Url::parse(&self.get_oauth().redirect_uri).ok()?;
+            let parsed_url = Url::parse(&self.oauth.redirect_uri).ok()?;
             let port = match parsed_url.scheme() {
                 "http" => parsed_url.port().unwrap_or(80),
                 "https" => parsed_url.port().unwrap_or(443),
@@ -280,8 +277,14 @@ impl SpotifyClient {
         self.write_token_cache()
     }
 
-    /// The manually paginated version of [`Self::current_user_playlists`].
-    pub fn current_user_playlists_manual(
+    /// Get current user playlists without required getting his profile.
+    ///
+    /// Parameters:
+    /// - limit  - the number of items to return
+    /// - offset - the index of the first item to return
+    ///
+    /// [Reference](https://developer.spotify.com/documentation/web-api/reference/#/operations/get-a-list-of-current-users-playlists)
+    pub fn current_user_playlists(
         &self,
         limit: Option<u32>,
         offset: Option<u32>,
@@ -564,7 +567,7 @@ impl SpotifyClient {
                     .read()
                     .as_ref()
                     .ok_or(ClientError::InvalidToken)?
-                    .access_token
+                    .access
             ),
         ))
     }
@@ -600,7 +603,7 @@ impl SpotifyClient {
         let mut request = self.http.put(&api_url(url));
         let (key, val) = self.auth_headers()?;
         request = request.header(key, val);
-        let response = request.send_json(payload.clone())?;
+        let response = request.send_json(payload)?;
         Ok(response.into_body().read_to_string()?)
     }
 
@@ -609,7 +612,7 @@ impl SpotifyClient {
         let mut request = self.http.delete(&api_url(url)).force_send_body();
         let (key, val) = self.auth_headers()?;
         request = request.header(key, val);
-        let response = request.send_json(payload.clone())?;
+        let response = request.send_json(payload)?;
         Ok(response.into_body().read_to_string()?)
     }
 
@@ -620,7 +623,7 @@ impl SpotifyClient {
     /// and do nothing in that case already.
     pub fn write_token_cache(&self) -> ClientResult<()> {
         if let Some(tok) = self.token.read().as_ref() {
-            tok.write_cache(&self.get_config().cache_path)?;
+            tok.write_cache(&self.config.cache_path)?;
         }
 
         Ok(())
@@ -664,11 +667,8 @@ impl SpotifyClient {
     /// - offset - the index of the first track to return
     /// - market - an ISO 3166-1 alpha-2 country code or the string from_token.
     ///
-    /// See [`Self::playlist_items_manual`] for a manually paginated version of
-    /// this.
-    ///
     /// [Reference](https://developer.spotify.com/documentation/web-api/reference/#/operations/get-playlists-tracks)
-    pub fn playlist_items_manual(
+    pub fn playlist_items(
         &self,
         playlist_id: &PlaylistId,
         fields: Option<&str>,
@@ -688,14 +688,10 @@ impl SpotifyClient {
         serde_json::from_str(&result).map_err(Into::into)
     }
 
-    pub const fn get_config(&self) -> &Config {
-        &self.config
-    }
-
     pub fn refetch_token(&self) -> ClientResult<Option<Token>> {
         match self.token.read().as_ref() {
             Some(Token {
-                refresh_token: Some(refresh_token),
+                refresh: Some(refresh_token),
                 ..
             }) => {
                 let token = self.fetch_access_token(&[
@@ -704,7 +700,7 @@ impl SpotifyClient {
                     ("client_id", &self.creds.id),
                 ])?;
 
-                if let Some(callback_fn) = &*self.get_config().token_callback_fn.clone() {
+                if let Some(callback_fn) = &*self.config.token_callback_fn.clone() {
                     callback_fn.0(token.clone())?;
                 }
 
@@ -712,10 +708,6 @@ impl SpotifyClient {
             }
             _ => Ok(None),
         }
-    }
-
-    pub const fn get_oauth(&self) -> &OAuth {
-        &self.oauth
     }
 
     /// Note that the code verifier must be set at this point, either manually
@@ -736,7 +728,7 @@ impl SpotifyClient {
             ("code_verifier", verifier),
         ])?;
 
-        if let Some(callback_fn) = &*self.get_config().token_callback_fn.clone() {
+        if let Some(callback_fn) = &*self.config.token_callback_fn.clone() {
             callback_fn.0(token.clone())?;
         }
 
@@ -756,11 +748,9 @@ impl SpotifyClient {
     }
 
     /// Generate the verifier code and the challenge code.
-    pub fn generate_codes(verifier_bytes: usize) -> (String, String) {
-        debug_assert!(verifier_bytes >= 43);
-        debug_assert!(verifier_bytes <= 128);
+    pub fn generate_codes() -> (String, String) {
         // The code verifier is just the randomly generated string.
-        let verifier = generate_random_string(verifier_bytes, alphabets::PKCE_CODE_VERIFIER);
+        let verifier = generate_random_string(VERIFIER_BYTES, alphabets::PKCE_CODE_VERIFIER);
         // The code challenge is the code verifier hashed with SHA256 and then
         // encoded with base64url.
         //
@@ -779,15 +769,9 @@ impl SpotifyClient {
     /// Returns the URL needed to authorize the current client as the first step
     /// in the authorization flow.
     ///
-    /// The parameter `verifier_bytes` is the length of the randomly generated
-    /// code verifier. Note that it must be between 43 and 128. If `None` is
-    /// given, a length of 43 will be used by default. See [the official
-    /// docs][reference] or [PKCE's RFC][rfce] for more information about the
-    /// code verifier.
-    ///
     /// [reference]: https://developer.spotify.com/documentation/general/guides/authorization/code-flow
     /// [rfce]: https://datatracker.ietf.org/doc/html/rfc7636#section-4.1
-    pub fn get_authorize_url(&mut self, verifier_bytes: Option<usize>) -> ClientResult<String> {
+    pub fn get_authorize_url(&mut self) -> ClientResult<String> {
         let scopes = self
             .oauth
             .scopes
@@ -795,8 +779,7 @@ impl SpotifyClient {
             .map(String::as_str)
             .collect::<Vec<_>>()
             .join(" ");
-        let verifier_bytes = verifier_bytes.unwrap_or(43);
-        let (verifier, challenge) = Self::generate_codes(verifier_bytes);
+        let (verifier, challenge) = Self::generate_codes();
         // The verifier will be needed later when requesting the token
         self.verifier = Some(verifier);
 

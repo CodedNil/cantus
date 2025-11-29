@@ -1,7 +1,7 @@
 //! All objects related to the auth flows defined by Spotify API
 use super::{
+    ModelResult,
     custom_serde::{duration_second, space_separated_scopes},
-    error::ModelResult,
 };
 use chrono::{DateTime, Duration, TimeDelta, Utc};
 use serde::{Deserialize, Serialize};
@@ -18,7 +18,8 @@ use std::{
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 pub struct Token {
     /// An access token that can be provided in subsequent calls
-    pub access_token: String,
+    #[serde(rename = "access_token")]
+    pub access: String,
     /// The time period for which the access token is valid.
     #[serde(with = "duration_second")]
     pub expires_in: Duration,
@@ -27,7 +28,8 @@ pub struct Token {
     pub expires_at: Option<DateTime<Utc>>,
     /// A token that can be sent to the Spotify Accounts service
     /// in place of an authorization code
-    pub refresh_token: Option<String>,
+    #[serde(rename = "refresh_token")]
+    pub refresh: Option<String>,
     /// A list of [scopes](https://developer.spotify.com/documentation/general/guides/authorization/scopes/)
     /// which have been granted for this `access_token`
     ///
@@ -42,10 +44,10 @@ pub struct Token {
 impl Default for Token {
     fn default() -> Self {
         Self {
-            access_token: String::new(),
+            access: String::new(),
             expires_in: Duration::try_seconds(0).unwrap(),
             expires_at: Some(Utc::now()),
-            refresh_token: None,
+            refresh: None,
             scopes: HashSet::new(),
         }
     }
