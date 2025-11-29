@@ -1,5 +1,7 @@
 //! All kinds of tracks object
-use super::{SimplifiedAlbum, SimplifiedArtist, TrackId, custom_serde::duration_ms};
+use super::{
+    album::SimplifiedAlbum, artist::SimplifiedArtist, custom_serde::duration_ms, idtypes::TrackId,
+};
 use chrono::Duration;
 use serde::{Deserialize, Serialize};
 

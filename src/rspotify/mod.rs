@@ -149,7 +149,7 @@ mod http;
 pub mod model;
 mod util;
 
-use crate::rspotify::model::auth::Token;
+use model::auth::Token;
 use std::{collections::HashSet, fmt, net::SocketAddr, path::PathBuf, sync::Arc};
 use thiserror::Error;
 
@@ -210,7 +210,7 @@ pub enum ClientError {
     TokenCallbackFn(#[from] CallbackError),
 
     #[error("model error: {0}")]
-    Model(#[from] model::ModelError),
+    Model(#[from] model::error::ModelError),
 
     #[error("Token is not valid")]
     InvalidToken,

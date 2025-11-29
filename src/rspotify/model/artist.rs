@@ -1,5 +1,5 @@
 //! All objects related to artist defined by Spotify API
-use super::{ArtistId, Followers, Image};
+use super::{Followers, idtypes::ArtistId, image::Image};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 

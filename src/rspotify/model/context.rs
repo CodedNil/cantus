@@ -1,5 +1,5 @@
 //! All objects related to context
-use super::{Device, RepeatState, custom_serde::option_duration_ms, track::FullTrack};
+use super::{custom_serde::option_duration_ms, device::Device, track::FullTrack};
 use chrono::serde::ts_milliseconds;
 use chrono::{DateTime, Duration, Utc};
 use serde::Deserialize;
@@ -17,7 +17,6 @@ pub struct Context {
 #[derive(Clone, Debug, Deserialize, PartialEq, Eq)]
 pub struct CurrentPlaybackContext {
     pub device: Device,
-    pub repeat_state: RepeatState,
     pub shuffle_state: bool,
     pub context: Option<Context>,
     #[serde(with = "ts_milliseconds")]

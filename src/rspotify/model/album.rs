@@ -1,5 +1,5 @@
 //! All objects related to album defined by Spotify API
-use super::{AlbumId, Image, RestrictionReason, SimplifiedArtist};
+use super::{artist::SimplifiedArtist, idtypes::AlbumId, image::Image};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
@@ -19,14 +19,4 @@ pub struct SimplifiedAlbum {
     pub name: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub release_date: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub release_date_precision: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub restrictions: Option<Restriction>,
-}
-
-/// Album restriction object
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
-pub struct Restriction {
-    pub reason: RestrictionReason,
 }

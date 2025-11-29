@@ -1,9 +1,15 @@
-use crate::rspotify::{
-    Config, Credentials, OAuth,
-    auth_code_pkce::SpotifyClient,
-    model::{AlbumId, ArtistId, PlaylistId, SimplifiedPlaylist, TrackId},
+use crate::{
+    background::update_color_palettes,
+    config::CONFIG,
+    rspotify::{
+        Config, Credentials, OAuth,
+        auth_code_pkce::SpotifyClient,
+        model::{
+            idtypes::{AlbumId, ArtistId, PlaylistId, TrackId},
+            playlist::SimplifiedPlaylist,
+        },
+    },
 };
-use crate::{background::update_color_palettes, config::CONFIG};
 use dashmap::DashMap;
 use parking_lot::RwLock;
 use std::{

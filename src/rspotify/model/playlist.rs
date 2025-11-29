@@ -1,5 +1,5 @@
 //! All kinds of playlists objects
-use super::{Image, PlaylistId, track::FullTrack};
+use super::{idtypes::PlaylistId, image::Image, track::FullTrack};
 use chrono::prelude::*;
 use serde::{Deserialize, Serialize};
 

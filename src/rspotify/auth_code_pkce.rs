@@ -5,8 +5,11 @@ use crate::rspotify::{
     http::{Form, Headers, HttpClient, Query},
     join_scopes,
     model::{
-        ArtistId, CurrentPlaybackContext, CurrentUserQueue, FullArtist, FullArtists, Page,
-        PlaylistId, PlaylistItem, PlaylistResult, SimplifiedPlaylist, TrackId,
+        artist::{FullArtist, FullArtists},
+        context::{CurrentPlaybackContext, CurrentUserQueue},
+        idtypes::{ArtistId, PlaylistId, TrackId},
+        page::Page,
+        playlist::{PlaylistItem, PlaylistResult, SimplifiedPlaylist},
     },
     params,
     util::{JsonBuilder, build_map},
