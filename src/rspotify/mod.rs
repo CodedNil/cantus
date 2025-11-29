@@ -7,14 +7,6 @@ use auth::Token;
 use std::{collections::HashSet, fmt, net::SocketAddr, path::PathBuf, sync::Arc};
 use thiserror::Error;
 
-/// Common alphabets for random number generation and similars
-pub mod alphabets {
-    pub const ALPHANUM: &[u8] = b"abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789";
-    /// From <https://datatracker.ietf.org/doc/html/rfc7636#section-4.1>
-    pub const PKCE_CODE_VERIFIER: &[u8] =
-        b"abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789-._~";
-}
-
 /// Possible errors returned from the `rspotify` client.
 #[derive(Debug, Error)]
 pub enum ClientError {
@@ -126,7 +118,10 @@ impl Default for OAuth {
     fn default() -> Self {
         Self {
             redirect_uri: String::new(),
-            state: generate_random_string(16, alphabets::ALPHANUM),
+            state: generate_random_string(
+                16,
+                b"abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789",
+            ),
             scopes: HashSet::new(),
         }
     }

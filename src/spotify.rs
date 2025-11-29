@@ -7,6 +7,7 @@ use crate::{
         model::{AlbumId, ArtistId, Playlist, PlaylistId, TrackId},
     },
 };
+use arrayvec::ArrayString;
 use dashmap::DashMap;
 use parking_lot::RwLock;
 use std::{
@@ -17,7 +18,6 @@ use std::{
     time::{Duration, Instant},
 };
 use tracing::{error, info, warn};
-use ureq::Agent;
 use vello::peniko::{
     Blob, Extend, ImageAlphaType, ImageBrush, ImageData, ImageFormat, ImageQuality, ImageSampler,
 };
@@ -51,7 +51,6 @@ pub const RATING_PLAYLISTS: [&str; 10] = [
     "0.5", "1.0", "1.5", "2.0", "2.5", "3.0", "3.5", "4.0", "4.5", "5.0",
 ];
 
-static HTTP_CLIENT: LazyLock<Agent> = LazyLock::new(Agent::new_with_defaults);
 pub static SPOTIFY_CLIENT: OnceLock<SpotifyClient> = OnceLock::new();
 
 pub struct PlaybackState {
@@ -94,7 +93,7 @@ pub struct CondensedPlaylist {
     pub image_url: String,
     pub tracks: HashSet<TrackId>,
     pub tracks_total: u32,
-    snapshot_id: String,
+    snapshot_id: ArrayString<32>,
 }
 
 /// Mutably updates the global playback state.
@@ -106,7 +105,7 @@ where
     update(&mut state);
 }
 
-type PlaylistCache = HashMap<PlaylistId, (String, HashSet<TrackId>)>;
+type PlaylistCache = HashMap<PlaylistId, (ArrayString<32>, HashSet<TrackId>)>;
 
 fn load_cached_playlist_tracks() -> PlaylistCache {
     let cache_path = dirs::config_dir()
@@ -139,7 +138,7 @@ fn persist_playlist_cache() {
             (
                 playlist.id,
                 (
-                    playlist.snapshot_id.clone(),
+                    playlist.snapshot_id,
                     playlist.tracks.iter().copied().collect(),
                 ),
             )
@@ -406,7 +405,7 @@ fn ensure_image_cached(url: &str) {
         return;
     }
     IMAGES_CACHE.insert(url.to_owned(), None);
-    let mut response = match HTTP_CLIENT.get(url).call() {
+    let mut response = match SPOTIFY_CLIENT.get().unwrap().http.get(url).call() {
         Ok(response) => response,
         Err(err) => {
             warn!("Failed to cache image {url}: {err}");
@@ -483,7 +482,7 @@ fn poll_playlists() {
                     .url
                     .clone(),
                 tracks: cached.1,
-                tracks_total: playlist.tracks.total,
+                tracks_total: playlist.total_tracks,
                 snapshot_id: cached.0,
             }
         })
@@ -519,7 +518,7 @@ fn refresh_playlists() {
         state
             .playlists
             .values()
-            .map(|playlist| (playlist.id, playlist.snapshot_id.clone()))
+            .map(|playlist| (playlist.id, playlist.snapshot_id))
             .collect::<HashMap<_, _>>()
     };
 
@@ -541,7 +540,7 @@ fn refresh_playlists() {
     // Fetch all new tracks in one go for changed playlists
     for playlist in changed_playlists {
         let chunk_size = 50;
-        let num_pages = playlist.tracks.total.div_ceil(chunk_size) as usize;
+        let num_pages = playlist.total_tracks.div_ceil(chunk_size) as usize;
         info!("Fetching {num_pages} pages from playlist {}", playlist.name);
         let mut pages = Vec::new();
         for page in 0..num_pages {

@@ -1,4 +1,4 @@
-use super::custom_serde::{duration_ms, option_duration_ms};
+use super::custom_serde::{duration_ms, option_duration_ms, tracks_total};
 use arrayvec::ArrayString;
 use chrono::Duration;
 use serde::{Deserialize, de::DeserializeOwned};
@@ -51,11 +51,6 @@ pub struct PartialTrack {
 // Playlist
 pub type PlaylistId = ArrayString<22>;
 
-#[derive(Deserialize, Default)]
-pub struct PlaylistTracksRef {
-    pub total: u32,
-}
-
 /// Simplified playlist object
 #[derive(Deserialize)]
 pub struct Playlist {
@@ -63,8 +58,9 @@ pub struct Playlist {
     #[serde(default)]
     pub images: Vec<Image>,
     pub name: String,
-    pub snapshot_id: String,
-    pub tracks: PlaylistTracksRef,
+    pub snapshot_id: ArrayString<32>,
+    #[serde(rename = "tracks", with = "tracks_total")]
+    pub total_tracks: u32,
 }
 
 /// Playlist track object

@@ -154,3 +154,20 @@ pub mod space_separated_scopes {
         s.serialize_str(&scopes)
     }
 }
+
+pub mod tracks_total {
+    use serde::{Deserialize, Deserializer};
+
+    #[derive(Deserialize)]
+    struct TracksRef {
+        total: u32,
+    }
+
+    pub fn deserialize<'de, D>(deserializer: D) -> Result<u32, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let tracks_ref = TracksRef::deserialize(deserializer)?;
+        Ok(tracks_ref.total)
+    }
+}
