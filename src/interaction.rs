@@ -1,3 +1,4 @@
+use crate::rspotify::model::{PlayableId, PlaylistId, TrackId};
 use crate::{
     CantusApp,
     config::CONFIG,
@@ -8,10 +9,6 @@ use crate::{
 };
 use chrono::TimeDelta;
 use itertools::Itertools;
-use rspotify::{
-    model::{PlayableId, PlaylistId, TrackId},
-    prelude::OAuthClient,
-};
 use std::{cmp::Ordering, collections::HashMap, sync::LazyLock, thread::spawn, time::Instant};
 use std::{
     sync::atomic::{AtomicBool, Ordering as AtomicOrdering},

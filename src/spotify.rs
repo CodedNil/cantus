@@ -1,14 +1,13 @@
-use crate::{background::update_color_palettes, config::CONFIG};
-use dashmap::DashMap;
-use parking_lot::RwLock;
-use rspotify::{
-    AuthCodePkceSpotify, Config, Credentials, OAuth,
+use crate::rspotify::{
+    Config, Credentials, OAuth,
+    auth_code_pkce::SpotifyClient,
     model::{
         AdditionalType, AlbumId, ArtistId, PlayableItem, PlaylistId, SimplifiedPlaylist, TrackId,
     },
-    prelude::{BaseClient, OAuthClient},
-    scopes,
 };
+use crate::{background::update_color_palettes, config::CONFIG};
+use dashmap::DashMap;
+use parking_lot::RwLock;
 use std::{
     collections::{HashMap, HashSet},
     fs,
@@ -52,7 +51,7 @@ pub const RATING_PLAYLISTS: [&str; 10] = [
 ];
 
 static HTTP_CLIENT: LazyLock<Agent> = LazyLock::new(Agent::new_with_defaults);
-pub static SPOTIFY_CLIENT: OnceLock<AuthCodePkceSpotify> = OnceLock::new();
+pub static SPOTIFY_CLIENT: OnceLock<SpotifyClient> = OnceLock::new();
 
 pub struct PlaybackState {
     pub playing: bool,
@@ -177,26 +176,25 @@ pub fn init() {
     }
 
     // Initialize Spotify client with credentials and OAuth scopes
-    let mut spotify = AuthCodePkceSpotify::with_config(
+    let mut scopes = HashSet::new();
+    scopes.insert("user-read-playback-state".to_owned());
+    scopes.insert("user-modify-playback-state".to_owned());
+    scopes.insert("user-read-currently-playing".to_owned());
+    scopes.insert("playlist-read-private".to_owned());
+    scopes.insert("playlist-read-collaborative".to_owned());
+    scopes.insert("playlist-modify-private".to_owned());
+    scopes.insert("playlist-modify-public".to_owned());
+    scopes.insert("user-library-read".to_owned());
+    scopes.insert("user-library-modify".to_owned());
+    let mut spotify = SpotifyClient::with_config(
         Credentials {
             id: CONFIG.spotify_client_id.clone().expect(
                 "Spotify client ID not set, set it in the config file under key `spotify_client_id`.",
             ),
-            secret: None,
         },
         OAuth {
             redirect_uri: String::from("http://127.0.0.1:7474/callback"),
-            scopes: scopes!(
-                "user-read-playback-state",
-                "user-modify-playback-state",
-                "user-read-currently-playing",
-                "playlist-read-private",
-                "playlist-read-collaborative",
-                "playlist-modify-private",
-                "playlist-modify-public",
-                "user-library-read",
-                "user-library-modify"
-            ),
+            scopes,
             ..Default::default()
         },
         Config {

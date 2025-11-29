@@ -17,7 +17,11 @@ winit = ["dep:winit"]
 tracing = "0.1.43"
 tracing-subscriber = { version = "0.3.22", features = ["env-filter"] }
 
-ureq = "3.1.4"
+ureq = { version = "3.1.4", default-features = false, features = [
+    "json",
+    "cookies",
+    "socks-proxy",
+] }
 pollster = "0.4.0"
 raw-window-handle = "0.6.2"
 
@@ -51,12 +55,10 @@ ttf-parser = { version = "0.25.1", default-features = false, features = [
     "variable-fonts",
 ] }
 
-rspotify = { version = "0.15.3", default-features = false, features = [
-    "client-ureq",
-    "ureq-rustls-tls",
-    "cli",
+chrono = { version = "0.4.42", default-features = false, features = [
+    "serde",
+    "clock",
 ] }
-chrono = { version = "0.4.42", default-features = false }
 image = { version = "0.25.9", default-features = false, features = [
     "jpeg",
     "png",
@@ -72,6 +74,14 @@ serde_json = "1.0.145"
 toml = "0.9.8"
 itertools = "0.14.0"
 dirs = "6.0.0"
+thiserror = "2.0.17"
+base64 = "0.22.1"
+url = "2.5.7"
+sha2 = "0.10.9"
+strum = { version = "0.27.2", features = ["derive"] }
+enum_dispatch = "0.3.13"
+getrandom = "0.3.4"
+webbrowser = "1.0.6"
 
 [lints.clippy]
 pedantic = { level = "warn", priority = -1 }
@@ -81,6 +91,9 @@ cast-possible-truncation = "allow"
 cast-precision-loss = "allow"
 cast-sign-loss = "allow"
 suboptimal_flops = "allow"
+
+doc-markdown = "allow"
+unused-self = "allow"
 
 separated_literal_suffix = "warn"
 wildcard_enum_match_arm = "warn"
