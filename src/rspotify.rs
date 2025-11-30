@@ -257,166 +257,6 @@ fn prompt_for_token(
 }
 
 impl SpotifyClient {
-    /// Get current user playlists without required getting his profile.
-    /// [Reference](https://developer.spotify.com/documentation/web-api/reference/#/operations/get-a-list-of-current-users-playlists)
-    pub fn current_user_playlists(
-        &self,
-        limit: Option<u32>,
-        offset: Option<u32>,
-    ) -> ClientResult<Page<Playlist>> {
-        let limit = limit.map(|s| s.to_string());
-        let offset = offset.map(|s| s.to_string());
-        let params = [("limit", limit.as_deref()), ("offset", offset.as_deref())];
-
-        let result = self.api_get("me/playlists", &params)?;
-        serde_json::from_str(&result).map_err(Into::into)
-    }
-
-    /// Adds items to a playlist.
-    /// [Reference](https://developer.spotify.com/documentation/web-api/reference/#/operations/add-tracks-to-playlist)
-    pub fn playlist_add_item(
-        &self,
-        playlist_id: &PlaylistId,
-        track_id: &TrackId,
-    ) -> ClientResult<()> {
-        let track_uri = format!("spotify:track:{track_id}");
-        self.api_post_payload(
-            &format!("playlists/{playlist_id}/tracks"),
-            &format!(r#"{{"uris": ["{track_uri}"]}}"#),
-        )
-    }
-
-    /// Removes all occurrences of the given items from the given playlist.
-    /// [Reference](https://developer.spotify.com/documentation/web-api/reference/#/operations/remove-tracks-playlist)
-    pub fn playlist_remove_item(
-        &self,
-        playlist_id: &PlaylistId,
-        track_id: &TrackId,
-    ) -> ClientResult<()> {
-        let track_uri = format!("spotify:track:{track_id}");
-        self.api_delete_payload(
-            &format!("playlists/{playlist_id}/tracks"),
-            &format!(r#"{{"tracks": [ {{"uri": "{track_uri}"}} ]}}"#),
-        )
-    }
-
-    /// Remove one or more tracks from the users liked songs.
-    /// [Reference](https://developer.spotify.com/documentation/web-api/reference/#/operations/remove-tracks-user)
-    pub fn current_user_saved_tracks_delete(&self, track_id: &TrackId) -> ClientResult<()> {
-        self.api_delete(&format!("me/tracks/?ids={track_id}"))?;
-        Ok(())
-    }
-
-    /// Check if one or more tracks is already liked by the user.
-    /// [Reference](https://developer.spotify.com/documentation/web-api/reference/#/operations/check-users-saved-tracks)
-    pub fn current_user_saved_tracks_contains(
-        &self,
-        track_id: &TrackId,
-    ) -> ClientResult<Vec<bool>> {
-        serde_json::from_str(&self.api_get(&format!("me/tracks/contains/?ids={track_id}"), &[])?)
-            .map_err(Into::into)
-    }
-
-    /// Save one or more tracks to the users liked songs.
-    /// [Reference](https://developer.spotify.com/documentation/web-api/reference/#/operations/save-tracks-user)
-    pub fn current_user_saved_tracks_add(&self, track_id: &TrackId) -> ClientResult<()> {
-        self.api_put(&format!("me/tracks/?ids={track_id}"))?;
-        Ok(())
-    }
-
-    /// Get Information About The User’s Current Playback
-    /// [Reference](https://developer.spotify.com/documentation/web-api/reference/#/operations/get-information-about-the-users-current-playback)
-    pub fn current_playback(&self) -> ClientResult<Option<CurrentPlaybackContext>> {
-        let result = self.api_get("me/player", &[])?;
-        if result.is_empty() {
-            Ok(None)
-        } else {
-            serde_json::from_str(&result).map_err(Into::into)
-        }
-    }
-
-    /// Get the Current User’s Queue
-    /// [Reference](https://developer.spotify.com/documentation/web-api/reference/#/operations/get-queue)
-    pub fn current_user_queue(&self) -> ClientResult<CurrentUserQueue> {
-        let result = self.api_get("me/player/queue", &[])?;
-        serde_json::from_str(&result).map_err(Into::into)
-    }
-
-    /// Pause a User’s Playback.
-    /// [Reference](https://developer.spotify.com/documentation/web-api/reference/#/operations/pause-a-users-playback)
-    pub fn pause_playback(&self) -> ClientResult<()> {
-        self.api_put("me/player/pause")
-    }
-
-    /// Resume a User’s Playback.
-    /// [Reference](https://developer.spotify.com/documentation/web-api/reference/#/operations/start-a-users-playback)
-    pub fn resume_playback(&self) -> ClientResult<()> {
-        self.api_put("me/player/play")
-    }
-
-    /// Skip User’s Playback To Next Track.
-    /// [Reference](https://developer.spotify.com/documentation/web-api/reference/#/operations/skip-users-playback-to-next-track)
-    pub fn next_track(&self) -> ClientResult<()> {
-        self.api_post("me/player/next")
-    }
-
-    /// Skip User’s Playback To Previous Track.
-    /// [Reference](https://developer.spotify.com/documentation/web-api/reference/#/operations/skip-users-playback-to-previous-track)
-    pub fn previous_track(&self) -> ClientResult<()> {
-        self.api_post("me/player/previous")
-    }
-
-    /// Seek To Position In Currently Playing Track.
-    /// [Reference](https://developer.spotify.com/documentation/web-api/reference/#/operations/seek-to-position-in-currently-playing-track)
-    pub fn seek_track(&self, position: Duration) -> ClientResult<()> {
-        self.api_put(&format!(
-            "me/player/seek?position_ms={}",
-            position.num_milliseconds()
-        ))
-    }
-
-    /// Set Volume For User’s Playback.
-    /// [Reference](https://developer.spotify.com/documentation/web-api/reference/#/operations/set-volume-for-users-playback)
-    pub fn volume(&self, volume_percent: u8) -> ClientResult<()> {
-        debug_assert!(
-            volume_percent <= 100u8,
-            "volume must be between 0 and 100, inclusive"
-        );
-        self.api_put(&format!("me/player/volume?volume_percent={volume_percent}"))
-    }
-
-    /// Returns a list of artists given the artist IDs, URIs, or URLs.
-    /// [Reference](https://developer.spotify.com/documentation/web-api/reference/#/operations/get-multiple-artists)
-    pub fn artists(&self, artist_ids: &[ArtistId]) -> ClientResult<Vec<Artist>> {
-        serde_json::from_str::<Artists>(
-            &self.api_get(&format!("artists/?ids={}", artist_ids.join(",")), &[])?,
-        )
-        .map_err(Into::into)
-        .map(|x| x.artists)
-    }
-
-    /// Get full details of the items of a playlist owned by a user.
-    /// [Reference](https://developer.spotify.com/documentation/web-api/reference/#/operations/get-playlists-tracks)
-    pub fn playlist_items(
-        &self,
-        playlist_id: &PlaylistId,
-        fields: Option<&str>,
-        limit: Option<u32>,
-        offset: Option<u32>,
-    ) -> ClientResult<Page<PlaylistItem>> {
-        let limit = limit.map(|s| s.to_string());
-        let offset = offset.map(|s| s.to_string());
-        serde_json::from_str(&self.api_get(
-            &format!("playlists/{playlist_id}/tracks"),
-            &[
-                ("fields", fields),
-                ("limit", limit.as_deref()),
-                ("offset", offset.as_deref()),
-            ],
-        )?)
-        .map_err(Into::into)
-    }
-
     /// The headers required for authenticated requests to the API.
     ///
     /// Since this is accessed by authenticated requests always, it's where the
@@ -433,26 +273,29 @@ impl SpotifyClient {
         Ok(format!("Bearer {}", self.token.read().access))
     }
 
-    // HTTP-related methods for the Spotify client. They wrap up the basic HTTP
-    // client with its specific usage for endpoints or authentication.
-
-    /// Convenience method to send GET requests related to an endpoint in the  API.
-    fn api_get(&self, url: &str, payload: &[(&str, Option<&str>)]) -> ClientResult<String> {
+    /// Convenience method to send GET requests related to an endpoint in the API.
+    pub fn api_get(&self, url: &str) -> ClientResult<String> {
         let response = self
             .http
             .get(format!("https://api.spotify.com/v1/{url}"))
             .header("authorization", self.auth_headers()?)
-            .query_pairs(
-                payload
-                    .iter()
-                    .filter_map(|&(k, v)| v.map(|v_inner| (k, v_inner))),
-            )
+            .call()?;
+        Ok(response.into_body().read_to_string()?)
+    }
+
+    /// Convenience method to send GET requests related to an endpoint in the API.
+    pub fn api_get_payload(&self, url: &str, payload: &[(&str, &str)]) -> ClientResult<String> {
+        let response = self
+            .http
+            .get(format!("https://api.spotify.com/v1/{url}"))
+            .header("authorization", self.auth_headers()?)
+            .query_pairs(payload.iter().copied())
             .call()?;
         Ok(response.into_body().read_to_string()?)
     }
 
     /// Convenience method to send POST requests related to an endpoint in the API.
-    fn api_post(&self, url: &str) -> ClientResult<()> {
+    pub fn api_post(&self, url: &str) -> ClientResult<()> {
         self.http
             .post(format!("https://api.spotify.com/v1/{url}"))
             .header("authorization", self.auth_headers()?)
@@ -461,7 +304,7 @@ impl SpotifyClient {
     }
 
     /// Convenience method to send POST requests related to an endpoint in the API.
-    fn api_post_payload(&self, url: &str, payload: &str) -> ClientResult<()> {
+    pub fn api_post_payload(&self, url: &str, payload: &str) -> ClientResult<()> {
         self.http
             .post(format!("https://api.spotify.com/v1/{url}"))
             .header("Content-Type", "application/json; charset=utf-8")
@@ -471,7 +314,7 @@ impl SpotifyClient {
     }
 
     /// Convenience method to send PUT requests related to an endpoint in the API.
-    fn api_put(&self, url: &str) -> ClientResult<()> {
+    pub fn api_put(&self, url: &str) -> ClientResult<()> {
         self.http
             .put(format!("https://api.spotify.com/v1/{url}"))
             .header("authorization", self.auth_headers()?)
@@ -480,7 +323,7 @@ impl SpotifyClient {
     }
 
     /// Convenience method to send DELETE requests related to an endpoint in the API.
-    fn api_delete(&self, url: &str) -> ClientResult<()> {
+    pub fn api_delete(&self, url: &str) -> ClientResult<()> {
         self.http
             .delete(format!("https://api.spotify.com/v1/{url}"))
             .header("authorization", self.auth_headers()?)
@@ -489,7 +332,7 @@ impl SpotifyClient {
     }
 
     /// Convenience method to send DELETE requests related to an endpoint in the API.
-    fn api_delete_payload(&self, url: &str, payload: &str) -> ClientResult<()> {
+    pub fn api_delete_payload(&self, url: &str, payload: &str) -> ClientResult<()> {
         self.http
             .delete(format!("https://api.spotify.com/v1/{url}"))
             .header("Content-Type", "application/json; charset=utf-8")

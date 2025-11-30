@@ -7,43 +7,20 @@ use crate::{
         update_playback_state,
     },
 };
-use chrono::TimeDelta;
 use itertools::Itertools;
+use std::time::Duration;
 use std::{cmp::Ordering, collections::HashMap, sync::LazyLock, thread::spawn, time::Instant};
-use std::{
-    sync::atomic::{AtomicBool, Ordering as AtomicOrdering},
-    time::Duration,
-};
 use tracing::{error, info, warn};
 use vello::{
     kurbo::{Affine, BezPath, Point, Rect, RoundedRect, Shape, Stroke},
     peniko::{Color, Fill, ImageBrush},
 };
 
-static SPOTIFY_INTERACTION_GUARD: AtomicBool = AtomicBool::new(false);
-struct SpotifyInteractionToken;
-fn try_acquire_spotify_guard() -> Option<SpotifyInteractionToken> {
-    SPOTIFY_INTERACTION_GUARD
-        .compare_exchange(
-            false,
-            true,
-            AtomicOrdering::Acquire,
-            AtomicOrdering::Relaxed,
-        )
-        .ok()
-        .map(|_| SpotifyInteractionToken)
-}
-impl Drop for SpotifyInteractionToken {
-    fn drop(&mut self) {
-        SPOTIFY_INTERACTION_GUARD.store(false, AtomicOrdering::Release);
-    }
-}
-
 pub struct IconHitbox {
     pub rect: Rect,
     pub track_id: TrackId,
     pub playlist_id: Option<PlaylistId>,
-    pub rating_index: Option<usize>,
+    pub rating_index: Option<u8>,
 }
 
 pub struct InteractionState {
@@ -60,7 +37,6 @@ pub struct InteractionState {
     pub drag_track: Option<(TrackId, f64)>,
     pub dragging: bool,
     pub drag_delta_pixels: f64,
-    spotify_guard: Option<SpotifyInteractionToken>,
 }
 
 impl Default for InteractionState {
@@ -81,7 +57,6 @@ impl Default for InteractionState {
             drag_track: None,
             dragging: false,
             drag_delta_pixels: 0.0,
-            spotify_guard: None,
         }
     }
 }
@@ -93,7 +68,7 @@ impl InteractionState {
         self.drag_track = None;
         self.dragging = false;
         self.drag_delta_pixels = 0.0;
-        self.spotify_guard = None;
+        PLAYBACK_STATE.write().interaction = false;
     }
 
     pub fn left_click_released(&mut self, scale_factor: f64) {
@@ -108,8 +83,8 @@ impl InteractionState {
         self.drag_origin = None;
         self.dragging = false;
         self.drag_delta_pixels = 0.0;
-        self.spotify_guard = None;
         self.mouse_down = false;
+        PLAYBACK_STATE.write().interaction = false;
     }
 
     pub fn right_click(&mut self) {
@@ -118,8 +93,16 @@ impl InteractionState {
     }
 
     /// Handle click events.
-    fn handle_click(&mut self, scale_factor: f64) -> bool {
+    fn handle_click(&mut self, scale_factor: f64) {
         let mouse_pos = self.mouse_position;
+        let (playing, interaction) = {
+            let state = PLAYBACK_STATE.read();
+            (state.playing, state.interaction)
+        };
+        if interaction {
+            return;
+        }
+        PLAYBACK_STATE.write().interaction = true;
 
         // Click on rating/playlist icons
         if let Some(hitbox) = self
@@ -132,7 +115,7 @@ impl InteractionState {
                 && let Some(index) = hitbox.rating_index
             {
                 let center_x = (hitbox.rect.x0 + hitbox.rect.x1) * 0.5;
-                let rating_slot = index * 2 + usize::from(mouse_pos.x >= center_x);
+                let rating_slot = index * 2 + u8::from(mouse_pos.x >= center_x);
                 spawn(move || {
                     update_star_rating(&track_id, rating_slot);
                 });
@@ -141,13 +124,8 @@ impl InteractionState {
                     toggle_playlist_membership(&track_id, &playlist_id);
                 });
             }
-            return true;
-        }
-
-        // Play/pause
-        if self.play_hitbox.contains(mouse_pos) {
-            let playing = PLAYBACK_STATE.read().playing;
-            // Add a click event
+        } else if self.play_hitbox.contains(mouse_pos) {
+            // Play/pause
             if let Some((track_id, track_rect, _)) = self
                 .track_hitboxes
                 .iter()
@@ -167,16 +145,13 @@ impl InteractionState {
             spawn(move || {
                 toggle_playing(!playing);
             });
-            return true;
-        }
-
-        // Seek track
-        if let Some((track_id, track_rect, (track_range_a, track_range_b))) = self
+        } else if let Some((track_id, track_rect, (track_range_a, track_range_b))) = self
             .track_hitboxes
             .iter()
             .rev()
             .find(|(_, track_rect, _)| track_rect.contains(mouse_pos))
         {
+            // Seek track
             self.last_click = Some((
                 Instant::now(),
                 *track_id,
@@ -193,9 +168,8 @@ impl InteractionState {
             spawn(move || {
                 skip_to_track(&track_id, position, false);
             });
-            return true;
         }
-        false
+        PLAYBACK_STATE.write().interaction = false;
     }
 
     /// Drag across the progress bar to seek.
@@ -205,7 +179,7 @@ impl InteractionState {
             let delta_y = self.mouse_position.y - origin_pos.y;
             if !self.dragging && (delta_x.abs() >= 2.0 || delta_y.abs() >= 2.0) {
                 self.dragging = true;
-                self.ensure_spotify_guard();
+                PLAYBACK_STATE.write().interaction = true;
             }
             self.drag_delta_pixels = if self.dragging { delta_x } else { 0.0 };
         } else {
@@ -239,13 +213,7 @@ impl InteractionState {
         self.drag_origin = None;
         self.dragging = false;
         self.drag_delta_pixels = 0.0;
-        self.spotify_guard = None;
-    }
-
-    fn ensure_spotify_guard(&mut self) {
-        if self.spotify_guard.is_none() {
-            self.spotify_guard = try_acquire_spotify_guard();
-        }
+        PLAYBACK_STATE.write().interaction = false;
     }
 }
 
@@ -259,7 +227,7 @@ pub enum InteractionEvent {
 
 enum IconEntry<'a> {
     Star {
-        index: usize,
+        index: u8,
     },
     Playlist {
         playlist: &'a CondensedPlaylist,
@@ -279,26 +247,25 @@ impl CantusApp {
         &mut self,
         track: &Track,
         hovered: bool,
-        playlists: &HashMap<String, CondensedPlaylist>,
+        playlists: &HashMap<PlaylistId, CondensedPlaylist>,
         width: f64,
         height: f64,
         pos_x: f64,
     ) {
-        let ratings_enabled = CONFIG.ratings_enabled;
-        let track_rating_index = if ratings_enabled {
-            RATING_PLAYLISTS
+        let track_rating_index = if CONFIG.ratings_enabled {
+            playlists
                 .iter()
-                .position(|&rating_key| {
-                    playlists
-                        .get(rating_key)
-                        .is_some_and(|playlist| playlist.tracks.contains(&track.id))
+                .find(|(_, playlist)| {
+                    playlist.rating_index.is_some() && playlist.tracks.contains(&track.id)
                 })
-                .unwrap_or(0)
+                .map_or(0, |(_, playlist)| {
+                    playlist.rating_index.map_or(0, |rating| rating + 1)
+                })
         } else {
             0
         };
 
-        let mut icon_entries = if ratings_enabled {
+        let mut icon_entries = if CONFIG.ratings_enabled {
             (0..5)
                 .map(|index| IconEntry::Star { index })
                 .collect::<Vec<_>>()
@@ -308,9 +275,10 @@ impl CantusApp {
         // Add playlists that are contained in the favourited playlists
         icon_entries.extend(
             playlists
-                .iter()
-                .filter_map(|(key, playlist)| {
-                    if ratings_enabled && RATING_PLAYLISTS.contains(&key.as_str()) {
+                .values()
+                .filter_map(|playlist| {
+                    if CONFIG.ratings_enabled && RATING_PLAYLISTS.contains(&playlist.name.as_str())
+                    {
                         return None;
                     }
                     let contained = playlist.tracks.contains(&track.id);
@@ -397,7 +365,7 @@ impl CantusApp {
                     if hovered {
                         let rect_center_x = (button_rect.x0 + button_rect.x1) * 0.5;
                         hover_rating_index =
-                            Some(*index * 2 + 1 + usize::from(mouse_pos.x >= rect_center_x));
+                            Some(*index * 2 + 1 + u8::from(mouse_pos.x >= rect_center_x));
                     }
                     self.interaction.icon_hitboxes.push(IconHitbox {
                         rect: button_rect,
@@ -421,7 +389,7 @@ impl CantusApp {
         }
 
         // Render out the icons
-        let display_rating_index = hover_rating_index.unwrap_or(track_rating_index + 1);
+        let display_rating_index = hover_rating_index.unwrap_or(track_rating_index);
         let display_full_stars = display_rating_index / 2;
         let display_has_half = display_rating_index % 2 == 1;
         for (entry, (hovered, icon_origin_x)) in
@@ -524,10 +492,6 @@ impl CantusApp {
 
 /// Skip to the specified track in the queue.
 fn skip_to_track(track_id: &TrackId, position: f64, always_seek: bool) {
-    let Some(_guard) = try_acquire_spotify_guard() else {
-        return;
-    };
-
     let (queue_index, position_in_queue, ms_lookup) = {
         let state = PLAYBACK_STATE.read();
         let queue_index = state.queue_index;
@@ -561,12 +525,13 @@ fn skip_to_track(track_id: &TrackId, position: f64, always_seek: bool) {
             "{} to track {track_id}, {skips} skips",
             if forward { "Skipping" } else { "Rewinding" }
         );
-        let client = SPOTIFY_CLIENT.get().unwrap();
         for _ in 0..skips.min(10) {
             let result = if forward {
-                client.next_track()
+                // https://developer.spotify.com/documentation/web-api/reference/#/operations/skip-users-playback-to-next-track
+                SPOTIFY_CLIENT.api_post("me/player/next")
             } else {
-                client.previous_track()
+                // https://developer.spotify.com/documentation/web-api/reference/#/operations/skip-users-playback-to-previous-track
+                SPOTIFY_CLIENT.api_post("me/player/previous")
             };
             update_playback_state(|state| {
                 state.queue_index = position_in_queue;
@@ -596,25 +561,22 @@ fn skip_to_track(track_id: &TrackId, position: f64, always_seek: bool) {
             state.last_progress_update = Instant::now();
             state.last_interaction = Instant::now() + Duration::from_millis(2000);
         });
-        if let Err(err) = SPOTIFY_CLIENT
-            .get()
-            .unwrap()
-            .seek_track(TimeDelta::milliseconds(milliseconds as i64))
-        {
+        // https://developer.spotify.com/documentation/web-api/reference/#/operations/seek-to-position-in-currently-playing-track
+        if let Err(err) = SPOTIFY_CLIENT.api_put(&format!(
+            "me/player/seek?position_ms={}",
+            milliseconds.round()
+        )) {
             error!("Failed to seek track: {err}");
         }
     }
 }
 
 /// Update Spotify rating playlists for the given track.
-fn update_star_rating(track_id: &TrackId, rating_slot: usize) {
+fn update_star_rating(track_id: &TrackId, rating_slot: u8) {
     if !CONFIG.ratings_enabled {
         return;
     }
-    let Some(_guard) = try_acquire_spotify_guard() else {
-        return;
-    };
-    let Some(rating_name) = RATING_PLAYLISTS.get(rating_slot) else {
+    let Some(rating_name) = RATING_PLAYLISTS.get(rating_slot as usize) else {
         return;
     };
 
@@ -645,32 +607,44 @@ fn update_star_rating(track_id: &TrackId, rating_slot: usize) {
     });
 
     // Make the changes
-    let spotify_client = SPOTIFY_CLIENT.get().unwrap();
     for (playlist_id, playlist_name) in playlists_to_remove_from {
         info!("Removing track {track_id} from rating playlist {playlist_name}");
-        if let Err(err) = spotify_client.playlist_remove_item(&playlist_id, track_id) {
+        let track_uri = format!("spotify:track:{track_id}");
+        // https://developer.spotify.com/documentation/web-api/reference/#/operations/remove-tracks-playlist
+        if let Err(err) = SPOTIFY_CLIENT.api_delete_payload(
+            &format!("playlists/{playlist_id}/tracks"),
+            &format!(r#"{{"tracks": [ {{"uri": "{track_uri}"}} ]}}"#),
+        ) {
             error!("Failed to remove track {track_id} from rating playlist {playlist_name}: {err}");
         }
     }
     for (playlist_id, playlist_name) in playlists_to_add_to {
         info!("Adding track {track_id} to rating playlist {playlist_name}");
-        if let Err(err) = spotify_client.playlist_add_item(&playlist_id, track_id) {
+        let track_uri = format!("spotify:track:{track_id}");
+        // https://developer.spotify.com/documentation/web-api/reference/#/operations/add-tracks-to-playlist)
+        if let Err(err) = SPOTIFY_CLIENT.api_post_payload(
+            &format!("playlists/{playlist_id}/tracks"),
+            &format!(r#"{{"uris": ["{track_uri}"]}}"#),
+        ) {
             error!("Failed to add track {track_id} to rating playlist {playlist_name}: {err}");
         }
     }
 
     // Add the track the liked songs if its rated above 3 stars
-    match spotify_client.current_user_saved_tracks_contains(track_id) {
-        Ok(already_liked) => match (already_liked[0], rating_slot >= 5) {
+    // https://developer.spotify.com/documentation/web-api/reference/#/operations/check-users-saved-tracks
+    match SPOTIFY_CLIENT.api_get(&format!("me/tracks/contains/?ids={track_id}")) {
+        Ok(already_liked) => match (already_liked == "[true]", rating_slot >= 5) {
             (true, false) => {
                 info!("Removing track {track_id} from liked songs");
-                if let Err(err) = spotify_client.current_user_saved_tracks_delete(track_id) {
+                // https://developer.spotify.com/documentation/web-api/reference/#/operations/remove-tracks-user
+                if let Err(err) = SPOTIFY_CLIENT.api_delete(&format!("me/tracks/?ids={track_id}")) {
                     error!("Failed to remove track {track_id} from liked songs: {err}");
                 }
             }
             (false, true) => {
                 info!("Adding track {track_id} to liked songs");
-                if let Err(err) = spotify_client.current_user_saved_tracks_add(track_id) {
+                // https://developer.spotify.com/documentation/web-api/reference/#/operations/save-tracks-user
+                if let Err(err) = SPOTIFY_CLIENT.api_put(&format!("me/tracks/?ids={track_id}")) {
                     error!("Failed to add track {track_id} to liked songs: {err}");
                 }
             }
@@ -684,18 +658,16 @@ fn update_star_rating(track_id: &TrackId, rating_slot: usize) {
 
 /// Toggle Spotify playlist membership for the given track.
 fn toggle_playlist_membership(track_id: &TrackId, playlist_id: &PlaylistId) {
-    let Some(_guard) = try_acquire_spotify_guard() else {
-        return;
-    };
-    let Some((playlist_name, (playlist_id, contained))) = PLAYBACK_STATE
+    let Some((playlist_id, playlist_name, contained)) = PLAYBACK_STATE
         .read()
         .playlists
         .iter()
         .find(|(_, p)| &p.id == playlist_id)
         .map(|(key, playlist)| {
             (
-                key.clone(),
-                (playlist.id, playlist.tracks.contains(track_id)),
+                *key,
+                playlist.name.clone(),
+                playlist.tracks.contains(track_id),
             )
         })
     else {
@@ -710,7 +682,7 @@ fn toggle_playlist_membership(track_id: &TrackId, playlist_id: &PlaylistId) {
     );
 
     update_playback_state(|state| {
-        let playlist_tracks = &mut state.playlists.get_mut(&playlist_name).unwrap().tracks;
+        let playlist_tracks = &mut state.playlists.get_mut(&playlist_id).unwrap().tracks;
         if contained {
             playlist_tracks.remove(track_id);
         } else {
@@ -719,11 +691,17 @@ fn toggle_playlist_membership(track_id: &TrackId, playlist_id: &PlaylistId) {
         state.last_interaction = Instant::now() + Duration::from_millis(500);
     });
 
-    let spotify_client = SPOTIFY_CLIENT.get().unwrap();
+    let track_uri = format!("spotify:track:{track_id}");
     let result = if contained {
-        spotify_client.playlist_remove_item(&playlist_id, track_id)
+        SPOTIFY_CLIENT.api_delete_payload(
+            &format!("playlists/{playlist_id}/tracks"),
+            &format!(r#"{{"tracks": [ {{"uri": "{track_uri}"}} ]}}"#),
+        )
     } else {
-        spotify_client.playlist_add_item(&playlist_id, track_id)
+        SPOTIFY_CLIENT.api_post_payload(
+            &format!("playlists/{playlist_id}/tracks"),
+            &format!(r#"{{"uris": ["{track_uri}"]}}"#),
+        )
     };
     if let Err(err) = result {
         error!(
@@ -736,36 +714,32 @@ fn toggle_playlist_membership(track_id: &TrackId, playlist_id: &PlaylistId) {
 
 /// Toggle Spotify playlist membership for the given track.
 fn toggle_playing(play: bool) {
-    let Some(_guard) = try_acquire_spotify_guard() else {
-        return;
-    };
-
     info!("{} current track", if play { "Playing" } else { "Pausing" });
     update_playback_state(|state| {
         state.last_interaction = Instant::now() + Duration::from_millis(2000);
+        state.playing = play;
     });
-    let spotify_client = SPOTIFY_CLIENT.get().unwrap();
+    // https://developer.spotify.com/documentation/web-api/reference/#/operations/start-a-users-playback
+    // https://developer.spotify.com/documentation/web-api/reference/#/operations/pause-a-users-playback
     if play {
-        if let Err(err) = spotify_client.resume_playback() {
+        if let Err(err) = SPOTIFY_CLIENT.api_put("me/player/play") {
             error!("Failed to play playback: {err}");
         }
-    } else if let Err(err) = spotify_client.pause_playback() {
+    } else if let Err(err) = SPOTIFY_CLIENT.api_put("me/player/pause") {
         error!("Failed to pause playback: {err}");
     }
 }
 
 /// Set the volume of the current playback device.
-fn set_volume(volume: u8) {
-    let Some(_guard) = try_acquire_spotify_guard() else {
-        return;
-    };
-
-    info!("Setting volume to {}%", volume);
+fn set_volume(volume_percent: u8) {
+    info!("Setting volume to {}%", volume_percent);
     update_playback_state(|state| {
         state.last_interaction = Instant::now() + Duration::from_millis(500);
     });
-    let spotify_client = SPOTIFY_CLIENT.get().unwrap();
-    if let Err(err) = spotify_client.volume(volume) {
+    // https://developer.spotify.com/documentation/web-api/reference/#/operations/set-volume-for-users-playback
+    if let Err(err) =
+        SPOTIFY_CLIENT.api_put(&format!("me/player/volume?volume_percent={volume_percent}"))
+    {
         error!("Failed to set volume: {err}");
     }
 }

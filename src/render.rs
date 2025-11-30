@@ -3,7 +3,7 @@ use crate::{
     config::CONFIG,
     interaction::InteractionEvent,
     lerpf64,
-    rspotify::Track,
+    rspotify::{PlaylistId, Track},
     spotify::{ALBUM_DATA_CACHE, CondensedPlaylist, IMAGES_CACHE, PLAYBACK_STATE},
 };
 use std::{
@@ -364,7 +364,7 @@ impl CantusApp {
         history_width: f64,
         px_per_ms: f64,
         height: f64,
-        playlists: &HashMap<String, CondensedPlaylist>,
+        playlists: &HashMap<PlaylistId, CondensedPlaylist>,
     ) {
         if track_render.width <= 0.0 {
             return;
