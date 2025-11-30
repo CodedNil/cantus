@@ -176,7 +176,7 @@ pub fn init() {
         CONFIG.spotify_client_id.clone().expect(
             "Spotify client ID not set, set it in the config file under key `spotify_client_id`.",
         ),
-        scopes,
+        &scopes,
         dirs::config_dir()
             .unwrap()
             .join("cantus")

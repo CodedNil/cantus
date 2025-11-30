@@ -11,7 +11,6 @@ use std::{
     io::{BufRead, BufReader, Write},
     net::{IpAddr, SocketAddr, TcpListener},
     path::PathBuf,
-    sync::Arc,
 };
 use thiserror::Error;
 use ureq::Agent;
@@ -28,11 +27,8 @@ const REDIRECT_PORT: u16 = 7474;
 #[derive(Debug)]
 pub struct SpotifyClient {
     client_id: String,
-    state: String,
-    scopes: HashSet<String>,
     cache_path: PathBuf,
-    token: Arc<RwLock<Option<Token>>>,
-    verifier: String,
+    token: RwLock<Token>,
     pub http: Agent,
 }
 
@@ -137,15 +133,14 @@ pub struct Device {
 pub struct Token {
     /// An access token that can be provided in subsequent calls
     #[serde(rename = "access_token")]
-    pub access: String,
-    /// The time period for which the access token is valid.
-    #[serde(with = "duration_second")]
-    pub expires_in: Duration,
+    pub access: ArrayString<359>,
+    /// Number of seconds for which the access token is valid.
+    pub expires_in: u32,
     /// The valid time for which the access token is available represented in ISO 8601 combined date and time.
     pub expires_at: Option<DateTime<Utc>>,
     /// A token that can be sent to the Spotify Accounts service in place of an authorization code
     #[serde(rename = "refresh_token")]
-    pub refresh: Option<String>,
+    pub refresh: Option<ArrayString<131>>,
     /// A list of [scopes](https://developer.spotify.com/documentation/general/guides/authorization/scopes/) which have been granted for this `access_token`
     #[serde(default, with = "space_separated_scopes", rename = "scope")]
     pub scopes: HashSet<String>,
@@ -159,118 +154,112 @@ impl Token {
     }
 }
 
-impl SpotifyClient {
-    /// Tries to read the cache file's token.
-    ///
-    /// This will return an error if the token couldn't be read (e.g. it's not
-    /// available or the JSON is malformed). It may return `Ok(None)` if:
-    ///
-    /// * The read token is expired and `allow_expired` is false
-    /// * Its scopes don't match with the current client (you will need to
-    ///   re-authenticate to gain access to more scopes)
-    /// * The cached token is disabled in the config
-    fn read_token_cache(&self, allow_expired: bool) -> Result<Option<Token>, std::io::Error> {
-        let token: Token = serde_json::from_str(&fs::read_to_string(&self.cache_path)?)?;
-        if !self.scopes.is_subset(&token.scopes) || (!allow_expired && token.is_expired()) {
-            // Invalid token, since it doesn't have at least the currently required scopes or it's expired.
-            Ok(None)
-        } else {
-            Ok(Some(token))
-        }
+/// Tries to read the cache file's token.
+///
+/// This will return an error if the token couldn't be read (e.g. it's not
+/// available or the JSON is malformed). It may return `Ok(None)` if:
+///
+/// * The read token is expired and `allow_expired` is false
+/// * Its scopes don't match with the current client (you will need to
+///   re-authenticate to gain access to more scopes)
+/// * The cached token is disabled in the config
+fn read_token_cache(
+    allow_expired: bool,
+    cache_path: &PathBuf,
+    scopes: &HashSet<String>,
+) -> Result<Option<Token>, std::io::Error> {
+    let token: Token = serde_json::from_str(&fs::read_to_string(cache_path)?)?;
+    if !scopes.is_subset(&token.scopes) || (!allow_expired && token.is_expired()) {
+        // Invalid token, since it doesn't have at least the currently required scopes or it's expired.
+        Ok(None)
+    } else {
+        Ok(Some(token))
+    }
+}
+
+/// Opens up the authorization URL in the user's browser so that it can
+/// authenticate. It reads from the standard input the redirect URI
+/// in order to obtain the access token information. The resulting access
+/// token will be saved internally once the operation is successful.
+pub fn prompt_for_token(
+    url: &str,
+    cache_path: &PathBuf,
+    scopes: &HashSet<String>,
+    client_id: &str,
+    verifier: &str,
+    http: &Agent,
+) -> Token {
+    if let Ok(Some(new_token)) = read_token_cache(true, cache_path, scopes)
+        && !new_token.is_expired()
+    {
+        return new_token;
+    }
+    match webbrowser::open(url) {
+        Ok(()) => println!("Opened {url} in your browser."),
+        Err(why) => eprintln!(
+            "Error when trying to open an URL in your browser: {why:?}. \
+             Please navigate here manually: {url}"
+        ),
     }
 
-    /// Parse the response code in the given response url. If the URL cannot be
-    /// parsed or the `code` parameter is not present, this will return `None`.
-    ///
-    // As the [RFC
-    // indicates](https://datatracker.ietf.org/doc/html/rfc6749#section-4.1),
-    // the state should be the same between the request and the callback. This
-    // will also return `None` if this is not true.
-    fn parse_response_code(&self, url: &str) -> Option<String> {
-        let mut code = None;
-        let mut state = None;
-        for (key, value) in Url::parse(url).ok()?.query_pairs() {
-            if key == "code" {
-                code = Some(value.to_string());
-            } else if key == "state" {
-                state = Some(value.to_string());
-            }
-        }
+    // Start a server to listen for the callback
+    let listener = TcpListener::bind(SocketAddr::new(
+        REDIRECT_HOST.parse::<IpAddr>().unwrap(),
+        REDIRECT_PORT,
+    ))
+    .unwrap();
 
-        // Making sure the state is the same
-        if state.as_deref() != Some(&self.state) {
-            tracing::error!("Request state doesn't match the callback state");
-            return None;
+    // The server will terminate itself after collecting the first code.
+    let mut stream = listener.incoming().flatten().next().unwrap();
+    let mut reader = BufReader::new(&stream);
+    let mut request_line = String::new();
+    reader.read_line(&mut request_line).unwrap();
+
+    let redirect_url = request_line.split_whitespace().nth(1).unwrap();
+    let redirect_full_url =
+        format!("http://{REDIRECT_HOST}:{REDIRECT_PORT}/callback{redirect_url}");
+
+    let mut code = None;
+    for (key, value) in Url::parse(&redirect_full_url).ok().unwrap().query_pairs() {
+        if key == "code" {
+            code = Some(value.to_string());
         }
-        code
     }
+    let code = code.unwrap();
 
-    /// Spawn HTTP server at provided socket address to accept OAuth callback and return auth code.
-    fn get_authcode_listener(&self, socket_address: SocketAddr) -> String {
-        let listener = TcpListener::bind(socket_address).unwrap();
+    let message = "Go back to your terminal :)";
+    let response = format!(
+        "HTTP/1.1 200 OK\r\ncontent-length: {}\r\n\r\n{}",
+        message.len(),
+        message
+    );
+    stream.write_all(response.as_bytes()).unwrap();
 
-        // The server will terminate itself after collecting the first code.
-        let mut stream = listener.incoming().flatten().next().unwrap();
-        let mut reader = BufReader::new(&stream);
-        let mut request_line = String::new();
-        reader.read_line(&mut request_line).unwrap();
-
-        let redirect_url = request_line.split_whitespace().nth(1).unwrap();
-        let redirect_full_url =
-            format!("http://{REDIRECT_HOST}:{REDIRECT_PORT}/callback{redirect_url}");
-
-        let code = self.parse_response_code(&redirect_full_url).unwrap();
-
-        let message = "Go back to your terminal :)";
-        let response = format!(
-            "HTTP/1.1 200 OK\r\ncontent-length: {}\r\n\r\n{}",
-            message.len(),
-            message
-        );
-        stream.write_all(response.as_bytes()).unwrap();
-
-        code
-    }
-
-    /// Opens up the authorization URL in the user's browser so that it can
-    /// authenticate. It reads from the standard input the redirect URI
-    /// in order to obtain the access token information. The resulting access
-    /// token will be saved internally once the operation is successful.
-    pub fn prompt_for_token(&self, url: &str) -> Token {
-        if let Ok(Some(new_token)) = self.read_token_cache(true) {
-            if new_token.is_expired() {
-                // Ensure that we actually got a token from the refetch
-                if let Some(refreshed_token) = self.refetch_token().unwrap() {
-                    return refreshed_token;
-                }
-            } else {
-                return new_token;
-            }
-        }
-        match webbrowser::open(url) {
-            Ok(()) => println!("Opened {url} in your browser."),
-            Err(why) => eprintln!(
-                "Error when trying to open an URL in your browser: {why:?}. \
-                 Please navigate here manually: {url}"
-            ),
-        }
-        let code = self.get_authcode_listener(SocketAddr::new(
-            REDIRECT_HOST.parse::<IpAddr>().unwrap(),
-            REDIRECT_PORT,
-        ));
-        self.fetch_access_token(&[
-            ("grant_type", "authorization_code"),
-            ("code", &code),
-            (
-                "redirect_uri",
-                &format!("http://{REDIRECT_HOST}:{REDIRECT_PORT}/callback"),
-            ),
-            ("client_id", &self.client_id),
-            ("code_verifier", &self.verifier),
-        ])
+    // Get token from spotify
+    let payload: &[(&str, &str)] = &[
+        ("grant_type", "authorization_code"),
+        ("code", &code),
+        (
+            "redirect_uri",
+            &format!("http://{REDIRECT_HOST}:{REDIRECT_PORT}/callback"),
+        ),
+        ("client_id", client_id),
+        ("code_verifier", verifier),
+    ];
+    let response = http
+        .post("https://accounts.spotify.com/api/token".to_owned())
+        .send_form(payload.to_owned())
         .unwrap()
-    }
+        .into_body()
+        .read_to_string()
+        .unwrap();
+    let mut token = serde_json::from_str::<Token>(&response).unwrap();
+    token.expires_at =
+        Utc::now().checked_add_signed(Duration::seconds(i64::from(token.expires_in)));
+    token
+}
 
+impl SpotifyClient {
     /// Get current user playlists without required getting his profile.
     /// [Reference](https://developer.spotify.com/documentation/web-api/reference/#/operations/get-a-list-of-current-users-playlists)
     pub fn current_user_playlists(
@@ -443,18 +432,15 @@ impl SpotifyClient {
     /// Since this is accessed by authenticated requests always, it's where the
     /// automatic reauthentication takes place, if enabled.
     fn auth_headers(&self) -> ClientResult<String> {
-        if self.token.read().as_ref().is_some_and(Token::is_expired) {
-            *self.token.write() = self.refetch_token()?;
-            self.write_token_cache();
+        if self.token.read().is_expired() {
+            if let Ok(token) = self.refetch_token() {
+                *self.token.write() = token;
+                self.write_token_cache();
+            } else {
+                return Err(ClientError::InvalidToken);
+            }
         }
-        Ok(format!(
-            "Bearer {}",
-            self.token
-                .read()
-                .as_ref()
-                .ok_or(ClientError::InvalidToken)?
-                .access
-        ))
+        Ok(format!("Bearer {}", self.token.read().access))
     }
 
     // HTTP-related methods for the Spotify client. They wrap up the basic HTTP
@@ -505,13 +491,20 @@ impl SpotifyClient {
 
     /// Updates the cache file at the internal cache path.
     fn write_token_cache(&self) {
-        if let Some(token) = self.token.read().as_ref() {
-            fs::write(&self.cache_path, serde_json::to_string(&token).unwrap()).unwrap();
-        }
+        let token = self.token.read().clone();
+        fs::write(&self.cache_path, serde_json::to_string(&token).unwrap()).unwrap();
     }
 
-    /// Sends a request to Spotify for an access token.
-    fn fetch_access_token(&self, payload: &[(&str, &str)]) -> ClientResult<Token> {
+    /// Sends a request to Spotify for a new token.
+    fn refetch_token(&self) -> ClientResult<Token> {
+        let Some(refresh_token) = &self.token.read().refresh else {
+            return Err(ClientError::InvalidToken);
+        };
+        let payload: &[(&str, &str)] = &[
+            ("grant_type", "refresh_token"),
+            ("refresh_token", refresh_token),
+            ("client_id", &self.client_id),
+        ];
         let response = self
             .http
             .post("https://accounts.spotify.com/api/token".to_owned())
@@ -519,45 +512,26 @@ impl SpotifyClient {
             .into_body()
             .read_to_string()?;
         let mut token = serde_json::from_str::<Token>(&response)?;
-        token.expires_at = Utc::now().checked_add_signed(token.expires_in);
+        token.expires_at =
+            Utc::now().checked_add_signed(Duration::seconds(i64::from(token.expires_in)));
         Ok(token)
     }
 
-    fn refetch_token(&self) -> ClientResult<Option<Token>> {
-        match self.token.read().as_ref() {
-            Some(Token {
-                refresh: Some(refresh_token),
-                ..
-            }) => {
-                let token = self.fetch_access_token(&[
-                    ("grant_type", "refresh_token"),
-                    ("refresh_token", refresh_token),
-                    ("client_id", &self.client_id),
-                ])?;
-
-                Ok(Some(token))
-            }
-            _ => Ok(None),
-        }
-    }
-
     /// Same as [`Self::new`] but with an extra parameter to configure the client.
-    pub fn new(client_id: String, scopes: HashSet<String>, cache_path: PathBuf) -> Self {
+    pub fn new(client_id: String, scopes: &HashSet<String>, cache_path: PathBuf) -> Self {
         let state = generate_random_string(
             16,
             b"abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789",
         );
-        let (verifier, url) = get_authorize_url(&client_id, &scopes, &state).unwrap();
+        let (verifier, url) = get_authorize_url(&client_id, scopes, &state).unwrap();
+        let agent = Agent::new_with_defaults();
+        let token = prompt_for_token(&url, &cache_path, scopes, &client_id, &verifier, &agent);
         let spotify_client = Self {
             client_id,
-            state,
-            scopes,
             cache_path,
-            token: Arc::new(RwLock::new(None)),
-            verifier,
+            token: RwLock::new(token),
             http: Agent::new_with_defaults(),
         };
-        *spotify_client.token.write() = Some(spotify_client.prompt_for_token(&url));
         spotify_client.write_token_cache();
         spotify_client
     }
@@ -642,33 +616,6 @@ impl From<ureq::Error> for ClientError {
 }
 
 pub type ClientResult<T> = Result<T, ClientError>;
-
-pub mod duration_second {
-    use chrono::Duration;
-    use serde::{Deserialize, Serializer, de};
-
-    /// Deserialize `chrono::Duration` from seconds (represented as u64)
-    pub fn deserialize<'de, D>(d: D) -> Result<Duration, D::Error>
-    where
-        D: de::Deserializer<'de>,
-    {
-        let duration: i64 = Deserialize::deserialize(d)?;
-        Duration::try_seconds(duration).ok_or_else(|| {
-            serde::de::Error::invalid_value(
-                serde::de::Unexpected::Signed(duration),
-                &"an invalid duration in seconds",
-            )
-        })
-    }
-
-    /// Serialize `chrono::Duration` to seconds (represented as u64)
-    pub fn serialize<S>(x: &Duration, s: S) -> Result<S::Ok, S::Error>
-    where
-        S: Serializer,
-    {
-        s.serialize_i64(x.num_seconds())
-    }
-}
 
 mod space_separated_scopes {
     use serde::{Deserialize, Serializer, de};

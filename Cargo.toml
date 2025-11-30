@@ -38,7 +38,6 @@ wayland-protocols-wlr = { version = "0.3.9", features = [
 
 winit = { version = "0.30.12", default-features = false, features = [
     "rwh_06",
-    "wayland",
     "x11",
 ], optional = true }
 
