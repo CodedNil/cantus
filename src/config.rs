@@ -2,7 +2,7 @@ use serde::Deserialize;
 use std::{fs, sync::LazyLock};
 use tracing::warn;
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Deserialize)]
 #[serde(default)]
 pub struct Config {
     // Spotify client ID

@@ -1,6 +1,6 @@
 [package]
 name = "cantus"
-version = "0.3.1"
+version = "0.3.2"
 edition = "2024"
 
 [features]
@@ -17,7 +17,7 @@ winit = ["dep:winit"]
 tracing = "0.1.43"
 tracing-subscriber = { version = "0.3.22", features = ["env-filter"] }
 
-ureq = "3.1.4"
+ureq = { version = "3.1.4", default-features = false, features = ["rustls"] }
 pollster = "0.4.0"
 raw-window-handle = "0.6.2"
 
@@ -35,7 +35,6 @@ wayland-protocols-wlr = { version = "0.3.9", features = [
 
 winit = { version = "0.30.12", default-features = false, features = [
     "rwh_06",
-    "wayland",
     "x11",
 ], optional = true }
 
@@ -51,12 +50,10 @@ ttf-parser = { version = "0.25.1", default-features = false, features = [
     "variable-fonts",
 ] }
 
-rspotify = { version = "0.15.3", default-features = false, features = [
-    "client-ureq",
-    "ureq-rustls-tls",
-    "cli",
+chrono = { version = "0.4.42", default-features = false, features = [
+    "serde",
+    "clock",
 ] }
-chrono = { version = "0.4.42", default-features = false }
 image = { version = "0.25.9", default-features = false, features = [
     "jpeg",
     "png",
@@ -64,14 +61,21 @@ image = { version = "0.25.9", default-features = false, features = [
 auto-palette = { version = "0.9.2", default-features = false }
 palette = { version = "0.7.6", default-features = false, features = ["std"] }
 
+serde = "1.0.228"
+serde_json = "1.0.145"
+toml = "0.9.8"
+
 fastrand = "2.3.0"
 parking_lot = "0.12.5"
 dashmap = "6.1.0"
-serde = { version = "1.0.228", features = ["derive"] }
-serde_json = "1.0.145"
-toml = "0.9.8"
+arrayvec = { version = "0.7.6", features = ["serde"] }
 itertools = "0.14.0"
 dirs = "6.0.0"
+thiserror = "2.0.17"
+base64 = "0.22.1"
+url = "2.5.7"
+sha2 = "0.10.9"
+webbrowser = "1.0.6"
 
 [lints.clippy]
 pedantic = { level = "warn", priority = -1 }

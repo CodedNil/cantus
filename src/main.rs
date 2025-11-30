@@ -25,6 +25,7 @@ mod background;
 mod config;
 mod interaction;
 mod render;
+mod rspotify;
 mod spotify;
 
 #[cfg(feature = "wayland")]

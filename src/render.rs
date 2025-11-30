@@ -3,7 +3,8 @@ use crate::{
     config::CONFIG,
     interaction::InteractionEvent,
     lerpf64,
-    spotify::{ALBUM_DATA_CACHE, IMAGES_CACHE, PLAYBACK_STATE, Playlist, Track},
+    rspotify::{PlaylistId, Track},
+    spotify::{ALBUM_DATA_CACHE, CondensedPlaylist, IMAGES_CACHE, PLAYBACK_STATE},
 };
 use std::{
     collections::HashMap,
@@ -11,7 +12,7 @@ use std::{
     sync::LazyLock,
     time::{Duration, Instant},
 };
-use ttf_parser::{Face, GlyphId, NormalizedCoordinate, Tag, VariationAxis};
+use ttf_parser::{Face, GlyphId, NormalizedCoordinate, Tag};
 use vello::{
     Glyph,
     kurbo::{Affine, BezPath, Circle, Point, Rect, RoundedRect, RoundedRectRadii, Shape},
@@ -63,9 +64,8 @@ impl Default for RenderState {
 }
 pub struct FontEngine {
     font_data: FontData,
-    base_face: Face<'static>,
-    axes: Vec<VariationAxis>,
-    weight_axis_index: Option<usize>,
+    face: Face<'static>,
+    coords: Vec<i16>,
 }
 
 struct TextLayout {
@@ -73,24 +73,49 @@ struct TextLayout {
     width: f64,
     height: f64,
     font_size: f32,
-    coords: Vec<i16>,
 }
 
 impl Default for FontEngine {
     fn default() -> Self {
         let bytes = include_bytes!("../assets/NotoSans.ttf");
         let font_data = FontData::new(Blob::from(bytes.to_vec()), 0);
-        let face = Face::parse(bytes, 0).expect("failed to parse embedded font");
+        let mut face = Face::parse(bytes, 0).expect("failed to parse embedded font");
         let axes = face.variation_axes().into_iter().collect::<Vec<_>>();
         let weight_axis_index = axes
             .iter()
             .position(|axis| axis.tag == Tag::from_bytes(b"wght"));
 
+        // Change the weight of the font
+        let font_weight = 700.0f32;
+        if let Some(index) = weight_axis_index {
+            let weight = font_weight.clamp(axes[index].min_value, axes[index].max_value);
+            face.set_variation(axes[index].tag, weight);
+        }
+
+        let coords = axes
+            .iter()
+            .map(|axis| {
+                let weight = font_weight.clamp(axis.min_value, axis.max_value);
+                let delta = weight - axis.def_value;
+                if delta.abs() < f32::EPSILON {
+                    return 0;
+                }
+                let range = if delta < 0.0 {
+                    axis.def_value - axis.min_value
+                } else {
+                    axis.max_value - axis.def_value
+                };
+                if range.abs() < f32::EPSILON {
+                    return 0;
+                }
+                NormalizedCoordinate::from(delta / range).get()
+            })
+            .collect();
+
         Self {
             font_data,
-            base_face: face,
-            axes,
-            weight_axis_index,
+            face,
+            coords,
         }
     }
 }
@@ -231,7 +256,7 @@ impl CantusApp {
         let past_tracks_duration: f64 = queue
             .iter()
             .take(current_index)
-            .map(|t| f64::from(t.milliseconds))
+            .map(|t| f64::from(t.duration_ms))
             .sum();
         let mut current_ms = -playback_elapsed - past_tracks_duration + drag_offset_ms
             - TRACK_SPACING_MS * current_index as f64;
@@ -255,7 +280,7 @@ impl CantusApp {
         let mut track_renders = Vec::with_capacity(queue.len());
         for track in queue {
             let track_start_ms = current_ms;
-            let track_end_ms = track_start_ms + f64::from(track.milliseconds);
+            let track_end_ms = track_start_ms + f64::from(track.duration_ms);
             current_ms = track_end_ms + TRACK_SPACING_MS;
 
             // Queue up the tracks positions
@@ -339,7 +364,7 @@ impl CantusApp {
         history_width: f64,
         px_per_ms: f64,
         height: f64,
-        playlists: &HashMap<String, Playlist>,
+        playlists: &HashMap<PlaylistId, CondensedPlaylist>,
     ) {
         if track_render.width <= 0.0 {
             return;
@@ -369,16 +394,16 @@ impl CantusApp {
         let crop_right = hit_end - (start_x + width);
         self.interaction
             .track_hitboxes
-            .push((track.id.clone(), hitbox, track_render.hitbox_range));
+            .push((track.id, hitbox, track_render.hitbox_range));
         // If dragging, set the drag target to this track, and the position within the track
         if self.interaction.dragging && track_render.is_current {
             let position_within_track = (start_x + dark_width - hit_start) / full_width;
-            self.interaction.drag_track = Some((track.id.clone(), position_within_track));
+            self.interaction.drag_track = Some((track.id, position_within_track));
         }
 
         let (Some(album_image_ref), Some(track_data_ref)) = (
-            IMAGES_CACHE.get(&track.image_url),
-            ALBUM_DATA_CACHE.get(&track.album_id),
+            IMAGES_CACHE.get(&track.album.image),
+            ALBUM_DATA_CACHE.get(&track.album.id),
         ) else {
             return;
         };
@@ -519,11 +544,11 @@ impl CantusApp {
             let text_brush = Color::from_rgb8(240, 240, 240);
 
             // Render the songs title (strip anything beyond a - or ( in the song title)
-            let song_name = track.title[..track
-                .title
+            let song_name = track.name[..track
+                .name
                 .find(" (")
-                .or_else(|| track.title.find(" -"))
-                .unwrap_or(track.title.len())]
+                .or_else(|| track.name.find(" -"))
+                .unwrap_or(track.name.len())]
                 .trim();
             let font_size = 12.0;
             let text_height = (height * 0.2).floor();
@@ -546,7 +571,7 @@ impl CantusApp {
             let font_size = 10.5;
             let text_height = (height * 0.52).floor();
 
-            let artist_text = &track.artist_name;
+            let artist_text = &track.artist.name;
             let time_text = if track_render.seconds_until_start >= 60.0 {
                 format!(
                     "{}m{}s",
@@ -617,12 +642,7 @@ impl CantusApp {
 
     /// Creates the text layout for a single-line string.
     fn layout_text(&self, text: &str, font_size: f64) -> TextLayout {
-        let font_weight = 700.0f32;
-        let mut face = self.font.base_face.clone();
-        if let Some(index) = self.font.weight_axis_index {
-            let axis = &self.font.axes[index];
-            face.set_variation(axis.tag, font_weight.clamp(axis.min_value, axis.max_value));
-        }
+        let face = &self.font.face;
 
         let font_size_px = (font_size * self.scale_factor) as f32;
         let scale = font_size_px / f32::from(face.units_per_em());
@@ -677,27 +697,6 @@ impl CantusApp {
             width: f64::from(pen_x),
             height: f64::from(line_height_units * scale),
             font_size: font_size_px,
-            coords: self
-                .font
-                .axes
-                .iter()
-                .map(|axis| {
-                    let weight = font_weight.clamp(axis.min_value, axis.max_value);
-                    let delta = weight - axis.def_value;
-                    if delta.abs() < f32::EPSILON {
-                        return 0;
-                    }
-                    let range = if delta < 0.0 {
-                        axis.def_value - axis.min_value
-                    } else {
-                        axis.max_value - axis.def_value
-                    };
-                    if range.abs() < f32::EPSILON {
-                        return 0;
-                    }
-                    NormalizedCoordinate::from(delta / range).get()
-                })
-                .collect(),
         }
     }
 
@@ -713,7 +712,7 @@ impl CantusApp {
         self.scene
             .draw_glyphs(&self.font.font_data)
             .font_size(layout.font_size)
-            .normalized_coords(&layout.coords)
+            .normalized_coords(&self.font.coords)
             .transform(Affine::translate((
                 pos_x - (layout.width * f64::from(u8::from(align_end))),
                 pos_y - layout.height * 0.5,
@@ -733,7 +732,7 @@ impl CantusApp {
         volume: Option<u8>,
     ) {
         let lightness_boost = 50.0;
-        let Some(track_data_ref) = ALBUM_DATA_CACHE.get(&track.album_id) else {
+        let Some(track_data_ref) = ALBUM_DATA_CACHE.get(&track.album.id) else {
             return;
         };
         let Some(track_data) = track_data_ref.as_ref() else {

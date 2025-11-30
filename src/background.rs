@@ -57,22 +57,22 @@ static BRUSHES: LazyLock<[GrayImage; 5]> = LazyLock::new(|| {
 pub fn update_color_palettes() {
     let state = PLAYBACK_STATE.read();
     for track in &state.queue {
-        if ALBUM_DATA_CACHE.contains_key(&track.album_id) {
+        if ALBUM_DATA_CACHE.contains_key(&track.album.id) {
             continue;
         }
-        let Some(image_ref) = IMAGES_CACHE.get(&track.image_url) else {
+        let Some(image_ref) = IMAGES_CACHE.get(&track.album.image) else {
             continue;
         };
         let Some(image) = image_ref.as_ref() else {
             continue;
         };
         let Some(artist_image_url_ref) = ARTIST_DATA_CACHE
-            .get(&track.artist_id)
+            .get(&track.artist.id)
             .map(|entry| entry.value().clone())
         else {
             continue;
         };
-        ALBUM_DATA_CACHE.insert(track.album_id.clone(), None);
+        ALBUM_DATA_CACHE.insert(track.album.id, None);
 
         let width = image.image.width;
         let height = image.image.height;
@@ -97,11 +97,11 @@ pub fn update_color_palettes() {
             && let Some(artist_image_url) = artist_image_url_ref.as_ref()
         {
             let Some(artist_image_ref) = IMAGES_CACHE.get(artist_image_url) else {
-                ALBUM_DATA_CACHE.remove(&track.album_id);
+                ALBUM_DATA_CACHE.remove(&track.album.id);
                 continue;
             };
             let Some(artist_image) = artist_image_ref.as_ref() else {
-                ALBUM_DATA_CACHE.remove(&track.album_id);
+                ALBUM_DATA_CACHE.remove(&track.album.id);
                 continue;
             };
             let artist_new_width = (width as f32 * 0.1).round() as u32;
@@ -144,7 +144,7 @@ pub fn update_color_palettes() {
             height: palette_image_height(),
         };
         ALBUM_DATA_CACHE.insert(
-            track.album_id.clone(),
+            track.album.id,
             Some(AlbumData {
                 primary_colors,
                 palette_image: ImageBrush::new(palette_image),
