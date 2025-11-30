@@ -34,7 +34,8 @@ mod layer_shell;
 mod winit_app;
 
 /// Additional height allocated for extended content.
-const PANEL_HEIGHT_EXTENSION: f64 = 10.0;
+const PANEL_HEIGHT_START: f64 = 6.0;
+const PANEL_HEIGHT_EXTENSION: f64 = 12.0;
 
 fn main() {
     tracing_subscriber::fmt()

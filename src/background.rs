@@ -16,7 +16,7 @@ const NUM_SWATCHES: usize = 4;
 
 /// Dimensions of the generated palette-based textures.
 fn palette_image_height() -> u32 {
-    CONFIG.height as u32
+    CONFIG.height as u32 * 2
 }
 
 fn palette_image_width() -> u32 {
@@ -24,33 +24,24 @@ fn palette_image_width() -> u32 {
 }
 
 /// Number of refinement passes when synthesising the background texture.
-const PALETTE_PASS_COUNT: usize = 6;
+const PALETTE_PASS_COUNT: usize = 3;
 /// Maximum number of brush placements per pass.
-const PALETTE_STROKES_PER_PASS: usize = 80;
+const PALETTE_STROKES_PER_PASS: usize = 20;
 
-static BRUSHES: LazyLock<[GrayImage; 5]> = LazyLock::new(|| {
-    // Helper function to load and extract the alpha channel
-    let load_and_extract_alpha = |bytes: &[u8]| -> GrayImage {
-        let luma_alpha_image: image::ImageBuffer<LumaA<u8>, Vec<u8>> =
-            image::load_from_memory(bytes).unwrap().to_luma_alpha8();
-        GrayImage::from_raw(
-            luma_alpha_image.width(),
-            luma_alpha_image.height(),
-            luma_alpha_image
-                .pixels()
-                .map(|p| p.0[1]) // p.0 is the array [Luma, Alpha]. We take index 1 (Alpha).
-                .collect(),
-        )
-        .expect("Failed to create GrayImage from extracted alpha data")
-    };
-
-    [
-        load_and_extract_alpha(include_bytes!("../assets/brushes/brush1.png")),
-        load_and_extract_alpha(include_bytes!("../assets/brushes/brush2.png")),
-        load_and_extract_alpha(include_bytes!("../assets/brushes/brush3.png")),
-        load_and_extract_alpha(include_bytes!("../assets/brushes/brush4.png")),
-        load_and_extract_alpha(include_bytes!("../assets/brushes/brush5.png")),
-    ]
+static BRUSH: LazyLock<GrayImage> = LazyLock::new(|| {
+    let luma_alpha_image: image::ImageBuffer<LumaA<u8>, Vec<u8>> =
+        image::load_from_memory(include_bytes!("../assets/brush.png"))
+            .unwrap()
+            .to_luma_alpha8();
+    GrayImage::from_raw(
+        luma_alpha_image.width(),
+        luma_alpha_image.height(),
+        luma_alpha_image
+            .pixels()
+            .map(|p| p.0[1]) // p.0 is the array [Luma, Alpha]. We take index 1 (Alpha).
+            .collect(),
+    )
+    .expect("Failed to create GrayImage from extracted alpha data")
 });
 
 /// Downloads and caches an image from the given URL.
@@ -137,7 +128,7 @@ pub fn update_color_palettes() {
             .collect::<Vec<_>>();
 
         let palette_image = ImageData {
-            data: Blob::from(generate_palette_image(&primary_colors)),
+            data: Blob::from(generate_palette_image(&album_image, &primary_colors)),
             format: ImageFormat::Rgba8,
             alpha_type: ImageAlphaType::Alpha,
             width: palette_image_width(),
@@ -167,7 +158,7 @@ impl auto_palette::Filter for ChromaFilter {
     }
 }
 
-fn generate_palette_image(colors: &[[u8; 4]]) -> Vec<u8> {
+fn generate_palette_image(album_image: &RgbaImage, colors: &[[u8; 4]]) -> Vec<u8> {
     let palette_width = palette_image_width();
     let palette_height = palette_image_height();
 
@@ -194,26 +185,25 @@ fn generate_palette_image(colors: &[[u8; 4]]) -> Vec<u8> {
         .map(|[r, g, b, _]| [f32::from(*r), f32::from(*g), f32::from(*b)])
         .collect::<Vec<_>>();
 
-    let mut canvas = RgbaImage::from_pixel(
+    // Start with the base image
+    let mut canvas = image::imageops::resize(
+        album_image,
         palette_width,
         palette_height,
-        image::Rgba([colors[0][0], colors[0][1], colors[0][2], 255]),
+        image::imageops::FilterType::Triangle,
     );
 
-    // Fill with the first colour; refinement passes will rebalance ratios.
+    // Refinement passes will rebalance ratios.
     let total_pixels = (palette_width * palette_height) as f32;
     let mut coverage = vec![0.0; colors.len()];
     let mut per_color_strokes = vec![0; colors.len()];
     let mut available_indices = Vec::with_capacity(colors.len());
     for pass in 0..PALETTE_PASS_COUNT {
-        let base_height = lerpf64(
-            pass as f64 / PALETTE_PASS_COUNT as f64,
-            f64::from(palette_height) * 0.7,
-            f64::from(palette_height) * 0.2,
-        );
+        let base_height =
+            f64::from(palette_height) * lerpf64(pass as f64 / PALETTE_PASS_COUNT as f64, 0.5, 0.1);
 
         // Blur the image slightly on each pass
-        canvas = imageops::blur(&canvas, 6.0);
+        canvas = imageops::blur(&canvas, 8.0);
 
         // Count pixels for each color, to get ratios
         let mut counts = vec![0u32; colors.len()];
@@ -278,16 +268,15 @@ fn generate_palette_image(colors: &[[u8; 4]]) -> Vec<u8> {
             }
             let color = colors[color_index];
 
-            // Pick a random brush
-            let brush_factor = lerpf64(fastrand::f64(), 0.75, 1.2);
-            let brush_size = (base_height * brush_factor)
+            // Create the brush
+            let brush_size = (base_height * lerpf64(fastrand::f64(), 0.75, 1.2))
                 .round()
                 .clamp(6.0, f64::from(palette_height)) as u32;
             let stamp = image::imageops::resize(
-                &BRUSHES[fastrand::usize(0..BRUSHES.len())],
+                &*BRUSH,
                 brush_size,
-                brush_size,
-                image::imageops::FilterType::Nearest,
+                brush_size * 4,
+                image::imageops::FilterType::Triangle,
             );
             let top_raw = stamp.as_raw();
 
@@ -345,9 +334,10 @@ fn generate_palette_image(colors: &[[u8; 4]]) -> Vec<u8> {
     }
 
     // Blur the image, and adjust its brightness, contrast & vibrancy
-    colorops::brighten_in_place(&mut canvas, -30);
-    colorops::contrast_in_place(&mut canvas, 0.5);
-    let mut raw_data = imageops::blur(&canvas, 8.0).into_raw();
+    colorops::brighten_in_place(&mut canvas, -70);
+    let mut canvas = imageops::blur(&canvas, 16.0);
+    colorops::contrast_in_place(&mut canvas, -30.0);
+    let mut raw_data = canvas.into_raw();
     apply_vibrancy(&mut raw_data, 4.0, 3.0);
     raw_data
 }
@@ -378,5 +368,6 @@ fn apply_vibrancy(raw_data: &mut [u8], boost: f32, weight: f32) {
         chunk[0] = (srgb.red * 255.0).round() as u8;
         chunk[1] = (srgb.green * 255.0).round() as u8;
         chunk[2] = (srgb.blue * 255.0).round() as u8;
+        chunk[3] = 255;
     }
 }

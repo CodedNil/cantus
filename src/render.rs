@@ -1,5 +1,5 @@
 use crate::{
-    CantusApp,
+    CantusApp, PANEL_HEIGHT_START,
     config::CONFIG,
     interaction::InteractionEvent,
     lerpf64,
@@ -196,9 +196,9 @@ impl CantusApp {
         let playbutton_hsize = total_height * 0.25;
         self.interaction.play_hitbox = Rect::new(
             playbutton_center - playbutton_hsize,
-            0.0,
+            PANEL_HEIGHT_START,
             playbutton_center + playbutton_hsize,
-            total_height,
+            PANEL_HEIGHT_START + total_height,
         );
         let play_button_hovered = self
             .interaction
@@ -372,10 +372,15 @@ impl CantusApp {
         let width = track_render.width;
         let track = track_render.track;
         let start_x = track_render.start_x;
-        let hitbox = Rect::new(start_x, 0.0, start_x + width, height);
+        let hitbox = Rect::new(
+            start_x,
+            PANEL_HEIGHT_START,
+            start_x + width,
+            PANEL_HEIGHT_START + height,
+        );
         let timeline_origin_x =
             history_width - (-CONFIG.timeline_past_minutes * 60_000.0) * px_per_ms;
-        let start_translation = Affine::translate((start_x, 0.0));
+        let start_translation = Affine::translate((start_x, PANEL_HEIGHT_START));
 
         // Fade out based on width
         let fade_alpha = if width < height {
@@ -425,13 +430,24 @@ impl CantusApp {
         if !track_render.art_only && width > height {
             // Don't need to render all the way to the edge since the album art is at the right edge
             let background_width = width - height * 0.25;
+            let extra_fade_alpha = fade_alpha * ((width - height) / 30.0).min(1.0) as f32;
+
+            // Add a drop shadow
+            self.scene.draw_blurred_rounded_rect(
+                start_translation,
+                Rect::new(0.0, 0.0, width, height),
+                Color::from_rgba8(0, 0, 0, (255.0 * extra_fade_alpha).round() as u8),
+                rounding,
+                30.0,
+            );
+
+            // Start clipping
             self.scene.push_clip_layer(
                 start_translation,
                 &RoundedRect::new(0.0, 0.0, background_width, height, radii),
             );
             let image_width = f64::from(track_data.palette_image.image.width);
             let background_aspect_ratio = background_width / height;
-            let extra_fade_alpha = ((width - height) / 30.0).min(1.0) as f32;
             self.scene.fill(
                 Fill::EvenOdd,
                 start_translation * Affine::scale(full_width / image_width),
@@ -440,10 +456,18 @@ impl CantusApp {
                     sampler: track_data
                         .palette_image
                         .sampler
-                        .with_alpha(fade_alpha * extra_fade_alpha),
+                        .with_alpha(extra_fade_alpha),
                 },
                 None,
                 &Rect::new(0.0, 0.0, image_width, image_width * background_aspect_ratio),
+            );
+            // Add a white glow above for a vignette effect
+            self.scene.draw_blurred_rounded_rect(
+                start_translation,
+                Rect::new(0.0, 0.0, width, height),
+                Color::from_rgba8(255, 255, 255, (30.0 * extra_fade_alpha).round() as u8),
+                rounding,
+                15.0,
             );
             self.scene.pop_layer();
         }
@@ -495,18 +519,32 @@ impl CantusApp {
         {
             self.scene.fill(
                 Fill::EvenOdd,
-                Affine::translate((start_x + point.x, point.y)),
+                start_translation * Affine::translate((point.x, point.y)),
                 Color::from_rgb8(255, 224, 210).with_alpha(1.0 - (anim_lerp + 0.4).min(1.0) as f32),
                 None,
                 &Circle::new(Point::default(), 500.0 * anim_lerp),
             );
         }
+        self.scene.pop_layer();
 
         // --- ALBUM ART SQUARE ---
         if fade_alpha > 0.0 {
+            // Add a drop shadow
+            self.scene.draw_blurred_rounded_rect(
+                start_translation * Affine::translate((width - height, 0.0)),
+                Rect::new(0.0, 0.0, height, height),
+                Color::from_rgba8(0, 0, 0, (150.0 * fade_alpha).round() as u8),
+                rounding,
+                5.0,
+            );
+
+            self.scene.push_clip_layer(
+                start_translation,
+                &RoundedRect::new(0.0, 0.0, width, height, radii),
+            );
             self.scene.fill(
                 Fill::EvenOdd,
-                Affine::translate((start_x + width - height, 0.0)),
+                start_translation * Affine::translate((width - height, 0.0)),
                 ImageBrush {
                     image: &album_image.image,
                     sampler: album_image.sampler.with_alpha(fade_alpha),
@@ -520,9 +558,8 @@ impl CantusApp {
                     RoundedRectRadii::new(rounding, right_rounding, right_rounding, rounding),
                 ),
             );
+            self.scene.pop_layer();
         }
-
-        self.scene.pop_layer();
 
         // --- TEXT ---
         if !track_render.art_only && fade_alpha >= 1.0 && width > height {
@@ -551,7 +588,7 @@ impl CantusApp {
                 .unwrap_or(track.name.len())]
                 .trim();
             let font_size = 12.0;
-            let text_height = (height * 0.2).floor();
+            let text_height = PANEL_HEIGHT_START + (height * 0.2).floor();
             let layout = self.layout_text(song_name, font_size);
             let width_ratio = available_width / layout.width;
             if width_ratio <= 1.0 {
@@ -569,7 +606,7 @@ impl CantusApp {
 
             // Get text layouts for bottom row of text
             let font_size = 10.5;
-            let text_height = (height * 0.52).floor();
+            let text_height = PANEL_HEIGHT_START + (height * 0.52).floor();
 
             let artist_text = &track.artist.name;
             let time_text = if track_render.seconds_until_start >= 60.0 {
@@ -775,7 +812,7 @@ impl CantusApp {
             if emit_count > 0 && particle.life <= 0.0 {
                 particle.position = [
                     x + spawn_offset,
-                    height * lerpf64(fastrand::f64(), 0.05, 0.95),
+                    PANEL_HEIGHT_START + height * lerpf64(fastrand::f64(), 0.05, 0.95),
                 ];
                 particle.velocity = [
                     fastrand::usize(SPARK_VELOCITY_X) as f64 * self.scale_factor * horizontal_bias,
@@ -845,20 +882,20 @@ impl CantusApp {
             let line_height = height * lerpf64(((anim_lerp - 0.75) * 4.0).max(0.0), 0.2, 0.5);
             self.scene.fill(
                 Fill::EvenOdd,
-                Affine::translate((line_x, 0.0)),
+                Affine::translate((line_x, PANEL_HEIGHT_START)),
                 line_color,
                 None,
                 &RoundedRect::new(0.0, 0.0, line_width, line_height, 100.0),
             );
             self.scene.fill(
                 Fill::EvenOdd,
-                Affine::translate((line_x, height - line_height)),
+                Affine::translate((line_x, PANEL_HEIGHT_START + height - line_height)),
                 line_color,
                 None,
                 &RoundedRect::new(0.0, 0.0, line_width, line_height, 100.0),
             );
 
-            let icon_height = height * 0.333;
+            let icon_height = PANEL_HEIGHT_START + height * 0.3;
             let is_paused = matches!(
                 self.interaction.last_event,
                 InteractionEvent::Pause(_) | InteractionEvent::PauseHover(_)
@@ -901,8 +938,10 @@ impl CantusApp {
                 let icon_scale = icon_height * (anim_lerp * 4.0).min(1.0) + 0.5 * icon_fade;
                 self.scene.fill(
                     Fill::EvenOdd,
-                    Affine::translate((line_x - icon_scale * 0.3, height * 0.5 - icon_scale * 0.5))
-                        * Affine::scale(icon_scale / play_icon_width),
+                    Affine::translate((
+                        line_x - icon_scale * 0.3,
+                        PANEL_HEIGHT_START + height * 0.5 - icon_scale * 0.5,
+                    )) * Affine::scale(icon_scale / play_icon_width),
                     icon_color,
                     None,
                     &*PLAY_SVG,
@@ -914,7 +953,7 @@ impl CantusApp {
             if volume < 1.0 {
                 self.scene.fill(
                     Fill::EvenOdd,
-                    Affine::translate((line_x, 0.0)),
+                    Affine::translate((line_x, PANEL_HEIGHT_START)),
                     Color::from_rgb8(150, 150, 150),
                     None,
                     &RoundedRect::new(0.0, 0.0, line_width, height, 100.0),
@@ -922,7 +961,7 @@ impl CantusApp {
             }
             self.scene.fill(
                 Fill::EvenOdd,
-                Affine::translate((line_x, height * (1.0 - volume))),
+                Affine::translate((line_x, PANEL_HEIGHT_START + height * (1.0 - volume))),
                 line_color,
                 None,
                 &RoundedRect::new(0.0, 0.0, line_width, height * volume, 100.0),

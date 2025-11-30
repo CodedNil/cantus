@@ -1,4 +1,7 @@
-use crate::{CantusApp, PANEL_HEIGHT_EXTENSION, config::CONFIG, interaction::InteractionState};
+use crate::{
+    CantusApp, PANEL_HEIGHT_EXTENSION, PANEL_HEIGHT_START, config::CONFIG,
+    interaction::InteractionState,
+};
 use raw_window_handle::{
     RawDisplayHandle, RawWindowHandle, WaylandDisplayHandle, WaylandWindowHandle,
 };
@@ -91,7 +94,7 @@ pub fn run() {
         (),
     );
     let width = CONFIG.width;
-    let total_height = CONFIG.height + PANEL_HEIGHT_EXTENSION;
+    let total_height = CONFIG.height + PANEL_HEIGHT_EXTENSION + PANEL_HEIGHT_START;
     layer_surface.set_size(width as u32, total_height as u32);
     layer_surface.set_anchor(match CONFIG.layer_anchor.as_str() {
         "top" => zwlr_layer_surface_v1::Anchor::Top,
@@ -109,7 +112,7 @@ pub fn run() {
             zwlr_layer_surface_v1::Anchor::Top | zwlr_layer_surface_v1::Anchor::Left
         }
     });
-    layer_surface.set_margin(4, 0, 0, 4);
+    layer_surface.set_margin(0, 0, 0, 0);
     layer_surface.set_exclusive_zone(-1);
 
     surface.commit();
@@ -245,7 +248,7 @@ impl LayerShellApp {
     fn refresh_surface(&mut self, qhandle: &QueueHandle<Self>) {
         let scale = self.cantus.scale_factor;
         let width = CONFIG.width;
-        let total_height = CONFIG.height + PANEL_HEIGHT_EXTENSION;
+        let total_height = CONFIG.height + PANEL_HEIGHT_EXTENSION + PANEL_HEIGHT_START;
         let buffer_width = (width * scale).round();
         let buffer_height = (total_height * scale).round();
 
@@ -280,7 +283,7 @@ impl LayerShellApp {
         if self.cantus.render_surface.is_none() {
             let scale = self.cantus.scale_factor;
             let width = CONFIG.width;
-            let total_height = CONFIG.height + PANEL_HEIGHT_EXTENSION;
+            let total_height = CONFIG.height + PANEL_HEIGHT_EXTENSION + PANEL_HEIGHT_START;
             let buffer_width = (width * scale).round();
             let buffer_height = (total_height * scale).round();
             self.ensure_surface(buffer_width, buffer_height);
@@ -298,7 +301,7 @@ impl LayerShellApp {
     fn update_scale_and_viewport(&self) {
         let scale = self.cantus.scale_factor;
         let width = CONFIG.width;
-        let total_height = CONFIG.height + PANEL_HEIGHT_EXTENSION;
+        let total_height = CONFIG.height + PANEL_HEIGHT_EXTENSION + PANEL_HEIGHT_START;
         let buffer_width = (width * scale).round();
         let buffer_height = (total_height * scale).round();
 

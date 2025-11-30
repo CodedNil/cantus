@@ -377,7 +377,6 @@ fn get_spotify_queue() {
             state.queue.extend(new_queue);
         } else {
             // Context switched - reset queue entirely
-            info!("Context changed, resetting queue");
             state.context_updated = false;
             state.queue = new_queue;
             state.queue_index = 0;
