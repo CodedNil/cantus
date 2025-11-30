@@ -2,7 +2,7 @@ use arrayvec::ArrayString;
 use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
 use chrono::{DateTime, Duration, TimeDelta, Utc};
 use parking_lot::RwLock;
-use serde::{Deserialize, Deserializer, Serialize, de::DeserializeOwned};
+use serde::{Deserialize, Deserializer, Serialize, Serializer, de::DeserializeOwned};
 use sha2::{Digest, Sha256};
 use std::{
     collections::HashSet,
@@ -141,7 +141,11 @@ struct Token {
     #[serde(rename = "refresh_token")]
     refresh: Option<ArrayString<131>>,
     /// A list of [scopes](https://developer.spotify.com/documentation/general/guides/authorization/scopes/) which have been granted for this `access_token`
-    #[serde(default, with = "space_separated_scopes", rename = "scope")]
+    #[serde(
+        serialize_with = "serialize_scopes",
+        deserialize_with = "deserialize_scopes",
+        rename = "scope"
+    )]
     scopes: HashSet<String>,
 }
 
@@ -231,7 +235,7 @@ fn prompt_for_token(
     stream.write_all(response.as_bytes()).unwrap();
 
     let response = http
-        .post("https://accounts.spotify.com/api/token".to_owned())
+        .post("https://accounts.spotify.com/api/token")
         .send_form([
             ("grant_type", "authorization_code"),
             ("code", &code),
@@ -509,15 +513,14 @@ impl SpotifyClient {
         let Some(refresh_token) = &self.token.read().refresh else {
             return Err(ClientError::InvalidToken);
         };
-        let payload: &[(&str, &str)] = &[
-            ("grant_type", "refresh_token"),
-            ("refresh_token", refresh_token),
-            ("client_id", &self.client_id),
-        ];
         let response = self
             .http
-            .post("https://accounts.spotify.com/api/token".to_owned())
-            .send_form(payload.to_owned())?
+            .post("https://accounts.spotify.com/api/token")
+            .send_form([
+                ("grant_type", "refresh_token"),
+                ("refresh_token", refresh_token),
+                ("client_id", &self.client_id),
+            ])?
             .into_body()
             .read_to_string()?;
         let mut token = serde_json::from_str::<Token>(&response)?;
@@ -624,25 +627,20 @@ impl From<ureq::Error> for ClientError {
 
 pub type ClientResult<T> = Result<T, ClientError>;
 
-mod space_separated_scopes {
-    use serde::{Deserialize, Serializer, de};
-    use std::collections::HashSet;
+fn deserialize_scopes<'de, D>(d: D) -> Result<HashSet<String>, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    let scopes: String = Deserialize::deserialize(d)?;
+    Ok(scopes.split_whitespace().map(ToOwned::to_owned).collect())
+}
 
-    pub fn deserialize<'de, D>(d: D) -> Result<HashSet<String>, D::Error>
-    where
-        D: de::Deserializer<'de>,
-    {
-        let scopes: String = Deserialize::deserialize(d)?;
-        Ok(scopes.split_whitespace().map(ToOwned::to_owned).collect())
-    }
-
-    pub fn serialize<S>(scopes: &HashSet<String>, s: S) -> Result<S::Ok, S::Error>
-    where
-        S: Serializer,
-    {
-        let scopes = scopes.clone().into_iter().collect::<Vec<_>>().join(" ");
-        s.serialize_str(&scopes)
-    }
+fn serialize_scopes<S>(scopes: &HashSet<String>, s: S) -> Result<S::Ok, S::Error>
+where
+    S: Serializer,
+{
+    let scopes = scopes.clone().into_iter().collect::<Vec<_>>().join(" ");
+    s.serialize_str(&scopes)
 }
 
 #[derive(Deserialize)]
