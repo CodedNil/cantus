@@ -91,9 +91,9 @@ pub struct Playlist {
 }
 
 /// Playlist track object
-#[derive(Deserialize, Default)]
+#[derive(Deserialize)]
 pub struct PlaylistItem {
-    pub track: Option<PartialTrack>,
+    pub track: PartialTrack,
 }
 
 /// Context object
@@ -129,25 +129,25 @@ pub struct Device {
 ///
 /// [Reference](https://developer.spotify.com/documentation/general/guides/authorization/)
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
-pub struct Token {
+struct Token {
     /// An access token that can be provided in subsequent calls
     #[serde(rename = "access_token")]
-    pub access: ArrayString<359>,
+    access: ArrayString<359>,
     /// Number of seconds for which the access token is valid.
-    pub expires_in: u32,
+    expires_in: u32,
     /// The valid time for which the access token is available represented in ISO 8601 combined date and time.
-    pub expires_at: Option<DateTime<Utc>>,
+    expires_at: Option<DateTime<Utc>>,
     /// A token that can be sent to the Spotify Accounts service in place of an authorization code
     #[serde(rename = "refresh_token")]
-    pub refresh: Option<ArrayString<131>>,
+    refresh: Option<ArrayString<131>>,
     /// A list of [scopes](https://developer.spotify.com/documentation/general/guides/authorization/scopes/) which have been granted for this `access_token`
     #[serde(default, with = "space_separated_scopes", rename = "scope")]
-    pub scopes: HashSet<String>,
+    scopes: HashSet<String>,
 }
 
 impl Token {
     /// Check if the token is expired. It includes a margin of 10 seconds (which is how much a request would take in the worst case scenario).
-    pub fn is_expired(&self) -> bool {
+    fn is_expired(&self) -> bool {
         self.expires_at
             .is_none_or(|expiration| Utc::now() + TimeDelta::try_seconds(10).unwrap() >= expiration)
     }
@@ -180,7 +180,7 @@ fn read_token_cache(
 /// authenticate. It reads from the standard input the redirect URI
 /// in order to obtain the access token information. The resulting access
 /// token will be saved internally once the operation is successful.
-pub fn prompt_for_token(
+fn prompt_for_token(
     url: &str,
     cache_path: &PathBuf,
     scopes: &HashSet<String>,
@@ -553,7 +553,7 @@ impl SpotifyClient {
 ///
 /// [reference]: https://developer.spotify.com/documentation/general/guides/authorization/code-flow
 /// [rfce]: https://datatracker.ietf.org/doc/html/rfc7636#section-4.1
-pub fn get_authorize_url(
+fn get_authorize_url(
     client_id: &str,
     scopes: &HashSet<String>,
     state: &str,
@@ -594,7 +594,7 @@ pub fn get_authorize_url(
 }
 
 /// Generate `length` random chars
-pub fn generate_random_string(length: usize, alphabet: &[u8]) -> String {
+fn generate_random_string(length: usize, alphabet: &[u8]) -> String {
     let range = alphabet.len();
     (0..length)
         .map(|_| alphabet[fastrand::usize(..range)] as char)

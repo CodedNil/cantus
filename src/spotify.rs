@@ -507,12 +507,7 @@ fn refresh_playlists() {
         let playlist_track_ids: HashSet<TrackId> = pages
             .into_iter()
             .flat_map(|page| page.items)
-            .filter_map(|item| {
-                let Some(track) = &item.track else {
-                    return None;
-                };
-                Some(track.id)
-            })
+            .map(|item| item.track.id)
             .collect();
 
         update_playback_state(|state| {
