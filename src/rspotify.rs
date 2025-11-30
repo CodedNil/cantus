@@ -132,14 +132,14 @@ pub struct Device {
 struct Token {
     /// An access token that can be provided in subsequent calls
     #[serde(rename = "access_token")]
-    access: ArrayString<359>,
+    access: String,
     /// Number of seconds for which the access token is valid.
     expires_in: u32,
     /// The valid time for which the access token is available represented in ISO 8601 combined date and time.
     expires_at: Option<DateTime<Utc>>,
     /// A token that can be sent to the Spotify Accounts service in place of an authorization code
     #[serde(rename = "refresh_token")]
-    refresh: Option<ArrayString<131>>,
+    refresh: Option<String>,
     /// A list of [scopes](https://developer.spotify.com/documentation/general/guides/authorization/scopes/) which have been granted for this `access_token`
     #[serde(
         serialize_with = "serialize_scopes",
@@ -192,9 +192,7 @@ fn prompt_for_token(
     verifier: &str,
     http: &Agent,
 ) -> Token {
-    if let Ok(Some(cached)) = read_token_cache(true, cache_path, scopes)
-        && !cached.is_expired()
-    {
+    if let Ok(Some(cached)) = read_token_cache(true, cache_path, scopes) {
         return cached;
     }
     match webbrowser::open(url) {
@@ -263,12 +261,9 @@ impl SpotifyClient {
     /// automatic reauthentication takes place, if enabled.
     fn auth_headers(&self) -> ClientResult<String> {
         if self.token.read().is_expired() {
-            if let Ok(token) = self.refetch_token() {
-                *self.token.write() = token;
-                self.write_token_cache();
-            } else {
-                return Err(ClientError::InvalidToken);
-            }
+            let token = self.refetch_token()?;
+            *self.token.write() = token;
+            self.write_token_cache();
         }
         Ok(format!("Bearer {}", self.token.read().access))
     }
