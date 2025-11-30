@@ -1,16 +1,8 @@
-use super::{
-    ClientError, ClientResult,
-    custom_serde::{duration_second, space_separated_scopes},
-    generate_random_string,
-    model::{
-        Artist, ArtistId, Artists, CurrentPlaybackContext, CurrentUserQueue, Page, Playlist,
-        PlaylistId, PlaylistItem, TrackId,
-    },
-};
+use arrayvec::ArrayString;
 use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
 use chrono::{DateTime, Duration, TimeDelta, Utc};
 use parking_lot::RwLock;
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Deserializer, Serialize, de::DeserializeOwned};
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 use std::{
@@ -21,6 +13,7 @@ use std::{
     path::PathBuf,
     sync::Arc,
 };
+use thiserror::Error;
 use ureq::Agent;
 use url::Url;
 
@@ -31,18 +24,7 @@ const REDIRECT_PORT: u16 = 7474;
 /// The [Authorization Code Flow with Proof Key for Code Exchange
 /// (PKCE)][reference] client for the Spotify API.
 ///
-/// This flow is very similar to the regular Authorization Code Flow, so please
-/// read [`AuthCodeSpotify`](crate::AuthCodeSpotify) for more information about
-/// it. The main difference in this case is that you can avoid storing your
-/// client secret by generating a *code verifier* and a *code challenge*.
-/// However, note that the refresh token obtained with PKCE will only work to
-/// request the next one, after which it'll become invalid.
-///
-/// There's an [example][example-main] available to learn how to use this
-/// client.
-///
 /// [reference]: https://developer.spotify.com/documentation/general/guides/authorization/code-flow
-/// [example-main]: https://github.com/ramsayleung/rspotify/blob/master/examples/auth_code_pkce.rs
 #[derive(Debug)]
 pub struct SpotifyClient {
     client_id: String,
@@ -52,6 +34,100 @@ pub struct SpotifyClient {
     token: Arc<RwLock<Option<Token>>>,
     verifier: String,
     pub http: Agent,
+}
+
+// Albums
+pub type AlbumId = ArrayString<22>;
+
+#[derive(Deserialize)]
+pub struct Album {
+    pub id: AlbumId,
+    #[serde(default, deserialize_with = "deserialize_images", rename = "images")]
+    pub image: String,
+}
+
+// Artists
+pub type ArtistId = ArrayString<22>;
+
+#[derive(Deserialize)]
+pub struct Artist {
+    pub id: ArtistId,
+    pub name: String,
+    #[serde(default, deserialize_with = "deserialize_images", rename = "images")]
+    pub image: String,
+}
+
+#[derive(Deserialize)]
+pub struct Artists {
+    pub artists: Vec<Artist>,
+}
+
+// Track
+pub type TrackId = ArrayString<22>;
+
+#[derive(Deserialize)]
+pub struct Track {
+    pub id: TrackId,
+    pub name: String,
+    pub album: Album,
+    #[serde(deserialize_with = "deserialize_first_artist", rename = "artists")]
+    pub artist: Artist,
+    pub duration_ms: u32,
+}
+
+#[derive(Deserialize)]
+pub struct PartialTrack {
+    pub id: TrackId,
+}
+
+// Playlist
+pub type PlaylistId = ArrayString<22>;
+
+/// Simplified playlist object
+#[derive(Deserialize)]
+pub struct Playlist {
+    pub id: PlaylistId,
+    pub name: String,
+    #[serde(default, deserialize_with = "deserialize_images", rename = "images")]
+    pub image: String,
+    pub snapshot_id: ArrayString<32>,
+    #[serde(deserialize_with = "deserialize_tracks_total", rename = "tracks")]
+    pub total_tracks: u32,
+}
+
+/// Playlist track object
+#[derive(Deserialize, Default)]
+pub struct PlaylistItem {
+    pub track: Option<PartialTrack>,
+}
+
+/// Context object
+#[derive(Deserialize)]
+pub struct Context {
+    /// The URI may be of any type, so it's not parsed into a [`crate::Id`]
+    pub uri: String,
+}
+
+#[derive(Deserialize)]
+pub struct CurrentPlaybackContext {
+    pub device: Device,
+    pub context: Option<Context>,
+    #[serde(default)]
+    pub progress_ms: u32,
+    pub is_playing: bool,
+    pub item: Option<Track>,
+}
+
+#[derive(Deserialize)]
+pub struct CurrentUserQueue {
+    pub currently_playing: Option<Track>,
+    pub queue: Vec<Track>,
+}
+
+/// Device object
+#[derive(Deserialize)]
+pub struct Device {
+    pub volume_percent: Option<u32>,
 }
 
 /// Spotify access token information
@@ -65,39 +141,18 @@ pub struct Token {
     /// The time period for which the access token is valid.
     #[serde(with = "duration_second")]
     pub expires_in: Duration,
-    /// The valid time for which the access token is available represented
-    /// in ISO 8601 combined date and time.
+    /// The valid time for which the access token is available represented in ISO 8601 combined date and time.
     pub expires_at: Option<DateTime<Utc>>,
-    /// A token that can be sent to the Spotify Accounts service
-    /// in place of an authorization code
+    /// A token that can be sent to the Spotify Accounts service in place of an authorization code
     #[serde(rename = "refresh_token")]
     pub refresh: Option<String>,
-    /// A list of [scopes](https://developer.spotify.com/documentation/general/guides/authorization/scopes/)
-    /// which have been granted for this `access_token`
-    ///
-    /// You may use the `scopes!` macro in
-    /// [`rspotify-macros`](https://docs.rs/rspotify-macros) to build it at
-    /// compile time easily.
-    // The token response from spotify is singular, hence the rename to `scope`
+    /// A list of [scopes](https://developer.spotify.com/documentation/general/guides/authorization/scopes/) which have been granted for this `access_token`
     #[serde(default, with = "space_separated_scopes", rename = "scope")]
     pub scopes: HashSet<String>,
 }
 
-impl Default for Token {
-    fn default() -> Self {
-        Self {
-            access: String::new(),
-            expires_in: Duration::try_seconds(0).unwrap(),
-            expires_at: Some(Utc::now()),
-            refresh: None,
-            scopes: HashSet::new(),
-        }
-    }
-}
-
 impl Token {
-    /// Check if the token is expired. It includes a margin of 10 seconds (which
-    /// is how much a request would take in the worst case scenario).
+    /// Check if the token is expired. It includes a margin of 10 seconds (which is how much a request would take in the worst case scenario).
     pub fn is_expired(&self) -> bool {
         self.expires_at
             .is_none_or(|expiration| Utc::now() + TimeDelta::try_seconds(10).unwrap() >= expiration)
@@ -114,19 +169,7 @@ impl SpotifyClient {
     /// * Its scopes don't match with the current client (you will need to
     ///   re-authenticate to gain access to more scopes)
     /// * The cached token is disabled in the config
-    ///
-    /// # Note
-    /// This function's implementation differs slightly from the implementation
-    /// in [`ClientCredsSpotify::read_token_cache`]. The boolean parameter
-    /// `allow_expired` allows users to load expired tokens from the cache.
-    /// This functionality can be used to access the refresh token and obtain
-    /// a new, valid token. This option is unavailable in the implementation of
-    /// [`ClientCredsSpotify::read_token_cache`] since the client credentials
-    /// authorization flow does not have a refresh token and instead requires
-    /// the application re-authenticate.
-    ///
-    /// [`ClientCredsSpotify::read_token_cache`]: crate::client_creds::ClientCredsSpotify::read_token_cache
-    fn read_token_cache(&self, allow_expired: bool) -> ClientResult<Option<Token>> {
+    fn read_token_cache(&self, allow_expired: bool) -> Result<Option<Token>, std::io::Error> {
         let token: Token = serde_json::from_str(&fs::read_to_string(&self.cache_path)?)?;
         if !self.scopes.is_subset(&token.scopes) || (!allow_expired && token.is_expired()) {
             // Invalid token, since it doesn't have at least the currently required scopes or it's expired.
@@ -562,4 +605,146 @@ pub fn get_authorize_url(
         ],
     )?;
     Ok((verifier, parsed.into()))
+}
+
+/// Generate `length` random chars
+pub fn generate_random_string(length: usize, alphabet: &[u8]) -> String {
+    let range = alphabet.len();
+    (0..length)
+        .map(|_| alphabet[fastrand::usize(..range)] as char)
+        .collect()
+}
+
+/// Possible errors returned from the `rspotify` client.
+#[derive(Debug, Error)]
+pub enum ClientError {
+    #[error("json parse error: {0}")]
+    ParseJson(#[from] serde_json::Error),
+
+    #[error("url parse error: {0}")]
+    ParseUrl(#[from] url::ParseError),
+
+    #[error("http error: {0}")]
+    Http(String),
+
+    #[error("input/output error: {0}")]
+    Io(#[from] std::io::Error),
+
+    #[error("Token is not valid")]
+    InvalidToken,
+}
+
+// The conversion has to be done manually because it's in a `Box<T>`
+impl From<ureq::Error> for ClientError {
+    fn from(err: ureq::Error) -> Self {
+        Self::Http(err.to_string())
+    }
+}
+
+pub type ClientResult<T> = Result<T, ClientError>;
+
+pub mod duration_second {
+    use chrono::Duration;
+    use serde::{Deserialize, Serializer, de};
+
+    /// Deserialize `chrono::Duration` from seconds (represented as u64)
+    pub fn deserialize<'de, D>(d: D) -> Result<Duration, D::Error>
+    where
+        D: de::Deserializer<'de>,
+    {
+        let duration: i64 = Deserialize::deserialize(d)?;
+        Duration::try_seconds(duration).ok_or_else(|| {
+            serde::de::Error::invalid_value(
+                serde::de::Unexpected::Signed(duration),
+                &"an invalid duration in seconds",
+            )
+        })
+    }
+
+    /// Serialize `chrono::Duration` to seconds (represented as u64)
+    pub fn serialize<S>(x: &Duration, s: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        s.serialize_i64(x.num_seconds())
+    }
+}
+
+mod space_separated_scopes {
+    use serde::{Deserialize, Serializer, de};
+    use std::collections::HashSet;
+
+    pub fn deserialize<'de, D>(d: D) -> Result<HashSet<String>, D::Error>
+    where
+        D: de::Deserializer<'de>,
+    {
+        let scopes: String = Deserialize::deserialize(d)?;
+        Ok(scopes.split_whitespace().map(ToOwned::to_owned).collect())
+    }
+
+    pub fn serialize<S>(scopes: &HashSet<String>, s: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        let scopes = scopes.clone().into_iter().collect::<Vec<_>>().join(" ");
+        s.serialize_str(&scopes)
+    }
+}
+
+#[derive(Deserialize)]
+struct TracksRef {
+    total: u32,
+}
+
+fn deserialize_tracks_total<'de, D>(deserializer: D) -> Result<u32, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    let tracks_ref = TracksRef::deserialize(deserializer)?;
+    Ok(tracks_ref.total)
+}
+
+/// Expects an array of Image structs and returns the URL of the image with the minimum width, wrapped in an Option.
+#[derive(Deserialize)]
+struct Image {
+    url: String,
+    width: Option<u32>,
+}
+fn deserialize_images<'de, D>(deserializer: D) -> Result<String, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    let images: Vec<Image> = Vec::deserialize(deserializer)?;
+    Ok(images
+        .into_iter()
+        .min_by_key(|img| img.width)
+        .map(|img| img.url)
+        .unwrap())
+}
+
+/// Expects the first item from an array.
+fn deserialize_first_artist<'de, D>(deserializer: D) -> Result<Artist, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    let artists: Vec<Artist> = Vec::deserialize(deserializer)?;
+    Ok(artists.into_iter().next().unwrap())
+}
+
+/// Custom deserializer to handle `Vec<Option<T>>` and filter out `None` values
+/// This is useful for deserializing lists that may contain null values that are not relevants
+fn vec_without_nulls<'de, D, T>(deserializer: D) -> Result<Vec<T>, D::Error>
+where
+    T: serde::Deserialize<'de>,
+    D: serde::Deserializer<'de>,
+{
+    let v = Vec::<Option<T>>::deserialize(deserializer)?;
+    Ok(v.into_iter().flatten().collect())
+}
+
+#[derive(Deserialize)]
+pub struct Page<T: DeserializeOwned> {
+    #[serde(deserialize_with = "vec_without_nulls")]
+    pub items: Vec<T>,
+    pub total: u32,
 }

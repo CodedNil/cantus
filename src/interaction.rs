@@ -1,9 +1,9 @@
 use crate::{
     CantusApp,
     config::CONFIG,
-    rspotify::model::{PlaylistId, TrackId},
+    rspotify::{PlaylistId, Track, TrackId},
     spotify::{
-        CondensedPlaylist, IMAGES_CACHE, PLAYBACK_STATE, RATING_PLAYLISTS, SPOTIFY_CLIENT, Track,
+        CondensedPlaylist, IMAGES_CACHE, PLAYBACK_STATE, RATING_PLAYLISTS, SPOTIFY_CLIENT,
         update_playback_state,
     },
 };
@@ -538,7 +538,7 @@ fn skip_to_track(track_id: &TrackId, position: f64, always_seek: bool) {
         let ms_lookup = state
             .queue
             .iter()
-            .map(|playlist| playlist.milliseconds)
+            .map(|playlist| playlist.duration_ms)
             .collect::<Vec<_>>();
         drop(state);
         (queue_index, position_in_queue, ms_lookup)

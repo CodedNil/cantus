@@ -1,10 +1,7 @@
 use crate::{
     background::update_color_palettes,
     config::CONFIG,
-    rspotify::{
-        client::SpotifyClient,
-        model::{AlbumId, ArtistId, Playlist, PlaylistId, TrackId},
-    },
+    rspotify::{AlbumId, ArtistId, Playlist, PlaylistId, SpotifyClient, Track, TrackId},
 };
 use arrayvec::ArrayString;
 use dashmap::DashMap;
@@ -67,16 +64,6 @@ pub struct PlaybackState {
     pub last_interaction: Instant,
     last_grabbed_playback: Instant,
     last_grabbed_queue: Instant,
-}
-
-pub struct Track {
-    pub id: TrackId,
-    pub title: String,
-    pub artist_id: ArtistId,
-    pub artist_name: String,
-    pub album_id: AlbumId,
-    pub image_url: String,
-    pub milliseconds: u32,
 }
 
 pub struct AlbumData {
@@ -249,7 +236,7 @@ fn get_spotify_playback() {
 
         // Song has changed, lets update to the new index and force a queue refresh
         if let Some(track) = current_playback.item {
-            let index_found = state.queue.iter().position(|t| t.title == track.name);
+            let index_found = state.queue.iter().position(|t| t.name == track.name);
             if let Some(new_index) = index_found
                 && state.queue_index != new_index
             {
@@ -264,10 +251,7 @@ fn get_spotify_playback() {
 
         state.volume = current_playback.device.volume_percent.map(|v| v as u8);
         state.playing = current_playback.is_playing;
-        let progress = current_playback
-            .progress
-            .map_or(0, |p| p.num_milliseconds()) as u32;
-        state.progress = progress
+        state.progress = current_playback.progress_ms
             + if current_playback.is_playing {
                 (request_duration.as_millis() / 2) as u32
             } else {
@@ -308,38 +292,20 @@ fn get_spotify_queue() {
     };
     let new_queue: Vec<Track> = std::iter::once(currently_playing)
         .chain(queue.queue)
-        .map(|track| {
-            let artist = track.artists.first().unwrap();
-            Track {
-                id: track.id,
-                title: track.name,
-                artist_id: artist.id,
-                artist_name: artist.name.clone(),
-                album_id: track.album.id,
-                image_url: track
-                    .album
-                    .images
-                    .into_iter()
-                    .min_by_key(|img| img.width)
-                    .map(|img| img.url)
-                    .unwrap(),
-                milliseconds: track.duration.num_milliseconds() as u32,
-            }
-        })
         .collect();
-    let current_title = new_queue.first().unwrap().title.clone();
+    let current_title = new_queue.first().unwrap().name.clone();
 
     // Start a task to fetch missing artists & images
     let mut missing_urls = HashSet::new();
     let mut missing_artists = Vec::new();
     for track in &new_queue {
-        if !IMAGES_CACHE.contains_key(&track.image_url) {
-            missing_urls.insert(track.image_url.clone());
+        if !IMAGES_CACHE.contains_key(&track.album.image) {
+            missing_urls.insert(track.album.image.clone());
         }
-        if !ARTIST_DATA_CACHE.contains_key(&track.artist_id)
-            && !missing_artists.contains(&track.artist_id)
+        if !ARTIST_DATA_CACHE.contains_key(&track.artist.id)
+            && !missing_artists.contains(&track.artist.id)
         {
-            missing_artists.push(track.artist_id);
+            missing_artists.push(track.artist.id);
         }
     }
     // Start downloading missing album images
@@ -354,12 +320,9 @@ fn get_spotify_queue() {
                 return;
             };
             for artist in artists {
-                let artist_image = artist.images.into_iter().min_by_key(|img| img.width);
-                ARTIST_DATA_CACHE.insert(artist.id, artist_image.as_ref().map(|a| a.url.clone()));
+                ARTIST_DATA_CACHE.insert(artist.id, Some(artist.image.clone()));
                 spawn(move || {
-                    if let Some(artist_image) = artist_image {
-                        ensure_image_cached(artist_image.url.as_str());
-                    }
+                    ensure_image_cached(artist.image.as_str());
                 });
             }
         });
@@ -368,7 +331,7 @@ fn get_spotify_queue() {
     // Update the playback state
     update_playback_state(|state| {
         if !state.context_updated
-            && let Some(new_index) = state.queue.iter().position(|t| t.title == current_title)
+            && let Some(new_index) = state.queue.iter().position(|t| t.name == current_title)
         {
             // Delete everything past the new_index, and append the new tracks at the end
             state.queue_index = new_index;
@@ -461,13 +424,7 @@ fn poll_playlists() {
             CondensedPlaylist {
                 id: playlist.id,
                 name: playlist.name,
-                image_url: playlist
-                    .images
-                    .iter()
-                    .min_by_key(|img| img.width)
-                    .unwrap()
-                    .url
-                    .clone(),
+                image_url: playlist.image,
                 tracks: cached.1,
                 tracks_total: playlist.total_tracks,
                 snapshot_id: cached.0,

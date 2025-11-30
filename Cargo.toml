@@ -89,7 +89,6 @@ cast-possible-truncation = "allow"
 cast-precision-loss = "allow"
 cast-sign-loss = "allow"
 suboptimal_flops = "allow"
-doc-markdown = "allow"
 
 separated_literal_suffix = "warn"
 wildcard_enum_match_arm = "warn"

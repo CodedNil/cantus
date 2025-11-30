@@ -3,7 +3,8 @@ use crate::{
     config::CONFIG,
     interaction::InteractionEvent,
     lerpf64,
-    spotify::{ALBUM_DATA_CACHE, CondensedPlaylist, IMAGES_CACHE, PLAYBACK_STATE, Track},
+    rspotify::Track,
+    spotify::{ALBUM_DATA_CACHE, CondensedPlaylist, IMAGES_CACHE, PLAYBACK_STATE},
 };
 use std::{
     collections::HashMap,
@@ -231,7 +232,7 @@ impl CantusApp {
         let past_tracks_duration: f64 = queue
             .iter()
             .take(current_index)
-            .map(|t| f64::from(t.milliseconds))
+            .map(|t| f64::from(t.duration_ms))
             .sum();
         let mut current_ms = -playback_elapsed - past_tracks_duration + drag_offset_ms
             - TRACK_SPACING_MS * current_index as f64;
@@ -255,7 +256,7 @@ impl CantusApp {
         let mut track_renders = Vec::with_capacity(queue.len());
         for track in queue {
             let track_start_ms = current_ms;
-            let track_end_ms = track_start_ms + f64::from(track.milliseconds);
+            let track_end_ms = track_start_ms + f64::from(track.duration_ms);
             current_ms = track_end_ms + TRACK_SPACING_MS;
 
             // Queue up the tracks positions
@@ -377,8 +378,8 @@ impl CantusApp {
         }
 
         let (Some(album_image_ref), Some(track_data_ref)) = (
-            IMAGES_CACHE.get(&track.image_url),
-            ALBUM_DATA_CACHE.get(&track.album_id),
+            IMAGES_CACHE.get(&track.album.image),
+            ALBUM_DATA_CACHE.get(&track.album.id),
         ) else {
             return;
         };
@@ -519,11 +520,11 @@ impl CantusApp {
             let text_brush = Color::from_rgb8(240, 240, 240);
 
             // Render the songs title (strip anything beyond a - or ( in the song title)
-            let song_name = track.title[..track
-                .title
+            let song_name = track.name[..track
+                .name
                 .find(" (")
-                .or_else(|| track.title.find(" -"))
-                .unwrap_or(track.title.len())]
+                .or_else(|| track.name.find(" -"))
+                .unwrap_or(track.name.len())]
                 .trim();
             let font_size = 12.0;
             let text_height = (height * 0.2).floor();
@@ -546,7 +547,7 @@ impl CantusApp {
             let font_size = 10.5;
             let text_height = (height * 0.52).floor();
 
-            let artist_text = &track.artist_name;
+            let artist_text = &track.artist.name;
             let time_text = if track_render.seconds_until_start >= 60.0 {
                 format!(
                     "{}m{}s",
@@ -733,7 +734,7 @@ impl CantusApp {
         volume: Option<u8>,
     ) {
         let lightness_boost = 50.0;
-        let Some(track_data_ref) = ALBUM_DATA_CACHE.get(&track.album_id) else {
+        let Some(track_data_ref) = ALBUM_DATA_CACHE.get(&track.album.id) else {
             return;
         };
         let Some(track_data) = track_data_ref.as_ref() else {
