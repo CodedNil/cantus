@@ -12,7 +12,7 @@ use std::{
     sync::LazyLock,
     time::{Duration, Instant},
 };
-use ttf_parser::{Face, GlyphId, NormalizedCoordinate, Tag, VariationAxis};
+use ttf_parser::{Face, GlyphId, NormalizedCoordinate, Tag};
 use vello::{
     Glyph,
     kurbo::{Affine, BezPath, Circle, Point, Rect, RoundedRect, RoundedRectRadii, Shape},
@@ -64,9 +64,8 @@ impl Default for RenderState {
 }
 pub struct FontEngine {
     font_data: FontData,
-    base_face: Face<'static>,
-    axes: Vec<VariationAxis>,
-    weight_axis_index: Option<usize>,
+    face: Face<'static>,
+    coords: Vec<i16>,
 }
 
 struct TextLayout {
@@ -74,24 +73,49 @@ struct TextLayout {
     width: f64,
     height: f64,
     font_size: f32,
-    coords: Vec<i16>,
 }
 
 impl Default for FontEngine {
     fn default() -> Self {
         let bytes = include_bytes!("../assets/NotoSans.ttf");
         let font_data = FontData::new(Blob::from(bytes.to_vec()), 0);
-        let face = Face::parse(bytes, 0).expect("failed to parse embedded font");
+        let mut face = Face::parse(bytes, 0).expect("failed to parse embedded font");
         let axes = face.variation_axes().into_iter().collect::<Vec<_>>();
         let weight_axis_index = axes
             .iter()
             .position(|axis| axis.tag == Tag::from_bytes(b"wght"));
 
+        // Change the weight of the font
+        let font_weight = 700.0f32;
+        if let Some(index) = weight_axis_index {
+            let weight = font_weight.clamp(axes[index].min_value, axes[index].max_value);
+            face.set_variation(axes[index].tag, weight);
+        }
+
+        let coords = axes
+            .iter()
+            .map(|axis| {
+                let weight = font_weight.clamp(axis.min_value, axis.max_value);
+                let delta = weight - axis.def_value;
+                if delta.abs() < f32::EPSILON {
+                    return 0;
+                }
+                let range = if delta < 0.0 {
+                    axis.def_value - axis.min_value
+                } else {
+                    axis.max_value - axis.def_value
+                };
+                if range.abs() < f32::EPSILON {
+                    return 0;
+                }
+                NormalizedCoordinate::from(delta / range).get()
+            })
+            .collect();
+
         Self {
             font_data,
-            base_face: face,
-            axes,
-            weight_axis_index,
+            face,
+            coords,
         }
     }
 }
@@ -618,12 +642,7 @@ impl CantusApp {
 
     /// Creates the text layout for a single-line string.
     fn layout_text(&self, text: &str, font_size: f64) -> TextLayout {
-        let font_weight = 700.0f32;
-        let mut face = self.font.base_face.clone();
-        if let Some(index) = self.font.weight_axis_index {
-            let axis = &self.font.axes[index];
-            face.set_variation(axis.tag, font_weight.clamp(axis.min_value, axis.max_value));
-        }
+        let face = &self.font.face;
 
         let font_size_px = (font_size * self.scale_factor) as f32;
         let scale = font_size_px / f32::from(face.units_per_em());
@@ -678,27 +697,6 @@ impl CantusApp {
             width: f64::from(pen_x),
             height: f64::from(line_height_units * scale),
             font_size: font_size_px,
-            coords: self
-                .font
-                .axes
-                .iter()
-                .map(|axis| {
-                    let weight = font_weight.clamp(axis.min_value, axis.max_value);
-                    let delta = weight - axis.def_value;
-                    if delta.abs() < f32::EPSILON {
-                        return 0;
-                    }
-                    let range = if delta < 0.0 {
-                        axis.def_value - axis.min_value
-                    } else {
-                        axis.max_value - axis.def_value
-                    };
-                    if range.abs() < f32::EPSILON {
-                        return 0;
-                    }
-                    NormalizedCoordinate::from(delta / range).get()
-                })
-                .collect(),
         }
     }
 
@@ -714,7 +712,7 @@ impl CantusApp {
         self.scene
             .draw_glyphs(&self.font.font_data)
             .font_size(layout.font_size)
-            .normalized_coords(&layout.coords)
+            .normalized_coords(&self.font.coords)
             .transform(Affine::translate((
                 pos_x - (layout.width * f64::from(u8::from(align_end))),
                 pos_y - layout.height * 0.5,

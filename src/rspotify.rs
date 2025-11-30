@@ -128,7 +128,7 @@ pub struct Device {
 /// Spotify access token information
 ///
 /// [Reference](https://developer.spotify.com/documentation/general/guides/authorization/)
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Serialize, Deserialize, PartialEq, Eq)]
 struct Token {
     /// An access token that can be provided in subsequent calls
     #[serde(rename = "access_token")]
@@ -188,10 +188,10 @@ fn prompt_for_token(
     verifier: &str,
     http: &Agent,
 ) -> Token {
-    if let Ok(Some(new_token)) = read_token_cache(true, cache_path, scopes)
-        && !new_token.is_expired()
+    if let Ok(Some(cached)) = read_token_cache(true, cache_path, scopes)
+        && !cached.is_expired()
     {
-        return new_token;
+        return cached;
     }
     match webbrowser::open(url) {
         Ok(()) => println!("Opened {url} in your browser."),
@@ -213,20 +213,16 @@ fn prompt_for_token(
     let mut reader = BufReader::new(&stream);
     let mut request_line = String::new();
     reader.read_line(&mut request_line).unwrap();
-
-    let redirect_url = request_line.split_whitespace().nth(1).unwrap();
+    let request_path = request_line.split_whitespace().nth(1).unwrap();
     let redirect_full_url =
-        format!("http://{REDIRECT_HOST}:{REDIRECT_PORT}/callback{redirect_url}");
-
-    let mut code = None;
-    for (key, value) in Url::parse(&redirect_full_url).ok().unwrap().query_pairs() {
-        if key == "code" {
-            code = Some(value.to_string());
-        }
-    }
-    let code = code.unwrap();
-
-    let message = "Go back to your terminal :)";
+        format!("http://{REDIRECT_HOST}:{REDIRECT_PORT}/callback{request_path}");
+    let code = Url::parse(&redirect_full_url)
+        .unwrap()
+        .query_pairs()
+        .find(|(key, _)| key == "code")
+        .map(|(_, value)| value.into_owned())
+        .unwrap();
+    let message = "Cantus connected successfully, this tab can be closed.";
     let response = format!(
         "HTTP/1.1 200 OK\r\ncontent-length: {}\r\n\r\n{}",
         message.len(),
@@ -234,20 +230,18 @@ fn prompt_for_token(
     );
     stream.write_all(response.as_bytes()).unwrap();
 
-    // Get token from spotify
-    let payload: &[(&str, &str)] = &[
-        ("grant_type", "authorization_code"),
-        ("code", &code),
-        (
-            "redirect_uri",
-            &format!("http://{REDIRECT_HOST}:{REDIRECT_PORT}/callback"),
-        ),
-        ("client_id", client_id),
-        ("code_verifier", verifier),
-    ];
     let response = http
         .post("https://accounts.spotify.com/api/token".to_owned())
-        .send_form(payload.to_owned())
+        .send_form([
+            ("grant_type", "authorization_code"),
+            ("code", &code),
+            (
+                "redirect_uri",
+                &format!("http://{REDIRECT_HOST}:{REDIRECT_PORT}/callback"),
+            ),
+            ("client_id", client_id),
+            ("code_verifier", verifier),
+        ])
         .unwrap()
         .into_body()
         .read_to_string()
@@ -503,8 +497,11 @@ impl SpotifyClient {
 
     /// Updates the cache file at the internal cache path.
     fn write_token_cache(&self) {
-        let token = self.token.read().clone();
-        fs::write(&self.cache_path, serde_json::to_string(&token).unwrap()).unwrap();
+        fs::write(
+            &self.cache_path,
+            serde_json::to_string(&*self.token.read()).unwrap(),
+        )
+        .unwrap();
     }
 
     /// Sends a request to Spotify for a new token.
@@ -601,7 +598,6 @@ fn generate_random_string(length: usize, alphabet: &[u8]) -> String {
         .collect()
 }
 
-/// Possible errors returned from the `rspotify` client.
 #[derive(Debug, Error)]
 pub enum ClientError {
     #[error("json parse error: {0}")]
@@ -620,7 +616,6 @@ pub enum ClientError {
     InvalidToken,
 }
 
-// The conversion has to be done manually because it's in a `Box<T>`
 impl From<ureq::Error> for ClientError {
     fn from(err: ureq::Error) -> Self {
         Self::Http(err.to_string())
