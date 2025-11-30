@@ -3,8 +3,7 @@ use crate::{
     config::CONFIG,
     rspotify::{PlaylistId, Track, TrackId},
     spotify::{
-        CondensedPlaylist, IMAGES_CACHE, PLAYBACK_STATE, RATING_PLAYLISTS, SPOTIFY_CLIENT,
-        update_playback_state,
+        CondensedPlaylist, IMAGES_CACHE, PLAYBACK_STATE, SPOTIFY_CLIENT, update_playback_state,
     },
 };
 use itertools::Itertools;
@@ -277,8 +276,7 @@ impl CantusApp {
             playlists
                 .values()
                 .filter_map(|playlist| {
-                    if CONFIG.ratings_enabled && RATING_PLAYLISTS.contains(&playlist.name.as_str())
-                    {
+                    if playlist.rating_index.is_some() {
                         return None;
                     }
                     let contained = playlist.tracks.contains(&track.id);
@@ -576,9 +574,6 @@ fn update_star_rating(track_id: &TrackId, rating_slot: u8) {
     if !CONFIG.ratings_enabled {
         return;
     }
-    let Some(rating_name) = RATING_PLAYLISTS.get(rating_slot as usize) else {
-        return;
-    };
 
     let mut playlists_to_remove_from = Vec::new();
     let mut playlists_to_add_to = Vec::new();
@@ -587,8 +582,8 @@ fn update_star_rating(track_id: &TrackId, rating_slot: u8) {
 
         // Remove tracks from existing playlists
         for playlist in state.playlists.values_mut().filter(|playlist| {
-            RATING_PLAYLISTS.contains(&playlist.name.as_str())
-                && playlist.name != *rating_name
+            playlist.rating_index.is_some()
+                && playlist.rating_index != Some(rating_slot)
                 && playlist.tracks.contains(track_id)
         }) {
             playlist.tracks.remove(track_id);
@@ -596,11 +591,9 @@ fn update_star_rating(track_id: &TrackId, rating_slot: u8) {
         }
 
         // Add the track to the target playlist if it's not already there
-        for playlist in state
-            .playlists
-            .values_mut()
-            .filter(|playlist| playlist.name == *rating_name && !playlist.tracks.contains(track_id))
-        {
+        for playlist in state.playlists.values_mut().filter(|playlist| {
+            playlist.rating_index == Some(rating_slot) && !playlist.tracks.contains(track_id)
+        }) {
             playlist.tracks.insert(*track_id);
             playlists_to_add_to.push((playlist.id, playlist.name.clone()));
         }

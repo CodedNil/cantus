@@ -7,13 +7,12 @@ use vello::{
     AaConfig, AaSupport, Renderer, RendererOptions, Scene,
     peniko::color::palette,
     util::{RenderContext, RenderSurface},
-    wgpu::{
-        BlendComponent, BlendFactor, BlendOperation, BlendState, CommandEncoderDescriptor,
-        CompositeAlphaMode, Instance, InstanceDescriptor, PresentMode, Surface,
-        TextureViewDescriptor, util::TextureBlitterBuilder,
-    },
 };
-use wgpu::Backends;
+use wgpu::{
+    Backends, BlendComponent, BlendFactor, BlendOperation, BlendState, CommandEncoderDescriptor,
+    CompositeAlphaMode, Instance, InstanceDescriptor, PresentMode, Surface, TextureViewDescriptor,
+    util::TextureBlitterBuilder,
+};
 
 #[cfg(not(any(feature = "wayland", feature = "winit")))]
 compile_error!("Enable at least one of the `wayland` or `winit` features.");
