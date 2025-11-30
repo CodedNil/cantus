@@ -3,7 +3,6 @@ use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
 use chrono::{DateTime, Duration, TimeDelta, Utc};
 use parking_lot::RwLock;
 use serde::{Deserialize, Deserializer, Serialize, de::DeserializeOwned};
-use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 use std::{
     collections::HashSet,
@@ -282,11 +281,10 @@ impl SpotifyClient {
         playlist_id: &PlaylistId,
         track_id: &TrackId,
     ) -> ClientResult<()> {
-        self.api_post(
+        let track_uri = format!("spotify:track:{track_id}");
+        self.api_post_payload(
             &format!("playlists/{playlist_id}/tracks"),
-            &json!({
-                "uris": [format!("spotify:track:{track_id}")],
-            }),
+            &format!(r#"{{"uris": ["{track_uri}"]}}"#),
         )
     }
 
@@ -297,20 +295,17 @@ impl SpotifyClient {
         playlist_id: &PlaylistId,
         track_id: &TrackId,
     ) -> ClientResult<()> {
-        self.api_delete(
+        let track_uri = format!("spotify:track:{track_id}");
+        self.api_delete_payload(
             &format!("playlists/{playlist_id}/tracks"),
-            &json!({
-                "tracks": [{
-                    "uri": format!("spotify:track:{track_id}")
-                }],
-            }),
+            &format!(r#"{{"tracks": [ {{"uri": "{track_uri}"}} ]}}"#),
         )
     }
 
     /// Remove one or more tracks from the users liked songs.
     /// [Reference](https://developer.spotify.com/documentation/web-api/reference/#/operations/remove-tracks-user)
     pub fn current_user_saved_tracks_delete(&self, track_id: &TrackId) -> ClientResult<()> {
-        self.api_delete(&format!("me/tracks/?ids={track_id}"), &Value::Null)?;
+        self.api_delete(&format!("me/tracks/?ids={track_id}"))?;
         Ok(())
     }
 
@@ -327,7 +322,7 @@ impl SpotifyClient {
     /// Save one or more tracks to the users liked songs.
     /// [Reference](https://developer.spotify.com/documentation/web-api/reference/#/operations/save-tracks-user)
     pub fn current_user_saved_tracks_add(&self, track_id: &TrackId) -> ClientResult<()> {
-        self.api_put(&format!("me/tracks/?ids={track_id}"), &Value::Null)?;
+        self.api_put(&format!("me/tracks/?ids={track_id}"))?;
         Ok(())
     }
 
@@ -352,34 +347,34 @@ impl SpotifyClient {
     /// Pause a User’s Playback.
     /// [Reference](https://developer.spotify.com/documentation/web-api/reference/#/operations/pause-a-users-playback)
     pub fn pause_playback(&self) -> ClientResult<()> {
-        self.api_put("me/player/pause", &Value::Null)
+        self.api_put("me/player/pause")
     }
 
     /// Resume a User’s Playback.
     /// [Reference](https://developer.spotify.com/documentation/web-api/reference/#/operations/start-a-users-playback)
     pub fn resume_playback(&self) -> ClientResult<()> {
-        self.api_put("me/player/play", &Value::Null)
+        self.api_put("me/player/play")
     }
 
     /// Skip User’s Playback To Next Track.
     /// [Reference](https://developer.spotify.com/documentation/web-api/reference/#/operations/skip-users-playback-to-next-track)
     pub fn next_track(&self) -> ClientResult<()> {
-        self.api_post("me/player/next", &Value::Null)
+        self.api_post("me/player/next")
     }
 
     /// Skip User’s Playback To Previous Track.
     /// [Reference](https://developer.spotify.com/documentation/web-api/reference/#/operations/skip-users-playback-to-previous-track)
     pub fn previous_track(&self) -> ClientResult<()> {
-        self.api_post("me/player/previous", &Value::Null)
+        self.api_post("me/player/previous")
     }
 
     /// Seek To Position In Currently Playing Track.
     /// [Reference](https://developer.spotify.com/documentation/web-api/reference/#/operations/seek-to-position-in-currently-playing-track)
     pub fn seek_track(&self, position: Duration) -> ClientResult<()> {
-        self.api_put(
-            &format!("me/player/seek?position_ms={}", position.num_milliseconds()),
-            &Value::Null,
-        )
+        self.api_put(&format!(
+            "me/player/seek?position_ms={}",
+            position.num_milliseconds()
+        ))
     }
 
     /// Set Volume For User’s Playback.
@@ -389,10 +384,7 @@ impl SpotifyClient {
             volume_percent <= 100u8,
             "volume must be between 0 and 100, inclusive"
         );
-        self.api_put(
-            &format!("me/player/volume?volume_percent={volume_percent}"),
-            &Value::Null,
-        )
+        self.api_put(&format!("me/player/volume?volume_percent={volume_percent}"))
     }
 
     /// Returns a list of artists given the artist IDs, URIs, or URLs.
@@ -462,30 +454,50 @@ impl SpotifyClient {
     }
 
     /// Convenience method to send POST requests related to an endpoint in the API.
-    fn api_post(&self, url: &str, payload: &Value) -> ClientResult<()> {
+    fn api_post(&self, url: &str) -> ClientResult<()> {
         self.http
             .post(format!("https://api.spotify.com/v1/{url}"))
             .header("authorization", self.auth_headers()?)
-            .send_json(payload)?;
+            .send_empty()?;
+        Ok(())
+    }
+
+    /// Convenience method to send POST requests related to an endpoint in the API.
+    fn api_post_payload(&self, url: &str, payload: &str) -> ClientResult<()> {
+        self.http
+            .post(format!("https://api.spotify.com/v1/{url}"))
+            .header("Content-Type", "application/json; charset=utf-8")
+            .header("authorization", self.auth_headers()?)
+            .send(payload)?;
         Ok(())
     }
 
     /// Convenience method to send PUT requests related to an endpoint in the API.
-    fn api_put(&self, url: &str, payload: &Value) -> ClientResult<()> {
+    fn api_put(&self, url: &str) -> ClientResult<()> {
         self.http
             .put(format!("https://api.spotify.com/v1/{url}"))
             .header("authorization", self.auth_headers()?)
-            .send_json(payload)?;
+            .send_empty()?;
         Ok(())
     }
 
     /// Convenience method to send DELETE requests related to an endpoint in the API.
-    fn api_delete(&self, url: &str, payload: &Value) -> ClientResult<()> {
+    fn api_delete(&self, url: &str) -> ClientResult<()> {
         self.http
             .delete(format!("https://api.spotify.com/v1/{url}"))
             .header("authorization", self.auth_headers()?)
+            .call()?;
+        Ok(())
+    }
+
+    /// Convenience method to send DELETE requests related to an endpoint in the API.
+    fn api_delete_payload(&self, url: &str, payload: &str) -> ClientResult<()> {
+        self.http
+            .delete(format!("https://api.spotify.com/v1/{url}"))
+            .header("Content-Type", "application/json; charset=utf-8")
+            .header("authorization", self.auth_headers()?)
             .force_send_body()
-            .send_json(payload)?;
+            .send(payload)?;
         Ok(())
     }
 
