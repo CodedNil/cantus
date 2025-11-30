@@ -2,7 +2,6 @@ use crate::{
     background::update_color_palettes,
     config::CONFIG,
     rspotify::{
-        Config, OAuth,
         client::SpotifyClient,
         model::{AlbumId, ArtistId, Playlist, PlaylistId, TrackId},
     },
@@ -186,28 +185,16 @@ pub fn init() {
     scopes.insert("playlist-modify-public".to_owned());
     scopes.insert("user-library-read".to_owned());
     scopes.insert("user-library-modify".to_owned());
-    let mut spotify = SpotifyClient::with_config(
+    SPOTIFY_CLIENT.set(SpotifyClient::new(
         CONFIG.spotify_client_id.clone().expect(
             "Spotify client ID not set, set it in the config file under key `spotify_client_id`.",
         ),
-        OAuth {
-            redirect_uri: String::from("http://127.0.0.1:7474/callback"),
-            scopes,
-            ..Default::default()
-        },
-        Config {
-            cache_path: dirs::config_dir()
-                .unwrap()
-                .join("cantus")
-                .join("spotify_cache.json"),
-            ..Default::default()
-        },
-    );
-
-    // Prompt user for authorization and get the token
-    let url = spotify.get_authorize_url().unwrap();
-    spotify.prompt_for_token(&url).unwrap();
-    SPOTIFY_CLIENT.set(spotify).unwrap();
+        scopes,
+        dirs::config_dir()
+            .unwrap()
+            .join("cantus")
+            .join("spotify_cache.json"),
+    )).unwrap();
 
     // Begin polling
     spawn(poll_playlists);

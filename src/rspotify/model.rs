@@ -124,8 +124,6 @@ pub struct Page<T: DeserializeOwned> {
     pub total: u32,
 }
 
-pub type ModelResult<T> = Result<T, ModelError>;
-
 /// Groups up the kinds of errors that may happen in this crate.
 #[derive(Debug, Error)]
 pub enum ModelError {
