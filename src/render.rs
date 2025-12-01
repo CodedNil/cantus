@@ -436,9 +436,9 @@ impl CantusApp {
             self.scene.draw_blurred_rounded_rect(
                 start_translation,
                 Rect::new(0.0, 0.0, width, height),
-                Color::from_rgba8(0, 0, 0, (255.0 * extra_fade_alpha).round() as u8),
+                Color::from_rgba8(0, 0, 0, (150.0 * extra_fade_alpha).round() as u8),
                 rounding,
-                30.0,
+                6.0,
             );
 
             // Start clipping
@@ -533,7 +533,7 @@ impl CantusApp {
             self.scene.draw_blurred_rounded_rect(
                 start_translation * Affine::translate((width - height, 0.0)),
                 Rect::new(0.0, 0.0, height, height),
-                Color::from_rgba8(0, 0, 0, (150.0 * fade_alpha).round() as u8),
+                Color::from_rgba8(0, 0, 0, (100.0 * fade_alpha).round() as u8),
                 rounding,
                 5.0,
             );
