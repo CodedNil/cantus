@@ -8,7 +8,7 @@ use crate::{
 };
 use itertools::Itertools;
 use std::time::Duration;
-use std::{cmp::Ordering, collections::HashMap, sync::LazyLock, thread::spawn, time::Instant};
+use std::{collections::HashMap, sync::LazyLock, thread::spawn, time::Instant};
 use tracing::{error, info, warn};
 use vello::{
     kurbo::{Affine, BezPath, Point, Rect, RoundedRect, Shape, Stroke},
@@ -253,43 +253,30 @@ impl CantusApp {
     ) {
         let track_rating_index = if CONFIG.ratings_enabled {
             playlists
-                .iter()
-                .find(|(_, playlist)| {
+                .values()
+                .find(|playlist| {
                     playlist.rating_index.is_some() && playlist.tracks.contains(&track.id)
                 })
-                .map_or(0, |(_, playlist)| {
-                    playlist.rating_index.map_or(0, |rating| rating + 1)
-                })
+                .and_then(|playlist| playlist.rating_index.map(|rating| rating + 1))
+                .unwrap_or(0)
         } else {
             0
         };
 
-        let mut icon_entries = if CONFIG.ratings_enabled {
-            (0..5)
-                .map(|index| IconEntry::Star { index })
-                .collect::<Vec<_>>()
-        } else {
-            Vec::new()
-        };
+        let mut icon_entries = Vec::with_capacity(5 + playlists.len());
+        if CONFIG.ratings_enabled {
+            icon_entries.extend((0..5).map(|index| IconEntry::Star { index }));
+        }
         // Add playlists that are contained in the favourited playlists
         icon_entries.extend(
             playlists
                 .values()
+                .filter(|playlist| playlist.rating_index.is_none())
                 .filter_map(|playlist| {
-                    if playlist.rating_index.is_some() {
-                        return None;
-                    }
                     let contained = playlist.tracks.contains(&track.id);
-                    if !contained && !hovered {
-                        return None;
-                    }
-                    Some((playlist, contained))
+                    (contained || hovered).then_some((playlist, contained))
                 })
-                .sorted_by(|(a, ac), (b, bc)| match bc.cmp(ac) {
-                    Ordering::Equal => a.name.cmp(&b.name),
-                    Ordering::Less => Ordering::Less,
-                    Ordering::Greater => Ordering::Greater,
-                })
+                .sorted_by(|(a, ac), (b, bc)| bc.cmp(ac).then_with(|| a.name.cmp(&b.name)))
                 .map(|(playlist, contained)| IconEntry::Playlist {
                     playlist,
                     contained,

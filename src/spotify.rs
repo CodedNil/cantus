@@ -207,11 +207,13 @@ pub fn init() {
 fn get_spotify_playback() {
     // Wait if we have recently interacted with spotify
     let now = Instant::now();
-    if now < PLAYBACK_STATE.read().last_interaction {
-        return;
-    }
-    if now < PLAYBACK_STATE.read().last_grabbed_playback + Duration::from_secs(1) {
-        return;
+    {
+        let state = PLAYBACK_STATE.read();
+        if now < state.last_interaction
+            || now < state.last_grabbed_playback + Duration::from_secs(1)
+        {
+            return;
+        }
     }
 
     // https://developer.spotify.com/documentation/web-api/reference/#/operations/get-information-about-the-users-current-playback
@@ -257,16 +259,16 @@ fn get_spotify_playback() {
 
         // Song has changed, lets update to the new index and force a queue refresh
         if let Some(track) = current_playback.item {
-            let index_found = state.queue.iter().position(|t| t.name == track.name);
-            if let Some(new_index) = index_found
-                && state.queue_index != new_index
-            {
-                state.queue_index = new_index;
-                state.last_grabbed_queue =
-                    Instant::now().checked_sub(Duration::from_secs(60)).unwrap();
-            } else if index_found.is_none() {
-                state.last_grabbed_queue =
-                    Instant::now().checked_sub(Duration::from_secs(60)).unwrap();
+            let queue_deadline = Instant::now().checked_sub(Duration::from_secs(60)).unwrap();
+            match state.queue.iter().position(|t| t.name == track.name) {
+                Some(new_index) if state.queue_index != new_index => {
+                    state.queue_index = new_index;
+                    state.last_grabbed_queue = queue_deadline;
+                }
+                None => {
+                    state.last_grabbed_queue = queue_deadline;
+                }
+                _ => {}
             }
         }
 
@@ -287,11 +289,12 @@ fn get_spotify_playback() {
 fn get_spotify_queue() {
     // Wait if we have recently interacted with spotify
     let now = Instant::now();
-    if now < PLAYBACK_STATE.read().last_interaction {
-        return;
-    }
-    if now < PLAYBACK_STATE.read().last_grabbed_queue + Duration::from_secs(15) {
-        return;
+    {
+        let state = PLAYBACK_STATE.read();
+        if now < state.last_interaction || now < state.last_grabbed_queue + Duration::from_secs(15)
+        {
+            return;
+        }
     }
 
     // https://developer.spotify.com/documentation/web-api/reference/#/operations/get-queue
@@ -327,15 +330,13 @@ fn get_spotify_queue() {
 
     // Start a task to fetch missing artists & images
     let mut missing_urls = HashSet::new();
-    let mut missing_artists = Vec::new();
+    let mut missing_artists = HashSet::new();
     for track in &new_queue {
         if !IMAGES_CACHE.contains_key(&track.album.image) {
             missing_urls.insert(track.album.image.clone());
         }
-        if !ARTIST_DATA_CACHE.contains_key(&track.artist.id)
-            && !missing_artists.contains(&track.artist.id)
-        {
-            missing_artists.push(track.artist.id);
+        if !ARTIST_DATA_CACHE.contains_key(&track.artist.id) {
+            missing_artists.insert(track.artist.id);
         }
     }
     // Start downloading missing album images
@@ -345,11 +346,14 @@ fn get_spotify_queue() {
 
     // Cache artists, and download images
     if !missing_artists.is_empty() {
+        let artist_query = missing_artists
+            .into_iter()
+            .map(|artist| artist.as_str().to_owned())
+            .collect::<Vec<_>>()
+            .join(",");
         spawn(move || {
             // https://developer.spotify.com/documentation/web-api/reference/#/operations/get-multiple-artists
-            let result = match SPOTIFY_CLIENT
-                .api_get(&format!("artists/?ids={}", missing_artists.join(",")))
-            {
+            let result = match SPOTIFY_CLIENT.api_get(&format!("artists/?ids={artist_query}")) {
                 Ok(result) => result,
                 Err(err) => {
                     error!("Failed to fetch artists: {err}");

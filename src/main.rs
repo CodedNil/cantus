@@ -159,12 +159,15 @@ impl CantusApp {
         self.scene.reset();
         self.create_scene();
 
-        let dev_id = self.render_surface.as_ref().unwrap().dev_id;
+        let Some(render_surface) = self.render_surface.as_mut() else {
+            return;
+        };
+        let Some(render_device) = self.render_device.as_mut() else {
+            return;
+        };
+        let dev_id = render_surface.dev_id;
         let handle = &self.render_context.devices[dev_id];
-        let render_surface = self.render_surface.as_mut().unwrap();
-        self.render_device
-            .as_mut()
-            .unwrap()
+        render_device
             .render_to_texture(
                 &handle.device,
                 &handle.queue,

@@ -192,12 +192,11 @@ impl CantusApp {
         let current_index = playback_state.queue_index.min(queue.len() - 1);
 
         // Play button hitbox
-        let playbutton_center = timeline_origin_x;
         let playbutton_hsize = total_height * 0.25;
         self.interaction.play_hitbox = Rect::new(
-            playbutton_center - playbutton_hsize,
+            timeline_origin_x - playbutton_hsize,
             PANEL_HEIGHT_START,
-            playbutton_center + playbutton_hsize,
+            timeline_origin_x + playbutton_hsize,
             PANEL_HEIGHT_START + total_height,
         );
         let play_button_hovered = self
@@ -340,9 +339,8 @@ impl CantusApp {
         for track_render in &track_renders {
             self.draw_track(
                 track_render,
-                history_width,
-                px_per_ms,
                 total_height,
+                timeline_origin_x,
                 &playback_state.playlists,
             );
         }
@@ -361,9 +359,8 @@ impl CantusApp {
     fn draw_track(
         &mut self,
         track_render: &TrackRender,
-        history_width: f64,
-        px_per_ms: f64,
         height: f64,
+        timeline_origin_x: f64,
         playlists: &HashMap<PlaylistId, CondensedPlaylist>,
     ) {
         if track_render.width <= 0.0 {
@@ -378,8 +375,6 @@ impl CantusApp {
             start_x + width,
             PANEL_HEIGHT_START + height,
         );
-        let timeline_origin_x =
-            history_width - (-CONFIG.timeline_past_minutes * 60_000.0) * px_per_ms;
         let start_translation = Affine::translate((start_x, PANEL_HEIGHT_START));
 
         // Fade out based on width
@@ -406,7 +401,7 @@ impl CantusApp {
             self.interaction.drag_track = Some((track.id, position_within_track));
         }
 
-        let (Some(album_image_ref), Some(track_data_ref)) = (
+        let (Some(album_image_ref), Some(album_data_ref)) = (
             IMAGES_CACHE.get(&track.album.image),
             ALBUM_DATA_CACHE.get(&track.album.id),
         ) else {
@@ -415,7 +410,7 @@ impl CantusApp {
         let Some(album_image) = album_image_ref.as_ref() else {
             return;
         };
-        let Some(track_data) = track_data_ref.as_ref() else {
+        let Some(album_data) = album_data_ref.as_ref() else {
             return;
         };
 
@@ -446,14 +441,14 @@ impl CantusApp {
                 start_translation,
                 &RoundedRect::new(0.0, 0.0, background_width, height, radii),
             );
-            let image_width = f64::from(track_data.palette_image.image.width);
+            let image_width = f64::from(album_data.palette_image.image.width);
             let background_aspect_ratio = background_width / height;
             self.scene.fill(
                 Fill::EvenOdd,
                 start_translation * Affine::scale(full_width / image_width),
                 ImageBrush {
-                    image: &track_data.palette_image.image,
-                    sampler: track_data
+                    image: &album_data.palette_image.image,
+                    sampler: album_data
                         .palette_image
                         .sampler
                         .with_alpha(extra_fade_alpha),
@@ -589,8 +584,8 @@ impl CantusApp {
                 .trim();
             let font_size = 12.0;
             let text_height = PANEL_HEIGHT_START + (height * 0.2).floor();
-            let layout = self.layout_text(song_name, font_size);
-            let width_ratio = available_width / layout.width;
+            let song_layout = self.layout_text(song_name, font_size);
+            let width_ratio = available_width / song_layout.width;
             if width_ratio <= 1.0 {
                 self.draw_text(
                     &self.layout_text(song_name, font_size * width_ratio.max(0.8)),
@@ -601,7 +596,13 @@ impl CantusApp {
                     text_brush.with_alpha(((width_ratio - 0.4) / 0.2) as f32),
                 );
             } else {
-                self.draw_text(&layout, text_start_right, text_height, true, text_brush);
+                self.draw_text(
+                    &song_layout,
+                    text_start_right,
+                    text_height,
+                    true,
+                    text_brush,
+                );
             }
 
             // Get text layouts for bottom row of text
@@ -620,20 +621,14 @@ impl CantusApp {
             };
             let dot_text = "\u{2004}•\u{2004}"; // Use thin spaces on either side of the bullet point
 
-            let layout = self.layout_text(
-                &format!("{time_text}{dot_text}{artist_text}"),
-                font_size * width_ratio.clamp(0.8, 1.0),
-            );
+            let bottom_text = format!("{time_text}{dot_text}{artist_text}");
+            let mut layout = self.layout_text(&bottom_text, font_size);
             let width_ratio = available_width / layout.width;
             if width_ratio <= 1.0 || !track_render.is_current {
-                let layout = if width_ratio >= 1.0 {
-                    layout
-                } else {
-                    self.layout_text(
-                        &format!("{time_text}{dot_text}{artist_text}"),
-                        font_size * width_ratio.clamp(0.8, 1.0),
-                    )
-                };
+                if width_ratio < 1.0 {
+                    layout =
+                        self.layout_text(&bottom_text, font_size * width_ratio.clamp(0.8, 1.0));
+                }
                 self.draw_text(
                     &layout,
                     if width_ratio >= 1.0 {
