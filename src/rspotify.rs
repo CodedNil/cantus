@@ -1,6 +1,5 @@
 use arrayvec::ArrayString;
 use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
-use chrono::{DateTime, Duration, TimeDelta, Utc};
 use parking_lot::RwLock;
 use serde::{Deserialize, Deserializer, Serialize, Serializer, de::DeserializeOwned};
 use sha2::{Digest, Sha256};
@@ -12,6 +11,7 @@ use std::{
     path::PathBuf,
 };
 use thiserror::Error;
+use time::{Duration, OffsetDateTime};
 use ureq::Agent;
 use url::Url;
 
@@ -19,8 +19,7 @@ const VERIFIER_BYTES: usize = 43;
 const REDIRECT_HOST: &str = "127.0.0.1";
 const REDIRECT_PORT: u16 = 7474;
 
-/// The [Authorization Code Flow with Proof Key for Code Exchange
-/// (PKCE)][reference] client for the Spotify API.
+/// The [Authorization Code Flow with Proof Key for Code Exchange (PKCE)][reference] client for the Spotify API.
 ///
 /// [reference]: https://developer.spotify.com/documentation/general/guides/authorization/code-flow
 #[derive(Debug)]
@@ -136,7 +135,7 @@ struct Token {
     /// Number of seconds for which the access token is valid.
     expires_in: u32,
     /// The valid time for which the access token is available represented in ISO 8601 combined date and time.
-    expires_at: Option<DateTime<Utc>>,
+    expires_at: Option<OffsetDateTime>,
     /// A token that can be sent to the Spotify Accounts service in place of an authorization code
     #[serde(rename = "refresh_token")]
     refresh: Option<String>,
@@ -152,8 +151,9 @@ struct Token {
 impl Token {
     /// Check if the token is expired. It includes a margin of 10 seconds (which is how much a request would take in the worst case scenario).
     fn is_expired(&self) -> bool {
-        self.expires_at
-            .is_none_or(|expiration| Utc::now() + TimeDelta::try_seconds(10).unwrap() >= expiration)
+        self.expires_at.is_none_or(|expiration| {
+            OffsetDateTime::now_utc() + Duration::seconds(10) >= expiration
+        })
     }
 }
 
@@ -250,7 +250,7 @@ fn prompt_for_token(
         .unwrap();
     let mut token = serde_json::from_str::<Token>(&response).unwrap();
     token.expires_at =
-        Utc::now().checked_add_signed(Duration::seconds(i64::from(token.expires_in)));
+        OffsetDateTime::now_utc().checked_add(Duration::seconds(i64::from(token.expires_in)));
     token
 }
 
@@ -363,7 +363,7 @@ impl SpotifyClient {
             .read_to_string()?;
         let mut token = serde_json::from_str::<Token>(&response)?;
         token.expires_at =
-            Utc::now().checked_add_signed(Duration::seconds(i64::from(token.expires_in)));
+            OffsetDateTime::now_utc().checked_add(Duration::seconds(i64::from(token.expires_in)));
         Ok(token)
     }
 

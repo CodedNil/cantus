@@ -24,7 +24,7 @@ const TRACK_SPACING_MS: f64 = 4000.0;
 
 /// Particles emitted per second when playback is active.
 const SPARK_EMISSION: f64 = 60.0;
-/// Downward acceleration applied to each particle (scaled by DPI).
+/// Downward acceleration applied to each particle.
 const SPARK_GRAVITY: f64 = 300.0;
 /// Horizontal velocity range applied at spawn.
 const SPARK_VELOCITY_X: Range<usize> = 75..100;
