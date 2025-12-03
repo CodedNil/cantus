@@ -39,8 +39,8 @@ use wayland_protocols::wp::{
     },
 };
 use wayland_protocols_wlr::layer_shell::v1::client::{
-    zwlr_layer_shell_v1::{self, ZwlrLayerShellV1},
-    zwlr_layer_surface_v1::{self, ZwlrLayerSurfaceV1},
+    zwlr_layer_shell_v1::{self, Layer as LayerStyle, ZwlrLayerShellV1},
+    zwlr_layer_surface_v1::{self, Anchor as LayerAnchor, ZwlrLayerSurfaceV1},
 };
 
 pub fn run() {
@@ -80,13 +80,13 @@ pub fn run() {
         surface,
         app.outputs.get(app.output_index).map(|info| &info.handle),
         match CONFIG.layer.as_str() {
-            "background" => zwlr_layer_shell_v1::Layer::Background,
-            "bottom" => zwlr_layer_shell_v1::Layer::Bottom,
-            "top" => zwlr_layer_shell_v1::Layer::Top,
-            "overlay" => zwlr_layer_shell_v1::Layer::Overlay,
+            "background" => LayerStyle::Background,
+            "bottom" => LayerStyle::Bottom,
+            "top" => LayerStyle::Top,
+            "overlay" => LayerStyle::Overlay,
             other => {
                 error!("Invalid layer '{other}', defaulting to 'top'");
-                zwlr_layer_shell_v1::Layer::Top
+                LayerStyle::Top
             }
         },
         "cantus".into(),
@@ -97,19 +97,17 @@ pub fn run() {
     let total_height = CONFIG.height + PANEL_HEIGHT_EXTENSION + PANEL_HEIGHT_START;
     layer_surface.set_size(width as u32, total_height as u32);
     layer_surface.set_anchor(match CONFIG.layer_anchor.as_str() {
-        "top" => zwlr_layer_surface_v1::Anchor::Top,
-        "topright" => zwlr_layer_surface_v1::Anchor::Top | zwlr_layer_surface_v1::Anchor::Right,
-        "right" => zwlr_layer_surface_v1::Anchor::Right,
-        "bottomright" => {
-            zwlr_layer_surface_v1::Anchor::Bottom | zwlr_layer_surface_v1::Anchor::Right
-        }
-        "bottom" => zwlr_layer_surface_v1::Anchor::Bottom,
-        "bottomleft" => zwlr_layer_surface_v1::Anchor::Bottom | zwlr_layer_surface_v1::Anchor::Left,
-        "left" => zwlr_layer_surface_v1::Anchor::Left,
-        "topleft" => zwlr_layer_surface_v1::Anchor::Top | zwlr_layer_surface_v1::Anchor::Left,
+        "top" => LayerAnchor::Top,
+        "topright" => LayerAnchor::Top | LayerAnchor::Right,
+        "right" => LayerAnchor::Right,
+        "bottomright" => LayerAnchor::Bottom | LayerAnchor::Right,
+        "bottom" => LayerAnchor::Bottom,
+        "bottomleft" => LayerAnchor::Bottom | LayerAnchor::Left,
+        "left" => LayerAnchor::Left,
+        "topleft" => LayerAnchor::Top | LayerAnchor::Left,
         other => {
             error!("Invalid layer anchor '{other}', defaulting to 'topleft'");
-            zwlr_layer_surface_v1::Anchor::Top | zwlr_layer_surface_v1::Anchor::Left
+            LayerAnchor::Top | LayerAnchor::Left
         }
     });
     layer_surface.set_margin(0, 0, 0, 0);
@@ -162,7 +160,6 @@ pub struct LayerShellApp {
     pointer: Option<WlPointer>,
     outputs: Vec<OutputInfo>,
     output_index: usize,
-    output_matched: bool,
 
     surface_ptr: Option<NonNull<c_void>>,
     wl_surface: Option<WlSurface>,
@@ -186,7 +183,6 @@ impl LayerShellApp {
             pointer: None,
             outputs: Vec::new(),
             output_index: 0,
-            output_matched: false,
             surface_ptr: None,
             wl_surface: None,
             viewport: None,
@@ -202,10 +198,9 @@ impl LayerShellApp {
         if self.frame_callback.is_some() {
             return;
         }
-        let Some(surface) = &self.wl_surface else {
-            return;
-        };
-        self.frame_callback = Some(surface.frame(qhandle, ()));
+        if let Some(surface) = &self.wl_surface {
+            self.frame_callback = Some(surface.frame(qhandle, ()));
+        }
     }
 
     fn ensure_surface(&mut self, width: f64, height: f64) {
@@ -245,49 +240,26 @@ impl LayerShellApp {
         );
     }
 
-    fn refresh_surface(&mut self, qhandle: &QueueHandle<Self>) {
-        let scale = self.cantus.scale_factor;
-        let width = CONFIG.width;
-        let total_height = CONFIG.height + PANEL_HEIGHT_EXTENSION + PANEL_HEIGHT_START;
-        let buffer_width = (width * scale).round();
-        let buffer_height = (total_height * scale).round();
-
-        self.ensure_surface(buffer_width, buffer_height);
-        self.try_render_frame(qhandle);
-    }
-
     fn try_select_output(&mut self) -> bool {
         if self.outputs.is_empty() {
             return false;
         }
 
-        let (index, matched_target) = CONFIG
+        self.output_index = CONFIG
             .monitor
             .as_ref()
-            .and_then(|target| {
-                self.outputs
-                    .iter()
-                    .position(|info| info.matches(target))
-                    .map(|found| (found, true))
-            })
-            .unwrap_or((0, false));
-
-        if self.output_index != index || (matched_target && !self.output_matched) {
-            self.output_index = index;
-            self.output_matched = matched_target;
-        }
+            .and_then(|target| self.outputs.iter().position(|info| info.matches(target)))
+            .unwrap_or(0);
         true
     }
 
     fn try_render_frame(&mut self, qhandle: &QueueHandle<Self>) {
-        if self.cantus.render_surface.is_none() {
-            let scale = self.cantus.scale_factor;
-            let width = CONFIG.width;
-            let total_height = CONFIG.height + PANEL_HEIGHT_EXTENSION + PANEL_HEIGHT_START;
-            let buffer_width = (width * scale).round();
-            let buffer_height = (total_height * scale).round();
-            self.ensure_surface(buffer_width, buffer_height);
-        }
+        let scale = self.cantus.scale_factor;
+        let width = CONFIG.width;
+        let total_height = CONFIG.height + PANEL_HEIGHT_EXTENSION + PANEL_HEIGHT_START;
+        let buffer_width = (width * scale).round();
+        let buffer_height = (total_height * scale).round();
+        self.ensure_surface(buffer_width, buffer_height);
 
         self.update_input_region(qhandle);
 
@@ -304,8 +276,7 @@ impl LayerShellApp {
         let total_height = CONFIG.height + PANEL_HEIGHT_EXTENSION + PANEL_HEIGHT_START;
         let buffer_width = (width * scale).round();
         let buffer_height = (total_height * scale).round();
-
-        let viewport = &self.viewport;
+        let viewport = self.viewport.as_ref();
         if let Some(surface) = &self.wl_surface {
             surface.set_buffer_scale(if viewport.is_some() {
                 1
@@ -365,11 +336,7 @@ impl Dispatch<ZwlrLayerSurfaceV1, ()> for LayerShellApp {
         qhandle: &QueueHandle<Self>,
     ) {
         match event {
-            zwlr_layer_surface_v1::Event::Configure {
-                serial,
-                width: _,
-                height: _,
-            } => {
+            zwlr_layer_surface_v1::Event::Configure { serial, .. } => {
                 proxy.ack_configure(serial);
                 state.update_scale_and_viewport();
                 if let Some(surface) = &state.wl_surface {
@@ -377,7 +344,7 @@ impl Dispatch<ZwlrLayerSurfaceV1, ()> for LayerShellApp {
                 }
                 state.is_configured = true;
 
-                state.refresh_surface(qhandle);
+                state.try_render_frame(qhandle);
             }
             zwlr_layer_surface_v1::Event::Closed => {
                 state.should_exit = true;
@@ -406,7 +373,7 @@ impl Dispatch<WpFractionalScaleV1, ()> for LayerShellApp {
                     surface.commit();
                 }
 
-                state.refresh_surface(qhandle);
+                state.try_render_frame(qhandle);
             }
         }
     }
@@ -472,10 +439,8 @@ impl Dispatch<WlSeat, ()> for LayerShellApp {
         if let wl_seat::Event::Capabilities { capabilities } = event
             && let WEnum::Value(caps) = capabilities
         {
-            if caps.contains(wl_seat::Capability::Pointer) {
-                if state.pointer.is_none() {
-                    state.pointer = Some(proxy.get_pointer(qhandle, ()));
-                }
+            if caps.contains(wl_seat::Capability::Pointer) && state.pointer.is_none() {
+                state.pointer = Some(proxy.get_pointer(qhandle, ()));
             } else if let Some(pointer) = state.pointer.take() {
                 pointer.release();
             }
@@ -501,10 +466,8 @@ impl Dispatch<WlPointer, ()> for LayerShellApp {
                 surface_x,
                 surface_y,
                 ..
-            } => {
-                if surface_id == Some(surface.id()) {
-                    interaction.mouse_position = Point::new(surface_x * scale, surface_y * scale);
-                }
+            } if surface_id == Some(surface.id()) => {
+                interaction.mouse_position = Point::new(surface_x * scale, surface_y * scale);
             }
             wl_pointer::Event::Motion {
                 surface_x,
@@ -520,26 +483,19 @@ impl Dispatch<WlPointer, ()> for LayerShellApp {
                 interaction.mouse_down = false;
             }
             wl_pointer::Event::Button {
-                button: 0x110,
-                state: WEnum::Value(wl_pointer::ButtonState::Pressed),
+                button,
+                state: button_state,
                 ..
-            } => {
-                interaction.left_click();
-            }
-            wl_pointer::Event::Button {
-                button: 0x110,
-                state: WEnum::Value(wl_pointer::ButtonState::Released),
-                ..
-            } => {
-                interaction.left_click_released(scale);
-            }
-            wl_pointer::Event::Button {
-                button: 0x111,
-                state: WEnum::Value(wl_pointer::ButtonState::Pressed),
-                ..
-            } if interaction.dragging => {
-                interaction.right_click();
-            }
+            } => match (button, button_state) {
+                (0x110, WEnum::Value(wl_pointer::ButtonState::Pressed)) => interaction.left_click(),
+                (0x110, WEnum::Value(wl_pointer::ButtonState::Released)) => {
+                    interaction.left_click_released(scale);
+                }
+                (0x111, WEnum::Value(wl_pointer::ButtonState::Pressed)) if interaction.dragging => {
+                    interaction.right_click();
+                }
+                _ => {}
+            },
             wl_pointer::Event::AxisDiscrete {
                 axis: WEnum::Value(wl_pointer::Axis::VerticalScroll),
                 discrete,
