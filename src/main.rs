@@ -9,9 +9,9 @@ use vello::{
     util::{RenderContext, RenderSurface},
 };
 use wgpu::{
-    Backends, BlendComponent, BlendFactor, BlendOperation, BlendState, CommandEncoderDescriptor,
-    CompositeAlphaMode, Instance, InstanceDescriptor, PresentMode, Surface, TextureViewDescriptor,
-    util::TextureBlitterBuilder,
+    Backends, CommandEncoderDescriptor, CompositeAlphaMode, Extent3d, Instance, InstanceDescriptor,
+    PresentMode, Surface, SurfaceConfiguration, TextureDescriptor, TextureDimension, TextureFormat,
+    TextureUsages, TextureViewDescriptor, util::TextureBlitter,
 };
 
 #[cfg(not(any(feature = "wayland", feature = "winit")))]
@@ -87,54 +87,62 @@ impl Default for CantusApp {
     }
 }
 impl CantusApp {
-    fn configure_render_surface(
-        &mut self,
-        surface: Surface<'static>,
-        width: u32,
-        height: u32,
-        present_mode: PresentMode,
-    ) {
-        let mut render_surface = pollster::block_on(self.render_context.create_render_surface(
-            surface,
-            width,
-            height,
-            present_mode,
-        ))
-        .expect("Failed to create render surface");
-        let device_handle = &self.render_context.devices[render_surface.dev_id];
-        let alpha_modes = render_surface
-            .surface
-            .get_capabilities(device_handle.adapter())
-            .alpha_modes;
+    fn configure_render_surface(&mut self, surface: Surface<'static>, width: u32, height: u32) {
+        let dev_id = pollster::block_on(self.render_context.device(Some(&surface)))
+            .expect("No compatible device found");
+        let device_handle = &self.render_context.devices[dev_id];
+        let capabilities = surface.get_capabilities(device_handle.adapter());
+
+        let format = capabilities
+            .formats
+            .into_iter()
+            .find(|it| matches!(it, TextureFormat::Rgba8Unorm | TextureFormat::Bgra8Unorm))
+            .expect("No compatible surface format found");
         let alpha_mode = [
             CompositeAlphaMode::PreMultiplied,
             CompositeAlphaMode::PostMultiplied,
         ]
         .into_iter()
-        .find(|mode| alpha_modes.contains(mode))
-        .or_else(|| alpha_modes.first().copied())
+        .find(|mode| capabilities.alpha_modes.contains(mode))
         .unwrap_or(CompositeAlphaMode::Auto);
-        render_surface.config.alpha_mode = alpha_mode;
-        if alpha_mode != CompositeAlphaMode::PostMultiplied {
-            render_surface.blitter =
-                TextureBlitterBuilder::new(&device_handle.device, render_surface.config.format)
-                    .blend_state(BlendState {
-                        color: BlendComponent {
-                            src_factor: BlendFactor::SrcAlpha,
-                            dst_factor: BlendFactor::Zero,
-                            operation: BlendOperation::Add,
-                        },
-                        alpha: BlendComponent {
-                            src_factor: BlendFactor::One,
-                            dst_factor: BlendFactor::Zero,
-                            operation: BlendOperation::Add,
-                        },
-                    })
-                    .build();
-        }
+
+        let target_texture = device_handle.device.create_texture(&TextureDescriptor {
+            label: None,
+            size: Extent3d {
+                width,
+                height,
+                depth_or_array_layers: 1,
+            },
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: TextureDimension::D2,
+            usage: TextureUsages::STORAGE_BINDING | TextureUsages::TEXTURE_BINDING,
+            format,
+            view_formats: &[],
+        });
+        let target_view = target_texture.create_view(&TextureViewDescriptor::default());
+        let render_surface = RenderSurface {
+            surface,
+            config: SurfaceConfiguration {
+                usage: TextureUsages::RENDER_ATTACHMENT,
+                format,
+                width,
+                height,
+                present_mode: PresentMode::AutoVsync,
+                desired_maximum_frame_latency: 2,
+                alpha_mode,
+                view_formats: vec![],
+            },
+            dev_id,
+            format,
+            target_texture,
+            target_view,
+            blitter: TextureBlitter::new(&device_handle.device, format),
+        };
         render_surface
             .surface
             .configure(&device_handle.device, &render_surface.config);
+
         self.render_device = Some(
             Renderer::new(
                 &self.render_context.devices[render_surface.dev_id].device,

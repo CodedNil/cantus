@@ -11,10 +11,7 @@ use std::{
     time::{Duration, Instant},
 };
 use tracing::error;
-use vello::{
-    kurbo::Point,
-    wgpu::{PresentMode, SurfaceTargetUnsafe},
-};
+use vello::{kurbo::Point, wgpu::SurfaceTargetUnsafe};
 use wayland_client::{
     Connection, Dispatch, Proxy, QueueHandle, WEnum,
     protocol::{
@@ -232,12 +229,8 @@ impl LayerShellApp {
         }
         .expect("Failed to create surface");
 
-        self.cantus.configure_render_surface(
-            surface,
-            width as u32,
-            height as u32,
-            PresentMode::AutoVsync,
-        );
+        self.cantus
+            .configure_render_surface(surface, width as u32, height as u32);
     }
 
     fn try_select_output(&mut self) -> bool {

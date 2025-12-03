@@ -1,10 +1,7 @@
 use crate::{CantusApp, PANEL_HEIGHT_EXTENSION, config::CONFIG, interaction::InteractionState};
 use raw_window_handle::{HasDisplayHandle, HasWindowHandle};
 use tracing::error;
-use vello::{
-    kurbo::Point,
-    wgpu::{PresentMode, SurfaceTargetUnsafe},
-};
+use vello::{kurbo::Point, wgpu::SurfaceTargetUnsafe};
 use winit::{
     application::ApplicationHandler,
     dpi::{LogicalPosition, PhysicalSize},
@@ -70,12 +67,8 @@ impl WinitApp {
                 .create_surface_unsafe(target)
                 .expect("Failed to create surface")
         };
-        self.cantus.configure_render_surface(
-            surface,
-            size.width,
-            size.height,
-            PresentMode::AutoVsync,
-        );
+        self.cantus
+            .configure_render_surface(surface, size.width, size.height);
     }
 }
 
