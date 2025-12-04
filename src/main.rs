@@ -96,7 +96,7 @@ impl CantusApp {
         let format = capabilities
             .formats
             .into_iter()
-            .find(|it| matches!(it, TextureFormat::Rgba8Unorm | TextureFormat::Bgra8Unorm))
+            .find(|it| it == &TextureFormat::Rgba8Unorm)
             .expect("No compatible surface format found");
         let alpha_mode = [
             CompositeAlphaMode::PreMultiplied,
