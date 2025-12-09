@@ -573,7 +573,12 @@ impl CantusApp {
             let text_start_left = start_x + 12.0;
             let text_start_right = start_x + width - height - 8.0;
             let available_width = (text_start_right - text_start_left).max(0.0);
-            let text_brush = Color::from_rgb8(240, 240, 240);
+            let text_brush = Color::from_rgba8(
+                240,
+                240,
+                240,
+                ((available_width / 100.0).min(1.0) * 255.0) as u8,
+            );
 
             // Render the songs title (strip anything beyond a - or ( in the song title)
             let song_name = track.name[..track
@@ -592,8 +597,7 @@ impl CantusApp {
                     text_start_left,
                     text_height,
                     false,
-                    // Fade out when it gets too small, 0.6-0.4
-                    text_brush.with_alpha(((width_ratio - 0.4) / 0.2) as f32),
+                    text_brush,
                 );
             } else {
                 self.draw_text(
@@ -638,8 +642,7 @@ impl CantusApp {
                     },
                     text_height,
                     width_ratio >= 1.0,
-                    // Fade out when it gets too small, 0.6-0.4
-                    text_brush.with_alpha(((width_ratio - 0.4) / 0.2) as f32),
+                    text_brush,
                 );
             } else {
                 self.draw_text(

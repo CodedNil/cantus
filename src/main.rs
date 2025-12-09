@@ -9,9 +9,10 @@ use vello::{
     util::{RenderContext, RenderSurface},
 };
 use wgpu::{
-    Backends, CommandEncoderDescriptor, CompositeAlphaMode, Extent3d, Instance, InstanceDescriptor,
-    PresentMode, Surface, SurfaceConfiguration, TextureDescriptor, TextureDimension, TextureFormat,
-    TextureUsages, TextureViewDescriptor, util::TextureBlitter,
+    Backends, BlendComponent, BlendFactor, BlendOperation, BlendState, CommandEncoderDescriptor,
+    CompositeAlphaMode, Extent3d, Instance, InstanceDescriptor, PresentMode, Surface,
+    SurfaceConfiguration, TextureDescriptor, TextureDimension, TextureFormat, TextureUsages,
+    TextureViewDescriptor, util::TextureBlitterBuilder,
 };
 
 #[cfg(not(any(feature = "wayland", feature = "winit")))]
@@ -93,11 +94,11 @@ impl CantusApp {
         let device_handle = &self.render_context.devices[dev_id];
         let capabilities = surface.get_capabilities(device_handle.adapter());
 
-        let format = capabilities
-            .formats
-            .into_iter()
-            .find(|it| it == &TextureFormat::Rgba8Unorm)
-            .expect("No compatible surface format found");
+        let format = TextureFormat::Rgba8Unorm;
+        assert!(
+            capabilities.formats.contains(&format),
+            "No compatible surface format found"
+        );
         let alpha_mode = [
             CompositeAlphaMode::PreMultiplied,
             CompositeAlphaMode::PostMultiplied,
@@ -137,7 +138,20 @@ impl CantusApp {
             format,
             target_texture,
             target_view,
-            blitter: TextureBlitter::new(&device_handle.device, format),
+            blitter: TextureBlitterBuilder::new(&device_handle.device, format)
+                .blend_state(BlendState {
+                    color: BlendComponent {
+                        src_factor: BlendFactor::SrcAlpha,
+                        dst_factor: BlendFactor::Zero,
+                        operation: BlendOperation::Add,
+                    },
+                    alpha: BlendComponent {
+                        src_factor: BlendFactor::One,
+                        dst_factor: BlendFactor::Zero,
+                        operation: BlendOperation::Add,
+                    },
+                })
+                .build(),
         };
         render_surface
             .surface
