@@ -5,14 +5,14 @@ use crate::{
 use tracing_subscriber::EnvFilter;
 use vello::{
     AaConfig, AaSupport, Renderer, RendererOptions, Scene,
-    peniko::color::palette,
+    peniko::color::AlphaColor,
     util::{RenderContext, RenderSurface},
 };
 use wgpu::{
-    Backends, BlendComponent, BlendFactor, BlendOperation, BlendState, CommandEncoderDescriptor,
-    CompositeAlphaMode, Extent3d, Instance, InstanceDescriptor, PresentMode, Surface,
-    SurfaceConfiguration, TextureDescriptor, TextureDimension, TextureFormat, TextureUsages,
-    TextureViewDescriptor, util::TextureBlitterBuilder,
+    BlendComponent, BlendFactor, BlendOperation, BlendState, CommandEncoderDescriptor,
+    CompositeAlphaMode, Extent3d, PresentMode, Surface, SurfaceConfiguration, TextureDescriptor,
+    TextureDimension, TextureFormat, TextureUsages, TextureViewDescriptor,
+    util::TextureBlitterBuilder,
 };
 
 #[cfg(not(any(feature = "wayland", feature = "winit")))]
@@ -68,14 +68,8 @@ struct CantusApp {
 
 impl Default for CantusApp {
     fn default() -> Self {
-        let mut render_context = RenderContext::new();
-        render_context.instance = Instance::new(&InstanceDescriptor {
-            backends: Backends::PRIMARY,
-            ..Default::default()
-        });
-
         Self {
-            render_context,
+            render_context: RenderContext::new(),
             render_surface: None,
             render_device: None,
             scene: Scene::new(),
@@ -159,7 +153,7 @@ impl CantusApp {
 
         self.render_device = Some(
             Renderer::new(
-                &self.render_context.devices[render_surface.dev_id].device,
+                &device_handle.device,
                 RendererOptions {
                     use_cpu: false,
                     antialiasing_support: AaSupport::area_only(),
@@ -196,7 +190,7 @@ impl CantusApp {
                 &self.scene,
                 &render_surface.target_view,
                 &vello::RenderParams {
-                    base_color: palette::css::TRANSPARENT,
+                    base_color: AlphaColor::from_rgba8(0, 0, 0, 0),
                     width: render_surface.config.width,
                     height: render_surface.config.height,
                     antialiasing_method: AaConfig::Area,
@@ -232,5 +226,9 @@ impl CantusApp {
 }
 
 fn lerpf64(t: f64, v0: f64, v1: f64) -> f64 {
+    (1.0 - t).mul_add(v0, t * v1)
+}
+
+fn lerpf32(t: f32, v0: f32, v1: f32) -> f32 {
     (1.0 - t).mul_add(v0, t * v1)
 }

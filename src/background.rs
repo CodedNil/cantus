@@ -5,10 +5,10 @@ use crate::spotify::{
 };
 use auto_palette::Palette;
 use image::imageops::colorops;
-use image::{GrayImage, LumaA, RgbaImage, imageops};
+use image::{RgbaImage, imageops};
 use itertools::Itertools;
 use palette::{Hsl, IntoColor, Srgb};
-use std::sync::LazyLock;
+
 use vello::peniko::{Blob, ImageAlphaType, ImageBrush, ImageData, ImageFormat};
 
 /// Number of swatches to use in colour palette generation.
@@ -27,22 +27,6 @@ fn palette_image_width() -> u32 {
 const PALETTE_PASS_COUNT: usize = 3;
 /// Maximum number of brush placements per pass.
 const PALETTE_STROKES_PER_PASS: usize = 20;
-
-static BRUSH: LazyLock<GrayImage> = LazyLock::new(|| {
-    let luma_alpha_image: image::ImageBuffer<LumaA<u8>, Vec<u8>> =
-        image::load_from_memory(include_bytes!("../assets/brush.png"))
-            .unwrap()
-            .to_luma_alpha8();
-    GrayImage::from_raw(
-        luma_alpha_image.width(),
-        luma_alpha_image.height(),
-        luma_alpha_image
-            .pixels()
-            .map(|p| p.0[1]) // p.0 is the array [Luma, Alpha]. We take index 1 (Alpha).
-            .collect(),
-    )
-    .expect("Failed to create GrayImage from extracted alpha data")
-});
 
 /// Downloads and caches an image from the given URL.
 pub fn update_color_palettes() {
@@ -269,65 +253,67 @@ fn generate_palette_image(album_image: &RgbaImage, colors: &[[u8; 4]]) -> Vec<u8
             let color = colors[color_index];
 
             // Create the brush
-            let brush_size = (base_height * lerpf64(fastrand::f64(), 0.75, 1.2))
+            let brush_height = (base_height * lerpf64(fastrand::f64(), 0.75, 1.2))
                 .round()
                 .clamp(6.0, f64::from(palette_height)) as u32;
-            let stamp = image::imageops::resize(
-                &*BRUSH,
-                brush_size,
-                brush_size * 4,
-                image::imageops::FilterType::Triangle,
-            );
-            let top_raw = stamp.as_raw();
+            let brush_width = brush_height * 4;
 
-            // Overlay the stamp onto the canvas
+            // Overlay the brush onto the canvas
             let fade_factor = lerpf64(fastrand::f64(), 0.55, 0.9);
-            let x = fastrand::i64(0..=i64::from(palette_width)) - i64::from(brush_size / 2);
-            let y = fastrand::i64(0..=i64::from(palette_height)) - i64::from(brush_size / 2);
-            let (bottom_width, bottom_height) = canvas.dimensions();
-            let (top_width, top_height) = stamp.dimensions();
+            let x = fastrand::i64(0..=i64::from(palette_width)) - i64::from(brush_height / 2);
+            let y = fastrand::i64(0..=i64::from(palette_height)) - i64::from(brush_height / 2);
 
             // Crop our top image if we're going out of bounds
-            let origin_bottom_x = x.clamp(0, i64::from(bottom_width)) as u32;
-            let origin_bottom_y = y.clamp(0, i64::from(bottom_height)) as u32;
+            let origin_bottom_x = x.clamp(0, i64::from(palette_width)) as u32;
+            let origin_bottom_y = y.clamp(0, i64::from(palette_height)) as u32;
 
             let range_width = (x
-                .saturating_add(i64::from(top_width))
-                .clamp(0, i64::from(bottom_width)) as u32)
+                .saturating_add(i64::from(brush_width))
+                .clamp(0, i64::from(palette_width)) as u32)
                 .saturating_sub(origin_bottom_x);
             let range_height = (y
-                .saturating_add(i64::from(top_height))
-                .clamp(0, i64::from(bottom_height)) as u32)
+                .saturating_add(i64::from(brush_height))
+                .clamp(0, i64::from(palette_height)) as u32)
                 .saturating_sub(origin_bottom_y);
-            let origin_top_x = x.saturating_neg().clamp(0, i64::from(top_width)) as u32;
-            let origin_top_y = y.saturating_neg().clamp(0, i64::from(top_height)) as u32;
 
             let raw_bottom: &mut [u8] = canvas.as_mut();
-            let bottom_stride = bottom_width as usize * 4;
-            let top_stride = top_width as usize;
-            for y_offset in 0..range_height {
-                let bottom_row_start = ((origin_bottom_y + y_offset) as usize) * bottom_stride;
-                let top_row_start = ((origin_top_y + y_offset) as usize) * top_stride;
-                for x_offset in 0..range_width {
-                    let alpha = top_raw[top_row_start + (origin_top_x + x_offset) as usize];
-                    let adjusted_alpha =
-                        (f64::from(alpha) * fade_factor).round().clamp(0.0, 255.0) as u8;
-                    if adjusted_alpha == 0 {
+            let bottom_stride = palette_width as usize * 4;
+
+            let center_x = x as f64 + f64::from(brush_width) / 2.0;
+            let center_y = y as f64 + f64::from(brush_height) / 2.0;
+            let inv_half_w = 2.0 / f64::from(brush_width);
+            let inv_half_h = 2.0 / f64::from(brush_height);
+
+            for cy in origin_bottom_y..origin_bottom_y + range_height {
+                let dy = (f64::from(cy) - center_y) * inv_half_h;
+                let dy_sq = dy * dy;
+                let row_start = (cy as usize) * bottom_stride;
+
+                for cx in origin_bottom_x..origin_bottom_x + range_width {
+                    let dx = (f64::from(cx) - center_x) * inv_half_w;
+                    let dist_sq = dx * dx + dy_sq;
+
+                    if dist_sq >= 1.0 {
                         continue;
                     }
-                    let bottom_idx = bottom_row_start + ((origin_bottom_x + x_offset) as usize) * 4;
-                    let src_a = u32::from(adjusted_alpha);
+
+                    let alpha = (1.0 - dist_sq.sqrt()) * fade_factor;
+                    let src_a = (alpha * 255.0) as u32;
+                    if src_a == 0 {
+                        continue;
+                    }
+
+                    let idx = row_start + (cx as usize) * 4;
                     let inv_a = 255 - src_a;
-                    let dst_a = u32::from(raw_bottom[bottom_idx + 3]);
+                    let dst_a = u32::from(raw_bottom[idx + 3]);
                     let out_a = src_a + (dst_a * inv_a / 255);
-                    let blend = |src: u8, dst: u8| {
-                        (((u32::from(src) * src_a) + (u32::from(dst) * dst_a * inv_a / 255))
-                            / out_a) as u8
-                    };
-                    raw_bottom[bottom_idx] = blend(color[0], raw_bottom[bottom_idx]);
-                    raw_bottom[bottom_idx + 1] = blend(color[1], raw_bottom[bottom_idx + 1]);
-                    raw_bottom[bottom_idx + 2] = blend(color[2], raw_bottom[bottom_idx + 2]);
-                    raw_bottom[bottom_idx + 3] = out_a as u8;
+
+                    for i in 0..3 {
+                        raw_bottom[idx + i] = ((u32::from(color[i]) * src_a
+                            + u32::from(raw_bottom[idx + i]) * dst_a * inv_a / 255)
+                            / out_a) as u8;
+                    }
+                    raw_bottom[idx + 3] = out_a as u8;
                 }
             }
         }

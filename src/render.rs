@@ -2,7 +2,7 @@ use crate::{
     CantusApp, PANEL_HEIGHT_START,
     config::CONFIG,
     interaction::InteractionEvent,
-    lerpf64,
+    lerpf32, lerpf64,
     rspotify::{PlaylistId, Track},
     spotify::{ALBUM_DATA_CACHE, CondensedPlaylist, IMAGES_CACHE, PLAYBACK_STATE},
 };
@@ -23,15 +23,15 @@ use vello::{
 const TRACK_SPACING_MS: f64 = 4000.0;
 
 /// Particles emitted per second when playback is active.
-const SPARK_EMISSION: f64 = 60.0;
+const SPARK_EMISSION: f32 = 60.0;
 /// Downward acceleration applied to each particle.
-const SPARK_GRAVITY: f64 = 300.0;
+const SPARK_GRAVITY: f32 = 300.0;
 /// Horizontal velocity range applied at spawn.
 const SPARK_VELOCITY_X: Range<usize> = 75..100;
 /// Vertical velocity range applied at spawn.
 const SPARK_VELOCITY_Y: Range<usize> = 30..70;
 /// Lifetime range for individual particles, in seconds.
-const SPARK_LIFETIME: Range<f64> = 0.3..0.6;
+const SPARK_LIFETIME: Range<f32> = 0.3..0.6;
 /// Rendered spark segment length range, in logical pixels.
 const SPARK_LENGTH_RANGE: Range<f64> = 6.0..10.0;
 /// Rendered spark thickness range, in logical pixels.
@@ -122,7 +122,7 @@ impl Default for FontEngine {
 
 pub struct ParticlesState {
     particles: [Particle; 32],
-    spawn_accumulator: f64,
+    spawn_accumulator: f32,
 }
 
 impl Default for ParticlesState {
@@ -141,10 +141,10 @@ impl Default for ParticlesState {
 
 #[derive(Copy, Clone)]
 struct Particle {
-    life: f64,
-    position: [f64; 2],
-    velocity: [f64; 2],
-    color: usize,
+    life: f32,
+    position: [f32; 2],
+    velocity: [f32; 2],
+    color: u8,
 }
 
 struct TrackRender<'a> {
@@ -347,11 +347,11 @@ impl CantusApp {
 
         // Draw the particles
         self.render_playing_particles(
-            dt,
+            dt as f32,
             &queue[current_index],
             timeline_origin_x,
             total_height,
-            track_move_speed,
+            track_move_speed as f32,
             playback_state.volume,
         );
     }
@@ -759,11 +759,11 @@ impl CantusApp {
 
     fn render_playing_particles(
         &mut self,
-        dt: f64,
+        dt: f32,
         track: &Track,
         x: f64,
         height: f64,
-        track_move_speed: f64,
+        track_move_speed: f32,
         volume: Option<u8>,
     ) {
         let lightness_boost = 50.0;
@@ -792,7 +792,7 @@ impl CantusApp {
         let mut emit_count = if track_move_speed.abs() > 0.000_001 {
             self.particles.spawn_accumulator += dt * SPARK_EMISSION;
             let emit_count = self.particles.spawn_accumulator.floor() as u8;
-            self.particles.spawn_accumulator -= f64::from(emit_count);
+            self.particles.spawn_accumulator -= f32::from(emit_count);
             emit_count
         } else {
             self.particles.spawn_accumulator = 0.0;
@@ -809,38 +809,43 @@ impl CantusApp {
             // Emit a new particle
             if emit_count > 0 && particle.life <= 0.0 {
                 particle.position = [
-                    x + spawn_offset,
-                    PANEL_HEIGHT_START + height * lerpf64(fastrand::f64(), 0.05, 0.95),
+                    x as f32 + spawn_offset,
+                    PANEL_HEIGHT_START as f32
+                        + height as f32 * lerpf32(fastrand::f32(), 0.05, 0.95),
                 ];
                 particle.velocity = [
-                    fastrand::usize(SPARK_VELOCITY_X) as f64 * self.scale_factor * horizontal_bias,
-                    fastrand::usize(SPARK_VELOCITY_Y) as f64 * -self.scale_factor,
+                    fastrand::usize(SPARK_VELOCITY_X) as f32
+                        * self.scale_factor as f32
+                        * horizontal_bias,
+                    fastrand::usize(SPARK_VELOCITY_Y) as f32 * -self.scale_factor as f32,
                 ];
-                particle.color = fastrand::usize(0..primary_colors.len());
-                particle.life = lerpf64(fastrand::f64(), SPARK_LIFETIME.start, SPARK_LIFETIME.end);
+                particle.color = fastrand::u8(0..primary_colors.len() as u8);
+                particle.life = lerpf32(fastrand::f32(), SPARK_LIFETIME.start, SPARK_LIFETIME.end);
                 emit_count -= 1;
             }
             if particle.life <= 0.0 {
                 continue;
             }
 
-            particle.velocity[1] += SPARK_GRAVITY * self.scale_factor * dt;
+            particle.velocity[1] += SPARK_GRAVITY * self.scale_factor as f32 * dt;
             particle.position[0] += particle.velocity[0] * dt;
             particle.position[1] += particle.velocity[1] * dt;
 
-            let fade = (particle.life / SPARK_LIFETIME.end).clamp(0.0, 1.0);
+            let fade = f64::from((particle.life / SPARK_LIFETIME.end).clamp(0.0, 1.0));
             let length =
                 lerpf64(fade, SPARK_LENGTH_RANGE.start, SPARK_LENGTH_RANGE.end) * self.scale_factor;
             let thickness = lerpf64(fade, SPARK_THICKNESS_RANGE.start, SPARK_THICKNESS_RANGE.end)
                 * self.scale_factor;
             let rgb = primary_colors
-                .get(particle.color)
+                .get(particle.color as usize)
                 .unwrap_or(&[255, 210, 160]);
             self.scene.fill(
                 Fill::EvenOdd,
-                Affine::translate((particle.position[0], particle.position[1]))
-                    * Affine::rotate(particle.velocity[1].atan2(particle.velocity[0]))
-                    * Affine::translate((-length * 0.5, 0.0)),
+                Affine::translate((
+                    f64::from(particle.position[0]),
+                    f64::from(particle.position[1]),
+                )) * Affine::rotate(f64::from(particle.velocity[1].atan2(particle.velocity[0])))
+                    * Affine::translate((length * -0.5, 0.0)),
                 Color::from_rgba8(
                     rgb[0],
                     rgb[1],
