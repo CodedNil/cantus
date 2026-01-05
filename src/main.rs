@@ -1,7 +1,10 @@
+use std::sync::Arc;
+
 use crate::{
     interaction::InteractionState,
     render::{FontEngine, ParticlesState, RenderState},
 };
+use render_types::{Particle, ParticleUniforms, Shaders};
 use tracing_subscriber::EnvFilter;
 use vello::{
     AaConfig, AaSupport, Renderer, RendererOptions, Scene,
@@ -25,6 +28,7 @@ mod background;
 mod config;
 mod interaction;
 mod render;
+mod render_types;
 mod rspotify;
 mod spotify;
 
@@ -38,11 +42,21 @@ mod winit_app;
 const PANEL_HEIGHT_START: f64 = 6.0;
 const PANEL_HEIGHT_EXTENSION: f64 = 12.0;
 
+pub struct GpuResources {
+    pub device: Arc<wgpu::Device>,
+    pub queue: Arc<wgpu::Queue>,
+    pub shaders: Shaders,
+    pub uniform_buffer: wgpu::Buffer,
+    pub storage_buffer: wgpu::Buffer,
+    pub particle_bind_group: wgpu::BindGroup,
+}
+
 fn main() {
     tracing_subscriber::fmt()
         .with_env_filter(EnvFilter::new(
             ["warn", "cantus=info", "wgpu_hal=error"].join(","),
         ))
+        .with_writer(std::io::stderr)
         .init();
 
     spotify::init();
@@ -54,7 +68,7 @@ fn main() {
     winit_app::run();
 }
 
-struct CantusApp {
+pub struct CantusApp {
     render_context: RenderContext,
     render_surface: Option<RenderSurface<'static>>,
     render_device: Option<Renderer>,
@@ -64,6 +78,8 @@ struct CantusApp {
     render_state: RenderState,
     interaction: InteractionState,
     particles: ParticlesState,
+    gpu_resources: Option<GpuResources>,
+    gpu_uniforms: Option<ParticleUniforms>,
 }
 
 impl Default for CantusApp {
@@ -78,6 +94,8 @@ impl Default for CantusApp {
             render_state: RenderState::default(),
             interaction: InteractionState::default(),
             particles: ParticlesState::default(),
+            gpu_resources: None,
+            gpu_uniforms: None,
         }
     }
 }
@@ -163,6 +181,49 @@ impl CantusApp {
             )
             .expect("Failed to create renderer"),
         );
+
+        let shaders = Shaders::new(&device_handle.device, format);
+        let uniform_buffer = device_handle.device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("Particle Uniform Buffer"),
+            size: std::mem::size_of::<ParticleUniforms>() as u64,
+            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+
+        let storage_buffer = device_handle.device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("Particle Storage Buffer"),
+            size: (std::mem::size_of::<Particle>() * 64) as u64,
+            usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+
+        let particle_bind_group =
+            device_handle
+                .device
+                .create_bind_group(&wgpu::BindGroupDescriptor {
+                    label: Some("Particle Bind Group"),
+                    layout: &shaders.bind_group_layout,
+                    entries: &[
+                        wgpu::BindGroupEntry {
+                            binding: 0,
+                            resource: uniform_buffer.as_entire_binding(),
+                        },
+                        wgpu::BindGroupEntry {
+                            binding: 1,
+                            resource: storage_buffer.as_entire_binding(),
+                        },
+                    ],
+                });
+
+        self.gpu_resources = Some(GpuResources {
+            device: Arc::new(device_handle.device.clone()),
+            queue: Arc::new(device_handle.queue.clone()),
+            shaders,
+            uniform_buffer,
+            storage_buffer,
+            particle_bind_group,
+        });
+
         self.render_surface = Some(render_surface);
     }
 
@@ -211,14 +272,48 @@ impl CantusApp {
             .create_command_encoder(&CommandEncoderDescriptor {
                 label: Some("Surface Blit"),
             });
+
+        let surface_view = surface_texture
+            .texture
+            .create_view(&TextureViewDescriptor::default());
+
         render_surface.blitter.copy(
             &handle.device,
             &mut encoder,
             &render_surface.target_view,
-            &surface_texture
-                .texture
-                .create_view(&TextureViewDescriptor::default()),
+            &surface_view,
         );
+
+        if let (Some(gpu), Some(gpu_uniforms)) =
+            (self.gpu_resources.as_ref(), self.gpu_uniforms.as_ref())
+        {
+            gpu.queue
+                .write_buffer(&gpu.uniform_buffer, 0, bytemuck::bytes_of(gpu_uniforms));
+            gpu.queue.write_buffer(
+                &gpu.storage_buffer,
+                0,
+                bytemuck::cast_slice(&self.particles.particles),
+            );
+
+            let mut rpass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                label: Some("Particle Pass"),
+                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                    view: &surface_view,
+                    resolve_target: None,
+                    ops: wgpu::Operations {
+                        load: wgpu::LoadOp::Load,
+                        store: wgpu::StoreOp::Store,
+                    },
+                    depth_slice: None,
+                })],
+                depth_stencil_attachment: None,
+                timestamp_writes: None,
+                occlusion_query_set: None,
+            });
+            rpass.set_pipeline(&gpu.shaders.pipeline);
+            rpass.set_bind_group(0, &gpu.particle_bind_group, &[]);
+            rpass.draw(0..4, 0..1);
+        }
 
         handle.queue.submit([encoder.finish()]);
         surface_texture.present();

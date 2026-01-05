@@ -3,6 +3,7 @@ use crate::{
     config::CONFIG,
     interaction::InteractionEvent,
     lerpf32, lerpf64,
+    render_types::{Particle, ParticleUniforms},
     rspotify::{PlaylistId, Track},
     spotify::{ALBUM_DATA_CACHE, CondensedPlaylist, IMAGES_CACHE, PLAYBACK_STATE},
 };
@@ -19,23 +20,18 @@ use vello::{
     peniko::{Blob, Color, Fill, FontData, ImageBrush},
 };
 
+static START_TIME: LazyLock<Instant> = LazyLock::new(Instant::now);
+
 /// Spacing between tracks in ms
 const TRACK_SPACING_MS: f64 = 4000.0;
-
 /// Particles emitted per second when playback is active.
 const SPARK_EMISSION: f32 = 60.0;
-/// Downward acceleration applied to each particle.
-const SPARK_GRAVITY: f32 = 300.0;
 /// Horizontal velocity range applied at spawn.
 const SPARK_VELOCITY_X: Range<usize> = 75..100;
 /// Vertical velocity range applied at spawn.
 const SPARK_VELOCITY_Y: Range<usize> = 30..70;
 /// Lifetime range for individual particles, in seconds.
 const SPARK_LIFETIME: Range<f32> = 0.3..0.6;
-/// Rendered spark segment length range, in logical pixels.
-const SPARK_LENGTH: Range<f64> = 6.0..10.0;
-/// Rendered spark thickness range, in logical pixels.
-const SPARK_THICKNESS: Range<f64> = 2.0..4.0;
 
 /// Duration for animation events
 const ANIMATION_DURATION: Duration = Duration::from_millis(3500);
@@ -44,11 +40,11 @@ static PLAY_SVG: LazyLock<BezPath> =
     LazyLock::new(|| BezPath::from_svg(include_str!("../assets/play.path")).unwrap());
 
 pub struct RenderState {
-    last_update: Instant,
-    track_offset: f64,
-    recent_speeds: [f64; 16],
-    speed_idx: usize,
-    speed_sum: f64,
+    pub last_update: Instant,
+    pub track_offset: f64,
+    pub recent_speeds: [f64; 16],
+    pub speed_idx: usize,
+    pub speed_sum: f64,
 }
 
 impl Default for RenderState {
@@ -63,12 +59,12 @@ impl Default for RenderState {
     }
 }
 pub struct FontEngine {
-    font_data: FontData,
-    face: Face<'static>,
-    coords: Vec<i16>,
+    pub font_data: FontData,
+    pub face: Face<'static>,
+    pub coords: Vec<i16>,
 }
 
-struct TextLayout {
+pub struct TextLayout {
     glyphs: Vec<Glyph>,
     width: f64,
     height: f64,
@@ -99,33 +95,26 @@ impl Default for FontEngine {
 }
 
 pub struct ParticlesState {
-    particles: [Particle; 32],
-    accumulator: f32,
+    pub particles: [Particle; 64],
+    pub accumulator: f32,
 }
 
 impl Default for ParticlesState {
     fn default() -> Self {
         Self {
             particles: [Particle {
-                life: 0.0,
-                position: [0.0; 2],
-                velocity: [0.0; 2],
+                spawn_y: 0.0,
+                spawn_time: 0.0,
+                duration: 0.0,
                 color: 0,
-            }; 32],
+                spawn_vel: [0.0; 2],
+            }; 64],
             accumulator: 0.0,
         }
     }
 }
 
-#[derive(Copy, Clone)]
-struct Particle {
-    life: f32,
-    position: [f32; 2],
-    velocity: [f32; 2],
-    color: u8,
-}
-
-struct TrackRender<'a> {
+pub struct TrackRender<'a> {
     track: &'a Track,
     is_current: bool,
     seconds_until_start: f64,
@@ -146,11 +135,11 @@ impl CantusApp {
 
         let scale = self.scale_factor;
         let history_width = (CONFIG.history_width * scale).ceil();
+        let total_width = (CONFIG.width * scale - history_width).ceil();
+        let total_height = (CONFIG.height * scale).ceil();
         let timeline_duration_ms = CONFIG.timeline_future_minutes * 60_000.0;
         let timeline_start_ms = -CONFIG.timeline_past_minutes * 60_000.0;
 
-        let total_width = (CONFIG.width * scale - history_width).ceil();
-        let total_height = (CONFIG.height * scale).ceil();
         let px_per_ms = total_width / timeline_duration_ms;
         let timeline_origin_x = history_width - timeline_start_ms * px_per_ms;
 
@@ -298,11 +287,11 @@ impl CantusApp {
                 current_px -= 30.0;
                 if !first_found {
                     first_found = true;
-                    current_px = history_width - total_height - track_spacing;
-
                     // Smooth out the snapping
-                    current_px -=
-                        (distance_before - (total_height - track_spacing * 2.0)).clamp(0.0, 30.0);
+                    current_px = history_width
+                        - total_height
+                        - track_spacing
+                        - (distance_before - (total_height - track_spacing * 2.0)).clamp(0.0, 30.0);
                 }
             } else {
                 // Set the start of the track, this will be the closest to the left track before they start being cropped
@@ -721,103 +710,72 @@ impl CantusApp {
         track_move_speed: f32,
         volume: Option<u8>,
     ) {
-        let lightness_boost = 50.0;
+        let scale = self.scale_factor as f32;
         let Some(track_data_ref) = ALBUM_DATA_CACHE.get(&track.album.id) else {
             return;
         };
         let Some(track_data) = track_data_ref.as_ref() else {
             return;
         };
-        let mut primary_colors: Vec<_> = track_data
+
+        let mut palette: Vec<u32> = track_data
             .primary_colors
             .iter()
             .map(|[r, g, b, _]| {
-                [
-                    (lerpf64(0.3, f64::from(*r) + lightness_boost, 255.0)).min(255.0) as u8,
-                    (lerpf64(0.3, f64::from(*g) + lightness_boost, 210.0)).min(255.0) as u8,
-                    (lerpf64(0.3, f64::from(*b) + lightness_boost, 160.0)).min(255.0) as u8,
-                ]
+                // Pack as RGBA (little-endian u32) for WGSL unpack4x8unorm
+                (u32::from(*r)) | (u32::from(*g) << 8) | (u32::from(*b) << 16) | (255 << 24)
             })
             .collect();
-        if primary_colors.is_empty() {
-            primary_colors.extend_from_slice(&[[100, 100, 100], [150, 150, 150], [200, 200, 200]]);
+        if palette.is_empty() {
+            palette.extend_from_slice(&[
+                102 | (102 << 8) | (102 << 16),
+                153 | (153 << 8) | (153 << 16),
+                204 | (204 << 8) | (204 << 16),
+            ]);
         }
+
+        // We use a monotonic time for the GPU to calculate displacements
+        let time = START_TIME.elapsed().as_secs_f32();
+
+        self.gpu_uniforms = Some(ParticleUniforms {
+            screen_size: [CONFIG.width as f32 * scale, height as f32],
+            time,
+            line_x: x as f32,
+        });
 
         // Emit new particles while playing
         let mut emit_count = if track_move_speed.abs() > 0.000_001 {
             self.particles.accumulator += dt * SPARK_EMISSION;
-            let emit_count = self.particles.accumulator.floor() as u8;
-            self.particles.accumulator -= f32::from(emit_count);
-            emit_count
+            let count = self.particles.accumulator.floor() as u8;
+            self.particles.accumulator -= f32::from(count);
+            count
         } else {
             self.particles.accumulator = 0.0;
             0
         };
 
-        // Spawn new particles, kill dead particles, update positions of others, then render them
         let spawn_offset = track_move_speed.signum() * 2.0;
         let horizontal_bias =
             (track_move_speed.abs().powf(0.2) * spawn_offset * 0.5).clamp(-3.0, 3.0);
-        for particle in &mut self.particles.particles {
-            particle.life -= dt;
 
+        for particle in &mut self.particles.particles {
             // Emit a new particle
-            if emit_count > 0 && particle.life <= 0.0 {
-                particle.position = [
-                    x as f32 + spawn_offset,
-                    PANEL_HEIGHT_START as f32
-                        + height as f32 * lerpf32(fastrand::f32(), 0.05, 0.95),
+            if emit_count > 0 && time > particle.spawn_time + particle.duration {
+                particle.spawn_y =
+                    PANEL_HEIGHT_START as f32 + height as f32 * lerpf32(fastrand::f32(), 0.1, 0.7);
+                particle.spawn_vel = [
+                    fastrand::usize(SPARK_VELOCITY_X) as f32 * scale * horizontal_bias,
+                    fastrand::usize(SPARK_VELOCITY_Y) as f32 * -scale,
                 ];
-                particle.velocity = [
-                    fastrand::usize(SPARK_VELOCITY_X) as f32
-                        * self.scale_factor as f32
-                        * horizontal_bias,
-                    fastrand::usize(SPARK_VELOCITY_Y) as f32 * -self.scale_factor as f32,
-                ];
-                particle.color = fastrand::u8(0..primary_colors.len() as u8);
-                particle.life = lerpf32(fastrand::f32(), SPARK_LIFETIME.start, SPARK_LIFETIME.end);
+                particle.color = palette[fastrand::usize(0..palette.len())];
+                particle.spawn_time = time;
+                particle.duration =
+                    lerpf32(fastrand::f32(), SPARK_LIFETIME.start, SPARK_LIFETIME.end);
                 emit_count -= 1;
             }
-            if particle.life <= 0.0 {
-                continue;
-            }
-
-            particle.velocity[1] += SPARK_GRAVITY * self.scale_factor as f32 * dt;
-            particle.position[0] += particle.velocity[0] * dt;
-            particle.position[1] += particle.velocity[1] * dt;
-
-            let fade = f64::from((particle.life / SPARK_LIFETIME.end).clamp(0.0, 1.0));
-            let length = lerpf64(fade, SPARK_LENGTH.start, SPARK_LENGTH.end) * self.scale_factor;
-            let thickness =
-                lerpf64(fade, SPARK_THICKNESS.start, SPARK_THICKNESS.end) * self.scale_factor;
-            let rgb = primary_colors
-                .get(particle.color as usize)
-                .unwrap_or(&[255, 210, 160]);
-            self.scene.fill(
-                Fill::EvenOdd,
-                Affine::translate((
-                    f64::from(particle.position[0]),
-                    f64::from(particle.position[1]),
-                )) * Affine::rotate(f64::from(particle.velocity[1].atan2(particle.velocity[0])))
-                    * Affine::translate((length * -0.5, 0.0)),
-                Color::from_rgba8(
-                    rgb[0],
-                    rgb[1],
-                    rgb[2],
-                    (fade.powf(1.1) * 235.0).round().clamp(0.0, 255.0) as u8,
-                ),
-                None,
-                &RoundedRect::new(
-                    0.0,
-                    -thickness * 0.5,
-                    length,
-                    thickness * 0.5,
-                    thickness * 0.5,
-                ),
-            );
         }
 
-        // Line at the now playing position to denote the cutoff
+        // Line and Volume logic
         let line_width = 4.0 * self.scale_factor;
         let line_color = Color::from_rgb8(255, 224, 210);
         let line_x = x - line_width * 0.5;
