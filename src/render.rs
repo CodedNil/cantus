@@ -12,7 +12,7 @@ use std::{
     sync::LazyLock,
     time::{Duration, Instant},
 };
-use ttf_parser::{Face, GlyphId, NormalizedCoordinate, Tag};
+use ttf_parser::{Face, Tag};
 use vello::{
     Glyph,
     kurbo::{Affine, BezPath, Circle, Point, Rect, RoundedRect, RoundedRectRadii, Shape},
@@ -33,9 +33,9 @@ const SPARK_VELOCITY_Y: Range<usize> = 30..70;
 /// Lifetime range for individual particles, in seconds.
 const SPARK_LIFETIME: Range<f32> = 0.3..0.6;
 /// Rendered spark segment length range, in logical pixels.
-const SPARK_LENGTH_RANGE: Range<f64> = 6.0..10.0;
+const SPARK_LENGTH: Range<f64> = 6.0..10.0;
 /// Rendered spark thickness range, in logical pixels.
-const SPARK_THICKNESS_RANGE: Range<f64> = 2.0..4.0;
+const SPARK_THICKNESS: Range<f64> = 2.0..4.0;
 
 /// Duration for animation events
 const ANIMATION_DURATION: Duration = Duration::from_millis(3500);
@@ -46,9 +46,9 @@ static PLAY_SVG: LazyLock<BezPath> =
 pub struct RenderState {
     last_update: Instant,
     track_offset: f64,
-    move_speeds: [f64; 16],
-    move_index: usize,
-    move_speed_sum: f64,
+    recent_speeds: [f64; 16],
+    speed_idx: usize,
+    speed_sum: f64,
 }
 
 impl Default for RenderState {
@@ -56,9 +56,9 @@ impl Default for RenderState {
         Self {
             last_update: Instant::now(),
             track_offset: 0.0,
-            move_speeds: [0.0; 16],
-            move_index: 0,
-            move_speed_sum: 0.0,
+            recent_speeds: [0.0; 16],
+            speed_idx: 0,
+            speed_sum: 0.0,
         }
     }
 }
@@ -78,51 +78,29 @@ struct TextLayout {
 impl Default for FontEngine {
     fn default() -> Self {
         let bytes = include_bytes!("../assets/NotoSans.ttf");
-        let font_data = FontData::new(Blob::from(bytes.to_vec()), 0);
-        let mut face = Face::parse(bytes, 0).expect("failed to parse embedded font");
-        let axes = face.variation_axes().into_iter().collect::<Vec<_>>();
-        let weight_axis_index = axes
-            .iter()
-            .position(|axis| axis.tag == Tag::from_bytes(b"wght"));
-
-        // Change the weight of the font
-        let font_weight = 700.0f32;
-        if let Some(index) = weight_axis_index {
-            let weight = font_weight.clamp(axes[index].min_value, axes[index].max_value);
-            face.set_variation(axes[index].tag, weight);
+        let mut face = Face::parse(bytes, 0).expect("failed to parse font");
+        if let Some(axis) = face
+            .variation_axes()
+            .into_iter()
+            .find(|a| a.tag == Tag::from_bytes(b"wght"))
+        {
+            face.set_variation(axis.tag, 700.0f32.clamp(axis.min_value, axis.max_value));
         }
-
-        let coords = axes
-            .iter()
-            .map(|axis| {
-                let weight = font_weight.clamp(axis.min_value, axis.max_value);
-                let delta = weight - axis.def_value;
-                if delta.abs() < f32::EPSILON {
-                    return 0;
-                }
-                let range = if delta < 0.0 {
-                    axis.def_value - axis.min_value
-                } else {
-                    axis.max_value - axis.def_value
-                };
-                if range.abs() < f32::EPSILON {
-                    return 0;
-                }
-                NormalizedCoordinate::from(delta / range).get()
-            })
-            .collect();
-
         Self {
-            font_data,
+            font_data: FontData::new(Blob::from(bytes.to_vec()), 0),
+            coords: face
+                .variation_coordinates()
+                .iter()
+                .map(|c| c.get())
+                .collect(),
             face,
-            coords,
         }
     }
 }
 
 pub struct ParticlesState {
     particles: [Particle; 32],
-    spawn_accumulator: f32,
+    accumulator: f32,
 }
 
 impl Default for ParticlesState {
@@ -130,11 +108,11 @@ impl Default for ParticlesState {
         Self {
             particles: [Particle {
                 life: 0.0,
-                position: [0.0, 0.0],
-                velocity: [0.0, 0.0],
+                position: [0.0; 2],
+                velocity: [0.0; 2],
                 color: 0,
             }; 32],
-            spawn_accumulator: 0.0,
+            accumulator: 0.0,
         }
     }
 }
@@ -166,30 +144,32 @@ impl CantusApp {
             .as_secs_f64();
         self.render_state.last_update = now;
 
-        let history_width = (CONFIG.history_width * self.scale_factor).ceil();
+        let scale = self.scale_factor;
+        let history_width = (CONFIG.history_width * scale).ceil();
         let timeline_duration_ms = CONFIG.timeline_future_minutes * 60_000.0;
         let timeline_start_ms = -CONFIG.timeline_past_minutes * 60_000.0;
-        let timeline_end_ms = timeline_start_ms + timeline_duration_ms;
 
-        let total_width = (CONFIG.width * self.scale_factor - history_width).ceil();
-        let total_height = (CONFIG.height * self.scale_factor).ceil();
+        let total_width = (CONFIG.width * scale - history_width).ceil();
+        let total_height = (CONFIG.height * scale).ceil();
         let px_per_ms = total_width / timeline_duration_ms;
         let timeline_origin_x = history_width - timeline_start_ms * px_per_ms;
 
         let playback_state = PLAYBACK_STATE.read();
-        let queue = &playback_state.queue;
-        self.interaction.icon_hitboxes.clear();
-        self.interaction.track_hitboxes.clear();
-        if queue.is_empty() {
+        if playback_state.queue.is_empty() {
             return;
         }
+
+        self.interaction.icon_hitboxes.clear();
+        self.interaction.track_hitboxes.clear();
 
         let drag_offset_ms = if self.interaction.dragging {
             self.interaction.drag_delta_pixels / px_per_ms
         } else {
             0.0
         };
-        let current_index = playback_state.queue_index.min(queue.len() - 1);
+        let cur_idx = playback_state
+            .queue_index
+            .min(playback_state.queue.len() - 1);
 
         // Play button hitbox
         let playbutton_hsize = total_height * 0.25;
@@ -252,58 +232,53 @@ impl CantusApp {
             };
 
         // Lerp track start based on the target and current start time
-        let past_tracks_duration: f64 = queue
+        let past_tracks_duration: f64 = playback_state
+            .queue
             .iter()
-            .take(current_index)
+            .take(cur_idx)
             .map(|t| f64::from(t.duration_ms))
             .sum();
+
         let mut current_ms = -playback_elapsed - past_tracks_duration + drag_offset_ms
-            - TRACK_SPACING_MS * current_index as f64;
-        let difference = current_ms - self.render_state.track_offset;
-        if !self.interaction.dragging && difference.abs() > 200.0 {
-            current_ms = self.render_state.track_offset + difference * 0.1;
+            - TRACK_SPACING_MS * cur_idx as f64;
+        let diff = current_ms - self.render_state.track_offset;
+        if !self.interaction.dragging && diff.abs() > 200.0 {
+            current_ms = self.render_state.track_offset + diff * 0.1;
         }
 
         // Add the new move speed to the array move_speeds, trim the previous ones
         let frame_move_speed = (current_ms - self.render_state.track_offset) * dt;
         self.render_state.track_offset = current_ms;
-        let idx = self.render_state.move_index;
-        self.render_state.move_speed_sum += frame_move_speed - self.render_state.move_speeds[idx];
-        self.render_state.move_speeds[idx] = frame_move_speed;
-        self.render_state.move_index = (idx + 1) % self.render_state.move_speeds.len();
+        let s_idx = self.render_state.speed_idx;
+        self.render_state.speed_sum += frame_move_speed - self.render_state.recent_speeds[s_idx];
+        self.render_state.recent_speeds[s_idx] = frame_move_speed;
+        self.render_state.speed_idx = (s_idx + 1) % 16;
         // Get new average
-        let track_move_speed =
-            self.render_state.move_speed_sum / self.render_state.move_speeds.len() as f64;
+        let avg_speed = self.render_state.speed_sum / 16.0;
 
         // Iterate over the tracks within the timeline.
-        let mut track_renders = Vec::with_capacity(queue.len());
-        for track in queue {
-            let track_start_ms = current_ms;
-            let track_end_ms = track_start_ms + f64::from(track.duration_ms);
-            current_ms = track_end_ms + TRACK_SPACING_MS;
-
-            // Queue up the tracks positions
-            if track_start_ms > timeline_end_ms {
+        let mut track_renders = Vec::with_capacity(playback_state.queue.len());
+        let mut cur_ms = current_ms;
+        for track in &playback_state.queue {
+            let start = cur_ms;
+            let end = start + f64::from(track.duration_ms);
+            cur_ms = end + TRACK_SPACING_MS;
+            if start > timeline_start_ms + timeline_duration_ms {
                 break;
             }
-            let visible_start_px = track_start_ms.max(timeline_start_ms) * px_per_ms;
-            let visible_end_px = track_end_ms.min(timeline_end_ms) * px_per_ms;
-            let hitbox_range = (
-                (track_start_ms - timeline_start_ms) * px_per_ms + history_width,
-                (track_end_ms - timeline_start_ms) * px_per_ms + history_width,
-            );
 
-            let start_x = (visible_start_px - timeline_start_ms * px_per_ms) + history_width;
-            let is_current = track_start_ms <= 0.0 && track_end_ms >= 0.0;
-            let seconds_until_start = (track_start_ms / 1000.0).abs();
-            let width = visible_end_px - visible_start_px;
+            let v_start = start.max(timeline_start_ms) * px_per_ms;
+            let v_end = end.min(timeline_start_ms + timeline_duration_ms) * px_per_ms;
             track_renders.push(TrackRender {
                 track,
-                is_current,
-                seconds_until_start,
-                start_x,
-                width,
-                hitbox_range,
+                is_current: start <= 0.0 && end >= 0.0,
+                seconds_until_start: (start / 1000.0).abs(),
+                start_x: (v_start - timeline_start_ms * px_per_ms) + history_width,
+                width: v_end - v_start,
+                hitbox_range: (
+                    (start - timeline_start_ms) * px_per_ms + history_width,
+                    (end - timeline_start_ms) * px_per_ms + history_width,
+                ),
                 art_only: false,
             });
         }
@@ -348,10 +323,10 @@ impl CantusApp {
         // Draw the particles
         self.render_playing_particles(
             dt as f32,
-            &queue[current_index],
+            &playback_state.queue[cur_idx],
             timeline_origin_x,
             total_height,
-            track_move_speed as f32,
+            avg_speed as f32,
             playback_state.volume,
         );
     }
@@ -676,85 +651,65 @@ impl CantusApp {
     }
 
     /// Creates the text layout for a single-line string.
-    fn layout_text(&self, text: &str, font_size: f64) -> TextLayout {
+    fn layout_text(&self, text: &str, size: f64) -> TextLayout {
         let face = &self.font.face;
-
-        let font_size_px = (font_size * self.scale_factor) as f32;
-        let scale = font_size_px / f32::from(face.units_per_em());
-        let baseline = f32::from(face.ascender()) * scale;
-        let space_advance = face
-            .glyph_index(' ')
-            .and_then(|gid| face.glyph_hor_advance(gid))
-            .map_or_else(|| f32::from(face.units_per_em()) * 0.5, f32::from);
-        let line_height_units = f32::from(face.ascender() + face.descender() + face.line_gap());
-
-        let mut pen_x = 0.0f32;
-        let mut glyphs = Vec::with_capacity(text.len());
-        let mut previous: Option<GlyphId> = None;
-
+        let psize = (size * self.scale_factor) as f32;
+        let scale = psize / f32::from(face.units_per_em());
+        let (mut px, mut glyphs, mut prev) = (0.0f32, Vec::with_capacity(text.len()), None);
         for ch in text.chars() {
-            let glyph_id = face.glyph_index(ch);
-            if let (Some(left), Some(right)) = (previous, glyph_id) {
-                pen_x += {
-                    face.tables().kern.map_or(0.0, |kern_table| {
-                        let mut adjustment = 0.0f32;
-                        for subtable in kern_table.subtables {
-                            if subtable.horizontal
-                                && !subtable.has_cross_stream
-                                && !subtable.has_state_machine
-                                && let Some(value) = subtable.glyphs_kerning(left, right)
-                            {
-                                adjustment += f32::from(value);
-                            }
+            let gid = face.glyph_index(ch);
+            if let (Some(l), Some(r)) = (prev, gid) {
+                px += face.tables().kern.map_or(0.0, |t| {
+                    let mut adj = 0.0f32;
+                    for s in t.subtables {
+                        if s.horizontal
+                            && !s.has_cross_stream
+                            && !s.has_state_machine
+                            && let Some(v) = s.glyphs_kerning(l, r)
+                        {
+                            adj += f32::from(v);
                         }
-                        adjustment
-                    })
-                } * scale;
+                    }
+                    adj
+                }) * scale;
             }
-            let advance_units = glyph_id
-                .and_then(|gid| face.glyph_hor_advance(gid))
-                .map_or(space_advance, f32::from);
-            if let Some(gid) = glyph_id {
+            let adv = gid
+                .and_then(|g| face.glyph_hor_advance(g))
+                .map_or_else(|| f32::from(face.units_per_em()) * 0.5, f32::from);
+            if let Some(g) = gid {
                 glyphs.push(Glyph {
-                    id: u32::from(gid.0),
-                    x: pen_x,
-                    y: baseline,
+                    id: u32::from(g.0),
+                    x: px,
+                    y: f32::from(face.ascender()) * scale,
                 });
-                previous = Some(gid);
+                prev = Some(g);
             } else {
-                previous = None;
+                prev = None;
             }
-            pen_x += advance_units * scale;
+            px += adv * scale;
         }
-
         TextLayout {
             glyphs,
-            width: f64::from(pen_x),
-            height: f64::from(line_height_units * scale),
-            font_size: font_size_px,
+            width: f64::from(px),
+            height: f64::from(
+                f32::from(face.ascender() + face.descender() + face.line_gap()) * scale,
+            ),
+            font_size: psize,
         }
     }
 
-    /// Draw the text layout onto the scene.
-    fn draw_text(
-        &mut self,
-        layout: &TextLayout,
-        pos_x: f64,
-        pos_y: f64,
-        align_end: bool,
-        brush: Color,
-    ) {
+    fn draw_text(&mut self, l: &TextLayout, px: f64, py: f64, align_e: bool, brush: Color) {
         self.scene
             .draw_glyphs(&self.font.font_data)
-            .font_size(layout.font_size)
+            .font_size(l.font_size)
             .normalized_coords(&self.font.coords)
             .transform(Affine::translate((
-                pos_x - (layout.width * f64::from(u8::from(align_end))),
-                pos_y - layout.height * 0.5,
+                px - (l.width * f64::from(u8::from(align_e))),
+                py - l.height * 0.5,
             )))
             .hint(true)
             .brush(brush)
-            .draw(Fill::EvenOdd, layout.glyphs.iter().copied());
+            .draw(Fill::EvenOdd, l.glyphs.iter().copied());
     }
 
     fn render_playing_particles(
@@ -790,12 +745,12 @@ impl CantusApp {
 
         // Emit new particles while playing
         let mut emit_count = if track_move_speed.abs() > 0.000_001 {
-            self.particles.spawn_accumulator += dt * SPARK_EMISSION;
-            let emit_count = self.particles.spawn_accumulator.floor() as u8;
-            self.particles.spawn_accumulator -= f32::from(emit_count);
+            self.particles.accumulator += dt * SPARK_EMISSION;
+            let emit_count = self.particles.accumulator.floor() as u8;
+            self.particles.accumulator -= f32::from(emit_count);
             emit_count
         } else {
-            self.particles.spawn_accumulator = 0.0;
+            self.particles.accumulator = 0.0;
             0
         };
 
@@ -832,10 +787,9 @@ impl CantusApp {
             particle.position[1] += particle.velocity[1] * dt;
 
             let fade = f64::from((particle.life / SPARK_LIFETIME.end).clamp(0.0, 1.0));
-            let length =
-                lerpf64(fade, SPARK_LENGTH_RANGE.start, SPARK_LENGTH_RANGE.end) * self.scale_factor;
-            let thickness = lerpf64(fade, SPARK_THICKNESS_RANGE.start, SPARK_THICKNESS_RANGE.end)
-                * self.scale_factor;
+            let length = lerpf64(fade, SPARK_LENGTH.start, SPARK_LENGTH.end) * self.scale_factor;
+            let thickness =
+                lerpf64(fade, SPARK_THICKNESS.start, SPARK_THICKNESS.end) * self.scale_factor;
             let rgb = primary_colors
                 .get(particle.color as usize)
                 .unwrap_or(&[255, 210, 160]);
