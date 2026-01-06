@@ -12,6 +12,8 @@ pub struct Shaders {
     pub bind_group_layout: BindGroupLayout,
     pub bg_pipeline: RenderPipeline,
     pub bg_bind_group_layout: BindGroupLayout,
+    pub icon_pipeline: RenderPipeline,
+    pub icon_bind_group_layout: BindGroupLayout,
 }
 
 impl Shaders {
@@ -166,11 +168,96 @@ impl Shaders {
             cache: None,
         });
 
+        // Icons
+        let icon_shader = device.create_shader_module(ShaderModuleDescriptor {
+            label: Some("Icons Shader"),
+            source: ShaderSource::Wgsl(include_str!("../assets/icons.wgsl").into()),
+        });
+
+        let icon_bind_group_layout = device.create_bind_group_layout(&BindGroupLayoutDescriptor {
+            label: Some("Icons Bind Group Layout"),
+            entries: &[
+                BindGroupLayoutEntry {
+                    binding: 0,
+                    visibility: ShaderStages::VERTEX | ShaderStages::FRAGMENT,
+                    ty: BindingType::Buffer {
+                        ty: BufferBindingType::Uniform,
+                        has_dynamic_offset: false,
+                        min_binding_size: None,
+                    },
+                    count: None,
+                },
+                BindGroupLayoutEntry {
+                    binding: 1,
+                    visibility: ShaderStages::VERTEX | ShaderStages::FRAGMENT,
+                    ty: BindingType::Buffer {
+                        ty: BufferBindingType::Storage { read_only: true },
+                        has_dynamic_offset: false,
+                        min_binding_size: None,
+                    },
+                    count: None,
+                },
+                BindGroupLayoutEntry {
+                    binding: 2,
+                    visibility: ShaderStages::FRAGMENT,
+                    ty: BindingType::Texture {
+                        multisampled: false,
+                        view_dimension: wgpu::TextureViewDimension::D2Array,
+                        sample_type: wgpu::TextureSampleType::Float { filterable: true },
+                    },
+                    count: None,
+                },
+                BindGroupLayoutEntry {
+                    binding: 3,
+                    visibility: ShaderStages::FRAGMENT,
+                    ty: BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
+                    count: None,
+                },
+            ],
+        });
+
+        let icon_pipeline_layout = device.create_pipeline_layout(&PipelineLayoutDescriptor {
+            label: Some("Icons Pipeline Layout"),
+            bind_group_layouts: &[&icon_bind_group_layout],
+            push_constant_ranges: &[],
+        });
+
+        let icon_pipeline = device.create_render_pipeline(&RenderPipelineDescriptor {
+            label: Some("Icons Pipeline"),
+            layout: Some(&icon_pipeline_layout),
+            vertex: VertexState {
+                module: &icon_shader,
+                entry_point: Some("vs_main"),
+                buffers: &[],
+                compilation_options: PipelineCompilationOptions::default(),
+            },
+            fragment: Some(FragmentState {
+                module: &icon_shader,
+                entry_point: Some("fs_main"),
+                targets: &[Some(ColorTargetState {
+                    format,
+                    blend: Some(BlendState::ALPHA_BLENDING),
+                    write_mask: ColorWrites::ALL,
+                })],
+                compilation_options: PipelineCompilationOptions::default(),
+            }),
+            primitive: PrimitiveState {
+                topology: PrimitiveTopology::TriangleStrip,
+                ..Default::default()
+            },
+            depth_stencil: None,
+            multisample: MultisampleState::default(),
+            multiview: None,
+            cache: None,
+        });
+
         Self {
             pipeline,
             bind_group_layout,
             bg_pipeline,
             bg_bind_group_layout,
+            icon_pipeline,
+            icon_bind_group_layout,
         }
     }
 }
@@ -202,7 +289,19 @@ pub struct BackgroundPill {
     pub alpha: f32,
     pub colors: [u32; 4],
     pub expansion_pos: [f32; 2],
-    pub expansion_time: f32, // Start time of the expansion animation
-    pub image_index: i32,    // Index in the texture array, -1 if none
+    pub expansion_time: f32,
+    pub image_index: i32,
     pub _padding: [f32; 2],
+}
+
+#[repr(C)]
+#[derive(Copy, Clone, Debug, Default, Pod, Zeroable)]
+pub struct IconInstance {
+    pub pos: [f32; 2],
+    pub size: f32,
+    pub alpha: f32,
+    pub variant: f32,
+    pub param: f32,
+    pub image_index: i32,
+    pub _padding: f32,
 }

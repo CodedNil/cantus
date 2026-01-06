@@ -3,7 +3,7 @@ use crate::{
     interaction::InteractionState,
     render::{FontEngine, ParticlesState, RenderState},
 };
-use render_types::{BackgroundPill, Particle, ScreenUniforms, Shaders};
+use render_types::{BackgroundPill, IconInstance, Particle, ScreenUniforms, Shaders};
 use std::{
     collections::{HashMap, HashSet},
     sync::Arc,
@@ -54,6 +54,8 @@ pub struct GpuResources {
     pub particle_bind_group: wgpu::BindGroup,
     pub bg_storage_buffer: wgpu::Buffer,
     pub bg_bind_group: Option<wgpu::BindGroup>,
+    pub icon_storage_buffer: wgpu::Buffer,
+    pub icon_bind_group: Option<wgpu::BindGroup>,
     pub bg_texture_array: Option<wgpu::Texture>,
     pub bg_sampler: wgpu::Sampler,
     pub last_texture_set: HashSet<String>,
@@ -87,6 +89,7 @@ pub struct CantusApp {
     interaction: InteractionState,
     particles: ParticlesState,
     background_pills: Vec<BackgroundPill>,
+    icon_pills: Vec<IconInstance>,
     gpu_resources: Option<GpuResources>,
     gpu_uniforms: Option<ScreenUniforms>,
     pub image_map: HashMap<String, i32>,
@@ -105,6 +108,7 @@ impl Default for CantusApp {
             interaction: InteractionState::default(),
             particles: ParticlesState::default(),
             background_pills: Vec::new(),
+            icon_pills: Vec::new(),
             gpu_resources: None,
             gpu_uniforms: None,
             image_map: HashMap::new(),
@@ -196,7 +200,7 @@ impl CantusApp {
 
         let shaders = Shaders::new(&device_handle.device, format);
         let uniform_buffer = device_handle.device.create_buffer(&wgpu::BufferDescriptor {
-            label: Some("Particle Uniform Buffer"),
+            label: Some("Common Uniform Buffer"),
             size: std::mem::size_of::<ScreenUniforms>() as u64,
             usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
             mapped_at_creation: false,
@@ -229,7 +233,14 @@ impl CantusApp {
 
         let bg_storage_buffer = device_handle.device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("Background Storage Buffer"),
-            size: (std::mem::size_of::<BackgroundPill>() * 16) as u64,
+            size: (std::mem::size_of::<BackgroundPill>() * 256) as u64,
+            usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+
+        let icon_storage_buffer = device_handle.device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("Icon Storage Buffer"),
+            size: (std::mem::size_of::<IconInstance>() * 256) as u64,
             usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
             mapped_at_creation: false,
         });
@@ -255,6 +266,8 @@ impl CantusApp {
             particle_bind_group,
             bg_storage_buffer,
             bg_bind_group: None,
+            icon_storage_buffer,
+            icon_bind_group: None,
             bg_texture_array: None,
             bg_sampler,
             last_texture_set: HashSet::new(),
@@ -271,33 +284,44 @@ impl CantusApp {
         self.scene.reset();
         self.image_map.clear();
 
-        let mut image_refs = Vec::new();
         let mut current_texture_urls = Vec::new();
         let mut url_to_index = HashMap::new();
 
-        // 1. Identify unique images and check for changes
-        for track in &PLAYBACK_STATE.read().queue {
-            if !current_texture_urls.contains(&track.album.image) {
-                current_texture_urls.push(track.album.image.clone());
+        // 1. Identify all unique images (both album queue and playlists)
+        {
+            let playback = PLAYBACK_STATE.read();
+            for track in &playback.queue {
+                if !current_texture_urls.contains(&track.album.image) {
+                    current_texture_urls.push(track.album.image.clone());
+                }
+            }
+            for playlist in playback.playlists.values() {
+                if !current_texture_urls.contains(&playlist.image_url) {
+                    current_texture_urls.push(playlist.image_url.clone());
+                }
             }
         }
 
-        for (i, url) in current_texture_urls.iter().enumerate() {
+        let mut image_refs = Vec::new();
+        let mut valid_urls = Vec::new();
+        for url in &current_texture_urls {
             if let Some(img_ref) = IMAGES_CACHE.get(url)
                 && img_ref.is_some()
             {
-                url_to_index.insert(url.clone(), i as i32);
+                url_to_index.insert(url.clone(), valid_urls.len() as i32);
                 image_refs.push(img_ref);
+                valid_urls.push(url.clone());
             }
         }
 
         let needs_texture_update = self.gpu_resources.as_ref().is_none_or(|gpu| {
-            let current_set: HashSet<String> = current_texture_urls.iter().cloned().collect();
+            let current_set: HashSet<String> = valid_urls.iter().cloned().collect();
             current_set != gpu.last_texture_set
         });
         self.image_map = url_to_index;
 
-        // Now build the scene (fills self.background_pills using self.image_map index)
+        // Now build the scene (fills background_pills and icon_pills)
+        self.icon_pills.clear();
         self.create_scene();
 
         // Collect the raw image pointers safely
@@ -385,8 +409,32 @@ impl CantusApp {
                             },
                         ],
                     }));
+
+                gpu.icon_bind_group =
+                    Some(gpu.device.create_bind_group(&wgpu::BindGroupDescriptor {
+                        label: Some("Icon Bind Group"),
+                        layout: &gpu.shaders.icon_bind_group_layout,
+                        entries: &[
+                            wgpu::BindGroupEntry {
+                                binding: 0,
+                                resource: gpu.uniform_buffer.as_entire_binding(),
+                            },
+                            wgpu::BindGroupEntry {
+                                binding: 1,
+                                resource: gpu.icon_storage_buffer.as_entire_binding(),
+                            },
+                            wgpu::BindGroupEntry {
+                                binding: 2,
+                                resource: wgpu::BindingResource::TextureView(&view),
+                            },
+                            wgpu::BindGroupEntry {
+                                binding: 3,
+                                resource: wgpu::BindingResource::Sampler(&gpu.bg_sampler),
+                            },
+                        ],
+                    }));
                 gpu.bg_texture_array = Some(texture);
-                gpu.last_texture_set = self.image_map.keys().cloned().collect();
+                gpu.last_texture_set = valid_urls.into_iter().collect();
             }
 
             if let Some(gpu_uniforms) = self.gpu_uniforms.as_ref() {
@@ -405,9 +453,16 @@ impl CantusApp {
                     bytemuck::cast_slice(&self.background_pills),
                 );
             }
+            if !self.icon_pills.is_empty() {
+                gpu.queue.write_buffer(
+                    &gpu.icon_storage_buffer,
+                    0,
+                    bytemuck::cast_slice(&self.icon_pills),
+                );
+            }
         }
 
-        // Explicitly drop image_refs after GPU upload to satisfy clippy and release DashMap locks
+        // Explicitly drop image_refs after GPU upload
         drop(image_refs);
 
         // Now we can safely borrow other parts
@@ -478,7 +533,32 @@ impl CantusApp {
                 }
             }
 
-            // 2. BLIT VELLO SCENE ON TOP
+            // 2. RENDER ICONS
+            {
+                let mut rpass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                    label: Some("Icon Pass"),
+                    color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                        view: &surface_view,
+                        resolve_target: None,
+                        ops: wgpu::Operations {
+                            load: wgpu::LoadOp::Load,
+                            store: wgpu::StoreOp::Store,
+                        },
+                        depth_slice: None,
+                    })],
+                    depth_stencil_attachment: None,
+                    timestamp_writes: None,
+                    occlusion_query_set: None,
+                });
+
+                if let Some(bind_group) = &gpu.icon_bind_group {
+                    rpass.set_pipeline(&gpu.shaders.icon_pipeline);
+                    rpass.set_bind_group(0, bind_group, &[]);
+                    rpass.draw(0..4, 0..self.icon_pills.len() as u32);
+                }
+            }
+
+            // 3. BLIT VELLO SCENE ON TOP
             render_surface.blitter.copy(
                 &handle.device,
                 &mut encoder,
@@ -486,7 +566,7 @@ impl CantusApp {
                 &surface_view,
             );
 
-            // 3. RENDER PARTICLES ON TOP
+            // 4. RENDER PARTICLES ON TOP
             {
                 let mut rpass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
                     label: Some("Particle Pass"),

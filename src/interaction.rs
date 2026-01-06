@@ -1,19 +1,15 @@
 use crate::{
     CantusApp, PANEL_START,
     config::CONFIG,
+    render_types::IconInstance,
     rspotify::{PlaylistId, Track, TrackId},
-    spotify::{
-        CondensedPlaylist, IMAGES_CACHE, PLAYBACK_STATE, SPOTIFY_CLIENT, update_playback_state,
-    },
+    spotify::{CondensedPlaylist, PLAYBACK_STATE, SPOTIFY_CLIENT, update_playback_state},
 };
 use itertools::Itertools;
 use std::time::Duration;
-use std::{collections::HashMap, sync::LazyLock, thread::spawn, time::Instant};
+use std::{collections::HashMap, thread::spawn, time::Instant};
 use tracing::{error, info, warn};
-use vello::{
-    kurbo::{Affine, BezPath, Point, Rect, RoundedRect, Shape, Stroke},
-    peniko::{Color, Fill, ImageBrush},
-};
+use vello::kurbo::{Point, Rect};
 
 pub struct IconHitbox {
     pub rect: Rect,
@@ -238,12 +234,6 @@ enum IconEntry<'a> {
     },
 }
 
-/// Star images
-static STAR_SVG: LazyLock<BezPath> =
-    LazyLock::new(|| BezPath::from_svg(include_str!("../assets/star.path")).unwrap());
-static STAR_SVG_HALF: LazyLock<BezPath> =
-    LazyLock::new(|| BezPath::from_svg(include_str!("../assets/star-half.path")).unwrap());
-
 impl CantusApp {
     /// Star ratings and favourite playlists
     pub fn draw_playlist_buttons(
@@ -288,8 +278,8 @@ impl CantusApp {
         );
 
         // Fade out when there's not enough space
-        let icon_size = 14.0 * self.scale_factor;
-        let icon_spacing = 2.0 * self.scale_factor;
+        let icon_size = 18.0 * self.scale_factor;
+        let icon_spacing = 1.0 * self.scale_factor;
         let mouse_pos = self.interaction.mouse_position;
 
         let needed_width = icon_size * icon_entries.len() as f64;
@@ -381,98 +371,52 @@ impl CantusApp {
         let display_rating_index = hover_rating_index.unwrap_or(track_rating_index);
         let display_full_stars = display_rating_index / 2;
         let display_has_half = display_rating_index % 2 == 1;
-        for (entry, (hovered, icon_origin_x)) in
+        for (entry, (hover_button, icon_origin_x)) in
             icon_entries.into_iter().zip(icon_entry_extras.into_iter())
         {
-            let icon_size = icon_size * if hovered { 1.6 } else { 1.0 };
-            let half_icon_size = icon_size * 0.5;
-            let icon_transform =
-                Affine::translate((icon_origin_x - half_icon_size, center_y - half_icon_size));
+            let icon_render_size = icon_size * if hover_button { 1.6 } else { 1.0 };
+            let alpha = fade_alpha;
 
             match entry {
                 IconEntry::Star { index } => {
-                    let fill_transform =
-                        icon_transform * Affine::scale(icon_size / STAR_SVG.bounding_box().width());
+                    let fill_param = if index < display_full_stars {
+                        1.0
+                    } else if index == display_full_stars && display_has_half {
+                        0.5
+                    } else {
+                        0.0
+                    };
 
-                    // Shadow outline
-                    self.scene.stroke(
-                        &Stroke::new(2.0 * self.scale_factor),
-                        fill_transform,
-                        Color::from_rgb8(0, 0, 0).with_alpha(fade_alpha),
-                        None,
-                        &*STAR_SVG,
-                    );
-
-                    self.scene.fill(
-                        Fill::EvenOdd,
-                        fill_transform,
-                        if index < display_full_stars {
-                            Color::from_rgb8(220, 180, 0)
-                        } else {
-                            Color::from_rgb8(85, 85, 85)
-                        }
-                        .with_alpha(fade_alpha),
-                        None,
-                        &*STAR_SVG,
-                    );
-                    if index == display_full_stars && display_has_half {
-                        self.scene.fill(
-                            Fill::EvenOdd,
-                            fill_transform,
-                            Color::from_rgb8(220, 180, 0).with_alpha(fade_alpha),
-                            None,
-                            &*STAR_SVG_HALF,
-                        );
-                    }
+                    self.icon_pills.push(IconInstance {
+                        pos: [icon_origin_x as f32, center_y as f32],
+                        size: icon_render_size as f32,
+                        alpha,
+                        variant: 1.0,
+                        param: fill_param as f32,
+                        image_index: -1,
+                        _padding: 0.0,
+                    });
                 }
                 IconEntry::Playlist {
                     playlist,
                     contained,
                 } => {
-                    let Some(playlist_image_ref) = IMAGES_CACHE.get(&playlist.image_url) else {
-                        continue;
-                    };
-                    let Some(playlist_image) = playlist_image_ref.as_ref() else {
-                        continue;
+                    let image_index = *self.image_map.get(&playlist.image_url).unwrap_or(&-1);
+                    let hover_overlay = if !contained && !hover_button {
+                        0.7
+                    } else {
+                        0.0
                     };
 
-                    // Shadow outline
-                    self.scene.stroke(
-                        &Stroke::new(1.0 * self.scale_factor),
-                        icon_transform,
-                        Color::from_rgb8(0, 0, 0).with_alpha(fade_alpha),
-                        None,
-                        &RoundedRect::new(0.0, 0.0, icon_size, icon_size, 6.0),
-                    );
-
-                    self.scene.push_clip_layer(
-                        icon_transform,
-                        &RoundedRect::new(0.0, 0.0, icon_size, icon_size, 6.0),
-                    );
-                    let zoom_pixels = 12.0;
-                    let image_size = f64::from(playlist_image.image.width);
-                    self.scene.fill(
-                        Fill::EvenOdd,
-                        icon_transform
-                            * Affine::translate((-zoom_pixels, -zoom_pixels))
-                            * Affine::scale((icon_size + zoom_pixels * 2.0) / image_size),
-                        ImageBrush {
-                            image: &playlist_image.image,
-                            sampler: playlist_image.sampler.with_alpha(fade_alpha),
-                        },
-                        None,
-                        &Rect::new(0.0, 0.0, image_size, image_size),
-                    );
-                    if !contained && !hovered {
-                        self.scene.fill(
-                            Fill::EvenOdd,
-                            icon_transform,
-                            Color::from_rgb8(60, 60, 60).with_alpha(0.7 * fade_alpha),
-                            None,
-                            &Rect::new(0.0, 0.0, icon_size, icon_size),
-                        );
-                    }
-                    self.scene.pop_layer();
+                    self.icon_pills.push(IconInstance {
+                        pos: [icon_origin_x as f32, center_y as f32],
+                        size: icon_render_size as f32,
+                        alpha,
+                        variant: 0.0,
+                        param: hover_overlay,
+                        image_index,
+                        _padding: 0.0,
+                    });
                 }
             }
         }
