@@ -6,7 +6,6 @@ struct Uniform {
 
 struct BackgroundPill {
     rect: vec4<f32>,
-    radii: vec2<f32>, // left, right
     dark_width: f32,
     alpha: f32,
     colors: array<u32, 4>,
@@ -41,19 +40,19 @@ fn vs_main(@builtin(vertex_index) vi: u32, @builtin(instance_index) ii: u32) -> 
     return VertexOutput(vec4(ndc.x, -ndc.y, 0.0, 1.0), local_pos / pill.rect.zw, local_pos / uniforms.screen_size.y, ii);
 }
 
-fn sd_rounded_rect(p: vec2<f32>, b: vec2<f32>, r: vec2<f32>) -> f32 {
-    let r_val = select(r.x, r.y, p.x > 0.0);
-    let q = abs(p) - b + r_val;
-    return min(max(q.x, q.y), 0.0) + length(max(q, vec2<f32>(0.0))) - r_val;
+fn sd_squircle(p: vec2<f32>, b: vec2<f32>, r: f32) -> f32 {
+    let q = abs(p) - b + r;
+    let n = 4.0;
+    return pow(pow(max(q.x, 0.0), n) + pow(max(q.y, 0.0), n), 1.0/n) - r + min(max(q.x, q.y), 0.0);
 }
 
 @fragment
 fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
     let pill = pills[in.instance_index];
-    let rounding = 14.0 * uniforms.scale_factor;
+    let rounding = 28.0 * uniforms.scale_factor;
 
     // Shape Masking
-    let d = sd_rounded_rect((in.uv - 0.5) * pill.rect.zw, pill.rect.zw * 0.5, pill.radii * rounding);
+    let d = sd_squircle((in.uv - 0.5) * pill.rect.zw, pill.rect.zw * 0.5, rounding);
     let edge_mask = 1.0 - smoothstep(-0.5, 0.5, d);
     let shadow_mask = (1.0 - smoothstep(0.0, 8.0, d)) * 0.3;
 
@@ -115,7 +114,7 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
     if (pill.image_index >= 0 && local_x >= image_start_x) {
         let image_uv = vec2<f32>((local_x - image_start_x) / pill.rect.w, in.uv.y);
         let tex = textureSample(t_images, s_images, image_uv, pill.image_index);
-        let image_d = sd_rounded_rect((image_uv - 0.5) * pill.rect.w, vec2<f32>(pill.rect.w * 0.5), vec2<f32>(rounding, rounding * pill.radii.y));
+        let image_d = sd_squircle((image_uv - 0.5) * pill.rect.w, vec2<f32>(pill.rect.w * 0.5), rounding);
         color = mix(color, tex.rgb, (1.0 - smoothstep(-0.5, 0.5, image_d)) * tex.a);
     }
 

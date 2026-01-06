@@ -1,5 +1,5 @@
 use crate::{
-    CantusApp, PANEL_HEIGHT_EXTENSION, PANEL_HEIGHT_START,
+    CantusApp, PANEL_EXTENSION, PANEL_START,
     config::CONFIG,
     interaction::InteractionEvent,
     lerpf32, lerpf64,
@@ -137,7 +137,7 @@ impl CantusApp {
         let timeline_start_ms = -CONFIG.timeline_past_minutes * 60_000.0;
 
         let px_per_ms = total_width / timeline_duration_ms;
-        let timeline_origin_x = history_width - timeline_start_ms * px_per_ms;
+        let origin_x = history_width - timeline_start_ms * px_per_ms;
 
         let playback_state = PLAYBACK_STATE.read();
         if playback_state.queue.is_empty() {
@@ -159,10 +159,10 @@ impl CantusApp {
         // Play button hitbox
         let playbutton_hsize = total_height * 0.25;
         self.interaction.play_hitbox = Rect::new(
-            timeline_origin_x - playbutton_hsize,
-            PANEL_HEIGHT_START,
-            timeline_origin_x + playbutton_hsize,
-            PANEL_HEIGHT_START + total_height,
+            origin_x - playbutton_hsize,
+            PANEL_START,
+            origin_x + playbutton_hsize,
+            PANEL_START + total_height,
         );
         let play_button_hovered = self
             .interaction
@@ -301,7 +301,7 @@ impl CantusApp {
             self.draw_track(
                 track_render,
                 total_height,
-                timeline_origin_x,
+                origin_x,
                 &playback_state.playlists,
             );
         }
@@ -310,7 +310,7 @@ impl CantusApp {
         self.render_playing_particles(
             dt as f32,
             &playback_state.queue[cur_idx],
-            timeline_origin_x,
+            origin_x,
             total_height,
             avg_speed as f32,
             playback_state.volume,
@@ -321,7 +321,7 @@ impl CantusApp {
         &mut self,
         track_render: &TrackRender,
         height: f64,
-        timeline_origin_x: f64,
+        origin_x: f64,
         playlists: &HashMap<PlaylistId, CondensedPlaylist>,
     ) {
         if track_render.width <= 0.0 {
@@ -330,13 +330,8 @@ impl CantusApp {
         let width = track_render.width;
         let track = track_render.track;
         let start_x = track_render.start_x;
-        let hitbox = Rect::new(
-            start_x,
-            PANEL_HEIGHT_START,
-            start_x + width,
-            PANEL_HEIGHT_START + height,
-        );
-        let start_translation = Affine::translate((start_x, PANEL_HEIGHT_START));
+        let hitbox = Rect::new(start_x, PANEL_START, start_x + width, PANEL_START + height);
+        let start_translation = Affine::translate((start_x, PANEL_START));
 
         // Fade out based on width
         let fade_alpha = if width < height {
@@ -346,13 +341,11 @@ impl CantusApp {
         };
 
         // How much of the width is to the left of the current position
-        let dark_width = (timeline_origin_x - start_x).max(0.0);
+        let dark_width = (origin_x - start_x).max(0.0);
 
         // Add hitbox
         let (hit_start, hit_end) = track_render.hitbox_range;
         let full_width = hit_end - hit_start;
-        let crop_left = start_x - hit_start;
-        let crop_right = hit_end - (start_x + width);
         self.interaction
             .track_hitboxes
             .push((track.id, hitbox, track_render.hitbox_range));
@@ -368,8 +361,6 @@ impl CantusApp {
         let Some(album_data) = album_data_ref.as_ref() else {
             return;
         };
-
-        let buffer_px = 20.0;
 
         // --- BACKGROUND ---
         let mut colors = [0u32; 4];
@@ -392,18 +383,12 @@ impl CantusApp {
             if c_track == track.id && (c_time > e_time || !track_render.is_current) {
                 (
                     c_time,
-                    [
-                        (start_x + c_pt.x) as f32,
-                        (PANEL_HEIGHT_START + c_pt.y) as f32,
-                    ],
+                    [(start_x + c_pt.x) as f32, (PANEL_START + c_pt.y) as f32],
                 )
             } else {
                 (
                     e_time,
-                    [
-                        timeline_origin_x as f32,
-                        (PANEL_HEIGHT_START + height * 0.5) as f32,
-                    ],
+                    [origin_x as f32, (PANEL_START + height * 0.5) as f32],
                 )
             }
         };
@@ -411,13 +396,9 @@ impl CantusApp {
         self.background_pills.push(BackgroundPill {
             rect: [
                 start_x as f32,
-                PANEL_HEIGHT_START as f32,
+                PANEL_START as f32,
                 width as f32,
                 height as f32,
-            ],
-            radii: [
-                lerpf64((crop_left / buffer_px).clamp(0.0, 1.0), 1.0, 0.3) as f32,
-                lerpf64((crop_right / buffer_px).clamp(0.0, 1.0), 1.0, 0.3) as f32,
             ],
             dark_width: dark_width as f32,
             alpha: fade_alpha,
@@ -425,6 +406,7 @@ impl CantusApp {
             expansion_pos,
             expansion_time,
             image_index: track_render.image_index,
+            _padding: [0.0; 2],
         });
 
         // --- TEXT ---
@@ -459,7 +441,7 @@ impl CantusApp {
                 .unwrap_or(track.name.len())]
                 .trim();
             let font_size = 12.0;
-            let text_height = PANEL_HEIGHT_START + (height * 0.2).floor();
+            let text_height = PANEL_START + (height * 0.2).floor();
             let song_layout = self.layout_text(song_name, font_size);
             let width_ratio = available_width / song_layout.width;
             if width_ratio <= 1.0 {
@@ -482,7 +464,7 @@ impl CantusApp {
 
             // Get text layouts for bottom row of text
             let font_size = 10.5;
-            let text_height = PANEL_HEIGHT_START + (height * 0.52).floor();
+            let text_height = PANEL_START + (height * 0.52).floor();
 
             let artist_text = &track.artist.name;
             let time_text = if track_render.seconds_until_start >= 60.0 {
@@ -647,8 +629,7 @@ impl CantusApp {
         self.gpu_uniforms = Some(ScreenUniforms {
             screen_size: [
                 (CONFIG.width * self.scale_factor) as f32,
-                ((CONFIG.height + PANEL_HEIGHT_START + PANEL_HEIGHT_EXTENSION) * self.scale_factor)
-                    as f32,
+                ((CONFIG.height + PANEL_START + PANEL_EXTENSION) * self.scale_factor) as f32,
             ],
             time,
             scale_factor: self.scale_factor as f32,
@@ -674,7 +655,7 @@ impl CantusApp {
             if emit_count > 0 && time > particle.spawn_time + particle.duration {
                 particle.spawn_pos = [
                     x as f32,
-                    PANEL_HEIGHT_START as f32 + height as f32 * lerpf32(fastrand::f32(), 0.1, 0.95),
+                    PANEL_START as f32 + height as f32 * lerpf32(fastrand::f32(), 0.1, 0.95),
                 ];
                 particle.spawn_vel = [
                     fastrand::usize(SPARK_VELOCITY_X) as f32 * scale * horizontal_bias,
@@ -710,20 +691,20 @@ impl CantusApp {
             let line_height = height * lerpf64(((anim_lerp - 0.75) * 4.0).max(0.0), 0.2, 0.5);
             self.scene.fill(
                 Fill::EvenOdd,
-                Affine::translate((line_x, PANEL_HEIGHT_START)),
+                Affine::translate((line_x, PANEL_START)),
                 line_color,
                 None,
                 &RoundedRect::new(0.0, 0.0, line_width, line_height, 100.0),
             );
             self.scene.fill(
                 Fill::EvenOdd,
-                Affine::translate((line_x, PANEL_HEIGHT_START + height - line_height)),
+                Affine::translate((line_x, PANEL_START + height - line_height)),
                 line_color,
                 None,
                 &RoundedRect::new(0.0, 0.0, line_width, line_height, 100.0),
             );
 
-            let icon_height = PANEL_HEIGHT_START + height * 0.3;
+            let icon_height = PANEL_START + height * 0.3;
             let is_paused = matches!(
                 self.interaction.last_event,
                 InteractionEvent::Pause(_) | InteractionEvent::PauseHover(_)
@@ -768,7 +749,7 @@ impl CantusApp {
                     Fill::EvenOdd,
                     Affine::translate((
                         line_x - icon_scale * 0.3,
-                        PANEL_HEIGHT_START + height * 0.5 - icon_scale * 0.5,
+                        PANEL_START + height * 0.5 - icon_scale * 0.5,
                     )) * Affine::scale(icon_scale / play_icon_width),
                     icon_color,
                     None,
@@ -781,7 +762,7 @@ impl CantusApp {
             if volume < 1.0 {
                 self.scene.fill(
                     Fill::EvenOdd,
-                    Affine::translate((line_x, PANEL_HEIGHT_START)),
+                    Affine::translate((line_x, PANEL_START)),
                     Color::from_rgb8(150, 150, 150),
                     None,
                     &RoundedRect::new(0.0, 0.0, line_width, height, 100.0),
@@ -789,7 +770,7 @@ impl CantusApp {
             }
             self.scene.fill(
                 Fill::EvenOdd,
-                Affine::translate((line_x, PANEL_HEIGHT_START + height * (1.0 - volume))),
+                Affine::translate((line_x, PANEL_START + height * (1.0 - volume))),
                 line_color,
                 None,
                 &RoundedRect::new(0.0, 0.0, line_width, height * volume, 100.0),

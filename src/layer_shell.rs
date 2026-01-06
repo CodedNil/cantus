@@ -1,6 +1,5 @@
 use crate::{
-    CantusApp, PANEL_HEIGHT_EXTENSION, PANEL_HEIGHT_START, config::CONFIG,
-    interaction::InteractionState,
+    CantusApp, PANEL_EXTENSION, PANEL_START, config::CONFIG, interaction::InteractionState,
 };
 use raw_window_handle::{
     RawDisplayHandle, RawWindowHandle, WaylandDisplayHandle, WaylandWindowHandle,
@@ -91,7 +90,7 @@ pub fn run() {
         (),
     );
     let width = CONFIG.width;
-    let total_height = CONFIG.height + PANEL_HEIGHT_EXTENSION + PANEL_HEIGHT_START;
+    let total_height = CONFIG.height + PANEL_EXTENSION + PANEL_START;
     layer_surface.set_size(width as u32, total_height as u32);
     layer_surface.set_anchor(match CONFIG.layer_anchor.as_str() {
         "top" => LayerAnchor::Top,
@@ -249,7 +248,7 @@ impl LayerShellApp {
     fn try_render_frame(&mut self, qhandle: &QueueHandle<Self>) {
         let scale = self.cantus.scale_factor;
         let width = CONFIG.width;
-        let total_height = CONFIG.height + PANEL_HEIGHT_EXTENSION + PANEL_HEIGHT_START;
+        let total_height = CONFIG.height + PANEL_EXTENSION + PANEL_START;
         let buffer_width = (width * scale).round();
         let buffer_height = (total_height * scale).round();
         self.ensure_surface(buffer_width, buffer_height);
@@ -266,7 +265,7 @@ impl LayerShellApp {
     fn update_scale_and_viewport(&self) {
         let scale = self.cantus.scale_factor;
         let width = CONFIG.width;
-        let total_height = CONFIG.height + PANEL_HEIGHT_EXTENSION + PANEL_HEIGHT_START;
+        let total_height = CONFIG.height + PANEL_EXTENSION + PANEL_START;
         let buffer_width = (width * scale).round();
         let buffer_height = (total_height * scale).round();
         let viewport = self.viewport.as_ref();

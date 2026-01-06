@@ -197,12 +197,12 @@ pub struct Particle {
 #[repr(C)]
 #[derive(Copy, Clone, Debug, Default, Pod, Zeroable)]
 pub struct BackgroundPill {
-    pub rect: [f32; 4],  // x, y, width, height
-    pub radii: [f32; 2], // left, right
+    pub rect: [f32; 4], // x, y, width, height
     pub dark_width: f32,
     pub alpha: f32,
     pub colors: [u32; 4],
     pub expansion_pos: [f32; 2],
     pub expansion_time: f32, // Start time of the expansion animation
     pub image_index: i32,    // Index in the texture array, -1 if none
+    pub _padding: [f32; 2],
 }

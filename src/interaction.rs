@@ -1,5 +1,5 @@
 use crate::{
-    CantusApp, PANEL_HEIGHT_START,
+    CantusApp, PANEL_START,
     config::CONFIG,
     rspotify::{PlaylistId, Track, TrackId},
     spotify::{
@@ -320,7 +320,7 @@ impl CantusApp {
         };
 
         let center_x = pos_x + width * 0.5;
-        let center_y = PANEL_HEIGHT_START + height * 0.975;
+        let center_y = PANEL_START + height * 0.975;
 
         // Count only the standard icons for spacing
         let half_icons = icon_entries
