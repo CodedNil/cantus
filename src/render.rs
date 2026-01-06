@@ -5,7 +5,7 @@ use crate::{
     lerpf32, lerpf64,
     render_types::{BackgroundPill, Particle, ScreenUniforms},
     rspotify::{PlaylistId, Track},
-    spotify::{ALBUM_DATA_CACHE, CondensedPlaylist, IMAGES_CACHE, PLAYBACK_STATE},
+    spotify::{ALBUM_DATA_CACHE, CondensedPlaylist, PLAYBACK_STATE},
 };
 use std::{
     collections::HashMap,
@@ -16,8 +16,8 @@ use std::{
 use ttf_parser::{Face, Tag};
 use vello::{
     Glyph,
-    kurbo::{Affine, BezPath, Rect, RoundedRect, RoundedRectRadii, Shape},
-    peniko::{Blob, Color, Fill, FontData, ImageBrush},
+    kurbo::{Affine, BezPath, Rect, RoundedRect, Shape},
+    peniko::{Blob, Color, Fill, FontData},
 };
 
 static START_TIME: LazyLock<Instant> = LazyLock::new(Instant::now);
@@ -116,6 +116,7 @@ pub struct TrackRender<'a> {
     width: f64,
     hitbox_range: (f64, f64),
     art_only: bool,
+    image_index: i32,
 }
 
 /// Build the scene for rendering.
@@ -264,6 +265,7 @@ impl CantusApp {
                     (end - timeline_start_ms) * px_per_ms + history_width,
                 ),
                 art_only: false,
+                image_index: *self.image_map.get(&track.album.image).unwrap_or(&-1),
             });
         }
 
@@ -360,25 +362,14 @@ impl CantusApp {
             self.interaction.drag_track = Some((track.id, position_within_track));
         }
 
-        let (Some(album_image_ref), Some(album_data_ref)) = (
-            IMAGES_CACHE.get(&track.album.image),
-            ALBUM_DATA_CACHE.get(&track.album.id),
-        ) else {
-            return;
-        };
-        let Some(album_image) = album_image_ref.as_ref() else {
+        let Some(album_data_ref) = ALBUM_DATA_CACHE.get(&track.album.id) else {
             return;
         };
         let Some(album_data) = album_data_ref.as_ref() else {
             return;
         };
 
-        let rounding = 14.0 * self.scale_factor;
         let buffer_px = 20.0;
-        let left_rounding = rounding * lerpf64((crop_left / buffer_px).clamp(0.0, 1.0), 1.0, 0.3);
-        let right_rounding = rounding * lerpf64((crop_right / buffer_px).clamp(0.0, 1.0), 1.0, 0.3);
-        let radii =
-            RoundedRectRadii::new(left_rounding, right_rounding, right_rounding, left_rounding);
 
         // --- BACKGROUND ---
         let mut colors = [0u32; 4];
@@ -424,48 +415,17 @@ impl CantusApp {
                 width as f32,
                 height as f32,
             ],
-            radii: [left_rounding as f32, right_rounding as f32],
+            radii: [
+                lerpf64((crop_left / buffer_px).clamp(0.0, 1.0), 1.0, 0.3) as f32,
+                lerpf64((crop_right / buffer_px).clamp(0.0, 1.0), 1.0, 0.3) as f32,
+            ],
             dark_width: dark_width as f32,
             alpha: fade_alpha,
             colors,
             expansion_pos,
             expansion_time,
-            _padding: [0.0; 1],
+            image_index: track_render.image_index,
         });
-
-        // --- ALBUM ART SQUARE ---
-        if fade_alpha > 0.0 {
-            // Add a drop shadow
-            self.scene.draw_blurred_rounded_rect(
-                start_translation * Affine::translate((width - height, 0.0)),
-                Rect::new(0.0, 0.0, height, height),
-                Color::from_rgba8(0, 0, 0, (100.0 * fade_alpha).round() as u8),
-                rounding,
-                5.0,
-            );
-
-            self.scene.push_clip_layer(
-                start_translation,
-                &RoundedRect::new(0.0, 0.0, width, height, radii),
-            );
-            self.scene.fill(
-                Fill::EvenOdd,
-                start_translation * Affine::translate((width - height, 0.0)),
-                ImageBrush {
-                    image: &album_image.image,
-                    sampler: album_image.sampler.with_alpha(fade_alpha),
-                },
-                Some(Affine::scale(height / f64::from(album_image.image.height))),
-                &RoundedRect::new(
-                    0.0,
-                    0.0,
-                    height,
-                    height,
-                    RoundedRectRadii::new(rounding, right_rounding, right_rounding, rounding),
-                ),
-            );
-            self.scene.pop_layer();
-        }
 
         // --- TEXT ---
         if !track_render.art_only && fade_alpha >= 1.0 && width > height {
@@ -691,7 +651,7 @@ impl CantusApp {
                     as f32,
             ],
             time,
-            _padding: 0.0,
+            scale_factor: self.scale_factor as f32,
         });
 
         // Emit new particles while playing
@@ -714,7 +674,7 @@ impl CantusApp {
             if emit_count > 0 && time > particle.spawn_time + particle.duration {
                 particle.spawn_pos = [
                     x as f32,
-                    PANEL_HEIGHT_START as f32 + height as f32 * lerpf32(fastrand::f32(), 0.1, 0.7),
+                    PANEL_HEIGHT_START as f32 + height as f32 * lerpf32(fastrand::f32(), 0.1, 0.95),
                 ];
                 particle.spawn_vel = [
                     fastrand::usize(SPARK_VELOCITY_X) as f32 * scale * horizontal_bias,

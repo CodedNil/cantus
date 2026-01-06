@@ -1,7 +1,7 @@
 struct Uniform {
     screen_size: vec2<f32>,
     time: f32,
-    _padding: f32,
+    scale_factor: f32,
 };
 
 struct BackgroundPill {
@@ -12,11 +12,13 @@ struct BackgroundPill {
     colors: array<u32, 4>,
     expansion_pos: vec2<f32>,
     expansion_time: f32,
-    _padding: f32,
+    image_index: i32,
 };
 
 @group(0) @binding(0) var<uniform> uniforms: Uniform;
 @group(0) @binding(1) var<storage, read> pills: array<BackgroundPill>;
+@group(0) @binding(2) var t_images: texture_2d_array<f32>;
+@group(0) @binding(3) var s_images: sampler;
 
 struct VertexOutput {
     @builtin(position) position: vec4<f32>,
@@ -30,52 +32,44 @@ fn vs_main(@builtin(vertex_index) vi: u32, @builtin(instance_index) ii: u32) -> 
     let pill = pills[ii];
     let margin = 16.0;
 
-    // Standard 0-1 corner calculation
     let corner = vec2<f32>(f32(vi % 2u), f32(vi / 2u));
-    let size_with_margin = pill.rect.zw + 2.0 * margin;
-    let local_pos = corner * size_with_margin - margin;
-
+    let local_pos = corner * (pill.rect.zw + 2.0 * margin) - margin;
     let pixel_pos = pill.rect.xy + local_pos;
+
+    // Combined NDC and Y-flip
     let ndc = (pixel_pos / uniforms.screen_size) * 2.0 - 1.0;
-
-    // local_uv is for the rounded rect (0.0 to 1.0 over the pill rect)
-    let local_uv = local_pos / pill.rect.zw;
-
-    // world_uv is anchored to the pill's top-left in screen-height units.
-    // This makes the noise move WITH the pill, but not STRETCH with the pill.
-    let world_uv = local_pos / uniforms.screen_size.y;
-
-    return VertexOutput(vec4(ndc.x, -ndc.y, 0.0, 1.0), local_uv, world_uv, ii);
+    return VertexOutput(vec4(ndc.x, -ndc.y, 0.0, 1.0), local_pos / pill.rect.zw, local_pos / uniforms.screen_size.y, ii);
 }
 
 fn sd_rounded_rect(p: vec2<f32>, b: vec2<f32>, r: vec2<f32>) -> f32 {
     let r_val = select(r.x, r.y, p.x > 0.0);
     let q = abs(p) - b + r_val;
-    return min(max(q.x, q.y), 0.0) + length(max(q, vec2(0.0))) - r_val;
+    return min(max(q.x, q.y), 0.0) + length(max(q, vec2<f32>(0.0))) - r_val;
 }
 
 @fragment
 fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
     let pill = pills[in.instance_index];
+    let rounding = 14.0 * uniforms.scale_factor;
 
     // Shape Masking
-    let local_p = (in.uv - 0.5) * pill.rect.zw;
-    let d = sd_rounded_rect(local_p, pill.rect.zw * 0.5, pill.radii);
-
+    let d = sd_rounded_rect((in.uv - 0.5) * pill.rect.zw, pill.rect.zw * 0.5, pill.radii * rounding);
     let edge_mask = 1.0 - smoothstep(-0.5, 0.5, d);
     let shadow_mask = (1.0 - smoothstep(0.0, 8.0, d)) * 0.3;
 
     if (edge_mask <= 0.0 && shadow_mask <= 0.0) { discard; }
 
     // Turbulent Color Field
-    // We use world_uv which is anchored to the pill origin but spans screen units.
-    let t = uniforms.time * 1.5;
-    var p = in.world_uv * 2.5;
+    let t = uniforms.time * 0.8;
+    // Use image_index to create a per-pill seed/offset
+    let seed = f32(pill.image_index) * 1.345;
+    var p = in.world_uv * 2.5 + seed;
 
-    // Iterative sine-wave turbulence (Cheap Turbulence)
+    // Turbulent Color Field
     for(var i: f32 = 0.0; i < 4.0; i += 1.0) {
-        p.x += sin(p.y + i + t) * 0.5;
-        p.y += sin(p.x + i * 1.5 + t * 0.8) * 0.5;
+        let wave_offset = i + seed;
+        p.x += sin(p.y + wave_offset + t) * 0.5;
+        p.y += sin(p.x + wave_offset * 1.5 + t * 0.7) * 0.5;
         p = mat2x2<f32>(0.8, -0.6, 0.6, 0.8) * p;
     }
 
@@ -84,45 +78,45 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
         unpack4x8unorm(pill.colors[2]).rgb, unpack4x8unorm(pill.colors[3]).rgb
     );
 
-    // Pick colors based on warped coordinates
-    let weight_a = sin(p.x * 0.5) * 0.5 + 0.5;
-    let weight_b = sin(p.y * 0.5 + 2.0) * 0.5 + 0.5;
-    let weight_c = sin((p.x + p.y) * 0.3 + 1.0) * 0.5 + 0.5;
+    // Color Selection & Mixing
+    let weights = vec3(
+        sin(p.x * 0.4 + t * 0.1) * 0.5 + 0.5,
+        sin(p.y * 0.4 - t * 0.15 + 2.0) * 0.5 + 0.5,
+        sin((p.x + p.y) * 0.3 + t * 0.05 + 1.0) * 0.5 + 0.5
+    );
 
-    var color = mix(colors[0], colors[1], weight_a);
-    color = mix(color, colors[2], weight_b);
-    color = mix(color, colors[3], weight_c);
+    var color = unpack4x8unorm(pill.colors[0]).rgb;
+    color = mix(color, unpack4x8unorm(pill.colors[1]).rgb, weights.x);
+    color = mix(color, unpack4x8unorm(pill.colors[2]).rgb, weights.y);
+    color = mix(color, unpack4x8unorm(pill.colors[3]).rgb, weights.z);
 
-    // Post-processing (Vibrancy, Contrast, and Soft Highlight Compression)
+    // Post-processing
     let luma = dot(color, vec3(0.2126, 0.7152, 0.0722));
     color = mix(vec3(luma), color, 0.85); // Vibrancy
-    color = (color - 0.5) * 1.05 + 0.5;   // Contrast
-
-    // Compress highlights: Darkens bright areas without crushing the blacks/midtones
-    color = color * (1.0 - smoothstep(0.4, 1.2, luma) * 0.4);
-
-    // Subtle inner glow
-    let inner_glow = smoothstep(0.0, -35.0, d);
-    color = mix(color * 1.1, color, inner_glow * 0.5);
+    color = (color - 0.5) * 1.05 + 0.5; // Contrast
+    color = color * (1.0 - smoothstep(0.4, 1.2, luma) * 0.4); // Compress highlights
+    color = mix(color * 1.1, color, smoothstep(0.0, -35.0, d) * 0.5); // Inner glow
 
     // --- DARK TRACK TO THE LEFT ---
-    if (pill.dark_width > 0.0) {
-        let dark_mask = step(in.uv.x * pill.rect.z, pill.dark_width);
-        color = mix(color, color * 0.5, dark_mask);
-    }
+    color = mix(color, color * 0.5, step(in.uv.x * pill.rect.z, pill.dark_width));
 
     // --- EXPANDING CIRCLE (ANIMATION OR CLICK) ---
-    if (pill.expansion_time > 0.0) {
-        let anim_color = vec3<f32>(1.0, 0.88, 0.824); // #FFE0D2
-        let anim_lerp = (uniforms.time - pill.expansion_time) / (3.5 * 0.3);
-        if (anim_lerp >= 0.0 && anim_lerp < 1.0) {
-            let p_local = (in.uv - 0.5) * pill.rect.zw;
-            let center = pill.expansion_pos - pill.rect.xy - pill.rect.zw * 0.5;
-            let dist = length(p_local - center);
-            let circle_mask = 1.0 - smoothstep(500.0 * anim_lerp - 2.0, 500.0 * anim_lerp, dist);
-            let circle_alpha = (1.0 - clamp(anim_lerp + 0.4, 0.0, 1.0)) * circle_mask;
-            color = mix(color, anim_color, circle_alpha);
-        }
+    let anim_lerp = (uniforms.time - pill.expansion_time) * 0.95;
+    if (anim_lerp >= 0.0 && anim_lerp < 1.0) {
+        let center = pill.expansion_pos - pill.rect.xy - pill.rect.zw * 0.5;
+        let dist = length(((in.uv - 0.5) * pill.rect.zw) - center);
+        let circle_alpha = (1.0 - clamp(anim_lerp + 0.4, 0.0, 1.0)) * (1.0 - smoothstep(500.0 * anim_lerp - 2.0, 500.0 * anim_lerp, dist));
+        color = mix(color, vec3(1.0, 0.88, 0.824), circle_alpha);
+    }
+
+    // --- ALBUM IMAGE ---
+    let image_start_x = pill.rect.z - pill.rect.w;
+    let local_x = in.uv.x * pill.rect.z;
+    if (pill.image_index >= 0 && local_x >= image_start_x) {
+        let image_uv = vec2<f32>((local_x - image_start_x) / pill.rect.w, in.uv.y);
+        let tex = textureSample(t_images, s_images, image_uv, pill.image_index);
+        let image_d = sd_rounded_rect((image_uv - 0.5) * pill.rect.w, vec2<f32>(pill.rect.w * 0.5), vec2<f32>(rounding, rounding * pill.radii.y));
+        color = mix(color, tex.rgb, (1.0 - smoothstep(-0.5, 0.5, image_d)) * tex.a);
     }
 
     return vec4(color * edge_mask * pill.alpha, max(edge_mask, shadow_mask) * pill.alpha);

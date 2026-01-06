@@ -82,6 +82,7 @@ too-many-lines = "allow"
 cast-possible-truncation = "allow"
 cast-precision-loss = "allow"
 cast-sign-loss = "allow"
+cast-possible-wrap = "allow"
 suboptimal_flops = "allow"
 missing-panics-doc = "allow"
 

@@ -1,7 +1,7 @@
 struct Uniform {
     screen_size: vec2<f32>,
     time: f32,
-    _padding: f32,
+    scale_factor: f32,
 };
 
 struct Particle {

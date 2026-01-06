@@ -1,10 +1,13 @@
-use std::sync::Arc;
-
+use crate::spotify::{IMAGES_CACHE, PLAYBACK_STATE};
 use crate::{
     interaction::InteractionState,
     render::{FontEngine, ParticlesState, RenderState},
 };
 use render_types::{BackgroundPill, Particle, ScreenUniforms, Shaders};
+use std::{
+    collections::{HashMap, HashSet},
+    sync::Arc,
+};
 use tracing_subscriber::EnvFilter;
 use vello::{
     AaConfig, AaSupport, Renderer, RendererOptions, Scene,
@@ -50,7 +53,10 @@ pub struct GpuResources {
     pub storage_buffer: wgpu::Buffer,
     pub particle_bind_group: wgpu::BindGroup,
     pub bg_storage_buffer: wgpu::Buffer,
-    pub bg_bind_group: wgpu::BindGroup,
+    pub bg_bind_group: Option<wgpu::BindGroup>,
+    pub bg_texture_array: Option<wgpu::Texture>,
+    pub bg_sampler: wgpu::Sampler,
+    pub last_texture_set: HashSet<String>,
 }
 
 fn main() {
@@ -83,6 +89,7 @@ pub struct CantusApp {
     background_pills: Vec<BackgroundPill>,
     gpu_resources: Option<GpuResources>,
     gpu_uniforms: Option<ScreenUniforms>,
+    pub image_map: HashMap<String, i32>,
 }
 
 impl Default for CantusApp {
@@ -100,6 +107,7 @@ impl Default for CantusApp {
             background_pills: Vec::new(),
             gpu_resources: None,
             gpu_uniforms: None,
+            image_map: HashMap::new(),
         }
     }
 }
@@ -226,21 +234,16 @@ impl CantusApp {
             mapped_at_creation: false,
         });
 
-        let bg_bind_group = device_handle
+        let bg_sampler = device_handle
             .device
-            .create_bind_group(&wgpu::BindGroupDescriptor {
-                label: Some("Background Bind Group"),
-                layout: &shaders.bg_bind_group_layout,
-                entries: &[
-                    wgpu::BindGroupEntry {
-                        binding: 0,
-                        resource: uniform_buffer.as_entire_binding(),
-                    },
-                    wgpu::BindGroupEntry {
-                        binding: 1,
-                        resource: bg_storage_buffer.as_entire_binding(),
-                    },
-                ],
+            .create_sampler(&wgpu::SamplerDescriptor {
+                address_mode_u: wgpu::AddressMode::ClampToEdge,
+                address_mode_v: wgpu::AddressMode::ClampToEdge,
+                address_mode_w: wgpu::AddressMode::ClampToEdge,
+                mag_filter: wgpu::FilterMode::Linear,
+                min_filter: wgpu::FilterMode::Linear,
+                mipmap_filter: wgpu::FilterMode::Nearest,
+                ..Default::default()
             });
 
         self.gpu_resources = Some(GpuResources {
@@ -251,7 +254,10 @@ impl CantusApp {
             storage_buffer,
             particle_bind_group,
             bg_storage_buffer,
-            bg_bind_group,
+            bg_bind_group: None,
+            bg_texture_array: None,
+            bg_sampler,
+            last_texture_set: HashSet::new(),
         });
 
         self.render_surface = Some(render_surface);
@@ -262,50 +268,131 @@ impl CantusApp {
         if self.render_surface.is_none() {
             return;
         }
-
         self.scene.reset();
+        self.image_map.clear();
+
+        let mut image_refs = Vec::new();
+        let mut current_texture_urls = Vec::new();
+        let mut url_to_index = HashMap::new();
+
+        // 1. Identify unique images and check for changes
+        for track in &PLAYBACK_STATE.read().queue {
+            if !current_texture_urls.contains(&track.album.image) {
+                current_texture_urls.push(track.album.image.clone());
+            }
+        }
+
+        for (i, url) in current_texture_urls.iter().enumerate() {
+            if let Some(img_ref) = IMAGES_CACHE.get(url)
+                && img_ref.is_some()
+            {
+                url_to_index.insert(url.clone(), i as i32);
+                image_refs.push(img_ref);
+            }
+        }
+
+        let needs_texture_update = self.gpu_resources.as_ref().is_none_or(|gpu| {
+            let current_set: HashSet<String> = current_texture_urls.iter().cloned().collect();
+            current_set != gpu.last_texture_set
+        });
+        self.image_map = url_to_index;
+
+        // Now build the scene (fills self.background_pills using self.image_map index)
         self.create_scene();
 
-        let Some(render_surface) = self.render_surface.as_mut() else {
-            return;
-        };
-        let Some(render_device) = self.render_device.as_mut() else {
-            return;
-        };
-        let dev_id = render_surface.dev_id;
-        let handle = &self.render_context.devices[dev_id];
-        render_device
-            .render_to_texture(
-                &handle.device,
-                &handle.queue,
-                &self.scene,
-                &render_surface.target_view,
-                &vello::RenderParams {
-                    base_color: AlphaColor::from_rgba8(0, 0, 0, 0),
-                    width: render_surface.config.width,
-                    height: render_surface.config.height,
-                    antialiasing_method: AaConfig::Area,
-                },
-            )
-            .expect("failed to render to surface");
+        // Collect the raw image pointers safely
+        let mut unique_textures = Vec::new();
+        for img_ref in &image_refs {
+            if let Some(img) = img_ref.as_ref() {
+                unique_textures.push(&img.image);
+            }
+        }
 
-        let Ok(surface_texture) = render_surface.surface.get_current_texture() else {
-            render_surface.surface.configure(
-                &self.render_context.devices[render_surface.dev_id].device,
-                &render_surface.config,
-            );
-            return;
-        };
+        // --- PREPARE GPU RESOURCES (Texture Array & Bind Group) ---
+        if let Some(gpu) = self.gpu_resources.as_mut() {
+            // Create or update the texture array if we have images
+            if needs_texture_update && !unique_textures.is_empty() {
+                let width = unique_textures[0].width;
+                let height = unique_textures[0].height;
+                let layers = unique_textures.len() as u32;
 
-        let surface_view = surface_texture
-            .texture
-            .create_view(&TextureViewDescriptor::default());
+                let texture = gpu.device.create_texture(&wgpu::TextureDescriptor {
+                    label: Some("Background Texture Array"),
+                    size: wgpu::Extent3d {
+                        width,
+                        height,
+                        depth_or_array_layers: layers,
+                    },
+                    mip_level_count: 1,
+                    sample_count: 1,
+                    dimension: wgpu::TextureDimension::D2,
+                    format: wgpu::TextureFormat::Rgba8Unorm,
+                    usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
+                    view_formats: &[],
+                });
 
-        if let (Some(gpu), Some(gpu_uniforms)) =
-            (self.gpu_resources.as_ref(), self.gpu_uniforms.as_ref())
-        {
-            gpu.queue
-                .write_buffer(&gpu.uniform_buffer, 0, bytemuck::bytes_of(gpu_uniforms));
+                for (i, img) in unique_textures.iter().enumerate() {
+                    gpu.queue.write_texture(
+                        wgpu::TexelCopyTextureInfo {
+                            texture: &texture,
+                            mip_level: 0,
+                            origin: wgpu::Origin3d {
+                                x: 0,
+                                y: 0,
+                                z: i as u32,
+                            },
+                            aspect: wgpu::TextureAspect::All,
+                        },
+                        img.data.as_ref(), // Use .as_ref() to get &[u8] from Blob<u8>
+                        wgpu::TexelCopyBufferLayout {
+                            offset: 0,
+                            bytes_per_row: Some(4 * width),
+                            rows_per_image: Some(height),
+                        },
+                        wgpu::Extent3d {
+                            width,
+                            height,
+                            depth_or_array_layers: 1,
+                        },
+                    );
+                }
+
+                let view = texture.create_view(&wgpu::TextureViewDescriptor {
+                    dimension: Some(wgpu::TextureViewDimension::D2Array),
+                    ..Default::default()
+                });
+
+                gpu.bg_bind_group =
+                    Some(gpu.device.create_bind_group(&wgpu::BindGroupDescriptor {
+                        label: Some("Background Bind Group"),
+                        layout: &gpu.shaders.bg_bind_group_layout,
+                        entries: &[
+                            wgpu::BindGroupEntry {
+                                binding: 0,
+                                resource: gpu.uniform_buffer.as_entire_binding(),
+                            },
+                            wgpu::BindGroupEntry {
+                                binding: 1,
+                                resource: gpu.bg_storage_buffer.as_entire_binding(),
+                            },
+                            wgpu::BindGroupEntry {
+                                binding: 2,
+                                resource: wgpu::BindingResource::TextureView(&view),
+                            },
+                            wgpu::BindGroupEntry {
+                                binding: 3,
+                                resource: wgpu::BindingResource::Sampler(&gpu.bg_sampler),
+                            },
+                        ],
+                    }));
+                gpu.bg_texture_array = Some(texture);
+                gpu.last_texture_set = self.image_map.keys().cloned().collect();
+            }
+
+            if let Some(gpu_uniforms) = self.gpu_uniforms.as_ref() {
+                gpu.queue
+                    .write_buffer(&gpu.uniform_buffer, 0, bytemuck::bytes_of(gpu_uniforms));
+            }
             gpu.queue.write_buffer(
                 &gpu.storage_buffer,
                 0,
@@ -318,7 +405,48 @@ impl CantusApp {
                     bytemuck::cast_slice(&self.background_pills),
                 );
             }
+        }
 
+        // Explicitly drop image_refs after GPU upload to satisfy clippy and release DashMap locks
+        drop(image_refs);
+
+        // Now we can safely borrow other parts
+        let render_surface_ref = self.render_surface.as_ref().unwrap();
+        let dev_id = render_surface_ref.dev_id;
+        let handle = &self.render_context.devices[dev_id];
+
+        self.render_device
+            .as_mut()
+            .unwrap()
+            .render_to_texture(
+                &handle.device,
+                &handle.queue,
+                &self.scene,
+                &render_surface_ref.target_view,
+                &vello::RenderParams {
+                    base_color: AlphaColor::from_rgba8(0, 0, 0, 0),
+                    width: render_surface_ref.config.width,
+                    height: render_surface_ref.config.height,
+                    antialiasing_method: AaConfig::Area,
+                },
+            )
+            .expect("failed to render to surface");
+
+        let render_surface = self.render_surface.as_mut().unwrap();
+        let Ok(surface_texture) = render_surface.surface.get_current_texture() else {
+            let render_surface = self.render_surface.as_mut().unwrap();
+            render_surface.surface.configure(
+                &self.render_context.devices[render_surface.dev_id].device,
+                &render_surface.config,
+            );
+            return;
+        };
+
+        let surface_view = surface_texture
+            .texture
+            .create_view(&TextureViewDescriptor::default());
+
+        if let Some(gpu) = self.gpu_resources.as_ref() {
             let mut encoder = handle
                 .device
                 .create_command_encoder(&CommandEncoderDescriptor {
@@ -343,9 +471,9 @@ impl CantusApp {
                     occlusion_query_set: None,
                 });
 
-                if !self.background_pills.is_empty() {
+                if let Some(bind_group) = &gpu.bg_bind_group {
                     rpass.set_pipeline(&gpu.shaders.bg_pipeline);
-                    rpass.set_bind_group(0, &gpu.bg_bind_group, &[]);
+                    rpass.set_bind_group(0, bind_group, &[]);
                     rpass.draw(0..4, 0..self.background_pills.len() as u32);
                 }
             }

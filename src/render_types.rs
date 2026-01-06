@@ -112,6 +112,22 @@ impl Shaders {
                     },
                     count: None,
                 },
+                BindGroupLayoutEntry {
+                    binding: 2,
+                    visibility: ShaderStages::FRAGMENT,
+                    ty: BindingType::Texture {
+                        multisampled: false,
+                        view_dimension: wgpu::TextureViewDimension::D2Array,
+                        sample_type: wgpu::TextureSampleType::Float { filterable: true },
+                    },
+                    count: None,
+                },
+                BindGroupLayoutEntry {
+                    binding: 3,
+                    visibility: ShaderStages::FRAGMENT,
+                    ty: BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
+                    count: None,
+                },
             ],
         });
 
@@ -164,7 +180,7 @@ impl Shaders {
 pub struct ScreenUniforms {
     pub screen_size: [f32; 2],
     pub time: f32,
-    pub _padding: f32,
+    pub scale_factor: f32,
 }
 
 #[repr(C)]
@@ -188,5 +204,5 @@ pub struct BackgroundPill {
     pub colors: [u32; 4],
     pub expansion_pos: [f32; 2],
     pub expansion_time: f32, // Start time of the expansion animation
-    pub _padding: [f32; 1],
+    pub image_index: i32,    // Index in the texture array, -1 if none
 }
