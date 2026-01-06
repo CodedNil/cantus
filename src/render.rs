@@ -1,9 +1,9 @@
 use crate::{
-    CantusApp, PANEL_HEIGHT_START,
+    CantusApp, PANEL_HEIGHT_EXTENSION, PANEL_HEIGHT_START,
     config::CONFIG,
     interaction::InteractionEvent,
     lerpf32, lerpf64,
-    render_types::{Particle, ParticleUniforms},
+    render_types::{BackgroundPill, Particle, ScreenUniforms},
     rspotify::{PlaylistId, Track},
     spotify::{ALBUM_DATA_CACHE, CondensedPlaylist, IMAGES_CACHE, PLAYBACK_STATE},
 };
@@ -127,6 +127,7 @@ impl CantusApp {
             .as_secs_f64();
         self.render_state.last_update = now;
 
+        self.background_pills.clear();
         let scale = self.scale_factor;
         let history_width = (CONFIG.history_width * scale).ceil();
         let total_width = (CONFIG.width * scale - history_width).ceil();
@@ -380,50 +381,24 @@ impl CantusApp {
             RoundedRectRadii::new(left_rounding, right_rounding, right_rounding, left_rounding);
 
         // --- BACKGROUND ---
-        if !track_render.art_only && width > height {
-            // Don't need to render all the way to the edge since the album art is at the right edge
-            let background_width = width - height * 0.25;
-            let extra_fade_alpha = fade_alpha * ((width - height) / 30.0).min(1.0) as f32;
-
-            // Add a drop shadow
-            self.scene.draw_blurred_rounded_rect(
-                start_translation,
-                Rect::new(0.0, 0.0, width, height),
-                Color::from_rgba8(0, 0, 0, (150.0 * extra_fade_alpha).round() as u8),
-                rounding,
-                6.0,
-            );
-
-            // Start clipping
-            self.scene.push_clip_layer(
-                start_translation,
-                &RoundedRect::new(0.0, 0.0, background_width, height, radii),
-            );
-            let image_width = f64::from(album_data.palette_image.image.width);
-            let background_aspect_ratio = background_width / height;
-            self.scene.fill(
-                Fill::EvenOdd,
-                start_translation * Affine::scale(full_width / image_width),
-                ImageBrush {
-                    image: &album_data.palette_image.image,
-                    sampler: album_data
-                        .palette_image
-                        .sampler
-                        .with_alpha(extra_fade_alpha),
-                },
-                None,
-                &Rect::new(0.0, 0.0, image_width, image_width * background_aspect_ratio),
-            );
-            // Add a white glow above for a vignette effect
-            self.scene.draw_blurred_rounded_rect(
-                start_translation,
-                Rect::new(0.0, 0.0, width, height),
-                Color::from_rgba8(255, 255, 255, (30.0 * extra_fade_alpha).round() as u8),
-                rounding,
-                15.0,
-            );
-            self.scene.pop_layer();
+        let mut colors = [0u32; 4];
+        for (i, c) in album_data.primary_colors.iter().take(4).enumerate() {
+            colors[i] =
+                (u32::from(c[0])) | (u32::from(c[1]) << 8) | (u32::from(c[2]) << 16) | (255 << 24);
         }
+
+        self.background_pills.push(BackgroundPill {
+            rect: [
+                start_x as f32,
+                (PANEL_HEIGHT_START / self.scale_factor) as f32,
+                width as f32,
+                (CONFIG.height * self.scale_factor) as f32,
+            ],
+            radii: [left_rounding as f32, right_rounding as f32],
+            colors,
+            alpha: fade_alpha,
+            _padding: [0.0; 1],
+        });
 
         // --- Render things within the track bounds ---
         self.scene.push_clip_layer(
@@ -731,8 +706,12 @@ impl CantusApp {
         // We use a monotonic time for the GPU to calculate displacements
         let time = START_TIME.elapsed().as_secs_f32();
 
-        self.gpu_uniforms = Some(ParticleUniforms {
-            screen_size: [CONFIG.width as f32 * scale, height as f32],
+        self.gpu_uniforms = Some(ScreenUniforms {
+            screen_size: [
+                (CONFIG.width * self.scale_factor) as f32,
+                ((CONFIG.height + PANEL_HEIGHT_START + PANEL_HEIGHT_EXTENSION) * self.scale_factor)
+                    as f32,
+            ],
             time,
             _padding: 0.0,
         });

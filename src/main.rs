@@ -4,7 +4,7 @@ use crate::{
     interaction::InteractionState,
     render::{FontEngine, ParticlesState, RenderState},
 };
-use render_types::{Particle, ParticleUniforms, Shaders};
+use render_types::{BackgroundPill, Particle, ScreenUniforms, Shaders};
 use tracing_subscriber::EnvFilter;
 use vello::{
     AaConfig, AaSupport, Renderer, RendererOptions, Scene,
@@ -49,6 +49,8 @@ pub struct GpuResources {
     pub uniform_buffer: wgpu::Buffer,
     pub storage_buffer: wgpu::Buffer,
     pub particle_bind_group: wgpu::BindGroup,
+    pub bg_storage_buffer: wgpu::Buffer,
+    pub bg_bind_group: wgpu::BindGroup,
 }
 
 fn main() {
@@ -78,8 +80,9 @@ pub struct CantusApp {
     render_state: RenderState,
     interaction: InteractionState,
     particles: ParticlesState,
+    background_pills: Vec<BackgroundPill>,
     gpu_resources: Option<GpuResources>,
-    gpu_uniforms: Option<ParticleUniforms>,
+    gpu_uniforms: Option<ScreenUniforms>,
 }
 
 impl Default for CantusApp {
@@ -94,6 +97,7 @@ impl Default for CantusApp {
             render_state: RenderState::default(),
             interaction: InteractionState::default(),
             particles: ParticlesState::default(),
+            background_pills: Vec::new(),
             gpu_resources: None,
             gpu_uniforms: None,
         }
@@ -154,12 +158,12 @@ impl CantusApp {
                 .blend_state(BlendState {
                     color: BlendComponent {
                         src_factor: BlendFactor::SrcAlpha,
-                        dst_factor: BlendFactor::Zero,
+                        dst_factor: BlendFactor::OneMinusSrcAlpha,
                         operation: BlendOperation::Add,
                     },
                     alpha: BlendComponent {
                         src_factor: BlendFactor::One,
-                        dst_factor: BlendFactor::Zero,
+                        dst_factor: BlendFactor::OneMinusSrcAlpha,
                         operation: BlendOperation::Add,
                     },
                 })
@@ -185,7 +189,7 @@ impl CantusApp {
         let shaders = Shaders::new(&device_handle.device, format);
         let uniform_buffer = device_handle.device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("Particle Uniform Buffer"),
-            size: std::mem::size_of::<ParticleUniforms>() as u64,
+            size: std::mem::size_of::<ScreenUniforms>() as u64,
             usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
             mapped_at_creation: false,
         });
@@ -215,6 +219,30 @@ impl CantusApp {
                     ],
                 });
 
+        let bg_storage_buffer = device_handle.device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("Background Storage Buffer"),
+            size: (std::mem::size_of::<BackgroundPill>() * 16) as u64,
+            usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+
+        let bg_bind_group = device_handle
+            .device
+            .create_bind_group(&wgpu::BindGroupDescriptor {
+                label: Some("Background Bind Group"),
+                layout: &shaders.bg_bind_group_layout,
+                entries: &[
+                    wgpu::BindGroupEntry {
+                        binding: 0,
+                        resource: uniform_buffer.as_entire_binding(),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 1,
+                        resource: bg_storage_buffer.as_entire_binding(),
+                    },
+                ],
+            });
+
         self.gpu_resources = Some(GpuResources {
             device: Arc::new(device_handle.device.clone()),
             queue: Arc::new(device_handle.queue.clone()),
@@ -222,6 +250,8 @@ impl CantusApp {
             uniform_buffer,
             storage_buffer,
             particle_bind_group,
+            bg_storage_buffer,
+            bg_bind_group,
         });
 
         self.render_surface = Some(render_surface);
@@ -267,22 +297,9 @@ impl CantusApp {
             return;
         };
 
-        let mut encoder = handle
-            .device
-            .create_command_encoder(&CommandEncoderDescriptor {
-                label: Some("Surface Blit"),
-            });
-
         let surface_view = surface_texture
             .texture
             .create_view(&TextureViewDescriptor::default());
-
-        render_surface.blitter.copy(
-            &handle.device,
-            &mut encoder,
-            &render_surface.target_view,
-            &surface_view,
-        );
 
         if let (Some(gpu), Some(gpu_uniforms)) =
             (self.gpu_resources.as_ref(), self.gpu_uniforms.as_ref())
@@ -294,28 +311,79 @@ impl CantusApp {
                 0,
                 bytemuck::cast_slice(&self.particles.particles),
             );
+            if !self.background_pills.is_empty() {
+                gpu.queue.write_buffer(
+                    &gpu.bg_storage_buffer,
+                    0,
+                    bytemuck::cast_slice(&self.background_pills),
+                );
+            }
 
-            let mut rpass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
-                label: Some("Particle Pass"),
-                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
-                    view: &surface_view,
-                    resolve_target: None,
-                    ops: wgpu::Operations {
-                        load: wgpu::LoadOp::Load,
-                        store: wgpu::StoreOp::Store,
-                    },
-                    depth_slice: None,
-                })],
-                depth_stencil_attachment: None,
-                timestamp_writes: None,
-                occlusion_query_set: None,
-            });
-            rpass.set_pipeline(&gpu.shaders.pipeline);
-            rpass.set_bind_group(0, &gpu.particle_bind_group, &[]);
-            rpass.draw(0..4, 0..1);
+            let mut encoder = handle
+                .device
+                .create_command_encoder(&CommandEncoderDescriptor {
+                    label: Some("Main Render Encoder"),
+                });
+
+            // 1. CLEAR AND RENDER BACKGROUND PILLS
+            {
+                let mut rpass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                    label: Some("Background Pass"),
+                    color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                        view: &surface_view,
+                        resolve_target: None,
+                        ops: wgpu::Operations {
+                            load: wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT),
+                            store: wgpu::StoreOp::Store,
+                        },
+                        depth_slice: None,
+                    })],
+                    depth_stencil_attachment: None,
+                    timestamp_writes: None,
+                    occlusion_query_set: None,
+                });
+
+                if !self.background_pills.is_empty() {
+                    rpass.set_pipeline(&gpu.shaders.bg_pipeline);
+                    rpass.set_bind_group(0, &gpu.bg_bind_group, &[]);
+                    rpass.draw(0..4, 0..self.background_pills.len() as u32);
+                }
+            }
+
+            // 2. BLIT VELLO SCENE ON TOP
+            render_surface.blitter.copy(
+                &handle.device,
+                &mut encoder,
+                &render_surface.target_view,
+                &surface_view,
+            );
+
+            // 3. RENDER PARTICLES ON TOP
+            {
+                let mut rpass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                    label: Some("Particle Pass"),
+                    color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                        view: &surface_view,
+                        resolve_target: None,
+                        ops: wgpu::Operations {
+                            load: wgpu::LoadOp::Load,
+                            store: wgpu::StoreOp::Store,
+                        },
+                        depth_slice: None,
+                    })],
+                    depth_stencil_attachment: None,
+                    timestamp_writes: None,
+                    occlusion_query_set: None,
+                });
+
+                rpass.set_pipeline(&gpu.shaders.pipeline);
+                rpass.set_bind_group(0, &gpu.particle_bind_group, &[]);
+                rpass.draw(0..4, 0..1);
+            }
+
+            handle.queue.submit([encoder.finish()]);
         }
 
-        handle.queue.submit([encoder.finish()]);
         surface_texture.present();
     }
 }

@@ -96,8 +96,6 @@ pub struct PlaybackState {
 pub struct AlbumData {
     /// Simplified color palette (RGBA, alpha = percentage 0-100).
     pub primary_colors: Vec<[u8; 4]>,
-    /// Generated texture derived from the palette for shader backgrounds.
-    pub palette_image: ImageBrush,
 }
 
 pub struct CondensedPlaylist {
