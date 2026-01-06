@@ -3,8 +3,9 @@ use wgpu::{
     BindGroupLayout, BindGroupLayoutDescriptor, BindGroupLayoutEntry, BindingType, BlendState,
     BufferBindingType, ColorTargetState, ColorWrites, Device, FragmentState, MultisampleState,
     PipelineCompilationOptions, PipelineLayoutDescriptor, PrimitiveState, PrimitiveTopology,
-    RenderPipeline, RenderPipelineDescriptor, ShaderModuleDescriptor, ShaderSource, ShaderStages,
-    TextureFormat, VertexState,
+    RenderPipeline, RenderPipelineDescriptor, SamplerBindingType, ShaderModuleDescriptor,
+    ShaderSource, ShaderStages, TextureFormat, TextureSampleType, TextureViewDimension,
+    VertexState,
 };
 
 pub struct Shaders {
@@ -18,246 +19,140 @@ pub struct Shaders {
 
 impl Shaders {
     pub fn new(device: &Device, format: TextureFormat) -> Self {
-        // Particles
+        // Shader Modules
         let particle_shader = device.create_shader_module(ShaderModuleDescriptor {
             label: Some("Particles Shader"),
             source: ShaderSource::Wgsl(include_str!("../assets/particles.wgsl").into()),
         });
-
-        let bind_group_layout = device.create_bind_group_layout(&BindGroupLayoutDescriptor {
-            label: Some("Particles Bind Group Layout"),
-            entries: &[
-                BindGroupLayoutEntry {
-                    binding: 0,
-                    visibility: ShaderStages::FRAGMENT,
-                    ty: BindingType::Buffer {
-                        ty: BufferBindingType::Uniform,
-                        has_dynamic_offset: false,
-                        min_binding_size: None,
-                    },
-                    count: None,
-                },
-                BindGroupLayoutEntry {
-                    binding: 1,
-                    visibility: ShaderStages::FRAGMENT,
-                    ty: BindingType::Buffer {
-                        ty: BufferBindingType::Storage { read_only: true },
-                        has_dynamic_offset: false,
-                        min_binding_size: None,
-                    },
-                    count: None,
-                },
-            ],
-        });
-
-        let pipeline_layout = device.create_pipeline_layout(&PipelineLayoutDescriptor {
-            label: Some("Particles Pipeline Layout"),
-            bind_group_layouts: &[&bind_group_layout],
-            push_constant_ranges: &[],
-        });
-
-        let pipeline = device.create_render_pipeline(&RenderPipelineDescriptor {
-            label: Some("Particles Pipeline"),
-            layout: Some(&pipeline_layout),
-            vertex: VertexState {
-                module: &particle_shader,
-                entry_point: Some("vs_main"),
-                buffers: &[],
-                compilation_options: PipelineCompilationOptions::default(),
-            },
-            fragment: Some(FragmentState {
-                module: &particle_shader,
-                entry_point: Some("fs_main"),
-                targets: &[Some(ColorTargetState {
-                    format,
-                    blend: Some(BlendState::ALPHA_BLENDING),
-                    write_mask: ColorWrites::ALL,
-                })],
-                compilation_options: PipelineCompilationOptions::default(),
-            }),
-            primitive: PrimitiveState {
-                topology: PrimitiveTopology::TriangleStrip,
-                ..Default::default()
-            },
-            depth_stencil: None,
-            multisample: MultisampleState::default(),
-            multiview: None,
-            cache: None,
-        });
-
-        // Background
         let bg_shader = device.create_shader_module(ShaderModuleDescriptor {
             label: Some("Background Shader"),
             source: ShaderSource::Wgsl(include_str!("../assets/background.wgsl").into()),
         });
-
-        let bg_bind_group_layout = device.create_bind_group_layout(&BindGroupLayoutDescriptor {
-            label: Some("Background Bind Group Layout"),
-            entries: &[
-                BindGroupLayoutEntry {
-                    binding: 0,
-                    visibility: ShaderStages::VERTEX | ShaderStages::FRAGMENT,
-                    ty: BindingType::Buffer {
-                        ty: BufferBindingType::Uniform,
-                        has_dynamic_offset: false,
-                        min_binding_size: None,
-                    },
-                    count: None,
-                },
-                BindGroupLayoutEntry {
-                    binding: 1,
-                    visibility: ShaderStages::VERTEX | ShaderStages::FRAGMENT,
-                    ty: BindingType::Buffer {
-                        ty: BufferBindingType::Storage { read_only: true },
-                        has_dynamic_offset: false,
-                        min_binding_size: None,
-                    },
-                    count: None,
-                },
-                BindGroupLayoutEntry {
-                    binding: 2,
-                    visibility: ShaderStages::FRAGMENT,
-                    ty: BindingType::Texture {
-                        multisampled: false,
-                        view_dimension: wgpu::TextureViewDimension::D2Array,
-                        sample_type: wgpu::TextureSampleType::Float { filterable: true },
-                    },
-                    count: None,
-                },
-                BindGroupLayoutEntry {
-                    binding: 3,
-                    visibility: ShaderStages::FRAGMENT,
-                    ty: BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
-                    count: None,
-                },
-            ],
-        });
-
-        let bg_pipeline_layout = device.create_pipeline_layout(&PipelineLayoutDescriptor {
-            label: Some("Background Pipeline Layout"),
-            bind_group_layouts: &[&bg_bind_group_layout],
-            push_constant_ranges: &[],
-        });
-
-        let bg_pipeline = device.create_render_pipeline(&RenderPipelineDescriptor {
-            label: Some("Background Pipeline"),
-            layout: Some(&bg_pipeline_layout),
-            vertex: VertexState {
-                module: &bg_shader,
-                entry_point: Some("vs_main"),
-                buffers: &[],
-                compilation_options: PipelineCompilationOptions::default(),
-            },
-            fragment: Some(FragmentState {
-                module: &bg_shader,
-                entry_point: Some("fs_main"),
-                targets: &[Some(ColorTargetState {
-                    format,
-                    blend: Some(BlendState::ALPHA_BLENDING),
-                    write_mask: ColorWrites::ALL,
-                })],
-                compilation_options: PipelineCompilationOptions::default(),
-            }),
-            primitive: PrimitiveState {
-                topology: PrimitiveTopology::TriangleStrip,
-                ..Default::default()
-            },
-            depth_stencil: None,
-            multisample: MultisampleState::default(),
-            multiview: None,
-            cache: None,
-        });
-
-        // Icons
         let icon_shader = device.create_shader_module(ShaderModuleDescriptor {
             label: Some("Icons Shader"),
             source: ShaderSource::Wgsl(include_str!("../assets/icons.wgsl").into()),
         });
 
-        let icon_bind_group_layout = device.create_bind_group_layout(&BindGroupLayoutDescriptor {
-            label: Some("Icons Bind Group Layout"),
-            entries: &[
-                BindGroupLayoutEntry {
-                    binding: 0,
-                    visibility: ShaderStages::VERTEX | ShaderStages::FRAGMENT,
-                    ty: BindingType::Buffer {
-                        ty: BufferBindingType::Uniform,
-                        has_dynamic_offset: false,
-                        min_binding_size: None,
+        // Bind Group Layouts
+        let particle_bind_group_layout =
+            device.create_bind_group_layout(&BindGroupLayoutDescriptor {
+                label: Some("Particles Layout"),
+                entries: &[
+                    BindGroupLayoutEntry {
+                        binding: 0,
+                        visibility: ShaderStages::FRAGMENT,
+                        ty: BindingType::Buffer {
+                            ty: BufferBindingType::Uniform,
+                            has_dynamic_offset: false,
+                            min_binding_size: None,
+                        },
+                        count: None,
                     },
-                    count: None,
-                },
-                BindGroupLayoutEntry {
-                    binding: 1,
-                    visibility: ShaderStages::VERTEX | ShaderStages::FRAGMENT,
-                    ty: BindingType::Buffer {
-                        ty: BufferBindingType::Storage { read_only: true },
-                        has_dynamic_offset: false,
-                        min_binding_size: None,
+                    BindGroupLayoutEntry {
+                        binding: 1,
+                        visibility: ShaderStages::FRAGMENT,
+                        ty: BindingType::Buffer {
+                            ty: BufferBindingType::Storage { read_only: true },
+                            has_dynamic_offset: false,
+                            min_binding_size: None,
+                        },
+                        count: None,
                     },
-                    count: None,
-                },
-                BindGroupLayoutEntry {
-                    binding: 2,
-                    visibility: ShaderStages::FRAGMENT,
-                    ty: BindingType::Texture {
-                        multisampled: false,
-                        view_dimension: wgpu::TextureViewDimension::D2Array,
-                        sample_type: wgpu::TextureSampleType::Float { filterable: true },
-                    },
-                    count: None,
-                },
-                BindGroupLayoutEntry {
-                    binding: 3,
-                    visibility: ShaderStages::FRAGMENT,
-                    ty: BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
-                    count: None,
-                },
-            ],
-        });
+                ],
+            });
 
-        let icon_pipeline_layout = device.create_pipeline_layout(&PipelineLayoutDescriptor {
-            label: Some("Icons Pipeline Layout"),
-            bind_group_layouts: &[&icon_bind_group_layout],
-            push_constant_ranges: &[],
-        });
+        let standard_bind_group_layout =
+            device.create_bind_group_layout(&BindGroupLayoutDescriptor {
+                label: Some("Standard Layout"),
+                entries: &[
+                    BindGroupLayoutEntry {
+                        binding: 0,
+                        visibility: ShaderStages::VERTEX | ShaderStages::FRAGMENT,
+                        ty: BindingType::Buffer {
+                            ty: BufferBindingType::Uniform,
+                            has_dynamic_offset: false,
+                            min_binding_size: None,
+                        },
+                        count: None,
+                    },
+                    BindGroupLayoutEntry {
+                        binding: 1,
+                        visibility: ShaderStages::VERTEX | ShaderStages::FRAGMENT,
+                        ty: BindingType::Buffer {
+                            ty: BufferBindingType::Storage { read_only: true },
+                            has_dynamic_offset: false,
+                            min_binding_size: None,
+                        },
+                        count: None,
+                    },
+                    BindGroupLayoutEntry {
+                        binding: 2,
+                        visibility: ShaderStages::FRAGMENT,
+                        ty: BindingType::Texture {
+                            multisampled: false,
+                            view_dimension: TextureViewDimension::D2Array,
+                            sample_type: TextureSampleType::Float { filterable: true },
+                        },
+                        count: None,
+                    },
+                    BindGroupLayoutEntry {
+                        binding: 3,
+                        visibility: ShaderStages::FRAGMENT,
+                        ty: BindingType::Sampler(SamplerBindingType::Filtering),
+                        count: None,
+                    },
+                ],
+            });
 
-        let icon_pipeline = device.create_render_pipeline(&RenderPipelineDescriptor {
-            label: Some("Icons Pipeline"),
-            layout: Some(&icon_pipeline_layout),
-            vertex: VertexState {
-                module: &icon_shader,
-                entry_point: Some("vs_main"),
-                buffers: &[],
-                compilation_options: PipelineCompilationOptions::default(),
-            },
-            fragment: Some(FragmentState {
-                module: &icon_shader,
-                entry_point: Some("fs_main"),
-                targets: &[Some(ColorTargetState {
-                    format,
-                    blend: Some(BlendState::ALPHA_BLENDING),
-                    write_mask: ColorWrites::ALL,
-                })],
-                compilation_options: PipelineCompilationOptions::default(),
-            }),
-            primitive: PrimitiveState {
-                topology: PrimitiveTopology::TriangleStrip,
-                ..Default::default()
-            },
-            depth_stencil: None,
-            multisample: MultisampleState::default(),
-            multiview: None,
-            cache: None,
-        });
+        // Pipeline Helper
+        let create_pipe = |label: &str, shader: &wgpu::ShaderModule, layout: &BindGroupLayout| {
+            let pipeline_layout = device.create_pipeline_layout(&PipelineLayoutDescriptor {
+                label: Some(&format!("{label} Pipeline Layout")),
+                bind_group_layouts: &[layout],
+                push_constant_ranges: &[],
+            });
+
+            device.create_render_pipeline(&RenderPipelineDescriptor {
+                label: Some(&format!("{label} Pipeline")),
+                layout: Some(&pipeline_layout),
+                vertex: VertexState {
+                    module: shader,
+                    entry_point: Some("vs_main"),
+                    buffers: &[],
+                    compilation_options: PipelineCompilationOptions::default(),
+                },
+                fragment: Some(FragmentState {
+                    module: shader,
+                    entry_point: Some("fs_main"),
+                    targets: &[Some(ColorTargetState {
+                        format,
+                        blend: Some(BlendState::ALPHA_BLENDING),
+                        write_mask: ColorWrites::ALL,
+                    })],
+                    compilation_options: PipelineCompilationOptions::default(),
+                }),
+                primitive: PrimitiveState {
+                    topology: PrimitiveTopology::TriangleStrip,
+                    ..Default::default()
+                },
+                depth_stencil: None,
+                multisample: MultisampleState::default(),
+                multiview: None,
+                cache: None,
+            })
+        };
+
+        let pipeline = create_pipe("Particles", &particle_shader, &particle_bind_group_layout);
+        let bg_pipeline = create_pipe("Background", &bg_shader, &standard_bind_group_layout);
+        let icon_pipeline = create_pipe("Icons", &icon_shader, &standard_bind_group_layout);
 
         Self {
             pipeline,
-            bind_group_layout,
+            bind_group_layout: particle_bind_group_layout,
             bg_pipeline,
-            bg_bind_group_layout,
+            bg_bind_group_layout: standard_bind_group_layout.clone(),
             icon_pipeline,
-            icon_bind_group_layout,
+            icon_bind_group_layout: standard_bind_group_layout,
         }
     }
 }
