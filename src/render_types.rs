@@ -183,7 +183,10 @@ pub struct Particle {
 pub struct BackgroundPill {
     pub rect: [f32; 4],  // x, y, width, height
     pub radii: [f32; 2], // left, right
-    pub colors: [u32; 4],
+    pub dark_width: f32,
     pub alpha: f32,
+    pub colors: [u32; 4],
+    pub expansion_pos: [f32; 2],
+    pub expansion_time: f32, // Start time of the expansion animation
     pub _padding: [f32; 1],
 }

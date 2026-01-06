@@ -16,7 +16,7 @@ use std::{
 use ttf_parser::{Face, Tag};
 use vello::{
     Glyph,
-    kurbo::{Affine, BezPath, Circle, Point, Rect, RoundedRect, RoundedRectRadii, Shape},
+    kurbo::{Affine, BezPath, Rect, RoundedRect, RoundedRectRadii, Shape},
     peniko::{Blob, Color, Fill, FontData, ImageBrush},
 };
 
@@ -387,73 +387,51 @@ impl CantusApp {
                 (u32::from(c[0])) | (u32::from(c[1]) << 8) | (u32::from(c[2]) << 16) | (255 << 24);
         }
 
+        // Determine which animation to show: specific track click or global playhead event
+        let (expansion_time, expansion_pos) = {
+            let (c_inst, c_track, c_pt) = self.interaction.last_click;
+            let c_time = c_inst.duration_since(*START_TIME).as_secs_f32();
+            let e_time = match self.interaction.last_event {
+                InteractionEvent::Pause(inst) | InteractionEvent::Play(inst) => {
+                    inst.duration_since(*START_TIME).as_secs_f32()
+                }
+                _ => 0.0,
+            };
+
+            if c_track == track.id && (c_time > e_time || !track_render.is_current) {
+                (
+                    c_time,
+                    [
+                        (start_x + c_pt.x) as f32,
+                        (PANEL_HEIGHT_START + c_pt.y) as f32,
+                    ],
+                )
+            } else {
+                (
+                    e_time,
+                    [
+                        timeline_origin_x as f32,
+                        (PANEL_HEIGHT_START + height * 0.5) as f32,
+                    ],
+                )
+            }
+        };
+
         self.background_pills.push(BackgroundPill {
             rect: [
                 start_x as f32,
-                (PANEL_HEIGHT_START / self.scale_factor) as f32,
+                PANEL_HEIGHT_START as f32,
                 width as f32,
-                (CONFIG.height * self.scale_factor) as f32,
+                height as f32,
             ],
             radii: [left_rounding as f32, right_rounding as f32],
-            colors,
+            dark_width: dark_width as f32,
             alpha: fade_alpha,
+            colors,
+            expansion_pos,
+            expansion_time,
             _padding: [0.0; 1],
         });
-
-        // --- Render things within the track bounds ---
-        self.scene.push_clip_layer(
-            start_translation,
-            &RoundedRect::new(0.0, 0.0, width, height, radii),
-        );
-
-        // Make the track dark to the left of the current time
-        if dark_width > 0.0 {
-            let extra_fade_alpha = ((width - height) / 30.0).min(1.0) as f32;
-            self.scene.fill(
-                Fill::EvenOdd,
-                start_translation,
-                Color::from_rgb8(0, 0, 0).with_alpha(0.5 * fade_alpha * extra_fade_alpha),
-                None,
-                &Rect::new(0.0, 0.0, dark_width, height),
-            );
-        }
-
-        // During animations add an expanding circle behind the line
-        if track_render.is_current {
-            let anim_lerp = match self.interaction.last_event {
-                InteractionEvent::Pause(start) | InteractionEvent::Play(start) => {
-                    start.elapsed().as_millis() as f64
-                        / (ANIMATION_DURATION.as_millis() as f64 * 0.3)
-                }
-                InteractionEvent::PauseHover(_) | InteractionEvent::PlayHover(_) => 1.0,
-            };
-            if anim_lerp < 1.0 {
-                self.scene.fill(
-                    Fill::EvenOdd,
-                    Affine::translate((timeline_origin_x, height * 0.5)),
-                    Color::from_rgb8(255, 224, 210)
-                        .with_alpha(1.0 - (anim_lerp + 0.4).min(1.0) as f32),
-                    None,
-                    &Circle::new(Point::default(), 500.0 * anim_lerp),
-                );
-            }
-        }
-        // After a click, add an expanding circle behind the click point
-        if let Some((start, track_id, point)) = &self.interaction.last_click
-            && track_id == &track.id
-            && let anim_lerp =
-                start.elapsed().as_millis() as f64 / (ANIMATION_DURATION.as_millis() as f64 * 0.3)
-            && anim_lerp < 1.0
-        {
-            self.scene.fill(
-                Fill::EvenOdd,
-                start_translation * Affine::translate((point.x, point.y)),
-                Color::from_rgb8(255, 224, 210).with_alpha(1.0 - (anim_lerp + 0.4).min(1.0) as f32),
-                None,
-                &Circle::new(Point::default(), 500.0 * anim_lerp),
-            );
-        }
-        self.scene.pop_layer();
 
         // --- ALBUM ART SQUARE ---
         if fade_alpha > 0.0 {

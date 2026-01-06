@@ -7,8 +7,11 @@ struct Uniform {
 struct BackgroundPill {
     rect: vec4<f32>,
     radii: vec2<f32>, // left, right
-    colors: array<u32, 4>,
+    dark_width: f32,
     alpha: f32,
+    colors: array<u32, 4>,
+    expansion_pos: vec2<f32>,
+    expansion_time: f32,
     _padding: f32,
 };
 
@@ -101,6 +104,26 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
     // Subtle inner glow
     let inner_glow = smoothstep(0.0, -35.0, d);
     color = mix(color * 1.1, color, inner_glow * 0.5);
+
+    // --- DARK TRACK TO THE LEFT ---
+    if (pill.dark_width > 0.0) {
+        let dark_mask = step(in.uv.x * pill.rect.z, pill.dark_width);
+        color = mix(color, color * 0.5, dark_mask);
+    }
+
+    // --- EXPANDING CIRCLE (ANIMATION OR CLICK) ---
+    if (pill.expansion_time > 0.0) {
+        let anim_color = vec3<f32>(1.0, 0.88, 0.824); // #FFE0D2
+        let anim_lerp = (uniforms.time - pill.expansion_time) / (3.5 * 0.3);
+        if (anim_lerp >= 0.0 && anim_lerp < 1.0) {
+            let p_local = (in.uv - 0.5) * pill.rect.zw;
+            let center = pill.expansion_pos - pill.rect.xy - pill.rect.zw * 0.5;
+            let dist = length(p_local - center);
+            let circle_mask = 1.0 - smoothstep(500.0 * anim_lerp - 2.0, 500.0 * anim_lerp, dist);
+            let circle_alpha = (1.0 - clamp(anim_lerp + 0.4, 0.0, 1.0)) * circle_mask;
+            color = mix(color, anim_color, circle_alpha);
+        }
+    }
 
     return vec4(color * edge_mask * pill.alpha, max(edge_mask, shadow_mask) * pill.alpha);
 }

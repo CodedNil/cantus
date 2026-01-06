@@ -24,7 +24,7 @@ pub struct IconHitbox {
 
 pub struct InteractionState {
     pub last_event: InteractionEvent,
-    pub last_click: Option<(Instant, TrackId, Point)>,
+    pub last_click: (Instant, TrackId, Point),
     pub mouse_position: Point,
     #[cfg(feature = "wayland")]
     pub last_hitbox_update: Instant,
@@ -44,7 +44,11 @@ impl Default for InteractionState {
             last_event: InteractionEvent::Pause(
                 Instant::now().checked_sub(Duration::from_secs(5)).unwrap(),
             ),
-            last_click: None,
+            last_click: (
+                Instant::now().checked_sub(Duration::from_secs(5)).unwrap(),
+                TrackId::default(),
+                Point::default(),
+            ),
             mouse_position: Point::default(),
             #[cfg(feature = "wayland")]
             last_hitbox_update: Instant::now(),
@@ -130,11 +134,11 @@ impl InteractionState {
                 .iter()
                 .find(|(_, track_rect, _)| track_rect.contains(mouse_pos))
             {
-                self.last_click = Some((
+                self.last_click = (
                     Instant::now(),
                     *track_id,
                     Point::new(mouse_pos.x - track_rect.x0, mouse_pos.y - track_rect.y0),
-                ));
+                );
             }
             self.last_event = if playing {
                 InteractionEvent::Pause(Instant::now())
@@ -151,11 +155,11 @@ impl InteractionState {
             .find(|(_, track_rect, _)| track_rect.contains(mouse_pos))
         {
             // Seek track
-            self.last_click = Some((
+            self.last_click = (
                 Instant::now(),
                 *track_id,
                 Point::new(mouse_pos.x - track_rect.x0, mouse_pos.y - track_rect.y0),
-            ));
+            );
 
             // If click is near the very left, reset to the start of the song, else seek to clicked position
             let position = if mouse_pos.x < (CONFIG.history_width + 20.0) * scale_factor {
