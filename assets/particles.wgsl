@@ -1,15 +1,16 @@
 struct Uniform {
     screen_size: vec2<f32>,
     time: f32,
-    line_x: f32,
+    _padding: f32,
 };
 
 struct Particle {
-    spawn_y: f32,
+    spawn_pos: vec2<f32>,
+    spawn_vel: vec2<f32>,
     spawn_time: f32,
     duration: f32,
     color: u32,
-    spawn_vel: vec2<f32>,
+    _padding: f32,
 };
 
 @group(0) @binding(0) var<uniform> uniforms: Uniform;
@@ -40,7 +41,7 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
         let p_life = 1. - (dt / p.duration);
         let fade = p_life * smoothstep(0., 0.05, dt);
 
-        let pos = vec2(uniforms.line_x, p.spawn_y) + p.spawn_vel * dt + vec2(0., 150. * dt * dt);
+        let pos = p.spawn_pos + p.spawn_vel * dt + vec2(0., 150. * dt * dt);
         let dir = normalize(p.spawn_vel + vec2(0., 300. * dt));
 
         let len = mix(8., 12., p_life);

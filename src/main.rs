@@ -321,9 +321,9 @@ impl CantusApp {
 }
 
 fn lerpf64(t: f64, v0: f64, v1: f64) -> f64 {
-    (1.0 - t).mul_add(v0, t * v1)
+    v0 + t * (v1 - v0)
 }
 
 fn lerpf32(t: f32, v0: f32, v1: f32) -> f32 {
-    (1.0 - t).mul_add(v0, t * v1)
+    v0 + t * (v1 - v0)
 }

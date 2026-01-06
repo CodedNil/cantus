@@ -31,7 +31,7 @@ const SPARK_VELOCITY_X: Range<usize> = 75..100;
 /// Vertical velocity range applied at spawn.
 const SPARK_VELOCITY_Y: Range<usize> = 30..70;
 /// Lifetime range for individual particles, in seconds.
-const SPARK_LIFETIME: Range<f32> = 0.3..0.6;
+const SPARK_LIFETIME: Range<f32> = 0.4..0.9;
 
 /// Duration for animation events
 const ANIMATION_DURATION: Duration = Duration::from_millis(3500);
@@ -102,13 +102,7 @@ pub struct ParticlesState {
 impl Default for ParticlesState {
     fn default() -> Self {
         Self {
-            particles: [Particle {
-                spawn_y: 0.0,
-                spawn_time: 0.0,
-                duration: 0.0,
-                color: 0,
-                spawn_vel: [0.0; 2],
-            }; 64],
+            particles: [Particle::default(); 64],
             accumulator: 0.0,
         }
     }
@@ -740,7 +734,7 @@ impl CantusApp {
         self.gpu_uniforms = Some(ParticleUniforms {
             screen_size: [CONFIG.width as f32 * scale, height as f32],
             time,
-            line_x: x as f32,
+            _padding: 0.0,
         });
 
         // Emit new particles while playing
@@ -761,8 +755,10 @@ impl CantusApp {
         for particle in &mut self.particles.particles {
             // Emit a new particle
             if emit_count > 0 && time > particle.spawn_time + particle.duration {
-                particle.spawn_y =
-                    PANEL_HEIGHT_START as f32 + height as f32 * lerpf32(fastrand::f32(), 0.1, 0.7);
+                particle.spawn_pos = [
+                    x as f32,
+                    PANEL_HEIGHT_START as f32 + height as f32 * lerpf32(fastrand::f32(), 0.1, 0.7),
+                ];
                 particle.spawn_vel = [
                     fastrand::usize(SPARK_VELOCITY_X) as f32 * scale * horizontal_bias,
                     fastrand::usize(SPARK_VELOCITY_Y) as f32 * -scale,

@@ -87,20 +87,21 @@ impl Shaders {
     }
 }
 
-#[repr(C, align(16))]
+#[repr(C)]
 #[derive(Copy, Clone, Debug, Pod, Zeroable)]
 pub struct ParticleUniforms {
     pub screen_size: [f32; 2],
     pub time: f32,
-    pub line_x: f32,
+    pub _padding: f32,
 }
 
 #[repr(C)]
-#[derive(Copy, Clone, Debug, Pod, Zeroable)]
+#[derive(Copy, Clone, Debug, Default, Pod, Zeroable)]
 pub struct Particle {
-    pub spawn_y: f32,
+    pub spawn_pos: [f32; 2],
+    pub spawn_vel: [f32; 2],
     pub spawn_time: f32,
     pub duration: f32,
     pub color: u32,
-    pub spawn_vel: [f32; 2],
+    pub _padding: f32,
 }

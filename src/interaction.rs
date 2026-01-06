@@ -136,11 +136,11 @@ impl InteractionState {
                     Point::new(mouse_pos.x - track_rect.x0, mouse_pos.y - track_rect.y0),
                 ));
             }
-            if playing {
-                self.last_event = InteractionEvent::Pause(Instant::now());
+            self.last_event = if playing {
+                InteractionEvent::Pause(Instant::now())
             } else {
-                self.last_event = InteractionEvent::Play(Instant::now());
-            }
+                InteractionEvent::Play(Instant::now())
+            };
             spawn(move || {
                 toggle_playing(!playing);
             });
@@ -564,26 +564,21 @@ fn update_star_rating(track_id: &TrackId, rating_slot: u8) {
 
     let mut playlists_to_remove_from = Vec::new();
     let mut playlists_to_add_to = Vec::new();
+
+    // Remove tracks from existing playlists, add to target playlist if not present
     update_playback_state(|state| {
         state.last_interaction = Instant::now() + Duration::from_millis(500);
-
-        // Remove tracks from existing playlists
-        for playlist in state.playlists.values_mut().filter(|playlist| {
-            playlist.rating_index.is_some()
+        state.playlists.values_mut().for_each(|playlist| {
+            if playlist.rating_index.is_some()
                 && playlist.rating_index != Some(rating_slot)
-                && playlist.tracks.contains(track_id)
-        }) {
-            playlist.tracks.remove(track_id);
-            playlists_to_remove_from.push((playlist.id, playlist.name.clone()));
-        }
-
-        // Add the track to the target playlist if it's not already there
-        for playlist in state.playlists.values_mut().filter(|playlist| {
-            playlist.rating_index == Some(rating_slot) && !playlist.tracks.contains(track_id)
-        }) {
-            playlist.tracks.insert(*track_id);
-            playlists_to_add_to.push((playlist.id, playlist.name.clone()));
-        }
+                && playlist.tracks.remove(track_id)
+            {
+                playlists_to_remove_from.push((playlist.id, playlist.name.clone()));
+            }
+            if playlist.rating_index == Some(rating_slot) && playlist.tracks.insert(*track_id) {
+                playlists_to_add_to.push((playlist.id, playlist.name.clone()));
+            }
+        });
     });
 
     // Make the changes

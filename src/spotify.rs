@@ -250,26 +250,26 @@ fn get_spotify_playback() {
 
     // Update the playback state
     update_playback_state(|state| {
-        let new_context = current_playback.context.map(|c| c.uri);
-        if state.current_context != new_context {
+        let new_context = current_playback.context.as_ref().map(|c| &c.uri);
+        let now = Instant::now();
+        let queue_deadline = now.checked_sub(Duration::from_secs(60)).unwrap();
+
+        if state.current_context.as_ref() != new_context {
             state.context_updated = true;
-            state.current_context = new_context;
-            state.last_grabbed_queue = Instant::now().checked_sub(Duration::from_secs(60)).unwrap();
+            state.current_context = new_context.map(String::from);
+            state.last_grabbed_queue = queue_deadline;
         }
 
         // Song has changed, lets update to the new index and force a queue refresh
         if let Some(track) = current_playback.item {
-            let queue_deadline = Instant::now().checked_sub(Duration::from_secs(60)).unwrap();
-            match state.queue.iter().position(|t| t.name == track.name) {
-                Some(new_index) if state.queue_index != new_index => {
-                    state.queue_index = new_index;
+            state.queue_index = state
+                .queue
+                .iter()
+                .position(|t| t.name == track.name)
+                .unwrap_or_else(|| {
                     state.last_grabbed_queue = queue_deadline;
-                }
-                None => {
-                    state.last_grabbed_queue = queue_deadline;
-                }
-                _ => {}
-            }
+                    0
+                });
         }
 
         state.volume = current_playback.device.volume_percent.map(|v| v as u8);
@@ -280,8 +280,8 @@ fn get_spotify_playback() {
             } else {
                 0
             };
-        state.last_progress_update = Instant::now();
-        state.last_grabbed_playback = Instant::now();
+        state.last_progress_update = now;
+        state.last_grabbed_playback = now;
     });
 }
 
