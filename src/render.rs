@@ -121,7 +121,7 @@ pub struct TrackRender<'a> {
 
 /// Build the scene for rendering.
 impl CantusApp {
-    pub fn create_scene(&mut self) {
+    pub fn create_scene(&mut self, image_map: &HashMap<String, i32>) {
         let now = Instant::now();
         let dt = now
             .duration_since(self.render_state.last_update)
@@ -265,7 +265,7 @@ impl CantusApp {
                     (end - timeline_start_ms) * px_per_ms + history_width,
                 ),
                 art_only: false,
-                image_index: *self.image_map.get(&track.album.image).unwrap_or(&-1),
+                image_index: self.get_image_index(&track.album.image, image_map),
             });
         }
 
@@ -303,6 +303,7 @@ impl CantusApp {
                 total_height,
                 origin_x,
                 &playback_state.playlists,
+                image_map,
             );
         }
 
@@ -323,6 +324,7 @@ impl CantusApp {
         height: f64,
         origin_x: f64,
         playlists: &HashMap<PlaylistId, CondensedPlaylist>,
+        image_map: &HashMap<String, i32>,
     ) {
         if track_render.width <= 0.0 {
             return;
@@ -524,7 +526,9 @@ impl CantusApp {
                 && hitbox
                     .inflate(0.0, 20.0)
                     .contains(self.interaction.mouse_position);
-            self.draw_playlist_buttons(track, hovered, playlists, width, height, start_x);
+            self.draw_playlist_buttons(
+                track, hovered, playlists, width, height, start_x, image_map,
+            );
         }
     }
 

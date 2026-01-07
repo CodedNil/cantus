@@ -1,34 +1,33 @@
-use crate::spotify::{IMAGES_CACHE, PLAYBACK_STATE};
-use crate::{
-    interaction::InteractionState,
-    render::{FontEngine, ParticlesState, RenderState},
-};
+use crate::image_manager::ImageManager;
+use crate::interaction::InteractionState;
+use crate::render::{FontEngine, ParticlesState, RenderState};
 use render_types::{BackgroundPill, IconInstance, Particle, ScreenUniforms, Shaders};
 use std::{
     collections::{HashMap, HashSet},
     sync::Arc,
 };
-use tracing_subscriber::EnvFilter;
 use vello::{
     AaConfig, AaSupport, Renderer, RendererOptions, Scene,
     peniko::color::AlphaColor,
     util::{RenderContext, RenderSurface},
 };
 use wgpu::{
-    BlendComponent, BlendFactor, BlendOperation, BlendState, CommandEncoderDescriptor,
-    CompositeAlphaMode, Extent3d, PresentMode, Surface, SurfaceConfiguration, TextureDescriptor,
-    TextureDimension, TextureFormat, TextureUsages, TextureViewDescriptor,
-    util::TextureBlitterBuilder,
+    AddressMode, BindGroup, BindGroupDescriptor, BindGroupEntry, BindingResource, BlendComponent,
+    BlendFactor, BlendOperation, BlendState, Buffer, BufferDescriptor, BufferUsages, Color,
+    CommandEncoderDescriptor, CompositeAlphaMode, Device, Extent3d, FilterMode, LoadOp, Operations,
+    PresentMode, Queue, RenderPassColorAttachment, RenderPassDescriptor, Sampler,
+    SamplerDescriptor, StoreOp, Surface, SurfaceConfiguration, TextureDescriptor, TextureDimension,
+    TextureFormat, TextureUsages, TextureViewDescriptor,
 };
 
 #[cfg(not(any(feature = "wayland", feature = "winit")))]
 compile_error!("Enable at least one of the `wayland` or `winit` features.");
-
 #[cfg(all(feature = "wayland", feature = "winit"))]
 compile_error!("`wayland` and `winit` features cannot be enabled at the same time.");
 
 mod background;
 mod config;
+mod image_manager;
 mod interaction;
 mod render;
 mod render_types;
@@ -46,24 +45,24 @@ const PANEL_START: f64 = 6.0;
 const PANEL_EXTENSION: f64 = 12.0;
 
 pub struct GpuResources {
-    pub device: Arc<wgpu::Device>,
-    pub queue: Arc<wgpu::Queue>,
+    pub device: Arc<Device>,
+    pub queue: Arc<Queue>,
     pub shaders: Shaders,
-    pub uniform_buffer: wgpu::Buffer,
-    pub storage_buffer: wgpu::Buffer,
-    pub particle_bind_group: wgpu::BindGroup,
-    pub bg_storage_buffer: wgpu::Buffer,
-    pub bg_bind_group: Option<wgpu::BindGroup>,
-    pub icon_storage_buffer: wgpu::Buffer,
-    pub icon_bind_group: Option<wgpu::BindGroup>,
-    pub bg_texture_array: Option<wgpu::Texture>,
-    pub bg_sampler: wgpu::Sampler,
-    pub last_texture_set: HashSet<String>,
+    pub uniform_buffer: Buffer,
+    pub storage_buffer: Buffer,
+    pub particle_bind_group: BindGroup,
+    pub bg_storage_buffer: Buffer,
+    pub bg_bind_group: Option<BindGroup>,
+    pub icon_storage_buffer: Buffer,
+    pub icon_bind_group: Option<BindGroup>,
+    pub bg_sampler: Sampler,
+    pub images: ImageManager,
+    pub requested_textures: HashSet<String>,
 }
 
 fn main() {
     tracing_subscriber::fmt()
-        .with_env_filter(EnvFilter::new(
+        .with_env_filter(tracing_subscriber::EnvFilter::new(
             ["warn", "cantus=info", "wgpu_hal=error"].join(","),
         ))
         .with_writer(std::io::stderr)
@@ -92,7 +91,6 @@ pub struct CantusApp {
     icon_pills: Vec<IconInstance>,
     gpu_resources: Option<GpuResources>,
     gpu_uniforms: Option<ScreenUniforms>,
-    pub image_map: HashMap<String, i32>,
 }
 
 impl Default for CantusApp {
@@ -111,10 +109,10 @@ impl Default for CantusApp {
             icon_pills: Vec::new(),
             gpu_resources: None,
             gpu_uniforms: None,
-            image_map: HashMap::new(),
         }
     }
 }
+
 impl CantusApp {
     fn configure_render_surface(&mut self, surface: Surface<'static>, width: u32, height: u32) {
         let dev_id = pollster::block_on(self.render_context.device(Some(&surface)))
@@ -152,6 +150,10 @@ impl CantusApp {
         let target_view = target_texture.create_view(&TextureViewDescriptor::default());
         let render_surface = RenderSurface {
             surface,
+            dev_id,
+            format,
+            target_texture,
+            target_view,
             config: SurfaceConfiguration {
                 usage: TextureUsages::RENDER_ATTACHMENT,
                 format,
@@ -162,11 +164,7 @@ impl CantusApp {
                 alpha_mode,
                 view_formats: vec![],
             },
-            dev_id,
-            format,
-            target_texture,
-            target_view,
-            blitter: TextureBlitterBuilder::new(&device_handle.device, format)
+            blitter: wgpu::util::TextureBlitterBuilder::new(&device_handle.device, format)
                 .blend_state(BlendState {
                     color: BlendComponent {
                         src_factor: BlendFactor::SrcAlpha,
@@ -199,67 +197,62 @@ impl CantusApp {
         );
 
         let shaders = Shaders::new(&device_handle.device, format);
-        let uniform_buffer = device_handle.device.create_buffer(&wgpu::BufferDescriptor {
-            label: Some("Common Uniform Buffer"),
+        let uniform_buffer = device_handle.device.create_buffer(&BufferDescriptor {
+            label: Some("Uniforms"),
             size: std::mem::size_of::<ScreenUniforms>() as u64,
-            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+            usage: BufferUsages::UNIFORM | BufferUsages::COPY_DST,
             mapped_at_creation: false,
         });
-
-        let storage_buffer = device_handle.device.create_buffer(&wgpu::BufferDescriptor {
-            label: Some("Particle Storage Buffer"),
+        let storage_buffer = device_handle.device.create_buffer(&BufferDescriptor {
+            label: Some("Particles"),
             size: (std::mem::size_of::<Particle>() * 64) as u64,
-            usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
+            usage: BufferUsages::STORAGE | BufferUsages::COPY_DST,
             mapped_at_creation: false,
         });
-
-        let particle_bind_group =
-            device_handle
-                .device
-                .create_bind_group(&wgpu::BindGroupDescriptor {
-                    label: Some("Particle Bind Group"),
-                    layout: &shaders.bind_group_layout,
-                    entries: &[
-                        wgpu::BindGroupEntry {
-                            binding: 0,
-                            resource: uniform_buffer.as_entire_binding(),
-                        },
-                        wgpu::BindGroupEntry {
-                            binding: 1,
-                            resource: storage_buffer.as_entire_binding(),
-                        },
-                    ],
-                });
-
-        let bg_storage_buffer = device_handle.device.create_buffer(&wgpu::BufferDescriptor {
-            label: Some("Background Storage Buffer"),
-            size: (std::mem::size_of::<BackgroundPill>() * 256) as u64,
-            usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
-            mapped_at_creation: false,
-        });
-
-        let icon_storage_buffer = device_handle.device.create_buffer(&wgpu::BufferDescriptor {
-            label: Some("Icon Storage Buffer"),
-            size: (std::mem::size_of::<IconInstance>() * 256) as u64,
-            usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
-            mapped_at_creation: false,
-        });
-
-        let bg_sampler = device_handle
+        let particle_bind_group = device_handle
             .device
-            .create_sampler(&wgpu::SamplerDescriptor {
-                address_mode_u: wgpu::AddressMode::ClampToEdge,
-                address_mode_v: wgpu::AddressMode::ClampToEdge,
-                address_mode_w: wgpu::AddressMode::ClampToEdge,
-                mag_filter: wgpu::FilterMode::Linear,
-                min_filter: wgpu::FilterMode::Linear,
-                mipmap_filter: wgpu::FilterMode::Nearest,
-                ..Default::default()
+            .create_bind_group(&BindGroupDescriptor {
+                label: Some("Particle BG"),
+                layout: &shaders.bind_group_layout,
+                entries: &[
+                    BindGroupEntry {
+                        binding: 0,
+                        resource: uniform_buffer.as_entire_binding(),
+                    },
+                    BindGroupEntry {
+                        binding: 1,
+                        resource: storage_buffer.as_entire_binding(),
+                    },
+                ],
             });
 
+        let bg_storage_buffer = device_handle.device.create_buffer(&BufferDescriptor {
+            label: Some("BG Pills"),
+            size: (std::mem::size_of::<BackgroundPill>() * 256) as u64,
+            usage: BufferUsages::STORAGE | BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+        let icon_storage_buffer = device_handle.device.create_buffer(&BufferDescriptor {
+            label: Some("Icons"),
+            size: (std::mem::size_of::<IconInstance>() * 256) as u64,
+            usage: BufferUsages::STORAGE | BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+        let bg_sampler = device_handle.device.create_sampler(&SamplerDescriptor {
+            address_mode_u: AddressMode::ClampToEdge,
+            address_mode_v: AddressMode::ClampToEdge,
+            address_mode_w: AddressMode::ClampToEdge,
+            mag_filter: FilterMode::Linear,
+            min_filter: FilterMode::Linear,
+            mipmap_filter: FilterMode::Nearest,
+            ..Default::default()
+        });
+
+        let device = Arc::new(device_handle.device.clone());
+        let queue = Arc::new(device_handle.queue.clone());
         self.gpu_resources = Some(GpuResources {
-            device: Arc::new(device_handle.device.clone()),
-            queue: Arc::new(device_handle.queue.clone()),
+            device: device.clone(),
+            queue: queue.clone(),
             shaders,
             uniform_buffer,
             storage_buffer,
@@ -268,178 +261,90 @@ impl CantusApp {
             bg_bind_group: None,
             icon_storage_buffer,
             icon_bind_group: None,
-            bg_texture_array: None,
             bg_sampler,
-            last_texture_set: HashSet::new(),
+            images: ImageManager::new(device, queue),
+            requested_textures: HashSet::new(),
         });
-
         self.render_surface = Some(render_surface);
     }
 
-    /// Try to render out the app
+    /// Render out the app
     fn render(&mut self) {
-        if self.render_surface.is_none() {
-            return;
-        }
+        let rs_ptr = self.render_surface.as_ref().unwrap();
+        let dev_id = rs_ptr.dev_id;
+
         self.scene.reset();
-        self.image_map.clear();
-
-        let mut current_texture_urls = Vec::new();
-        let mut url_to_index = HashMap::new();
-
-        // 1. Identify all unique images (both album queue and playlists)
-        {
-            let playback = PLAYBACK_STATE.read();
-            for track in &playback.queue {
-                if !current_texture_urls.contains(&track.album.image) {
-                    current_texture_urls.push(track.album.image.clone());
-                }
-            }
-            for playlist in playback.playlists.values() {
-                if !current_texture_urls.contains(&playlist.image_url) {
-                    current_texture_urls.push(playlist.image_url.clone());
-                }
-            }
-        }
-
-        let mut image_refs = Vec::new();
-        let mut valid_urls = Vec::new();
-        for url in &current_texture_urls {
-            if let Some(img_ref) = IMAGES_CACHE.get(url)
-                && img_ref.is_some()
-            {
-                url_to_index.insert(url.clone(), valid_urls.len() as i32);
-                image_refs.push(img_ref);
-                valid_urls.push(url.clone());
-            }
-        }
-
-        let needs_texture_update = self.gpu_resources.as_ref().is_none_or(|gpu| {
-            let current_set: HashSet<String> = valid_urls.iter().cloned().collect();
-            current_set != gpu.last_texture_set
-        });
-        self.image_map = url_to_index;
-
-        // Now build the scene (fills background_pills and icon_pills)
+        self.background_pills.clear();
         self.icon_pills.clear();
-        self.create_scene();
+        if let Some(gpu) = self.gpu_resources.as_mut() {
+            gpu.requested_textures.clear();
+        }
 
-        // Collect the raw image pointers safely
-        let mut unique_textures = Vec::new();
-        for img_ref in &image_refs {
-            if let Some(img) = img_ref.as_ref() {
-                unique_textures.push(&img.image);
+        let current_indices = self
+            .gpu_resources
+            .as_ref()
+            .map(|g| g.images.url_to_index.clone())
+            .unwrap_or_default();
+        self.create_scene(&current_indices);
+
+        let next_indices = if let Some(gpu) = self.gpu_resources.as_mut()
+            && gpu.images.update(&gpu.requested_textures)
+        {
+            Some(gpu.images.url_to_index.clone())
+        } else {
+            None
+        };
+
+        if let Some(idx) = next_indices {
+            self.scene.reset();
+            self.background_pills.clear();
+            self.icon_pills.clear();
+            self.create_scene(&idx);
+
+            if let Some(gpu) = self.gpu_resources.as_mut()
+                && let Some(view) = gpu.images.create_view()
+            {
+                let make_bg = |label, layout, storage: BindingResource| {
+                    gpu.device.create_bind_group(&BindGroupDescriptor {
+                        label: Some(label),
+                        layout,
+                        entries: &[
+                            BindGroupEntry {
+                                binding: 0,
+                                resource: gpu.uniform_buffer.as_entire_binding(),
+                            },
+                            BindGroupEntry {
+                                binding: 1,
+                                resource: storage,
+                            },
+                            BindGroupEntry {
+                                binding: 2,
+                                resource: BindingResource::TextureView(&view),
+                            },
+                            BindGroupEntry {
+                                binding: 3,
+                                resource: BindingResource::Sampler(&gpu.bg_sampler),
+                            },
+                        ],
+                    })
+                };
+                gpu.bg_bind_group = Some(make_bg(
+                    "BG BG",
+                    &gpu.shaders.bg_bind_group_layout,
+                    gpu.bg_storage_buffer.as_entire_binding(),
+                ));
+                gpu.icon_bind_group = Some(make_bg(
+                    "Icon BG",
+                    &gpu.shaders.icon_bind_group_layout,
+                    gpu.icon_storage_buffer.as_entire_binding(),
+                ));
             }
         }
 
-        // --- PREPARE GPU RESOURCES (Texture Array & Bind Group) ---
-        if let Some(gpu) = self.gpu_resources.as_mut() {
-            // Create or update the texture array if we have images
-            if needs_texture_update && !unique_textures.is_empty() {
-                let width = unique_textures[0].width;
-                let height = unique_textures[0].height;
-                let layers = unique_textures.len() as u32;
-
-                let texture = gpu.device.create_texture(&wgpu::TextureDescriptor {
-                    label: Some("Background Texture Array"),
-                    size: wgpu::Extent3d {
-                        width,
-                        height,
-                        depth_or_array_layers: layers,
-                    },
-                    mip_level_count: 1,
-                    sample_count: 1,
-                    dimension: wgpu::TextureDimension::D2,
-                    format: wgpu::TextureFormat::Rgba8Unorm,
-                    usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
-                    view_formats: &[],
-                });
-
-                for (i, img) in unique_textures.iter().enumerate() {
-                    gpu.queue.write_texture(
-                        wgpu::TexelCopyTextureInfo {
-                            texture: &texture,
-                            mip_level: 0,
-                            origin: wgpu::Origin3d {
-                                x: 0,
-                                y: 0,
-                                z: i as u32,
-                            },
-                            aspect: wgpu::TextureAspect::All,
-                        },
-                        img.data.as_ref(), // Use .as_ref() to get &[u8] from Blob<u8>
-                        wgpu::TexelCopyBufferLayout {
-                            offset: 0,
-                            bytes_per_row: Some(4 * width),
-                            rows_per_image: Some(height),
-                        },
-                        wgpu::Extent3d {
-                            width,
-                            height,
-                            depth_or_array_layers: 1,
-                        },
-                    );
-                }
-
-                let view = texture.create_view(&wgpu::TextureViewDescriptor {
-                    dimension: Some(wgpu::TextureViewDimension::D2Array),
-                    ..Default::default()
-                });
-
-                gpu.bg_bind_group =
-                    Some(gpu.device.create_bind_group(&wgpu::BindGroupDescriptor {
-                        label: Some("Background Bind Group"),
-                        layout: &gpu.shaders.bg_bind_group_layout,
-                        entries: &[
-                            wgpu::BindGroupEntry {
-                                binding: 0,
-                                resource: gpu.uniform_buffer.as_entire_binding(),
-                            },
-                            wgpu::BindGroupEntry {
-                                binding: 1,
-                                resource: gpu.bg_storage_buffer.as_entire_binding(),
-                            },
-                            wgpu::BindGroupEntry {
-                                binding: 2,
-                                resource: wgpu::BindingResource::TextureView(&view),
-                            },
-                            wgpu::BindGroupEntry {
-                                binding: 3,
-                                resource: wgpu::BindingResource::Sampler(&gpu.bg_sampler),
-                            },
-                        ],
-                    }));
-
-                gpu.icon_bind_group =
-                    Some(gpu.device.create_bind_group(&wgpu::BindGroupDescriptor {
-                        label: Some("Icon Bind Group"),
-                        layout: &gpu.shaders.icon_bind_group_layout,
-                        entries: &[
-                            wgpu::BindGroupEntry {
-                                binding: 0,
-                                resource: gpu.uniform_buffer.as_entire_binding(),
-                            },
-                            wgpu::BindGroupEntry {
-                                binding: 1,
-                                resource: gpu.icon_storage_buffer.as_entire_binding(),
-                            },
-                            wgpu::BindGroupEntry {
-                                binding: 2,
-                                resource: wgpu::BindingResource::TextureView(&view),
-                            },
-                            wgpu::BindGroupEntry {
-                                binding: 3,
-                                resource: wgpu::BindingResource::Sampler(&gpu.bg_sampler),
-                            },
-                        ],
-                    }));
-                gpu.bg_texture_array = Some(texture);
-                gpu.last_texture_set = valid_urls.into_iter().collect();
-            }
-
-            if let Some(gpu_uniforms) = self.gpu_uniforms.as_ref() {
+        if let Some(gpu) = self.gpu_resources.as_ref() {
+            if let Some(u) = self.gpu_uniforms.as_ref() {
                 gpu.queue
-                    .write_buffer(&gpu.uniform_buffer, 0, bytemuck::bytes_of(gpu_uniforms));
+                    .write_buffer(&gpu.uniform_buffer, 0, bytemuck::bytes_of(u));
             }
             gpu.queue.write_buffer(
                 &gpu.storage_buffer,
@@ -462,14 +367,8 @@ impl CantusApp {
             }
         }
 
-        // Explicitly drop image_refs after GPU upload
-        drop(image_refs);
-
-        // Now we can safely borrow other parts
-        let render_surface_ref = self.render_surface.as_ref().unwrap();
-        let dev_id = render_surface_ref.dev_id;
+        let rs = self.render_surface.as_mut().unwrap();
         let handle = &self.render_context.devices[dev_id];
-
         self.render_device
             .as_mut()
             .unwrap()
@@ -477,26 +376,20 @@ impl CantusApp {
                 &handle.device,
                 &handle.queue,
                 &self.scene,
-                &render_surface_ref.target_view,
+                &rs.target_view,
                 &vello::RenderParams {
                     base_color: AlphaColor::from_rgba8(0, 0, 0, 0),
-                    width: render_surface_ref.config.width,
-                    height: render_surface_ref.config.height,
+                    width: rs.config.width,
+                    height: rs.config.height,
                     antialiasing_method: AaConfig::Area,
                 },
             )
-            .expect("failed to render to surface");
+            .unwrap();
 
-        let render_surface = self.render_surface.as_mut().unwrap();
-        let Ok(surface_texture) = render_surface.surface.get_current_texture() else {
-            let render_surface = self.render_surface.as_mut().unwrap();
-            render_surface.surface.configure(
-                &self.render_context.devices[render_surface.dev_id].device,
-                &render_surface.config,
-            );
+        let Ok(surface_texture) = rs.surface.get_current_texture() else {
+            rs.surface.configure(&handle.device, &rs.config);
             return;
         };
-
         let surface_view = surface_texture
             .texture
             .create_view(&TextureViewDescriptor::default());
@@ -504,95 +397,73 @@ impl CantusApp {
         if let Some(gpu) = self.gpu_resources.as_ref() {
             let mut encoder = handle
                 .device
-                .create_command_encoder(&CommandEncoderDescriptor {
-                    label: Some("Main Render Encoder"),
-                });
-
-            // 1. CLEAR AND RENDER BACKGROUND PILLS
-            {
-                let mut rpass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                .create_command_encoder(&CommandEncoderDescriptor { label: None });
+            if let Some(bg_bind_group) = &gpu.bg_bind_group {
+                let mut rpass = encoder.begin_render_pass(&RenderPassDescriptor {
                     label: Some("Background Pass"),
-                    color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                    color_attachments: &[Some(RenderPassColorAttachment {
                         view: &surface_view,
                         resolve_target: None,
-                        ops: wgpu::Operations {
-                            load: wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT),
-                            store: wgpu::StoreOp::Store,
+                        ops: Operations {
+                            load: LoadOp::Clear(Color::TRANSPARENT),
+                            store: StoreOp::Store,
                         },
                         depth_slice: None,
                     })],
-                    depth_stencil_attachment: None,
-                    timestamp_writes: None,
-                    occlusion_query_set: None,
+                    ..Default::default()
                 });
-
-                if let Some(bind_group) = &gpu.bg_bind_group {
-                    rpass.set_pipeline(&gpu.shaders.bg_pipeline);
-                    rpass.set_bind_group(0, bind_group, &[]);
-                    rpass.draw(0..4, 0..self.background_pills.len() as u32);
-                }
+                rpass.set_pipeline(&gpu.shaders.bg_pipeline);
+                rpass.set_bind_group(0, bg_bind_group, &[]);
+                rpass.draw(0..4, 0..self.background_pills.len() as u32);
             }
-
-            // 2. RENDER ICONS
-            {
-                let mut rpass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+            if let Some(icon_bind_group) = &gpu.icon_bind_group {
+                let mut rpass = encoder.begin_render_pass(&RenderPassDescriptor {
                     label: Some("Icon Pass"),
-                    color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                    color_attachments: &[Some(RenderPassColorAttachment {
                         view: &surface_view,
                         resolve_target: None,
-                        ops: wgpu::Operations {
-                            load: wgpu::LoadOp::Load,
-                            store: wgpu::StoreOp::Store,
+                        ops: Operations {
+                            load: LoadOp::Load,
+                            store: StoreOp::Store,
                         },
                         depth_slice: None,
                     })],
-                    depth_stencil_attachment: None,
-                    timestamp_writes: None,
-                    occlusion_query_set: None,
+                    ..Default::default()
                 });
-
-                if let Some(bind_group) = &gpu.icon_bind_group {
-                    rpass.set_pipeline(&gpu.shaders.icon_pipeline);
-                    rpass.set_bind_group(0, bind_group, &[]);
-                    rpass.draw(0..4, 0..self.icon_pills.len() as u32);
-                }
+                rpass.set_pipeline(&gpu.shaders.icon_pipeline);
+                rpass.set_bind_group(0, icon_bind_group, &[]);
+                rpass.draw(0..4, 0..self.icon_pills.len() as u32);
             }
-
-            // 3. BLIT VELLO SCENE ON TOP
-            render_surface.blitter.copy(
-                &handle.device,
-                &mut encoder,
-                &render_surface.target_view,
-                &surface_view,
-            );
-
-            // 4. RENDER PARTICLES ON TOP
+            rs.blitter
+                .copy(&handle.device, &mut encoder, &rs.target_view, &surface_view);
             {
-                let mut rpass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                let mut rpass = encoder.begin_render_pass(&RenderPassDescriptor {
                     label: Some("Particle Pass"),
-                    color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                    color_attachments: &[Some(RenderPassColorAttachment {
                         view: &surface_view,
                         resolve_target: None,
-                        ops: wgpu::Operations {
-                            load: wgpu::LoadOp::Load,
-                            store: wgpu::StoreOp::Store,
+                        ops: Operations {
+                            load: LoadOp::Load,
+                            store: StoreOp::Store,
                         },
                         depth_slice: None,
                     })],
-                    depth_stencil_attachment: None,
-                    timestamp_writes: None,
-                    occlusion_query_set: None,
+                    ..Default::default()
                 });
-
                 rpass.set_pipeline(&gpu.shaders.pipeline);
                 rpass.set_bind_group(0, &gpu.particle_bind_group, &[]);
                 rpass.draw(0..4, 0..1);
             }
-
             handle.queue.submit([encoder.finish()]);
         }
-
         surface_texture.present();
+    }
+
+    pub fn get_image_index(&mut self, url: &str, image_map: &HashMap<String, i32>) -> i32 {
+        if let Some(gpu) = self.gpu_resources.as_mut() {
+            gpu.requested_textures.insert(url.to_owned());
+        }
+        image_map.get(url).copied().unwrap_or(-1)
     }
 }
 

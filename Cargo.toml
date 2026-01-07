@@ -79,6 +79,7 @@ bytemuck = { version = "1.24.0", features = ["derive"] }
 pedantic = { level = "warn", priority = -1 }
 nursery = { level = "warn", priority = -1 }
 too-many-lines = "allow"
+too-many-arguments = "allow"
 cast-possible-truncation = "allow"
 cast-precision-loss = "allow"
 cast-sign-loss = "allow"
