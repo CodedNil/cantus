@@ -608,11 +608,10 @@ fn toggle_playlist_membership(track_id: &TrackId, playlist_id: &PlaylistId) {
     }
 }
 
-/// Toggle Spotify playlist membership for the given track.
+/// Set Spotify playing or paused.
 fn toggle_playing(play: bool) {
     info!("{} current track", if play { "Playing" } else { "Pausing" });
     update_playback_state(|state| {
-        state.last_interaction = Instant::now() + Duration::from_millis(2000);
         state.playing = play;
     });
     // https://developer.spotify.com/documentation/web-api/reference/#/operations/start-a-users-playback
@@ -629,9 +628,6 @@ fn toggle_playing(play: bool) {
 /// Set the volume of the current playback device.
 fn set_volume(volume_percent: u8) {
     info!("Setting volume to {}%", volume_percent);
-    update_playback_state(|state| {
-        state.last_interaction = Instant::now() + Duration::from_millis(500);
-    });
     // https://developer.spotify.com/documentation/web-api/reference/#/operations/set-volume-for-users-playback
     if let Err(err) =
         SPOTIFY_CLIENT.api_put(&format!("me/player/volume?volume_percent={volume_percent}"))

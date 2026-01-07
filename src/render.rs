@@ -28,7 +28,7 @@ const SPARK_VELOCITY_Y: Range<usize> = 30..70;
 const SPARK_LIFETIME: Range<f32> = 0.4..0.9;
 
 /// Duration for animation events
-const ANIMATION_DURATION: f32 = 3.5;
+const ANIMATION_DURATION: f32 = 2.0;
 
 pub struct RenderState {
     pub last_update: Instant,
@@ -633,46 +633,44 @@ impl CantusApp {
             origin_x + playbutton_hsize,
             PANEL_START + height,
         );
+        // Get playhead states
         let playhead_hovered = interaction.play_hitbox.contains(interaction.mouse_position);
         let last_event = interaction.last_event.elapsed().as_secs_f32() / ANIMATION_DURATION;
-        if playhead_hovered && last_event > 0.1 {
-            move_towards(&mut interaction.playhead_bar, 1.0, speed);
+
+        // Determine the intended state for the bar
+        let bar_target =
+            u32::from(playhead_hovered || !interaction.playing || last_event < 1.0) as f32;
+        move_towards(&mut interaction.playhead_bar, bar_target, speed);
+
+        // Determine which icon (if any) is currently active
+        let (mut play_active, mut pause_active) = (false, false);
+        if playhead_hovered {
             if interaction.playing {
-                move_towards(&mut interaction.playhead_pause, 0.5, speed);
+                pause_active = true;
             } else {
-                move_towards(&mut interaction.playhead_play, 0.5, speed);
+                play_active = true;
             }
         } else if !interaction.playing {
-            move_towards(&mut interaction.playhead_bar, 1.0, speed);
-            move_towards(&mut interaction.playhead_pause, 0.5, speed);
-        } else if last_event < 1.0 {
-            if last_event < 0.5 {
-                move_towards(&mut interaction.playhead_bar, 1.0, speed);
-            } else {
-                move_towards(&mut interaction.playhead_bar, 0.0, speed);
-            }
-        } else {
-            move_towards(&mut interaction.playhead_bar, 0.0, speed);
+            pause_active = true;
+        } else if interaction.playing && last_event < 1.0 {
+            interaction.playhead_play = last_event; // Hard set for the "start" animation
+            play_active = true;
+        }
 
-            // Reset the play and pause icons
-            if interaction.playhead_play >= 1.0 {
-                interaction.playhead_play = 0.0;
-            } else if interaction.playhead_play != 0.0 {
-                move_towards(&mut interaction.playhead_play, 1.0, speed);
-            }
-            if interaction.playhead_pause >= 1.0 {
-                interaction.playhead_pause = 0.0;
-            } else if interaction.playhead_pause != 0.0 {
-                move_towards(&mut interaction.playhead_pause, 1.0, speed);
+        // If active, move toward 0.5. If inactive, finish the animation to 1.0 then reset to 0.0.
+        for (val, is_active) in [
+            (&mut interaction.playhead_play, play_active),
+            (&mut interaction.playhead_pause, pause_active),
+        ] {
+            if is_active {
+                move_towards(val, 0.5, speed);
+            } else if *val > 0.0 {
+                move_towards(val, 1.0, speed);
+                if *val >= 1.0 {
+                    *val = 0.0;
+                }
             }
         }
-        println!(
-            "{} Play: {}, Pause: {}  {}",
-            interaction.playhead_bar,
-            interaction.playhead_play,
-            interaction.playhead_pause,
-            interaction.playing
-        );
 
         self.playhead_info = Some(PlayheadUniforms {
             origin_x: origin_x as f32,
