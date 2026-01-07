@@ -19,7 +19,6 @@ pub struct IconHitbox {
 }
 
 pub struct InteractionState {
-    pub last_event: InteractionEvent,
     pub last_click: (Instant, TrackId, Point),
     pub mouse_position: Point,
     #[cfg(feature = "wayland")]
@@ -32,14 +31,17 @@ pub struct InteractionState {
     pub drag_track: Option<(TrackId, f64)>,
     pub dragging: bool,
     pub drag_delta_pixels: f64,
+    // Playhead
+    pub last_event: Instant,
+    pub playing: bool,
+    pub playhead_bar: f32,
+    pub playhead_play: f32,
+    pub playhead_pause: f32,
 }
 
 impl Default for InteractionState {
     fn default() -> Self {
         Self {
-            last_event: InteractionEvent::Pause(
-                Instant::now().checked_sub(Duration::from_secs(5)).unwrap(),
-            ),
             last_click: (
                 Instant::now().checked_sub(Duration::from_secs(5)).unwrap(),
                 TrackId::default(),
@@ -56,6 +58,11 @@ impl Default for InteractionState {
             drag_track: None,
             dragging: false,
             drag_delta_pixels: 0.0,
+            last_event: Instant::now().checked_sub(Duration::from_secs(5)).unwrap(),
+            playing: false,
+            playhead_bar: 0.0,
+            playhead_play: 0.0,
+            playhead_pause: 0.0,
         }
     }
 }
@@ -136,11 +143,7 @@ impl InteractionState {
                     Point::new(mouse_pos.x - track_rect.x0, mouse_pos.y - track_rect.y0),
                 );
             }
-            self.last_event = if playing {
-                InteractionEvent::Pause(Instant::now())
-            } else {
-                InteractionEvent::Play(Instant::now())
-            };
+            self.last_event = Instant::now();
             spawn(move || {
                 toggle_playing(!playing);
             });
@@ -214,14 +217,6 @@ impl InteractionState {
         self.drag_delta_pixels = 0.0;
         PLAYBACK_STATE.write().interaction = false;
     }
-}
-
-#[derive(PartialEq, Eq)]
-pub enum InteractionEvent {
-    Pause(Instant),
-    Play(Instant),
-    PauseHover(Instant),
-    PlayHover(Instant),
 }
 
 enum IconEntry<'a> {

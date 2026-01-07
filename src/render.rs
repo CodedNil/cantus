@@ -1,22 +1,16 @@
 use crate::{
     CantusApp, PANEL_EXTENSION, PANEL_START,
     config::CONFIG,
-    interaction::InteractionEvent,
-    lerpf32, lerpf64,
-    render_types::{BackgroundPill, Particle, ScreenUniforms},
+    lerpf32,
+    render_types::{BackgroundPill, Particle, PlayheadUniforms, ScreenUniforms},
     rspotify::{PlaylistId, Track},
     spotify::{ALBUM_DATA_CACHE, CondensedPlaylist, PLAYBACK_STATE},
 };
-use std::{
-    collections::HashMap,
-    ops::Range,
-    sync::LazyLock,
-    time::{Duration, Instant},
-};
+use std::{collections::HashMap, ops::Range, sync::LazyLock, time::Instant};
 use ttf_parser::{Face, Tag};
 use vello::{
     Glyph,
-    kurbo::{Affine, BezPath, Rect, RoundedRect, Shape},
+    kurbo::{Affine, Rect, RoundedRect},
     peniko::{Blob, Color, Fill, FontData},
 };
 
@@ -34,10 +28,7 @@ const SPARK_VELOCITY_Y: Range<usize> = 30..70;
 const SPARK_LIFETIME: Range<f32> = 0.4..0.9;
 
 /// Duration for animation events
-const ANIMATION_DURATION: Duration = Duration::from_millis(3500);
-
-static PLAY_SVG: LazyLock<BezPath> =
-    LazyLock::new(|| BezPath::from_svg(include_str!("../assets/play.path")).unwrap());
+const ANIMATION_DURATION: f32 = 3.5;
 
 pub struct RenderState {
     pub last_update: Instant,
@@ -156,53 +147,9 @@ impl CantusApp {
             .queue_index
             .min(playback_state.queue.len() - 1);
 
-        // Play button hitbox
-        let playbutton_hsize = total_height * 0.25;
-        self.interaction.play_hitbox = Rect::new(
-            origin_x - playbutton_hsize,
-            PANEL_START,
-            origin_x + playbutton_hsize,
-            PANEL_START + total_height,
-        );
-        let play_button_hovered = self
-            .interaction
-            .play_hitbox
-            .contains(self.interaction.mouse_position);
-        if play_button_hovered {
-            if playback_state.playing
-                && !matches!(self.interaction.last_event, InteractionEvent::PauseHover(_))
-            {
-                self.interaction.last_event = InteractionEvent::PauseHover(now);
-            }
-            if !playback_state.playing
-                && !matches!(self.interaction.last_event, InteractionEvent::PlayHover(_))
-            {
-                self.interaction.last_event = InteractionEvent::PlayHover(now);
-            }
-        }
-
-        // Update interaction events
-        match self.interaction.last_event {
-            InteractionEvent::Pause(_) => {
-                if playback_state.playing {
-                    self.interaction.last_event = InteractionEvent::Play(now);
-                }
-            }
-            InteractionEvent::Play(_) => {
-                if !playback_state.playing {
-                    self.interaction.last_event = InteractionEvent::Pause(now);
-                }
-            }
-            InteractionEvent::PauseHover(_) | InteractionEvent::PlayHover(_) => {
-                if !play_button_hovered {
-                    let instant = now.checked_sub(Duration::from_secs(5)).unwrap();
-                    self.interaction.last_event = if playback_state.playing {
-                        InteractionEvent::Play(instant)
-                    } else {
-                        InteractionEvent::Pause(instant)
-                    }
-                }
-            }
+        if playback_state.playing != self.interaction.playing {
+            self.interaction.playing = playback_state.playing;
+            self.interaction.last_event = Instant::now();
         }
         if self.interaction.dragging {
             self.interaction.drag_track = None;
@@ -308,7 +255,7 @@ impl CantusApp {
         }
 
         // Draw the particles
-        self.render_playing_particles(
+        self.render_playhead_particles(
             dt as f32,
             &playback_state.queue[cur_idx],
             origin_x,
@@ -375,12 +322,11 @@ impl CantusApp {
         let (expansion_time, expansion_pos) = {
             let (c_inst, c_track, c_pt) = self.interaction.last_click;
             let c_time = c_inst.duration_since(*START_TIME).as_secs_f32();
-            let e_time = match self.interaction.last_event {
-                InteractionEvent::Pause(inst) | InteractionEvent::Play(inst) => {
-                    inst.duration_since(*START_TIME).as_secs_f32()
-                }
-                _ => 0.0,
-            };
+            let e_time = self
+                .interaction
+                .last_event
+                .duration_since(*START_TIME)
+                .as_secs_f32();
 
             if c_track == track.id && (c_time > e_time || !track_render.is_current) {
                 (
@@ -594,11 +540,11 @@ impl CantusApp {
             .draw(Fill::EvenOdd, l.glyphs.iter().copied());
     }
 
-    fn render_playing_particles(
+    fn render_playhead_particles(
         &mut self,
         dt: f32,
         track: &Track,
-        x: f64,
+        origin_x: f64,
         height: f64,
         track_move_speed: f32,
         volume: Option<u8>,
@@ -662,7 +608,7 @@ impl CantusApp {
             // Emit a new particle
             if emit_count > 0 && time > particle.spawn_time + particle.duration {
                 particle.spawn_pos = [
-                    x as f32,
+                    origin_x as f32,
                     PANEL_START as f32 + height as f32 * lerpf32(fastrand::f32(), 0.1, 0.95),
                 ];
                 particle.spawn_vel = [
@@ -677,112 +623,75 @@ impl CantusApp {
             }
         }
 
-        // Line and Volume logic
-        let line_width = 4.0 * self.scale_factor;
-        let line_color = Color::from_rgb8(255, 224, 210);
-        let line_x = x - line_width * 0.5;
-        let anim_lerp = match self.interaction.last_event {
-            InteractionEvent::Play(start) => (start.elapsed().as_millis() as f64
-                / ANIMATION_DURATION.as_millis() as f64)
-                .clamp(0.0, 1.0),
-            InteractionEvent::Pause(start) => (start.elapsed().as_millis() as f64
-                / ANIMATION_DURATION.as_millis() as f64)
-                .clamp(0.0, 0.5),
-            InteractionEvent::PauseHover(start) | InteractionEvent::PlayHover(start) => {
-                (start.elapsed().as_millis() as f64
-                    / (ANIMATION_DURATION.as_millis() as f64 * 0.25))
-                    .clamp(0.0, 0.5)
+        // Playhead
+        let interaction = &mut self.interaction;
+        let playbutton_hsize = height * 0.25;
+        let speed = 2.2 * dt;
+        interaction.play_hitbox = Rect::new(
+            origin_x - playbutton_hsize,
+            PANEL_START,
+            origin_x + playbutton_hsize,
+            PANEL_START + height,
+        );
+        let playhead_hovered = interaction.play_hitbox.contains(interaction.mouse_position);
+        let last_event = interaction.last_event.elapsed().as_secs_f32() / ANIMATION_DURATION;
+        if playhead_hovered && last_event > 0.1 {
+            move_towards(&mut interaction.playhead_bar, 1.0, speed);
+            if interaction.playing {
+                move_towards(&mut interaction.playhead_pause, 0.5, speed);
+            } else {
+                move_towards(&mut interaction.playhead_play, 0.5, speed);
             }
-        };
-        if anim_lerp < 1.0 {
-            // Start with the lines split, then 3/4 way through close them again
-            let line_height = height * lerpf64(((anim_lerp - 0.75) * 4.0).max(0.0), 0.2, 0.5);
-            self.scene.fill(
-                Fill::EvenOdd,
-                Affine::translate((line_x, PANEL_START)),
-                line_color,
-                None,
-                &RoundedRect::new(0.0, 0.0, line_width, line_height, 100.0),
-            );
-            self.scene.fill(
-                Fill::EvenOdd,
-                Affine::translate((line_x, PANEL_START + height - line_height)),
-                line_color,
-                None,
-                &RoundedRect::new(0.0, 0.0, line_width, line_height, 100.0),
-            );
-
-            let icon_height = PANEL_START + height * 0.3;
-            let is_paused = matches!(
-                self.interaction.last_event,
-                InteractionEvent::Pause(_) | InteractionEvent::PauseHover(_)
-            );
-            if is_paused || anim_lerp < 0.5 {
-                // Two lines for pause, during a pause its always there, when on play it fades out
-                let anim_lerp = if is_paused {
-                    anim_lerp
-                } else {
-                    (anim_lerp + 0.5) * 1.5
-                };
-                let icon_fade = ((anim_lerp - 0.75) * 4.0).clamp(0.0, 1.0);
-                let icon_color = line_color.with_alpha(1.0 - icon_fade as f32);
-                let icon_offset = 5.0 * (anim_lerp * 4.0).min(1.0) + 4.0 * icon_fade;
-                self.scene.fill(
-                    Fill::EvenOdd,
-                    Affine::translate((line_x - icon_offset, icon_height)),
-                    icon_color,
-                    None,
-                    &RoundedRect::new(0.0, 0.0, line_width, icon_height, 100.0),
-                );
-                self.scene.fill(
-                    Fill::EvenOdd,
-                    Affine::translate((line_x + icon_offset, icon_height)),
-                    icon_color,
-                    None,
-                    &RoundedRect::new(0.0, 0.0, line_width, icon_height, 100.0),
-                );
-            }
-            if !is_paused || anim_lerp < 0.5 {
-                // Render out the play icon svg, grow it in the first quarter, then keep in place for half, then expand out with a fade in final quarter
-                let anim_lerp = if is_paused {
-                    (anim_lerp + 0.5) * 2.0
-                } else {
-                    anim_lerp
-                };
-                let icon_fade = ((anim_lerp - 0.75) * 4.0).clamp(0.0, 1.0);
-                let icon_color = line_color.with_alpha(1.0 - icon_fade as f32);
-                let play_icon_width = PLAY_SVG.bounding_box().width();
-                let icon_scale = icon_height * (anim_lerp * 4.0).min(1.0) + 0.5 * icon_fade;
-                self.scene.fill(
-                    Fill::EvenOdd,
-                    Affine::translate((
-                        line_x - icon_scale * 0.3,
-                        PANEL_START + height * 0.5 - icon_scale * 0.5,
-                    )) * Affine::scale(icon_scale / play_icon_width),
-                    icon_color,
-                    None,
-                    &*PLAY_SVG,
-                );
+        } else if !interaction.playing {
+            move_towards(&mut interaction.playhead_bar, 1.0, speed);
+            move_towards(&mut interaction.playhead_pause, 0.5, speed);
+        } else if last_event < 1.0 {
+            if last_event < 0.5 {
+                move_towards(&mut interaction.playhead_bar, 1.0, speed);
+            } else {
+                move_towards(&mut interaction.playhead_bar, 0.0, speed);
             }
         } else {
-            // Volume display bar
-            let volume = f64::from(volume.unwrap_or(100)) / 100.0;
-            if volume < 1.0 {
-                self.scene.fill(
-                    Fill::EvenOdd,
-                    Affine::translate((line_x, PANEL_START)),
-                    Color::from_rgb8(150, 150, 150),
-                    None,
-                    &RoundedRect::new(0.0, 0.0, line_width, height, 100.0),
-                );
+            move_towards(&mut interaction.playhead_bar, 0.0, speed);
+
+            // Reset the play and pause icons
+            if interaction.playhead_play >= 1.0 {
+                interaction.playhead_play = 0.0;
+            } else if interaction.playhead_play != 0.0 {
+                move_towards(&mut interaction.playhead_play, 1.0, speed);
             }
-            self.scene.fill(
-                Fill::EvenOdd,
-                Affine::translate((line_x, PANEL_START + height * (1.0 - volume))),
-                line_color,
-                None,
-                &RoundedRect::new(0.0, 0.0, line_width, height * volume, 100.0),
-            );
+            if interaction.playhead_pause >= 1.0 {
+                interaction.playhead_pause = 0.0;
+            } else if interaction.playhead_pause != 0.0 {
+                move_towards(&mut interaction.playhead_pause, 1.0, speed);
+            }
         }
+        println!(
+            "{} Play: {}, Pause: {}  {}",
+            interaction.playhead_bar,
+            interaction.playhead_play,
+            interaction.playhead_pause,
+            interaction.playing
+        );
+
+        self.playhead_info = Some(PlayheadUniforms {
+            origin_x: origin_x as f32,
+            panel_start: PANEL_START as f32,
+            height: height as f32,
+            volume: f64::from(volume.unwrap_or(100)) as f32 / 100.0,
+            bar_lerp: interaction.playhead_bar,
+            play_lerp: interaction.playhead_play,
+            pause_lerp: interaction.playhead_pause,
+            _padding: 0.0,
+        });
+    }
+}
+
+fn move_towards(current: &mut f32, target: f32, speed: f32) {
+    let delta = target - *current;
+    if delta.abs() <= speed {
+        *current = target;
+    } else {
+        *current += delta.signum() * speed;
     }
 }

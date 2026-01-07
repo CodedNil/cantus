@@ -15,6 +15,8 @@ pub struct Shaders {
     pub bg_bind_group_layout: BindGroupLayout,
     pub icon_pipeline: RenderPipeline,
     pub icon_bind_group_layout: BindGroupLayout,
+    pub playhead_pipeline: RenderPipeline,
+    pub playhead_bind_group_layout: BindGroupLayout,
 }
 
 impl Shaders {
@@ -31,6 +33,10 @@ impl Shaders {
         let icon_shader = device.create_shader_module(ShaderModuleDescriptor {
             label: Some("Icons Shader"),
             source: ShaderSource::Wgsl(include_str!("../assets/icons.wgsl").into()),
+        });
+        let playhead_shader = device.create_shader_module(ShaderModuleDescriptor {
+            label: Some("Playhead Shader"),
+            source: ShaderSource::Wgsl(include_str!("../assets/playhead.wgsl").into()),
         });
 
         // Bind Group Layouts
@@ -104,6 +110,33 @@ impl Shaders {
                 ],
             });
 
+        let playhead_bind_group_layout =
+            device.create_bind_group_layout(&BindGroupLayoutDescriptor {
+                label: Some("Playhead Layout"),
+                entries: &[
+                    BindGroupLayoutEntry {
+                        binding: 0,
+                        visibility: ShaderStages::FRAGMENT,
+                        ty: BindingType::Buffer {
+                            ty: BufferBindingType::Uniform,
+                            has_dynamic_offset: false,
+                            min_binding_size: None,
+                        },
+                        count: None,
+                    },
+                    BindGroupLayoutEntry {
+                        binding: 1,
+                        visibility: ShaderStages::FRAGMENT,
+                        ty: BindingType::Buffer {
+                            ty: BufferBindingType::Uniform,
+                            has_dynamic_offset: false,
+                            min_binding_size: None,
+                        },
+                        count: None,
+                    },
+                ],
+            });
+
         // Pipeline Helper
         let create_pipe = |label: &str, shader: &wgpu::ShaderModule, layout: &BindGroupLayout| {
             let pipeline_layout = device.create_pipeline_layout(&PipelineLayoutDescriptor {
@@ -145,6 +178,8 @@ impl Shaders {
         let pipeline = create_pipe("Particles", &particle_shader, &particle_bind_group_layout);
         let bg_pipeline = create_pipe("Background", &bg_shader, &standard_bind_group_layout);
         let icon_pipeline = create_pipe("Icons", &icon_shader, &standard_bind_group_layout);
+        let playhead_pipeline =
+            create_pipe("Playhead", &playhead_shader, &playhead_bind_group_layout);
 
         Self {
             pipeline,
@@ -153,6 +188,8 @@ impl Shaders {
             bg_bind_group_layout: standard_bind_group_layout.clone(),
             icon_pipeline,
             icon_bind_group_layout: standard_bind_group_layout,
+            playhead_pipeline,
+            playhead_bind_group_layout,
         }
     }
 }
@@ -164,6 +201,19 @@ pub struct ScreenUniforms {
     pub time: f32,
     pub scale_factor: f32,
     pub mouse_pos: [f32; 2],
+}
+
+#[repr(C)]
+#[derive(Copy, Clone, Debug, Default, Pod, Zeroable)]
+pub struct PlayheadUniforms {
+    pub origin_x: f32,
+    pub panel_start: f32,
+    pub height: f32,
+    pub volume: f32,
+    pub bar_lerp: f32,
+    pub play_lerp: f32,
+    pub pause_lerp: f32,
+    pub _padding: f32,
 }
 
 #[repr(C)]
