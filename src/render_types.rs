@@ -163,6 +163,7 @@ pub struct ScreenUniforms {
     pub screen_size: [f32; 2],
     pub time: f32,
     pub scale_factor: f32,
+    pub mouse_pos: [f32; 2],
 }
 
 #[repr(C)]
@@ -193,10 +194,9 @@ pub struct BackgroundPill {
 #[derive(Copy, Clone, Debug, Default, Pod, Zeroable)]
 pub struct IconInstance {
     pub pos: [f32; 2],
-    pub size: f32,
     pub alpha: f32,
     pub variant: f32,
     pub param: f32,
     pub image_index: i32,
-    pub _padding: f32,
+    pub _padding: [f32; 2],
 }

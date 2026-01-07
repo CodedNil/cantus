@@ -633,6 +633,10 @@ impl CantusApp {
             ],
             time,
             scale_factor: self.scale_factor as f32,
+            mouse_pos: [
+                self.interaction.mouse_position.x as f32,
+                self.interaction.mouse_position.y as f32,
+            ],
         });
 
         // Emit new particles while playing

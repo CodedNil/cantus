@@ -245,30 +245,28 @@ impl CantusApp {
         height: f64,
         pos_x: f64,
     ) {
-        let track_rating_index = if CONFIG.ratings_enabled {
-            playlists
+        let (track_rating_index, mut icon_entries) = if CONFIG.ratings_enabled {
+            let index = playlists
                 .values()
-                .find(|playlist| {
-                    playlist.rating_index.is_some() && playlist.tracks.contains(&track.id)
-                })
-                .and_then(|playlist| playlist.rating_index.map(|rating| rating + 1))
-                .unwrap_or(0)
+                .find(|p| p.rating_index.is_some() && p.tracks.contains(&track.id))
+                .and_then(|p| p.rating_index.map(|r| r + 1))
+                .unwrap_or(0);
+            (
+                index,
+                (0..5).map(|index| IconEntry::Star { index }).collect_vec(),
+            )
         } else {
-            0
+            (0, Vec::new())
         };
 
-        let mut icon_entries = Vec::with_capacity(5 + playlists.len());
-        if CONFIG.ratings_enabled {
-            icon_entries.extend((0..5).map(|index| IconEntry::Star { index }));
-        }
         // Add playlists that are contained in the favourited playlists
         icon_entries.extend(
             playlists
                 .values()
-                .filter(|playlist| playlist.rating_index.is_none())
-                .filter_map(|playlist| {
-                    let contained = playlist.tracks.contains(&track.id);
-                    (contained || hovered).then_some((playlist, contained))
+                .filter(|p| p.rating_index.is_none())
+                .filter_map(|p| {
+                    let contained = p.tracks.contains(&track.id);
+                    (contained || hovered).then_some((p, contained))
                 })
                 .sorted_by(|(a, ac), (b, bc)| bc.cmp(ac).then_with(|| a.name.cmp(&b.name)))
                 .map(|(playlist, contained)| IconEntry::Playlist {
@@ -277,13 +275,12 @@ impl CantusApp {
                 }),
         );
 
-        // Fade out when there's not enough space
-        let icon_size = 18.0 * self.scale_factor;
+        // Fade out and fit based on size
+        let icon_size = 16.0 * self.scale_factor;
         let icon_spacing = 1.0 * self.scale_factor;
         let mouse_pos = self.interaction.mouse_position;
 
-        let needed_width = icon_size * icon_entries.len() as f64;
-        if width < needed_width {
+        if width < icon_size * icon_entries.len() as f64 {
             // Strip out all playlists that arent contained
             icon_entries.retain(|entry| {
                 if let IconEntry::Playlist { contained, .. } = entry {
@@ -293,13 +290,10 @@ impl CantusApp {
                 }
             });
         }
-        // Try fitting again
+
         let num_icons = icon_entries.len();
-        if num_icons == 0 {
-            return;
-        }
         let needed_width = icon_size * num_icons as f64;
-        if width < needed_width {
+        if num_icons == 0 || width < needed_width {
             return;
         }
 
@@ -308,7 +302,6 @@ impl CantusApp {
         } else {
             ((width - needed_width) / (needed_width * 0.25)).clamp(0.0, 1.0) as f32
         };
-
         let center_x = pos_x + width * 0.5;
         let center_y = PANEL_START + height * 0.975;
 
@@ -325,100 +318,84 @@ impl CantusApp {
             .count() as f64
             / 2.0;
 
-        // Track hovers, and add hitboxes
         let mut hover_rating_index = None;
-        let mut icon_entry_extras = Vec::new();
-        for (i, entry) in icon_entries.iter().enumerate() {
-            let icon_origin_x = center_x + (i as f64 - half_icons) * (icon_size + icon_spacing);
-            let half_icon_size = (icon_size + icon_spacing) * 0.5; // Include some spacing so the hitboxes don't have gaps
-            let button_rect = Rect::new(
-                icon_origin_x - half_icon_size,
-                center_y - half_icon_size,
-                icon_origin_x + half_icon_size,
-                center_y + half_icon_size,
+        let mut icon_data = Vec::with_capacity(num_icons);
+
+        for (i, entry) in icon_entries.into_iter().enumerate() {
+            let origin_x = center_x + (i as f64 - half_icons) * (icon_size + icon_spacing);
+            let half_size = (icon_size + icon_spacing) * 0.5;
+            let rect = Rect::new(
+                origin_x - half_size,
+                center_y - half_size,
+                origin_x + half_size,
+                center_y + half_size,
             );
-            let hovered = button_rect.contains(mouse_pos);
-            icon_entry_extras.push((hovered, icon_origin_x));
-            match entry {
+            let is_hovered = rect.contains(mouse_pos);
+
+            match &entry {
                 IconEntry::Star { index } => {
-                    if hovered {
-                        let rect_center_x = (button_rect.x0 + button_rect.x1) * 0.5;
-                        hover_rating_index =
-                            Some(*index * 2 + 1 + u8::from(mouse_pos.x >= rect_center_x));
+                    if is_hovered {
+                        hover_rating_index = Some(
+                            index * 2 + 1 + u8::from(mouse_pos.x >= (rect.x0 + rect.x1) * 0.5),
+                        );
                     }
                     self.interaction.icon_hitboxes.push(IconHitbox {
-                        rect: button_rect,
+                        rect,
                         track_id: track.id,
                         playlist_id: None,
                         rating_index: Some(*index),
                     });
                 }
-                IconEntry::Playlist {
-                    playlist,
-                    contained: _,
-                } => {
+                IconEntry::Playlist { playlist, .. } => {
                     self.interaction.icon_hitboxes.push(IconHitbox {
-                        rect: button_rect,
+                        rect,
                         track_id: track.id,
                         playlist_id: Some(playlist.id),
                         rating_index: None,
                     });
                 }
             }
+            icon_data.push((entry, is_hovered, origin_x));
         }
 
-        // Render out the icons
-        let display_rating_index = hover_rating_index.unwrap_or(track_rating_index);
-        let display_full_stars = display_rating_index / 2;
-        let display_has_half = display_rating_index % 2 == 1;
-        for (entry, (hover_button, icon_origin_x)) in
-            icon_entries.into_iter().zip(icon_entry_extras.into_iter())
-        {
-            let icon_render_size = icon_size * if hover_button { 1.6 } else { 1.0 };
-            let alpha = fade_alpha;
+        // Sort by distance to mouse for overlap rendering
+        icon_data.sort_by(|(_, _, x1), (_, _, x2)| {
+            let d1 = (x1 - mouse_pos.x).powi(2);
+            let d2 = (x2 - mouse_pos.x).powi(2);
+            d2.partial_cmp(&d1).unwrap_or(std::cmp::Ordering::Equal)
+        });
+
+        let display_rating = hover_rating_index.unwrap_or(track_rating_index);
+        let full_stars = display_rating / 2;
+        let has_half = display_rating % 2 == 1;
+
+        for (entry, is_hovered, origin_x) in icon_data {
+            let mut instance = IconInstance {
+                pos: [origin_x as f32, center_y as f32],
+                alpha: fade_alpha,
+                ..Default::default()
+            };
 
             match entry {
                 IconEntry::Star { index } => {
-                    let fill_param = if index < display_full_stars {
+                    instance.variant = 1.0;
+                    instance.param = if index < full_stars {
                         1.0
-                    } else if index == display_full_stars && display_has_half {
+                    } else if index == full_stars && has_half {
                         0.5
                     } else {
                         0.0
                     };
-
-                    self.icon_pills.push(IconInstance {
-                        pos: [icon_origin_x as f32, center_y as f32],
-                        size: icon_render_size as f32,
-                        alpha,
-                        variant: 1.0,
-                        param: fill_param as f32,
-                        image_index: -1,
-                        _padding: 0.0,
-                    });
                 }
                 IconEntry::Playlist {
                     playlist,
                     contained,
                 } => {
-                    let image_index = *self.image_map.get(&playlist.image_url).unwrap_or(&-1);
-                    let hover_overlay = if !contained && !hover_button {
-                        0.7
-                    } else {
-                        0.0
-                    };
-
-                    self.icon_pills.push(IconInstance {
-                        pos: [icon_origin_x as f32, center_y as f32],
-                        size: icon_render_size as f32,
-                        alpha,
-                        variant: 0.0,
-                        param: hover_overlay,
-                        image_index,
-                        _padding: 0.0,
-                    });
+                    instance.image_index = *self.image_map.get(&playlist.image_url).unwrap_or(&-1);
+                    instance.param = if !contained && !is_hovered { 0.7 } else { 0.0 };
                 }
             }
+            self.icon_pills.push(instance);
         }
     }
 }

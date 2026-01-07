@@ -410,8 +410,8 @@ fn ensure_image_cached(url: &str) {
             warn!("Failed to cache image {url}: failed to read image");
             return;
         };
-        // If width or height more thant 64 pixels, resize the image
-        let dynamic_image = if dynamic_image.width() > 64 || dynamic_image.height() > 64 {
+        // Resize the image to exactly 64x64 to ensure consistent buffer sizes for WGPU
+        let dynamic_image = if dynamic_image.width() != 64 || dynamic_image.height() != 64 {
             dynamic_image.resize_to_fill(64, 64, image::imageops::FilterType::Lanczos3)
         } else {
             dynamic_image
