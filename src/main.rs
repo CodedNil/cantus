@@ -14,7 +14,7 @@ use wgpu::{
     DeviceDescriptor, ExperimentalFeatures, Extent3d, Features, FilterMode, Instance,
     InstanceDescriptor, Limits, LoadOp, MemoryHints, Operations, PowerPreference, PresentMode,
     Queue, RenderPassColorAttachment, RenderPassDescriptor, RequestAdapterOptions, Sampler,
-    SamplerDescriptor, StoreOp, Surface, SurfaceConfiguration, TexelCopyBufferLayout, Texture,
+    SamplerDescriptor, StoreOp, Surface, SurfaceConfiguration, TexelCopyBufferLayout,
     TextureDescriptor, TextureDimension, TextureFormat, TextureUsages, TextureView,
     TextureViewDescriptor, Trace,
 };
@@ -35,38 +35,37 @@ mod spotify;
 mod text_render;
 
 #[cfg(feature = "wayland")]
-pub mod layer_shell;
+mod layer_shell;
 
 #[cfg(feature = "winit")]
-pub mod winit_app;
+mod winit_app;
 
 use crate::image_manager::ImageManager;
 
 #[global_allocator]
 static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
 
-pub const PANEL_START: f32 = 6.0;
-pub const PANEL_EXTENSION: f32 = 12.0;
+const PANEL_START: f32 = 6.0;
+const PANEL_EXTENSION: f32 = 12.0;
 
-pub struct GpuResources {
-    pub device: Arc<Device>,
-    pub queue: Arc<Queue>,
-    pub shaders: Shaders,
-    pub uniform_buffer: Buffer,
-    pub particles_buffer: Buffer,
-    pub playhead_buffer: Buffer,
-    pub playhead_bind_group: BindGroup,
-    pub bg_storage_buffer: Buffer,
-    pub bg_bind_group: Option<BindGroup>,
-    pub icon_storage_buffer: Buffer,
-    pub icon_bind_group: Option<BindGroup>,
-    pub atlas_texture: Texture,
-    pub atlas_view: TextureView,
-    pub text_storage_buffer: Buffer,
-    pub text_bind_group: Option<BindGroup>,
-    pub bg_sampler: Sampler,
-    pub images: ImageManager,
-    pub requested_textures: HashSet<String>,
+struct GpuResources {
+    device: Arc<Device>,
+    queue: Arc<Queue>,
+    shaders: Shaders,
+    uniform_buffer: Buffer,
+    particles_buffer: Buffer,
+    playhead_buffer: Buffer,
+    playhead_bind_group: BindGroup,
+    bg_storage_buffer: Buffer,
+    bg_bind_group: Option<BindGroup>,
+    icon_storage_buffer: Buffer,
+    icon_bind_group: Option<BindGroup>,
+    atlas_view: TextureView,
+    text_storage_buffer: Buffer,
+    text_bind_group: Option<BindGroup>,
+    bg_sampler: Sampler,
+    images: ImageManager,
+    requested_textures: HashSet<String>,
 }
 
 fn main() {
@@ -86,9 +85,9 @@ fn main() {
     winit_app::run();
 }
 
-pub struct CantusApp {
+struct CantusApp {
     render_context: RenderContext,
-    pub render_surface: Option<RenderSurface>,
+    render_surface: Option<RenderSurface>,
     font: FontEngine,
     scale_factor: f32,
     render_state: RenderState,
@@ -178,7 +177,6 @@ impl CantusApp {
         let render_surface = RenderSurface {
             surface,
             dev_id,
-            format,
             config,
         };
 
@@ -295,7 +293,6 @@ impl CantusApp {
             bg_bind_group: None,
             icon_storage_buffer,
             icon_bind_group: None,
-            atlas_texture,
             atlas_view,
             text_storage_buffer,
             text_bind_group: None,
@@ -537,7 +534,7 @@ impl CantusApp {
         surface_texture.present();
     }
 
-    pub fn get_image_index(&mut self, url: &str, image_map: &HashMap<String, i32>) -> i32 {
+    fn get_image_index(&mut self, url: &str, image_map: &HashMap<String, i32>) -> i32 {
         if let Some(gpu) = self.gpu_resources.as_mut() {
             gpu.requested_textures.insert(url.to_owned());
         }
@@ -545,22 +542,21 @@ impl CantusApp {
     }
 }
 
-pub struct RenderContext {
-    pub instance: Instance,
-    pub devices: Vec<DeviceHandle>,
+struct RenderContext {
+    instance: Instance,
+    devices: Vec<DeviceHandle>,
 }
 
-pub struct DeviceHandle {
-    pub adapter: Adapter,
-    pub device: Arc<Device>,
-    pub queue: Arc<Queue>,
+struct DeviceHandle {
+    adapter: Adapter,
+    device: Arc<Device>,
+    queue: Arc<Queue>,
 }
 
-pub struct RenderSurface {
-    pub surface: Surface<'static>,
-    pub dev_id: usize,
-    pub format: TextureFormat,
-    pub config: SurfaceConfiguration,
+struct RenderSurface {
+    surface: Surface<'static>,
+    dev_id: usize,
+    config: SurfaceConfiguration,
 }
 
 impl Default for RenderContext {

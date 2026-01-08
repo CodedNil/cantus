@@ -91,7 +91,7 @@ pub fn update_color_palettes() {
 
 /// A filter that filters chroma values.
 #[derive(Debug)]
-pub struct ChromaFilter {
+struct ChromaFilter {
     threshold: u8,
 }
 impl auto_palette::Filter for ChromaFilter {
