@@ -9,14 +9,12 @@ use wgpu::{
 };
 
 pub struct Shaders {
-    pub pipeline: RenderPipeline,
-    pub bind_group_layout: BindGroupLayout,
+    pub playhead_pipeline: RenderPipeline,
+    pub playhead_bind_group_layout: BindGroupLayout,
     pub bg_pipeline: RenderPipeline,
     pub bg_bind_group_layout: BindGroupLayout,
     pub icon_pipeline: RenderPipeline,
     pub icon_bind_group_layout: BindGroupLayout,
-    pub playhead_pipeline: RenderPipeline,
-    pub playhead_bind_group_layout: BindGroupLayout,
     pub text_pipeline: RenderPipeline,
     pub text_bind_group_layout: BindGroupLayout,
 }
@@ -24,9 +22,9 @@ pub struct Shaders {
 impl Shaders {
     pub fn new(device: &Device, format: TextureFormat) -> Self {
         // Shader Modules
-        let particle_shader = device.create_shader_module(ShaderModuleDescriptor {
-            label: Some("Particles Shader"),
-            source: ShaderSource::Wgsl(include_str!("../assets/particles.wgsl").into()),
+        let playhead_shader = device.create_shader_module(ShaderModuleDescriptor {
+            label: Some("Playhead Shader"),
+            source: ShaderSource::Wgsl(include_str!("../assets/playhead.wgsl").into()),
         });
         let bg_shader = device.create_shader_module(ShaderModuleDescriptor {
             label: Some("Background Shader"),
@@ -36,19 +34,15 @@ impl Shaders {
             label: Some("Icons Shader"),
             source: ShaderSource::Wgsl(include_str!("../assets/icons.wgsl").into()),
         });
-        let playhead_shader = device.create_shader_module(ShaderModuleDescriptor {
-            label: Some("Playhead Shader"),
-            source: ShaderSource::Wgsl(include_str!("../assets/playhead.wgsl").into()),
-        });
         let text_shader = device.create_shader_module(ShaderModuleDescriptor {
             label: Some("Text Shader"),
             source: ShaderSource::Wgsl(include_str!("../assets/text.wgsl").into()),
         });
 
         // Bind Group Layouts
-        let particle_bind_group_layout =
+        let playhead_bind_group_layout =
             device.create_bind_group_layout(&BindGroupLayoutDescriptor {
-                label: Some("Particles Layout"),
+                label: Some("Playhead Layout"),
                 entries: &[
                     BindGroupLayoutEntry {
                         binding: 0,
@@ -65,6 +59,16 @@ impl Shaders {
                         visibility: ShaderStages::FRAGMENT,
                         ty: BindingType::Buffer {
                             ty: BufferBindingType::Storage { read_only: true },
+                            has_dynamic_offset: false,
+                            min_binding_size: None,
+                        },
+                        count: None,
+                    },
+                    BindGroupLayoutEntry {
+                        binding: 2,
+                        visibility: ShaderStages::FRAGMENT,
+                        ty: BindingType::Buffer {
+                            ty: BufferBindingType::Uniform,
                             has_dynamic_offset: false,
                             min_binding_size: None,
                         },
@@ -111,33 +115,6 @@ impl Shaders {
                         binding: 3,
                         visibility: ShaderStages::FRAGMENT,
                         ty: BindingType::Sampler(SamplerBindingType::Filtering),
-                        count: None,
-                    },
-                ],
-            });
-
-        let playhead_bind_group_layout =
-            device.create_bind_group_layout(&BindGroupLayoutDescriptor {
-                label: Some("Playhead Layout"),
-                entries: &[
-                    BindGroupLayoutEntry {
-                        binding: 0,
-                        visibility: ShaderStages::FRAGMENT,
-                        ty: BindingType::Buffer {
-                            ty: BufferBindingType::Uniform,
-                            has_dynamic_offset: false,
-                            min_binding_size: None,
-                        },
-                        count: None,
-                    },
-                    BindGroupLayoutEntry {
-                        binding: 1,
-                        visibility: ShaderStages::FRAGMENT,
-                        ty: BindingType::Buffer {
-                            ty: BufferBindingType::Uniform,
-                            has_dynamic_offset: false,
-                            min_binding_size: None,
-                        },
                         count: None,
                     },
                 ],
@@ -223,22 +200,19 @@ impl Shaders {
             })
         };
 
-        let pipeline = create_pipe("Particles", &particle_shader, &particle_bind_group_layout);
-        let bg_pipeline = create_pipe("Background", &bg_shader, &standard_bind_group_layout);
-        let icon_pipeline = create_pipe("Icons", &icon_shader, &standard_bind_group_layout);
         let playhead_pipeline =
             create_pipe("Playhead", &playhead_shader, &playhead_bind_group_layout);
+        let bg_pipeline = create_pipe("Background", &bg_shader, &standard_bind_group_layout);
+        let icon_pipeline = create_pipe("Icons", &icon_shader, &standard_bind_group_layout);
         let text_pipeline = create_pipe("Text", &text_shader, &text_bind_group_layout);
 
         Self {
-            pipeline,
-            bind_group_layout: particle_bind_group_layout,
+            playhead_pipeline,
+            playhead_bind_group_layout,
             bg_pipeline,
             bg_bind_group_layout: standard_bind_group_layout.clone(),
             icon_pipeline,
             icon_bind_group_layout: standard_bind_group_layout,
-            playhead_pipeline,
-            playhead_bind_group_layout,
             text_pipeline,
             text_bind_group_layout,
         }

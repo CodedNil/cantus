@@ -42,6 +42,9 @@ pub mod winit_app;
 
 use crate::image_manager::ImageManager;
 
+#[global_allocator]
+static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
+
 pub const PANEL_START: f32 = 6.0;
 pub const PANEL_EXTENSION: f32 = 12.0;
 
@@ -50,11 +53,10 @@ pub struct GpuResources {
     pub queue: Arc<Queue>,
     pub shaders: Shaders,
     pub uniform_buffer: Buffer,
-    pub storage_buffer: Buffer,
-    pub particle_bind_group: BindGroup,
-    pub bg_storage_buffer: Buffer,
+    pub particles_buffer: Buffer,
     pub playhead_buffer: Buffer,
     pub playhead_bind_group: BindGroup,
+    pub bg_storage_buffer: Buffer,
     pub bg_bind_group: Option<BindGroup>,
     pub icon_storage_buffer: Buffer,
     pub icon_bind_group: Option<BindGroup>,
@@ -133,8 +135,8 @@ impl CantusApp {
         let (device, queue) = pollster::block_on(adapter.request_device(&DeviceDescriptor {
             label: None,
             required_features: Features::default(),
-            required_limits: Limits::default(),
-            memory_hints: MemoryHints::default(),
+            required_limits: Limits::defaults(),
+            memory_hints: MemoryHints::MemoryUsage,
             trace: Trace::Off,
             experimental_features: ExperimentalFeatures::disabled(),
         }))
@@ -187,29 +189,12 @@ impl CantusApp {
             usage: BufferUsages::UNIFORM | BufferUsages::COPY_DST,
             mapped_at_creation: false,
         });
-        let storage_buffer = device_handle.device.create_buffer(&BufferDescriptor {
+        let particles_buffer = device_handle.device.create_buffer(&BufferDescriptor {
             label: Some("Particles"),
             size: (std::mem::size_of::<Particle>() * 64) as u64,
             usage: BufferUsages::STORAGE | BufferUsages::COPY_DST,
             mapped_at_creation: false,
         });
-        let particle_bind_group = device_handle
-            .device
-            .create_bind_group(&BindGroupDescriptor {
-                label: Some("Particle BG"),
-                layout: &shaders.bind_group_layout,
-                entries: &[
-                    BindGroupEntry {
-                        binding: 0,
-                        resource: uniform_buffer.as_entire_binding(),
-                    },
-                    BindGroupEntry {
-                        binding: 1,
-                        resource: storage_buffer.as_entire_binding(),
-                    },
-                ],
-            });
-
         let playhead_buffer = device_handle.device.create_buffer(&BufferDescriptor {
             label: Some("Playhead Info"),
             size: std::mem::size_of::<PlayheadUniforms>() as u64,
@@ -229,6 +214,10 @@ impl CantusApp {
                     },
                     BindGroupEntry {
                         binding: 1,
+                        resource: particles_buffer.as_entire_binding(),
+                    },
+                    BindGroupEntry {
+                        binding: 2,
                         resource: playhead_buffer.as_entire_binding(),
                     },
                 ],
@@ -299,8 +288,7 @@ impl CantusApp {
             queue,
             shaders,
             uniform_buffer,
-            storage_buffer,
-            particle_bind_group,
+            particles_buffer,
             bg_storage_buffer,
             playhead_buffer,
             playhead_bind_group,
@@ -420,7 +408,7 @@ impl CantusApp {
                     .write_buffer(&gpu.uniform_buffer, 0, bytemuck::bytes_of(u));
             }
             gpu.queue.write_buffer(
-                &gpu.storage_buffer,
+                &gpu.particles_buffer,
                 0,
                 bytemuck::cast_slice(&self.particles.particles),
             );
@@ -527,26 +515,7 @@ impl CantusApp {
 
             {
                 let mut rpass = encoder.begin_render_pass(&RenderPassDescriptor {
-                    label: Some("Particle Pass"),
-                    color_attachments: &[Some(RenderPassColorAttachment {
-                        view: &surface_view,
-                        resolve_target: None,
-                        ops: Operations {
-                            load: LoadOp::Load,
-                            store: StoreOp::Store,
-                        },
-                        depth_slice: None,
-                    })],
-                    ..Default::default()
-                });
-                rpass.set_pipeline(&gpu.shaders.pipeline);
-                rpass.set_bind_group(0, &gpu.particle_bind_group, &[]);
-                rpass.draw(0..4, 0..1);
-            }
-
-            if self.playhead_info.is_some() {
-                let mut rpass = encoder.begin_render_pass(&RenderPassDescriptor {
-                    label: Some("Playhead Pass"),
+                    label: Some("Combined Pass"),
                     color_attachments: &[Some(RenderPassColorAttachment {
                         view: &surface_view,
                         resolve_target: None,
@@ -562,6 +531,7 @@ impl CantusApp {
                 rpass.set_bind_group(0, &gpu.playhead_bind_group, &[]);
                 rpass.draw(0..4, 0..1);
             }
+
             handle.queue.submit([encoder.finish()]);
         }
         surface_texture.present();
