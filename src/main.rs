@@ -1,6 +1,6 @@
-use crate::image_manager::ImageManager;
 use crate::interaction::InteractionState;
 use crate::render::{FontEngine, ParticlesState, RenderState};
+use crate::text_render::TextInstance;
 use render_types::{
     BackgroundPill, IconInstance, Particle, PlayheadUniforms, ScreenUniforms, Shaders,
 };
@@ -9,8 +9,7 @@ use std::{
     sync::Arc,
 };
 use vello::{
-    AaConfig, AaSupport, Renderer, RendererOptions, Scene,
-    peniko::color::AlphaColor,
+    AaSupport, Renderer, RendererOptions, Scene,
     util::{RenderContext, RenderSurface},
 };
 use wgpu::{
@@ -35,16 +34,18 @@ mod render;
 mod render_types;
 mod rspotify;
 mod spotify;
+mod text_render;
 
 #[cfg(feature = "wayland")]
-mod layer_shell;
+pub mod layer_shell;
 
 #[cfg(feature = "winit")]
-mod winit_app;
+pub mod winit_app;
 
-/// Additional height allocated for extended content.
-const PANEL_START: f64 = 6.0;
-const PANEL_EXTENSION: f64 = 12.0;
+use crate::image_manager::ImageManager;
+
+pub const PANEL_START: f32 = 6.0;
+pub const PANEL_EXTENSION: f32 = 12.0;
 
 pub struct GpuResources {
     pub device: Arc<Device>,
@@ -59,6 +60,10 @@ pub struct GpuResources {
     pub bg_bind_group: Option<BindGroup>,
     pub icon_storage_buffer: Buffer,
     pub icon_bind_group: Option<BindGroup>,
+    pub atlas_texture: wgpu::Texture,
+    pub atlas_view: wgpu::TextureView,
+    pub text_storage_buffer: Buffer,
+    pub text_bind_group: Option<BindGroup>,
     pub bg_sampler: Sampler,
     pub images: ImageManager,
     pub requested_textures: HashSet<String>,
@@ -87,12 +92,13 @@ pub struct CantusApp {
     render_device: Option<Renderer>,
     scene: Scene,
     font: FontEngine,
-    scale_factor: f64,
+    scale_factor: f32,
     render_state: RenderState,
     interaction: InteractionState,
     particles: ParticlesState,
     background_pills: Vec<BackgroundPill>,
     icon_pills: Vec<IconInstance>,
+    text_instances: Vec<TextInstance>,
     gpu_resources: Option<GpuResources>,
     playhead_info: Option<PlayheadUniforms>,
     gpu_uniforms: Option<ScreenUniforms>,
@@ -112,6 +118,7 @@ impl Default for CantusApp {
             particles: ParticlesState::default(),
             background_pills: Vec::new(),
             icon_pills: Vec::new(),
+            text_instances: Vec::new(),
             gpu_resources: None,
             playhead_info: None,
             gpu_uniforms: None,
@@ -268,6 +275,42 @@ impl CantusApp {
             usage: BufferUsages::STORAGE | BufferUsages::COPY_DST,
             mapped_at_creation: false,
         });
+
+        let atlas_size = Extent3d {
+            width: self.font.atlas.width,
+            height: self.font.atlas.height,
+            depth_or_array_layers: 1,
+        };
+        let atlas_texture = device_handle.device.create_texture(&TextureDescriptor {
+            label: Some("MSDF Atlas"),
+            size: atlas_size,
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: TextureDimension::D2,
+            format: TextureFormat::Rgba8Unorm,
+            usage: TextureUsages::TEXTURE_BINDING | TextureUsages::COPY_DST,
+            view_formats: &[],
+        });
+
+        device_handle.queue.write_texture(
+            atlas_texture.as_image_copy(),
+            &self.font.atlas.texture_data,
+            wgpu::TexelCopyBufferLayout {
+                offset: 0,
+                bytes_per_row: Some(self.font.atlas.width * 4),
+                rows_per_image: None,
+            },
+            atlas_size,
+        );
+        let atlas_view = atlas_texture.create_view(&TextureViewDescriptor::default());
+
+        let text_storage_buffer = device_handle.device.create_buffer(&BufferDescriptor {
+            label: Some("Text Instances"),
+            size: (std::mem::size_of::<TextInstance>() * 1024) as u64,
+            usage: BufferUsages::STORAGE | BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+
         let bg_sampler = device_handle.device.create_sampler(&SamplerDescriptor {
             address_mode_u: AddressMode::ClampToEdge,
             address_mode_v: AddressMode::ClampToEdge,
@@ -293,6 +336,10 @@ impl CantusApp {
             bg_bind_group: None,
             icon_storage_buffer,
             icon_bind_group: None,
+            atlas_texture,
+            atlas_view,
+            text_storage_buffer,
+            text_bind_group: None,
             bg_sampler,
             images: ImageManager::new(device, queue),
             requested_textures: HashSet::new(),
@@ -308,6 +355,7 @@ impl CantusApp {
         self.scene.reset();
         self.background_pills.clear();
         self.icon_pills.clear();
+        self.text_instances.clear();
         self.playhead_info = None;
         if let Some(gpu) = self.gpu_resources.as_mut() {
             gpu.requested_textures.clear();
@@ -332,6 +380,7 @@ impl CantusApp {
             self.scene.reset();
             self.background_pills.clear();
             self.icon_pills.clear();
+            self.text_instances.clear();
             self.create_scene(&idx);
 
             if let Some(gpu) = self.gpu_resources.as_mut()
@@ -371,6 +420,28 @@ impl CantusApp {
                     &gpu.shaders.icon_bind_group_layout,
                     gpu.icon_storage_buffer.as_entire_binding(),
                 ));
+                gpu.text_bind_group = Some(gpu.device.create_bind_group(&BindGroupDescriptor {
+                    label: Some("Text BG"),
+                    layout: &gpu.shaders.text_bind_group_layout,
+                    entries: &[
+                        BindGroupEntry {
+                            binding: 0,
+                            resource: gpu.uniform_buffer.as_entire_binding(),
+                        },
+                        BindGroupEntry {
+                            binding: 1,
+                            resource: gpu.text_storage_buffer.as_entire_binding(),
+                        },
+                        BindGroupEntry {
+                            binding: 2,
+                            resource: BindingResource::TextureView(&gpu.atlas_view),
+                        },
+                        BindGroupEntry {
+                            binding: 3,
+                            resource: BindingResource::Sampler(&gpu.bg_sampler),
+                        },
+                    ],
+                }));
             }
         }
 
@@ -398,6 +469,14 @@ impl CantusApp {
                     bytemuck::cast_slice(&self.icon_pills),
                 );
             }
+            if !self.text_instances.is_empty() {
+                let bytes: &[u8] = bytemuck::cast_slice(&self.text_instances);
+                gpu.queue.write_buffer(
+                    &gpu.text_storage_buffer,
+                    0,
+                    &bytes[..bytes.len().min(gpu.text_storage_buffer.size() as usize)],
+                );
+            }
             if let Some(p) = self.playhead_info.as_ref() {
                 gpu.queue
                     .write_buffer(&gpu.playhead_buffer, 0, bytemuck::bytes_of(p));
@@ -406,22 +485,6 @@ impl CantusApp {
 
         let rs = self.render_surface.as_mut().unwrap();
         let handle = &self.render_context.devices[dev_id];
-        self.render_device
-            .as_mut()
-            .unwrap()
-            .render_to_texture(
-                &handle.device,
-                &handle.queue,
-                &self.scene,
-                &rs.target_view,
-                &vello::RenderParams {
-                    base_color: AlphaColor::from_rgba8(0, 0, 0, 0),
-                    width: rs.config.width,
-                    height: rs.config.height,
-                    antialiasing_method: AaConfig::Area,
-                },
-            )
-            .unwrap();
 
         let Ok(surface_texture) = rs.surface.get_current_texture() else {
             rs.surface.configure(&handle.device, &rs.config);
@@ -435,6 +498,7 @@ impl CantusApp {
             let mut encoder = handle
                 .device
                 .create_command_encoder(&CommandEncoderDescriptor { label: None });
+
             if let Some(bg_bind_group) = &gpu.bg_bind_group {
                 let mut rpass = encoder.begin_render_pass(&RenderPassDescriptor {
                     label: Some("Background Pass"),
@@ -453,6 +517,7 @@ impl CantusApp {
                 rpass.set_bind_group(0, bg_bind_group, &[]);
                 rpass.draw(0..4, 0..self.background_pills.len() as u32);
             }
+
             if let Some(icon_bind_group) = &gpu.icon_bind_group {
                 let mut rpass = encoder.begin_render_pass(&RenderPassDescriptor {
                     label: Some("Icon Pass"),
@@ -471,8 +536,26 @@ impl CantusApp {
                 rpass.set_bind_group(0, icon_bind_group, &[]);
                 rpass.draw(0..4, 0..self.icon_pills.len() as u32);
             }
-            rs.blitter
-                .copy(&handle.device, &mut encoder, &rs.target_view, &surface_view);
+
+            if let Some(text_bind_group) = &gpu.text_bind_group {
+                let mut rpass = encoder.begin_render_pass(&RenderPassDescriptor {
+                    label: Some("Text Pass"),
+                    color_attachments: &[Some(RenderPassColorAttachment {
+                        view: &surface_view,
+                        resolve_target: None,
+                        ops: Operations {
+                            load: LoadOp::Load,
+                            store: StoreOp::Store,
+                        },
+                        depth_slice: None,
+                    })],
+                    ..Default::default()
+                });
+                rpass.set_pipeline(&gpu.shaders.text_pipeline);
+                rpass.set_bind_group(0, text_bind_group, &[]);
+                rpass.draw(0..4, 0..self.text_instances.len() as u32);
+            }
+
             {
                 let mut rpass = encoder.begin_render_pass(&RenderPassDescriptor {
                     label: Some("Particle Pass"),
@@ -491,6 +574,7 @@ impl CantusApp {
                 rpass.set_bind_group(0, &gpu.particle_bind_group, &[]);
                 rpass.draw(0..4, 0..1);
             }
+
             if self.playhead_info.is_some() {
                 let mut rpass = encoder.begin_render_pass(&RenderPassDescriptor {
                     label: Some("Playhead Pass"),

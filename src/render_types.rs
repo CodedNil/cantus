@@ -17,6 +17,8 @@ pub struct Shaders {
     pub icon_bind_group_layout: BindGroupLayout,
     pub playhead_pipeline: RenderPipeline,
     pub playhead_bind_group_layout: BindGroupLayout,
+    pub text_pipeline: RenderPipeline,
+    pub text_bind_group_layout: BindGroupLayout,
 }
 
 impl Shaders {
@@ -37,6 +39,10 @@ impl Shaders {
         let playhead_shader = device.create_shader_module(ShaderModuleDescriptor {
             label: Some("Playhead Shader"),
             source: ShaderSource::Wgsl(include_str!("../assets/playhead.wgsl").into()),
+        });
+        let text_shader = device.create_shader_module(ShaderModuleDescriptor {
+            label: Some("Text Shader"),
+            source: ShaderSource::Wgsl(include_str!("../assets/text.wgsl").into()),
         });
 
         // Bind Group Layouts
@@ -137,6 +143,48 @@ impl Shaders {
                 ],
             });
 
+        let text_bind_group_layout = device.create_bind_group_layout(&BindGroupLayoutDescriptor {
+            label: Some("Text Layout"),
+            entries: &[
+                BindGroupLayoutEntry {
+                    binding: 0,
+                    visibility: ShaderStages::VERTEX | ShaderStages::FRAGMENT,
+                    ty: BindingType::Buffer {
+                        ty: BufferBindingType::Uniform,
+                        has_dynamic_offset: false,
+                        min_binding_size: None,
+                    },
+                    count: None,
+                },
+                BindGroupLayoutEntry {
+                    binding: 1,
+                    visibility: ShaderStages::VERTEX | ShaderStages::FRAGMENT,
+                    ty: BindingType::Buffer {
+                        ty: BufferBindingType::Storage { read_only: true },
+                        has_dynamic_offset: false,
+                        min_binding_size: None,
+                    },
+                    count: None,
+                },
+                BindGroupLayoutEntry {
+                    binding: 2,
+                    visibility: ShaderStages::FRAGMENT,
+                    ty: BindingType::Texture {
+                        multisampled: false,
+                        view_dimension: TextureViewDimension::D2,
+                        sample_type: TextureSampleType::Float { filterable: true },
+                    },
+                    count: None,
+                },
+                BindGroupLayoutEntry {
+                    binding: 3,
+                    visibility: ShaderStages::FRAGMENT,
+                    ty: BindingType::Sampler(SamplerBindingType::Filtering),
+                    count: None,
+                },
+            ],
+        });
+
         // Pipeline Helper
         let create_pipe = |label: &str, shader: &wgpu::ShaderModule, layout: &BindGroupLayout| {
             let pipeline_layout = device.create_pipeline_layout(&PipelineLayoutDescriptor {
@@ -180,6 +228,7 @@ impl Shaders {
         let icon_pipeline = create_pipe("Icons", &icon_shader, &standard_bind_group_layout);
         let playhead_pipeline =
             create_pipe("Playhead", &playhead_shader, &playhead_bind_group_layout);
+        let text_pipeline = create_pipe("Text", &text_shader, &text_bind_group_layout);
 
         Self {
             pipeline,
@@ -190,32 +239,34 @@ impl Shaders {
             icon_bind_group_layout: standard_bind_group_layout,
             playhead_pipeline,
             playhead_bind_group_layout,
+            text_pipeline,
+            text_bind_group_layout,
         }
     }
 }
 
 #[derive(Copy, Clone, Debug, Default, PartialEq)]
 pub struct Point {
-    pub x: f64,
-    pub y: f64,
+    pub x: f32,
+    pub y: f32,
 }
 
 impl Point {
-    pub const fn new(x: f64, y: f64) -> Self {
+    pub const fn new(x: f32, y: f32) -> Self {
         Self { x, y }
     }
 }
 
 #[derive(Copy, Clone, Debug, Default, PartialEq)]
 pub struct Rect {
-    pub x0: f64,
-    pub y0: f64,
-    pub x1: f64,
-    pub y1: f64,
+    pub x0: f32,
+    pub y0: f32,
+    pub x1: f32,
+    pub y1: f32,
 }
 
 impl Rect {
-    pub const fn new(x0: f64, y0: f64, x1: f64, y1: f64) -> Self {
+    pub const fn new(x0: f32, y0: f32, x1: f32, y1: f32) -> Self {
         Self { x0, y0, x1, y1 }
     }
 
@@ -223,7 +274,7 @@ impl Rect {
         p.x >= self.x0 && p.x <= self.x1 && p.y >= self.y0 && p.y <= self.y1
     }
 
-    pub fn inflate(&self, dx: f64, dy: f64) -> Self {
+    pub fn inflate(&self, dx: f32, dy: f32) -> Self {
         Self {
             x0: self.x0 - dx,
             y0: self.y0 - dy,

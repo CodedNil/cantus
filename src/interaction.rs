@@ -26,13 +26,13 @@ pub struct InteractionState {
     #[cfg(feature = "wayland")]
     pub last_hitbox_update: Instant,
     pub play_hitbox: Rect,
-    pub track_hitboxes: Vec<(TrackId, Rect, (f64, f64))>,
+    pub track_hitboxes: Vec<(TrackId, Rect, (f32, f32))>,
     pub icon_hitboxes: Vec<IconHitbox>,
     pub mouse_down: bool,
     pub drag_origin: Option<Point>,
-    pub drag_track: Option<(TrackId, f64)>,
+    pub drag_track: Option<(TrackId, f32)>,
     pub dragging: bool,
-    pub drag_delta_pixels: f64,
+    pub drag_delta_pixels: f32,
     // Playhead
     pub last_event: Instant,
     pub playing: bool,
@@ -79,7 +79,7 @@ impl InteractionState {
         PLAYBACK_STATE.write().interaction = false;
     }
 
-    pub fn left_click_released(&mut self, scale_factor: f64) {
+    pub fn left_click_released(&mut self, scale_factor: f32) {
         if !self.dragging && self.mouse_down {
             self.handle_click(scale_factor);
         }
@@ -101,7 +101,7 @@ impl InteractionState {
     }
 
     /// Handle click events.
-    fn handle_click(&mut self, scale_factor: f64) {
+    fn handle_click(&mut self, scale_factor: f32) {
         let mouse_pos = self.mouse_position;
         let (playing, interaction) = {
             let state = PLAYBACK_STATE.read();
@@ -238,9 +238,9 @@ impl CantusApp {
         track: &Track,
         hovered: bool,
         playlists: &HashMap<PlaylistId, CondensedPlaylist>,
-        width: f64,
-        height: f64,
-        pos_x: f64,
+        width: f32,
+        height: f32,
+        pos_x: f32,
         image_map: &HashMap<String, i32>,
     ) {
         let (track_rating_index, mut icon_entries) = if CONFIG.ratings_enabled {
@@ -278,7 +278,7 @@ impl CantusApp {
         let icon_spacing = 1.0 * self.scale_factor;
         let mouse_pos = self.interaction.mouse_position;
 
-        if width < icon_size * icon_entries.len() as f64 {
+        if width < icon_size * icon_entries.len() as f32 {
             // Strip out all playlists that arent contained
             icon_entries.retain(|entry| {
                 if let IconEntry::Playlist { contained, .. } = entry {
@@ -290,7 +290,7 @@ impl CantusApp {
         }
 
         let num_icons = icon_entries.len();
-        let needed_width = icon_size * num_icons as f64;
+        let needed_width = icon_size * num_icons as f32;
         if num_icons == 0 || width < needed_width {
             return;
         }
@@ -298,7 +298,7 @@ impl CantusApp {
         let fade_alpha = if hovered {
             1.0
         } else {
-            ((width - needed_width) / (needed_width * 0.25)).clamp(0.0, 1.0) as f32
+            ((width - needed_width) / (needed_width * 0.25)).clamp(0.0, 1.0)
         };
         let center_x = pos_x + width * 0.5;
         let center_y = PANEL_START + height * 0.975;
@@ -313,14 +313,14 @@ impl CantusApp {
                     true
                 }
             })
-            .count() as f64
+            .count() as f32
             / 2.0;
 
         let mut hover_rating_index = None;
         let mut icon_data = Vec::with_capacity(num_icons);
 
         for (i, entry) in icon_entries.into_iter().enumerate() {
-            let origin_x = center_x + (i as f64 - half_icons) * (icon_size + icon_spacing);
+            let origin_x = center_x + (i as f32 - half_icons) * (icon_size + icon_spacing);
             let half_size = (icon_size + icon_spacing) * 0.5;
             let rect = Rect::new(
                 origin_x - half_size,
@@ -369,7 +369,7 @@ impl CantusApp {
 
         for (entry, is_hovered, origin_x) in icon_data {
             let mut instance = IconInstance {
-                pos: [origin_x as f32, center_y as f32],
+                pos: [origin_x, center_y],
                 alpha: fade_alpha,
                 ..Default::default()
             };
@@ -399,7 +399,7 @@ impl CantusApp {
 }
 
 /// Skip to the specified track in the queue.
-fn skip_to_track(track_id: &TrackId, position: f64, always_seek: bool) {
+fn skip_to_track(track_id: &TrackId, position: f32, always_seek: bool) {
     let (queue_index, position_in_queue, ms_lookup) = {
         let state = PLAYBACK_STATE.read();
         let queue_index = state.queue_index;
@@ -458,11 +458,11 @@ fn skip_to_track(track_id: &TrackId, position: f64, always_seek: bool) {
         let milliseconds = if position < 0.05 {
             0.0
         } else {
-            f64::from(song_ms) * position
+            song_ms as f32 * position
         };
         info!(
             "Seeking track {track_id} to {}%",
-            (milliseconds / f64::from(song_ms) * 100.0).round()
+            (milliseconds / song_ms as f32 * 100.0).round()
         );
         update_playback_state(|state| {
             state.progress = milliseconds.round() as u32;

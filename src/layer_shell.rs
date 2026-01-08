@@ -200,7 +200,7 @@ impl LayerShellApp {
         }
     }
 
-    fn ensure_surface(&mut self, width: f64, height: f64) {
+    fn ensure_surface(&mut self, width: f32, height: f32) {
         if width == 0.0 || height == 0.0 || !self.is_configured {
             return;
         }
@@ -267,8 +267,6 @@ impl LayerShellApp {
         let scale = self.cantus.scale_factor;
         let width = CONFIG.width;
         let total_height = CONFIG.height + PANEL_EXTENSION + PANEL_START;
-        let buffer_width = (width * scale).round();
-        let buffer_height = (total_height * scale).round();
         let viewport = self.viewport.as_ref();
         if let Some(surface) = &self.wl_surface {
             surface.set_buffer_scale(if viewport.is_some() {
@@ -278,7 +276,12 @@ impl LayerShellApp {
             });
         }
         if let Some(viewport) = viewport {
-            viewport.set_source(0.0, 0.0, buffer_width, buffer_height);
+            viewport.set_source(
+                0.0,
+                0.0,
+                f64::from(width * scale).round(),
+                f64::from(total_height * scale).round(),
+            );
             viewport.set_destination(width as i32, total_height as i32);
         }
     }
@@ -357,7 +360,7 @@ impl Dispatch<WpFractionalScaleV1, ()> for LayerShellApp {
         qhandle: &QueueHandle<Self>,
     ) {
         if let wp_fractional_scale_v1::Event::PreferredScale { scale } = event {
-            state.cantus.scale_factor = f64::from(scale) / 120.0;
+            state.cantus.scale_factor = scale as f32 / 120.0;
 
             if state.is_configured {
                 state.update_scale_and_viewport();
@@ -460,14 +463,16 @@ impl Dispatch<WlPointer, ()> for LayerShellApp {
                 surface_y,
                 ..
             } if surface_id == Some(surface.id()) => {
-                interaction.mouse_position = Point::new(surface_x * scale, surface_y * scale);
+                interaction.mouse_position =
+                    Point::new(surface_x as f32 * scale, surface_y as f32 * scale);
             }
             wl_pointer::Event::Motion {
                 surface_x,
                 surface_y,
                 ..
             } => {
-                interaction.mouse_position = Point::new(surface_x * scale, surface_y * scale);
+                interaction.mouse_position =
+                    Point::new(surface_x as f32 * scale, surface_y as f32 * scale);
                 interaction.handle_mouse_drag();
             }
             wl_pointer::Event::Leave { .. } => {

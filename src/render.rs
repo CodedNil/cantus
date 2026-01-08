@@ -5,19 +5,15 @@ use crate::{
     render_types::{BackgroundPill, Particle, PlayheadUniforms, Rect, ScreenUniforms},
     rspotify::{PlaylistId, Track},
     spotify::{ALBUM_DATA_CACHE, CondensedPlaylist, PLAYBACK_STATE},
+    text_render::{ATLAS_MSDF_SCALE, ATLAS_RANGE, MSDFAtlas, TextInstance},
 };
 use std::{collections::HashMap, ops::Range, sync::LazyLock, time::Instant};
 use ttf_parser::{Face, Tag};
-use vello::{
-    Glyph,
-    kurbo::{Affine, RoundedRect},
-    peniko::{Blob, Color, Fill, FontData},
-};
 
 static START_TIME: LazyLock<Instant> = LazyLock::new(Instant::now);
 
 /// Spacing between tracks in ms
-const TRACK_SPACING_MS: f64 = 4000.0;
+const TRACK_SPACING_MS: f32 = 4000.0;
 /// Particles emitted per second when playback is active.
 const SPARK_EMISSION: f32 = 60.0;
 /// Horizontal velocity range applied at spawn.
@@ -32,10 +28,10 @@ const ANIMATION_DURATION: f32 = 2.0;
 
 pub struct RenderState {
     pub last_update: Instant,
-    pub track_offset: f64,
-    pub recent_speeds: [f64; 16],
+    pub track_offset: f32,
+    pub recent_speeds: [f32; 16],
     pub speed_idx: usize,
-    pub speed_sum: f64,
+    pub speed_sum: f32,
 }
 
 impl Default for RenderState {
@@ -50,15 +46,14 @@ impl Default for RenderState {
     }
 }
 pub struct FontEngine {
-    pub font_data: FontData,
     pub face: Face<'static>,
-    pub coords: Vec<i16>,
+    pub atlas: MSDFAtlas,
 }
 
 pub struct TextLayout {
-    glyphs: Vec<Glyph>,
-    width: f64,
-    height: f64,
+    glyphs: Vec<(u32, f32)>, // gid, x_offset
+    width: f32,
+    line_height: f32,
     font_size: f32,
 }
 
@@ -73,15 +68,8 @@ impl Default for FontEngine {
         {
             face.set_variation(axis.tag, 700.0f32.clamp(axis.min_value, axis.max_value));
         }
-        Self {
-            font_data: FontData::new(Blob::from(bytes.to_vec()), 0),
-            coords: face
-                .variation_coordinates()
-                .iter()
-                .map(|c| c.get())
-                .collect(),
-            face,
-        }
+        let atlas = MSDFAtlas::new(&face, 48);
+        Self { face, atlas }
     }
 }
 
@@ -102,10 +90,10 @@ impl Default for ParticlesState {
 pub struct TrackRender<'a> {
     track: &'a Track,
     is_current: bool,
-    seconds_until_start: f64,
-    start_x: f64,
-    width: f64,
-    hitbox_range: (f64, f64),
+    seconds_until_start: f32,
+    start_x: f32,
+    width: f32,
+    hitbox_range: (f32, f32),
     art_only: bool,
     image_index: i32,
 }
@@ -116,7 +104,7 @@ impl CantusApp {
         let now = Instant::now();
         let dt = now
             .duration_since(self.render_state.last_update)
-            .as_secs_f64();
+            .as_secs_f32();
         self.render_state.last_update = now;
 
         self.background_pills.clear();
@@ -156,23 +144,23 @@ impl CantusApp {
         }
 
         // Lerp the progress based on when the data was last updated, get the start time of the current track
-        let playback_elapsed = f64::from(playback_state.progress)
+        let playback_elapsed = playback_state.progress as f32
             + if playback_state.playing {
-                playback_state.last_progress_update.elapsed().as_millis() as f64
+                playback_state.last_progress_update.elapsed().as_millis() as f32
             } else {
                 0.0
             };
 
         // Lerp track start based on the target and current start time
-        let past_tracks_duration: f64 = playback_state
+        let past_tracks_duration: f32 = playback_state
             .queue
             .iter()
             .take(cur_idx)
-            .map(|t| f64::from(t.duration_ms))
+            .map(|t| t.duration_ms as f32)
             .sum();
 
         let mut current_ms = -playback_elapsed - past_tracks_duration + drag_offset_ms
-            - TRACK_SPACING_MS * cur_idx as f64;
+            - TRACK_SPACING_MS * cur_idx as f32;
         let diff = current_ms - self.render_state.track_offset;
         if !self.interaction.dragging && diff.abs() > 200.0 {
             current_ms = self.render_state.track_offset + diff * 0.1;
@@ -193,7 +181,7 @@ impl CantusApp {
         let mut cur_ms = current_ms;
         for track in &playback_state.queue {
             let start = cur_ms;
-            let end = start + f64::from(track.duration_ms);
+            let end = start + track.duration_ms as f32;
             cur_ms = end + TRACK_SPACING_MS;
             if start > timeline_start_ms + timeline_duration_ms {
                 break;
@@ -256,11 +244,11 @@ impl CantusApp {
 
         // Draw the particles
         self.render_playhead_particles(
-            dt as f32,
+            dt,
             &playback_state.queue[cur_idx],
             origin_x,
             total_height,
-            avg_speed as f32,
+            avg_speed,
             playback_state.volume,
         );
     }
@@ -268,8 +256,8 @@ impl CantusApp {
     fn draw_track(
         &mut self,
         track_render: &TrackRender,
-        height: f64,
-        origin_x: f64,
+        height: f32,
+        origin_x: f32,
         playlists: &HashMap<PlaylistId, CondensedPlaylist>,
         image_map: &HashMap<String, i32>,
     ) {
@@ -280,11 +268,10 @@ impl CantusApp {
         let track = track_render.track;
         let start_x = track_render.start_x;
         let hitbox = Rect::new(start_x, PANEL_START, start_x + width, PANEL_START + height);
-        let start_translation = Affine::translate((start_x, PANEL_START));
 
         // Fade out based on width
         let fade_alpha = if width < height {
-            ((width / height) as f32 * 1.5 - 0.5).max(0.0)
+            ((width / height) * 1.5 - 0.5).max(0.0)
         } else {
             1.0
         };
@@ -329,26 +316,15 @@ impl CantusApp {
                 .as_secs_f32();
 
             if c_track == track.id && (c_time > e_time || !track_render.is_current) {
-                (
-                    c_time,
-                    [(start_x + c_pt.x) as f32, (PANEL_START + c_pt.y) as f32],
-                )
+                (c_time, [(start_x + c_pt.x), (PANEL_START + c_pt.y)])
             } else {
-                (
-                    e_time,
-                    [origin_x as f32, (PANEL_START + height * 0.5) as f32],
-                )
+                (e_time, [origin_x, (PANEL_START + height * 0.5)])
             }
         };
 
         self.background_pills.push(BackgroundPill {
-            rect: [
-                start_x as f32,
-                PANEL_START as f32,
-                width as f32,
-                height as f32,
-            ],
-            dark_width: dark_width as f32,
+            rect: [start_x, PANEL_START, width, height],
+            dark_width,
             alpha: fade_alpha,
             colors,
             expansion_pos,
@@ -359,27 +335,12 @@ impl CantusApp {
 
         // --- TEXT ---
         if !track_render.art_only && fade_alpha >= 1.0 && width > height {
-            // Clipping mask to the edge of the background rectangle, shrunk by a margin
-            self.scene.push_clip_layer(
-                start_translation,
-                &RoundedRect::new(
-                    4.0,
-                    4.0,
-                    width - height - 4.0,
-                    height - 4.0,
-                    6.0 * self.scale_factor,
-                ),
-            );
             // Get available width for text
             let text_start_left = start_x + 12.0;
             let text_start_right = start_x + width - height - 8.0;
             let available_width = (text_start_right - text_start_left).max(0.0);
-            let text_brush = Color::from_rgba8(
-                240,
-                240,
-                240,
-                ((available_width / 100.0).min(1.0) * 255.0) as u8,
-            );
+            let text_alpha = (available_width / 100.0).min(1.0);
+            let text_color = [0.94, 0.94, 0.94, text_alpha];
 
             // Render the songs title (strip anything beyond a - or ( in the song title)
             let song_name = track.name[..track
@@ -397,17 +358,11 @@ impl CantusApp {
                     &self.layout_text(song_name, font_size * width_ratio.max(0.8)),
                     text_start_left,
                     text_height,
-                    false,
-                    text_brush,
+                    0.0,
+                    text_color,
                 );
             } else {
-                self.draw_text(
-                    &song_layout,
-                    text_start_right,
-                    text_height,
-                    true,
-                    text_brush,
-                );
+                self.draw_text(&song_layout, text_start_right, text_height, 1.0, text_color);
             }
 
             // Get text layouts for bottom row of text
@@ -442,28 +397,25 @@ impl CantusApp {
                         text_start_left
                     },
                     text_height,
-                    width_ratio >= 1.0,
-                    text_brush,
+                    if width_ratio >= 1.0 { 1.0 } else { 0.0 },
+                    text_color,
                 );
             } else {
                 self.draw_text(
                     &self.layout_text(&time_text, font_size),
                     start_x + 12.0,
                     text_height,
-                    false,
-                    text_brush,
+                    0.0,
+                    text_color,
                 );
                 self.draw_text(
                     &self.layout_text(artist_text, font_size),
                     text_start_right,
                     text_height,
-                    true,
-                    text_brush,
+                    1.0,
+                    text_color,
                 );
             }
-
-            // Release clipping mask
-            self.scene.pop_layer();
         }
 
         // Expand the hitbox vertically so it includes the playlist buttons
@@ -479,77 +431,73 @@ impl CantusApp {
     }
 
     /// Creates the text layout for a single-line string.
-    fn layout_text(&self, text: &str, size: f64) -> TextLayout {
+    fn layout_text(&self, text: &str, size: f32) -> TextLayout {
         let face = &self.font.face;
-        let psize = (size * self.scale_factor) as f32;
+        let psize = size * self.scale_factor;
         let scale = psize / f32::from(face.units_per_em());
-        let (mut px, mut glyphs, mut prev) = (0.0f32, Vec::with_capacity(text.len()), None);
+        let mut px = 0.0f32;
+        let mut glyphs = Vec::with_capacity(text.len());
+
         for ch in text.chars() {
-            let gid = face.glyph_index(ch);
-            if let (Some(l), Some(r)) = (prev, gid) {
-                px += face.tables().kern.map_or(0.0, |t| {
-                    let mut adj = 0.0f32;
-                    for s in t.subtables {
-                        if s.horizontal
-                            && !s.has_cross_stream
-                            && !s.has_state_machine
-                            && let Some(v) = s.glyphs_kerning(l, r)
-                        {
-                            adj += f32::from(v);
-                        }
-                    }
-                    adj
-                }) * scale;
-            }
-            let adv = gid
-                .and_then(|g| face.glyph_hor_advance(g))
-                .map_or_else(|| f32::from(face.units_per_em()) * 0.5, f32::from);
-            if let Some(g) = gid {
-                glyphs.push(Glyph {
-                    id: u32::from(g.0),
-                    x: px,
-                    y: f32::from(face.ascender()) * scale,
-                });
-                prev = Some(g);
-            } else {
-                prev = None;
-            }
-            px += adv * scale;
+            let gid = u32::from(face.glyph_index(ch).map_or(0, |g| g.0));
+            let advance = face
+                .glyph_hor_advance(ttf_parser::GlyphId(gid as u16))
+                .unwrap_or(0);
+
+            glyphs.push((gid, px));
+            px += f32::from(advance) * scale;
         }
+
         TextLayout {
             glyphs,
-            width: f64::from(px),
-            height: f64::from(
-                f32::from(face.ascender() + face.descender() + face.line_gap()) * scale,
-            ),
+            width: px,
+            line_height: psize,
             font_size: psize,
         }
     }
 
-    fn draw_text(&mut self, l: &TextLayout, px: f64, py: f64, align_e: bool, brush: Color) {
-        self.scene
-            .draw_glyphs(&self.font.font_data)
-            .font_size(l.font_size)
-            .normalized_coords(&self.font.coords)
-            .transform(Affine::translate((
-                px - (l.width * f64::from(u8::from(align_e))),
-                py - l.height * 0.5,
-            )))
-            .hint(true)
-            .brush(brush)
-            .draw(Fill::EvenOdd, l.glyphs.iter().copied());
+    fn draw_text(&mut self, l: &TextLayout, px: f32, py: f32, x_align: f32, color: [f32; 4]) {
+        let start_x = px - (l.width * x_align);
+        let start_y = py - l.line_height * 0.5;
+        let scale = l.font_size / f32::from(self.font.face.units_per_em());
+        let ascender = f32::from(self.font.face.ascender()) * scale;
+
+        for (gid, x_off) in &l.glyphs {
+            if let Some(info) = self.font.atlas.glyphs.get(gid) {
+                let msdf_scale = ATLAS_MSDF_SCALE;
+                let range = ATLAS_RANGE;
+
+                // Position relative to baseline
+                let gx = (start_x + x_off + (f32::from(info.metrics.x_min) * scale))
+                    / self.scale_factor
+                    - ((range + 1.0) / msdf_scale * scale);
+                let gy = (start_y + ascender - (f32::from(info.metrics.y_max) * scale))
+                    / self.scale_factor
+                    - ((range + 1.0) / msdf_scale * scale);
+
+                let gw = (info.uv_rect[2] * self.font.atlas.width as f32) * (scale / msdf_scale)
+                    / self.scale_factor;
+                let gh = (info.uv_rect[3] * self.font.atlas.height as f32) * (scale / msdf_scale)
+                    / self.scale_factor;
+
+                self.text_instances.push(TextInstance {
+                    rect: [gx, gy, gw, gh],
+                    uv_rect: info.uv_rect,
+                    color,
+                });
+            }
+        }
     }
 
     fn render_playhead_particles(
         &mut self,
         dt: f32,
         track: &Track,
-        origin_x: f64,
-        height: f64,
+        origin_x: f32,
+        height: f32,
         track_move_speed: f32,
         volume: Option<u8>,
     ) {
-        let scale = self.scale_factor as f32;
         let Some(track_data_ref) = ALBUM_DATA_CACHE.get(&track.album.id) else {
             return;
         };
@@ -578,14 +526,14 @@ impl CantusApp {
 
         self.gpu_uniforms = Some(ScreenUniforms {
             screen_size: [
-                (CONFIG.width * self.scale_factor) as f32,
-                ((CONFIG.height + PANEL_START + PANEL_EXTENSION) * self.scale_factor) as f32,
+                (CONFIG.width * self.scale_factor),
+                ((CONFIG.height + PANEL_START + PANEL_EXTENSION) * self.scale_factor),
             ],
             time,
-            scale_factor: self.scale_factor as f32,
+            scale_factor: self.scale_factor,
             mouse_pos: [
-                self.interaction.mouse_position.x as f32,
-                self.interaction.mouse_position.y as f32,
+                self.interaction.mouse_position.x,
+                self.interaction.mouse_position.y,
             ],
         });
 
@@ -608,12 +556,12 @@ impl CantusApp {
             // Emit a new particle
             if emit_count > 0 && time > particle.spawn_time + particle.duration {
                 particle.spawn_pos = [
-                    origin_x as f32,
-                    PANEL_START as f32 + height as f32 * lerpf32(fastrand::f32(), 0.1, 0.95),
+                    origin_x,
+                    PANEL_START + height * lerpf32(fastrand::f32(), 0.1, 0.95),
                 ];
                 particle.spawn_vel = [
-                    fastrand::usize(SPARK_VELOCITY_X) as f32 * scale * horizontal_bias,
-                    fastrand::usize(SPARK_VELOCITY_Y) as f32 * -scale,
+                    fastrand::usize(SPARK_VELOCITY_X) as f32 * self.scale_factor * horizontal_bias,
+                    fastrand::usize(SPARK_VELOCITY_Y) as f32 * -self.scale_factor,
                 ];
                 particle.color = palette[fastrand::usize(0..palette.len())];
                 particle.spawn_time = time;
@@ -673,10 +621,10 @@ impl CantusApp {
         }
 
         self.playhead_info = Some(PlayheadUniforms {
-            origin_x: origin_x as f32,
-            panel_start: PANEL_START as f32,
-            height: height as f32,
-            volume: f64::from(volume.unwrap_or(100)) as f32 / 100.0,
+            origin_x,
+            panel_start: PANEL_START,
+            height,
+            volume: f32::from(volume.unwrap_or(100)) / 100.0,
             bar_lerp: interaction.playhead_bar,
             play_lerp: interaction.playhead_play,
             pause_lerp: interaction.playhead_pause,

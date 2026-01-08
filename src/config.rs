@@ -12,9 +12,9 @@ pub struct Config {
     pub monitor: Option<String>,
 
     /// The width of the timeline in pixels.
-    pub width: f64,
+    pub width: f32,
     /// The height of the timeline in pixels.
-    pub height: f64,
+    pub height: f32,
 
     /// The layer the app should be on.
     ///
@@ -27,11 +27,11 @@ pub struct Config {
     pub layer_anchor: String,
 
     /// How many minutes in the future to display in the timeline.
-    pub timeline_future_minutes: f64,
+    pub timeline_future_minutes: f32,
     /// How many minutes before the current time to display in the timeline.
-    pub timeline_past_minutes: f64,
+    pub timeline_past_minutes: f32,
     /// The width in pixels on the left where previous tracks are displayed.
-    pub history_width: f64,
+    pub history_width: f32,
 
     /// Array of favourite playlists to display as buttons.
     pub playlists: Vec<String>,
