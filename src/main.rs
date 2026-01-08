@@ -8,17 +8,15 @@ use std::{
     collections::{HashMap, HashSet},
     sync::Arc,
 };
-use vello::{
-    AaSupport, Renderer, RendererOptions, Scene,
-    util::{RenderContext, RenderSurface},
-};
 use wgpu::{
-    AddressMode, BindGroup, BindGroupDescriptor, BindGroupEntry, BindingResource, BlendComponent,
-    BlendFactor, BlendOperation, BlendState, Buffer, BufferDescriptor, BufferUsages, Color,
-    CommandEncoderDescriptor, CompositeAlphaMode, Device, Extent3d, FilterMode, LoadOp, Operations,
-    PresentMode, Queue, RenderPassColorAttachment, RenderPassDescriptor, Sampler,
-    SamplerDescriptor, StoreOp, Surface, SurfaceConfiguration, TextureDescriptor, TextureDimension,
-    TextureFormat, TextureUsages, TextureViewDescriptor,
+    Adapter, AddressMode, BindGroup, BindGroupDescriptor, BindGroupEntry, BindingResource, Buffer,
+    BufferDescriptor, BufferUsages, Color, CommandEncoderDescriptor, CompositeAlphaMode, Device,
+    DeviceDescriptor, ExperimentalFeatures, Extent3d, Features, FilterMode, Instance,
+    InstanceDescriptor, Limits, LoadOp, MemoryHints, Operations, PowerPreference, PresentMode,
+    Queue, RenderPassColorAttachment, RenderPassDescriptor, RequestAdapterOptions, Sampler,
+    SamplerDescriptor, StoreOp, Surface, SurfaceConfiguration, TexelCopyBufferLayout, Texture,
+    TextureDescriptor, TextureDimension, TextureFormat, TextureUsages, TextureView,
+    TextureViewDescriptor, Trace,
 };
 
 #[cfg(not(any(feature = "wayland", feature = "winit")))]
@@ -60,8 +58,8 @@ pub struct GpuResources {
     pub bg_bind_group: Option<BindGroup>,
     pub icon_storage_buffer: Buffer,
     pub icon_bind_group: Option<BindGroup>,
-    pub atlas_texture: wgpu::Texture,
-    pub atlas_view: wgpu::TextureView,
+    pub atlas_texture: Texture,
+    pub atlas_view: TextureView,
     pub text_storage_buffer: Buffer,
     pub text_bind_group: Option<BindGroup>,
     pub bg_sampler: Sampler,
@@ -88,9 +86,7 @@ fn main() {
 
 pub struct CantusApp {
     render_context: RenderContext,
-    render_surface: Option<RenderSurface<'static>>,
-    render_device: Option<Renderer>,
-    scene: Scene,
+    pub render_surface: Option<RenderSurface>,
     font: FontEngine,
     scale_factor: f32,
     render_state: RenderState,
@@ -107,10 +103,8 @@ pub struct CantusApp {
 impl Default for CantusApp {
     fn default() -> Self {
         Self {
-            render_context: RenderContext::new(),
+            render_context: RenderContext::default(),
             render_surface: None,
-            render_device: None,
-            scene: Scene::new(),
             font: FontEngine::default(),
             scale_factor: 1.0,
             render_state: RenderState::default(),
@@ -128,10 +122,31 @@ impl Default for CantusApp {
 
 impl CantusApp {
     fn configure_render_surface(&mut self, surface: Surface<'static>, width: u32, height: u32) {
-        let dev_id = pollster::block_on(self.render_context.device(Some(&surface)))
-            .expect("No compatible device found");
+        let adapter = pollster::block_on(self.render_context.instance.request_adapter(
+            &RequestAdapterOptions {
+                power_preference: PowerPreference::HighPerformance,
+                compatible_surface: Some(&surface),
+                force_fallback_adapter: false,
+            },
+        ))
+        .expect("No compatible adapter found");
+        let (device, queue) = pollster::block_on(adapter.request_device(&DeviceDescriptor {
+            label: None,
+            required_features: Features::default(),
+            required_limits: Limits::default(),
+            memory_hints: MemoryHints::default(),
+            trace: Trace::Off,
+            experimental_features: ExperimentalFeatures::disabled(),
+        }))
+        .expect("No compatible device found");
+        self.render_context.devices.push(DeviceHandle {
+            adapter,
+            device: Arc::new(device),
+            queue: Arc::new(queue),
+        });
+        let dev_id = self.render_context.devices.len() - 1;
         let device_handle = &self.render_context.devices[dev_id];
-        let capabilities = surface.get_capabilities(device_handle.adapter());
+        let capabilities = surface.get_capabilities(&device_handle.adapter);
 
         let format = TextureFormat::Rgba8Unorm;
         assert!(
@@ -146,68 +161,24 @@ impl CantusApp {
         .find(|mode| capabilities.alpha_modes.contains(mode))
         .unwrap_or(CompositeAlphaMode::Auto);
 
-        let target_texture = device_handle.device.create_texture(&TextureDescriptor {
-            label: None,
-            size: Extent3d {
-                width,
-                height,
-                depth_or_array_layers: 1,
-            },
-            mip_level_count: 1,
-            sample_count: 1,
-            dimension: TextureDimension::D2,
-            usage: TextureUsages::STORAGE_BINDING | TextureUsages::TEXTURE_BINDING,
+        let config = SurfaceConfiguration {
+            usage: TextureUsages::RENDER_ATTACHMENT,
             format,
-            view_formats: &[],
-        });
-        let target_view = target_texture.create_view(&TextureViewDescriptor::default());
+            width,
+            height,
+            present_mode: PresentMode::AutoVsync,
+            desired_maximum_frame_latency: 2,
+            alpha_mode,
+            view_formats: vec![],
+        };
+        surface.configure(&device_handle.device, &config);
+
         let render_surface = RenderSurface {
             surface,
             dev_id,
             format,
-            target_texture,
-            target_view,
-            config: SurfaceConfiguration {
-                usage: TextureUsages::RENDER_ATTACHMENT,
-                format,
-                width,
-                height,
-                present_mode: PresentMode::AutoVsync,
-                desired_maximum_frame_latency: 2,
-                alpha_mode,
-                view_formats: vec![],
-            },
-            blitter: wgpu::util::TextureBlitterBuilder::new(&device_handle.device, format)
-                .blend_state(BlendState {
-                    color: BlendComponent {
-                        src_factor: BlendFactor::SrcAlpha,
-                        dst_factor: BlendFactor::OneMinusSrcAlpha,
-                        operation: BlendOperation::Add,
-                    },
-                    alpha: BlendComponent {
-                        src_factor: BlendFactor::One,
-                        dst_factor: BlendFactor::OneMinusSrcAlpha,
-                        operation: BlendOperation::Add,
-                    },
-                })
-                .build(),
+            config,
         };
-        render_surface
-            .surface
-            .configure(&device_handle.device, &render_surface.config);
-
-        self.render_device = Some(
-            Renderer::new(
-                &device_handle.device,
-                RendererOptions {
-                    use_cpu: false,
-                    antialiasing_support: AaSupport::area_only(),
-                    num_init_threads: None,
-                    pipeline_cache: None,
-                },
-            )
-            .expect("Failed to create renderer"),
-        );
 
         let shaders = Shaders::new(&device_handle.device, format);
         let uniform_buffer = device_handle.device.create_buffer(&BufferDescriptor {
@@ -295,7 +266,7 @@ impl CantusApp {
         device_handle.queue.write_texture(
             atlas_texture.as_image_copy(),
             &self.font.atlas.texture_data,
-            wgpu::TexelCopyBufferLayout {
+            TexelCopyBufferLayout {
                 offset: 0,
                 bytes_per_row: Some(self.font.atlas.width * 4),
                 rows_per_image: None,
@@ -321,11 +292,11 @@ impl CantusApp {
             ..Default::default()
         });
 
-        let device = Arc::new(device_handle.device.clone());
-        let queue = Arc::new(device_handle.queue.clone());
+        let device = device_handle.device.clone();
+        let queue = device_handle.queue.clone();
         self.gpu_resources = Some(GpuResources {
-            device: device.clone(),
-            queue: queue.clone(),
+            device,
+            queue,
             shaders,
             uniform_buffer,
             storage_buffer,
@@ -341,7 +312,7 @@ impl CantusApp {
             text_storage_buffer,
             text_bind_group: None,
             bg_sampler,
-            images: ImageManager::new(device, queue),
+            images: ImageManager::new(device_handle.device.clone(), device_handle.queue.clone()),
             requested_textures: HashSet::new(),
         });
         self.render_surface = Some(render_surface);
@@ -352,7 +323,6 @@ impl CantusApp {
         let rs_ptr = self.render_surface.as_ref().unwrap();
         let dev_id = rs_ptr.dev_id;
 
-        self.scene.reset();
         self.background_pills.clear();
         self.icon_pills.clear();
         self.text_instances.clear();
@@ -377,7 +347,6 @@ impl CantusApp {
         };
 
         if let Some(idx) = next_indices {
-            self.scene.reset();
             self.background_pills.clear();
             self.icon_pills.clear();
             self.text_instances.clear();
@@ -603,6 +572,34 @@ impl CantusApp {
             gpu.requested_textures.insert(url.to_owned());
         }
         image_map.get(url).copied().unwrap_or(-1)
+    }
+}
+
+pub struct RenderContext {
+    pub instance: Instance,
+    pub devices: Vec<DeviceHandle>,
+}
+
+pub struct DeviceHandle {
+    pub adapter: Adapter,
+    pub device: Arc<Device>,
+    pub queue: Arc<Queue>,
+}
+
+pub struct RenderSurface {
+    pub surface: Surface<'static>,
+    pub dev_id: usize,
+    pub format: TextureFormat,
+    pub config: SurfaceConfiguration,
+}
+
+impl Default for RenderContext {
+    fn default() -> Self {
+        let instance = Instance::new(&InstanceDescriptor::default());
+        Self {
+            instance,
+            devices: Vec::new(),
+        }
     }
 }
 

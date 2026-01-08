@@ -38,17 +38,11 @@ winit = { version = "0.30.12", default-features = false, features = [
     "x11",
 ], optional = true }
 
-wgpu = { version = "26.0.1", default-features = false, features = [
+wgpu = { version = "27.0.1", default-features = false, features = [
     "parking_lot",
     "std",
     "vulkan",
     "wgsl",
-] }
-vello = { version = "0.6.0", default-features = false, features = ["wgpu"] }
-
-ttf-parser = { version = "0.25.1", default-features = false, features = [
-    "std",
-    "variable-fonts",
 ] }
 
 time = { version = "0.3.44", features = ["serde"] }
@@ -74,6 +68,11 @@ url = "2.5.8"
 sha2 = "0.10.9"
 webbrowser = "1.0.6"
 bytemuck = { version = "1.24.0", features = ["derive"] }
+
+ttf-parser = { version = "0.25.1", default-features = false, features = [
+    "std",
+    "variable-fonts",
+] }
 fdsm = "0.8.0"
 fdsm-ttf-parser = "0.2.0"
 nalgebra = "0.34.1"

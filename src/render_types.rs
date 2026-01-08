@@ -3,9 +3,9 @@ use wgpu::{
     BindGroupLayout, BindGroupLayoutDescriptor, BindGroupLayoutEntry, BindingType, BlendState,
     BufferBindingType, ColorTargetState, ColorWrites, Device, FragmentState, MultisampleState,
     PipelineCompilationOptions, PipelineLayoutDescriptor, PrimitiveState, PrimitiveTopology,
-    RenderPipeline, RenderPipelineDescriptor, SamplerBindingType, ShaderModuleDescriptor,
-    ShaderSource, ShaderStages, TextureFormat, TextureSampleType, TextureViewDimension,
-    VertexState,
+    RenderPipeline, RenderPipelineDescriptor, SamplerBindingType, ShaderModule,
+    ShaderModuleDescriptor, ShaderSource, ShaderStages, TextureFormat, TextureSampleType,
+    TextureViewDimension, VertexState,
 };
 
 pub struct Shaders {
@@ -186,7 +186,7 @@ impl Shaders {
         });
 
         // Pipeline Helper
-        let create_pipe = |label: &str, shader: &wgpu::ShaderModule, layout: &BindGroupLayout| {
+        let create_pipe = |label: &str, shader: &ShaderModule, layout: &BindGroupLayout| {
             let pipeline_layout = device.create_pipeline_layout(&PipelineLayoutDescriptor {
                 label: Some(&format!("{label} Pipeline Layout")),
                 bind_group_layouts: &[layout],
