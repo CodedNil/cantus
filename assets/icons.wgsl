@@ -35,9 +35,10 @@ fn vs_main(@builtin(vertex_index) v_idx: u32, @builtin(instance_index) i_idx: u3
     return VertexOutput(vec4(ndc.x, -ndc.y, 0.0, 1.0), corner, i_idx);
 }
 
-fn sd_rounded_rect(p: vec2<f32>, b: vec2<f32>, r: f32) -> f32 {
+fn sd_squircle(p: vec2<f32>, b: vec2<f32>, r: f32) -> f32 {
     let q = abs(p) - b + r;
-    return length(max(q, vec2(0.0))) + min(max(q.x, q.y), 0.0) - r;
+    let n = 4.0;
+    return pow(pow(max(q.x, 0.0), n) + pow(max(q.y, 0.0), n), 1.0/n) - r + min(max(q.x, q.y), 0.0);
 }
 
 fn sd_star(p: vec2<f32>, r: f32, rf: f32) -> f32 {
@@ -70,7 +71,7 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
         let split_mask = clamp((in.uv.x - icon.param) / fwidth(in.uv.x) + 0.5, 0.0, 1.0);
         color = mix(vec3(1.0, 0.85, 0.2), vec3(0.33), split_mask);
     } else {
-        dist = sd_rounded_rect(p, vec2(size * 0.5), 2.0 * uniforms.scale_factor);
+        dist = sd_squircle(p, vec2(size * 0.5), 12.0 * uniforms.scale_factor);
         color = mix(textureSample(t_images, s_images, p / size + 0.5, icon.image_index).rgb, vec3(0.24), icon.param);
     }
 
