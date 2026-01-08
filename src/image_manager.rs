@@ -47,10 +47,10 @@ impl ImageManager {
 
         for url in &sorted_urls {
             if let Some(img_ref) = IMAGES_CACHE.get(url)
-                && let Some(img_brush) = img_ref.as_ref()
+                && let Some(image) = img_ref.as_ref()
             {
                 next_url_to_index.insert(url.clone(), images_data.len() as i32);
-                images_data.push(img_brush.image.clone());
+                images_data.push(image.clone());
             }
         }
 
@@ -60,8 +60,8 @@ impl ImageManager {
             return false;
         }
 
-        let width = images_data[0].width;
-        let height = images_data[0].height;
+        let width = images_data[0].width();
+        let height = images_data[0].height();
         let layers = images_data.len() as u32;
 
         let texture = self.device.create_texture(&TextureDescriptor {
@@ -91,7 +91,7 @@ impl ImageManager {
                     },
                     aspect: TextureAspect::All,
                 },
-                img.data.as_ref(),
+                img.as_raw(),
                 TexelCopyBufferLayout {
                     offset: 0,
                     bytes_per_row: Some(4 * width),

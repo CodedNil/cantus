@@ -194,6 +194,45 @@ impl Shaders {
     }
 }
 
+#[derive(Copy, Clone, Debug, Default, PartialEq)]
+pub struct Point {
+    pub x: f64,
+    pub y: f64,
+}
+
+impl Point {
+    pub const fn new(x: f64, y: f64) -> Self {
+        Self { x, y }
+    }
+}
+
+#[derive(Copy, Clone, Debug, Default, PartialEq)]
+pub struct Rect {
+    pub x0: f64,
+    pub y0: f64,
+    pub x1: f64,
+    pub y1: f64,
+}
+
+impl Rect {
+    pub const fn new(x0: f64, y0: f64, x1: f64, y1: f64) -> Self {
+        Self { x0, y0, x1, y1 }
+    }
+
+    pub fn contains(&self, p: Point) -> bool {
+        p.x >= self.x0 && p.x <= self.x1 && p.y >= self.y0 && p.y <= self.y1
+    }
+
+    pub fn inflate(&self, dx: f64, dy: f64) -> Self {
+        Self {
+            x0: self.x0 - dx,
+            y0: self.y0 - dy,
+            x1: self.x1 + dx,
+            y1: self.y1 + dy,
+        }
+    }
+}
+
 #[repr(C)]
 #[derive(Copy, Clone, Debug, Pod, Zeroable)]
 pub struct ScreenUniforms {

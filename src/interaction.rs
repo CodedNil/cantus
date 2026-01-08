@@ -1,15 +1,17 @@
 use crate::{
     CantusApp, PANEL_START,
     config::CONFIG,
-    render_types::IconInstance,
+    render_types::{IconInstance, Point, Rect},
     rspotify::{PlaylistId, Track, TrackId},
     spotify::{CondensedPlaylist, PLAYBACK_STATE, SPOTIFY_CLIENT, update_playback_state},
 };
 use itertools::Itertools;
-use std::time::Duration;
-use std::{collections::HashMap, thread::spawn, time::Instant};
+use std::{
+    collections::HashMap,
+    thread::spawn,
+    time::{Duration, Instant},
+};
 use tracing::{error, info, warn};
-use vello::kurbo::{Point, Rect};
 
 pub struct IconHitbox {
     pub rect: Rect,

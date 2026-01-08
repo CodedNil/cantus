@@ -1,7 +1,9 @@
-use crate::{CantusApp, PANEL_EXTENSION, config::CONFIG, interaction::InteractionState};
+use crate::{
+    CantusApp, PANEL_EXTENSION, config::CONFIG, interaction::InteractionState, render_types::Point,
+};
 use raw_window_handle::{HasDisplayHandle, HasWindowHandle};
 use tracing::error;
-use vello::{kurbo::Point, wgpu::SurfaceTargetUnsafe};
+use wgpu::SurfaceTargetUnsafe;
 use winit::{
     application::ApplicationHandler,
     dpi::{LogicalPosition, PhysicalSize},

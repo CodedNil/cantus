@@ -2,7 +2,7 @@ use crate::{
     CantusApp, PANEL_EXTENSION, PANEL_START,
     config::CONFIG,
     lerpf32,
-    render_types::{BackgroundPill, Particle, PlayheadUniforms, ScreenUniforms},
+    render_types::{BackgroundPill, Particle, PlayheadUniforms, Rect, ScreenUniforms},
     rspotify::{PlaylistId, Track},
     spotify::{ALBUM_DATA_CACHE, CondensedPlaylist, PLAYBACK_STATE},
 };
@@ -10,7 +10,7 @@ use std::{collections::HashMap, ops::Range, sync::LazyLock, time::Instant};
 use ttf_parser::{Face, Tag};
 use vello::{
     Glyph,
-    kurbo::{Affine, Rect, RoundedRect},
+    kurbo::{Affine, RoundedRect},
     peniko::{Blob, Color, Fill, FontData},
 };
 

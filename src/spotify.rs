@@ -8,6 +8,7 @@ use crate::{
 };
 use arrayvec::ArrayString;
 use dashmap::DashMap;
+use image::RgbaImage;
 use parking_lot::RwLock;
 use std::{
     collections::{HashMap, HashSet},
@@ -17,9 +18,6 @@ use std::{
     time::{Duration, Instant},
 };
 use tracing::{error, info, warn};
-use vello::peniko::{
-    Blob, Extend, ImageAlphaType, ImageBrush, ImageData, ImageFormat, ImageQuality, ImageSampler,
-};
 
 pub static PLAYBACK_STATE: LazyLock<RwLock<PlaybackState>> = LazyLock::new(|| {
     RwLock::new(PlaybackState {
@@ -40,8 +38,7 @@ pub static PLAYBACK_STATE: LazyLock<RwLock<PlaybackState>> = LazyLock::new(|| {
         last_grabbed_queue: Instant::now().checked_sub(Duration::from_secs(60)).unwrap(),
     })
 });
-pub static IMAGES_CACHE: LazyLock<DashMap<String, Option<ImageBrush>>> =
-    LazyLock::new(DashMap::new);
+pub static IMAGES_CACHE: LazyLock<DashMap<String, Option<RgbaImage>>> = LazyLock::new(DashMap::new);
 pub static ALBUM_DATA_CACHE: LazyLock<DashMap<AlbumId, Option<AlbumData>>> =
     LazyLock::new(DashMap::new);
 pub static ARTIST_DATA_CACHE: LazyLock<DashMap<ArtistId, Option<String>>> =
@@ -215,36 +212,19 @@ fn get_spotify_playback() {
     }
 
     // https://developer.spotify.com/documentation/web-api/reference/#/operations/get-information-about-the-users-current-playback
-    let result = match SPOTIFY_CLIENT.api_get("me/player") {
-        Ok(result) => {
-            if result.is_empty() {
-                // Spotify is not playing anything
-                update_playback_state(|state| {
-                    state.last_grabbed_playback = Instant::now();
-                });
-                return;
-            }
-            result
-        }
-        Err(err) => {
-            update_playback_state(|state| {
-                state.last_grabbed_playback = Instant::now();
-            });
-            error!("Failed to fetch current playback: {err}");
-            return;
-        }
+    let current_playback_opt = SPOTIFY_CLIENT
+        .api_get("me/player")
+        .ok()
+        .filter(|res| !res.is_empty()) // Handle "nothing playing"
+        .and_then(|res| {
+            serde_json::from_str::<CurrentPlaybackContext>(&res)
+                .map_err(|e| error!("Failed to parse playback: {e}"))
+                .ok()
+        });
+    update_playback_state(|state| state.last_grabbed_playback = Instant::now());
+    let Some(current_playback) = current_playback_opt else {
+        return;
     };
-    let current_playback = match serde_json::from_str::<CurrentPlaybackContext>(&result) {
-        Ok(playback) => playback,
-        Err(err) => {
-            update_playback_state(|state| {
-                state.last_grabbed_playback = Instant::now();
-            });
-            error!("Failed to parse current playback: {err}");
-            return;
-        }
-    };
-    let request_duration = now.elapsed();
 
     // Update the playback state
     update_playback_state(|state| {
@@ -272,12 +252,7 @@ fn get_spotify_playback() {
 
         state.volume = current_playback.device.volume_percent.map(|v| v as u8);
         state.playing = current_playback.is_playing;
-        state.progress = current_playback.progress_ms
-            + if current_playback.is_playing {
-                (request_duration.as_millis() / 2) as u32
-            } else {
-                0
-            };
+        state.progress = current_playback.progress_ms;
         state.last_progress_update = now;
         state.last_grabbed_playback = now;
     });
@@ -296,25 +271,19 @@ fn get_spotify_queue() {
     }
 
     // https://developer.spotify.com/documentation/web-api/reference/#/operations/get-queue
-    let result = match SPOTIFY_CLIENT.api_get("me/player/queue") {
-        Ok(result) => result,
-        Err(err) => {
-            update_playback_state(|state| {
-                state.last_grabbed_queue = Instant::now();
-            });
-            error!("Failed to fetch current queue: {err}");
-            return;
-        }
-    };
-    let queue = match serde_json::from_str::<CurrentUserQueue>(&result) {
-        Ok(queue) => queue,
-        Err(err) => {
-            update_playback_state(|state| {
-                state.last_grabbed_playback = Instant::now();
-            });
-            error!("Failed to parse current queue: {err}");
-            return;
-        }
+    let queue_opt = SPOTIFY_CLIENT
+        .api_get("me/player/queue")
+        .map_err(|e| error!("Failed to fetch queue: {e}"))
+        .ok()
+        .and_then(|res| {
+            serde_json::from_str::<CurrentUserQueue>(&res)
+                .map_err(|e| error!("Failed to parse queue: {e}"))
+                .ok()
+        });
+    update_playback_state(|state| state.last_grabbed_queue = Instant::now());
+
+    let Some(queue) = queue_opt else {
+        return;
     };
 
     // Get current track and the upcoming queue
@@ -351,14 +320,12 @@ fn get_spotify_queue() {
             .join(",");
         spawn(move || {
             // https://developer.spotify.com/documentation/web-api/reference/#/operations/get-multiple-artists
-            let result = match SPOTIFY_CLIENT.api_get(&format!("artists/?ids={artist_query}")) {
-                Ok(result) => result,
-                Err(err) => {
-                    error!("Failed to fetch artists: {err}");
-                    return;
-                }
-            };
-            let Ok(artists) = serde_json::from_str::<Artists>(&result) else {
+            let Some(artists) = SPOTIFY_CLIENT
+                .api_get(&format!("artists/?ids={artist_query}"))
+                .map_err(|e| error!("Failed to fetch artists: {e}"))
+                .ok()
+                .and_then(|res| serde_json::from_str::<Artists>(&res).ok())
+            else {
                 return;
             };
             for artist in artists.artists {
@@ -416,24 +383,7 @@ fn ensure_image_cached(url: &str) {
         } else {
             dynamic_image
         };
-        IMAGES_CACHE.insert(
-            url,
-            Some(ImageBrush {
-                image: ImageData {
-                    data: Blob::from(dynamic_image.to_rgba8().into_raw()),
-                    format: ImageFormat::Rgba8,
-                    alpha_type: ImageAlphaType::Alpha,
-                    width: dynamic_image.width(),
-                    height: dynamic_image.height(),
-                },
-                sampler: ImageSampler {
-                    x_extend: Extend::Pad,
-                    y_extend: Extend::Pad,
-                    quality: ImageQuality::Medium,
-                    alpha: 1.0,
-                },
-            }),
-        );
+        IMAGES_CACHE.insert(url, Some(dynamic_image.to_rgba8()));
         update_color_palettes();
     });
 }
@@ -451,20 +401,15 @@ fn poll_playlists() {
     // Spawn loop to collect spotify playlist tracks
     loop {
         // https://developer.spotify.com/documentation/web-api/reference/#/operations/get-a-list-of-current-users-playlists
-        let result = match SPOTIFY_CLIENT.api_get_payload("me/playlists", &[("limit", "50")]) {
-            Ok(result) => result,
-            Err(err) => {
-                error!("Failed to fetch users playlists: {err}");
-                String::new()
-            }
-        };
-        let playlists = match serde_json::from_str::<Page<Playlist>>(&result) {
-            Ok(playlists) => playlists.items,
-            Err(err) => {
-                error!("Failed to parse users playlists: {err}");
-                Vec::new()
-            }
-        };
+        let playlists = SPOTIFY_CLIENT
+            .api_get_payload("me/playlists", &[("limit", "50")])
+            .map_err(|err| error!("Failed to fetch users playlists: {err}"))
+            .and_then(|res| {
+                serde_json::from_str::<Page<Playlist>>(&res)
+                    .map_err(|err| error!("Failed to parse users playlists: {err}"))
+            })
+            .map(|page| page.items)
+            .unwrap_or_default();
 
         for playlist in playlists {
             // Check if the playlist is on the contained list
@@ -524,29 +469,30 @@ fn poll_playlists() {
             let mut pages = Vec::new();
             for page in 0..num_pages {
                 // https://developer.spotify.com/documentation/web-api/reference/#/operations/get-playlists-tracks
-                let result = match SPOTIFY_CLIENT.api_get_payload(
-                    &format!("playlists/{}/tracks", playlist.id),
-                    &[
-                        (
-                            "fields",
-                            "href,limit,offset,total,items(is_local,track(id))",
-                        ),
-                        ("limit", &chunk_size.to_string()),
-                        ("offset", &((page as u32) * chunk_size).to_string()),
-                    ],
-                ) {
-                    Ok(result) => result,
-                    Err(err) => {
-                        error!("Failed to fetch playlist page: {err}");
-                        return;
-                    }
-                };
-                match serde_json::from_str::<Page<PlaylistItem>>(&result) {
-                    Ok(page) => pages.push(page),
-                    Err(err) => {
-                        error!("Failed to parse playlist page: {err}");
-                        return;
-                    }
+                let page_data = SPOTIFY_CLIENT
+                    .api_get_payload(
+                        &format!("playlists/{}/tracks", playlist.id),
+                        &[
+                            (
+                                "fields",
+                                "href,limit,offset,total,items(is_local,track(id))",
+                            ),
+                            ("limit", &chunk_size.to_string()),
+                            ("offset", &((page as u32) * chunk_size).to_string()),
+                        ],
+                    )
+                    .map_err(|e| error!("Failed to fetch playlist page: {e}"))
+                    .ok()
+                    .and_then(|res| {
+                        serde_json::from_str::<Page<PlaylistItem>>(&res)
+                            .map_err(|e| error!("Failed to parse playlist page: {e}"))
+                            .ok()
+                    });
+
+                if let Some(p) = page_data {
+                    pages.push(p);
+                } else {
+                    return;
                 }
             }
 

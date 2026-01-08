@@ -18,7 +18,7 @@ pub fn update_color_palettes() {
         let Some(image_ref) = IMAGES_CACHE.get(&track.album.image) else {
             continue;
         };
-        let Some(image) = image_ref.as_ref() else {
+        let Some(album_image) = image_ref.as_ref() else {
             continue;
         };
         let Some(artist_image_url_ref) = ARTIST_DATA_CACHE
@@ -29,10 +29,8 @@ pub fn update_color_palettes() {
         };
         ALBUM_DATA_CACHE.insert(track.album.id, None);
 
-        let width = image.image.width;
-        let height = image.image.height;
-        let album_image =
-            RgbaImage::from_raw(width, height, image.image.data.data().to_vec()).unwrap();
+        let width = album_image.width();
+        let height = album_image.height();
 
         let get_swatches = |img_data| {
             let palette: Palette<f64> = Palette::builder()
@@ -47,7 +45,7 @@ pub fn update_color_palettes() {
         };
 
         let mut swatches =
-            get_swatches(auto_palette::ImageData::new(width, height, &album_image).unwrap());
+            get_swatches(auto_palette::ImageData::new(width, height, album_image).unwrap());
         if swatches.len() < NUM_SWATCHES
             && let Some(artist_image_url) = artist_image_url_ref.as_ref()
         {
@@ -61,14 +59,9 @@ pub fn update_color_palettes() {
             };
             let artist_new_width = (width as f32 * 0.1).round() as u32;
             let mut new_img = RgbaImage::new(width + artist_new_width, height);
-            image::imageops::overlay(&mut new_img, &album_image, 0, 0);
+            image::imageops::overlay(&mut new_img, album_image, 0, 0);
             let artist_img_resized = image::imageops::resize(
-                &image::RgbaImage::from_raw(
-                    artist_image.image.width,
-                    artist_image.image.height,
-                    artist_image.image.data.data().to_vec(),
-                )
-                .unwrap(),
+                artist_image,
                 artist_new_width,
                 height,
                 image::imageops::FilterType::Nearest,

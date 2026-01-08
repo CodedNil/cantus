@@ -1,5 +1,6 @@
 use crate::{
     CantusApp, PANEL_EXTENSION, PANEL_START, config::CONFIG, interaction::InteractionState,
+    render_types::Point,
 };
 use raw_window_handle::{
     RawDisplayHandle, RawWindowHandle, WaylandDisplayHandle, WaylandWindowHandle,
@@ -10,7 +11,6 @@ use std::{
     time::{Duration, Instant},
 };
 use tracing::error;
-use vello::{kurbo::Point, wgpu::SurfaceTargetUnsafe};
 use wayland_client::{
     Connection, Dispatch, Proxy, QueueHandle, WEnum,
     protocol::{
@@ -38,6 +38,7 @@ use wayland_protocols_wlr::layer_shell::v1::client::{
     zwlr_layer_shell_v1::{self, Layer as LayerStyle, ZwlrLayerShellV1},
     zwlr_layer_surface_v1::{self, Anchor as LayerAnchor, ZwlrLayerSurfaceV1},
 };
+use wgpu::SurfaceTargetUnsafe;
 
 pub fn run() {
     let connection = Connection::connect_to_env().expect("Failed to connect to Wayland display");
