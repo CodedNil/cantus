@@ -1,3 +1,4 @@
+use crate::image_manager::ImageManager;
 use crate::interaction::InteractionState;
 use crate::render::{FontEngine, ParticlesState, RenderState};
 use crate::text_render::TextInstance;
@@ -40,8 +41,6 @@ mod layer_shell;
 #[cfg(feature = "winit")]
 mod winit_app;
 
-use crate::image_manager::ImageManager;
-
 #[global_allocator]
 static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
 
@@ -61,6 +60,7 @@ struct GpuResources {
     icon_storage_buffer: Buffer,
     icon_bind_group: Option<BindGroup>,
     atlas_view: TextureView,
+    image_view: TextureView,
     text_storage_buffer: Buffer,
     text_bind_group: Option<BindGroup>,
     bg_sampler: Sampler,
@@ -234,14 +234,13 @@ impl CantusApp {
             mapped_at_creation: false,
         });
 
-        let atlas_size = Extent3d {
-            width: self.font.atlas.width,
-            height: self.font.atlas.height,
-            depth_or_array_layers: 1,
-        };
         let atlas_texture = device_handle.device.create_texture(&TextureDescriptor {
             label: Some("MSDF Atlas"),
-            size: atlas_size,
+            size: Extent3d {
+                width: self.font.atlas.width,
+                height: self.font.atlas.height,
+                depth_or_array_layers: 1,
+            },
             mip_level_count: 1,
             sample_count: 1,
             dimension: TextureDimension::D2,
@@ -258,13 +257,18 @@ impl CantusApp {
                 bytes_per_row: Some(self.font.atlas.width * 4),
                 rows_per_image: None,
             },
-            atlas_size,
+            Extent3d {
+                width: self.font.atlas.width,
+                height: self.font.atlas.height,
+                depth_or_array_layers: 1,
+            },
         );
+
         let atlas_view = atlas_texture.create_view(&TextureViewDescriptor::default());
 
         let text_storage_buffer = device_handle.device.create_buffer(&BufferDescriptor {
             label: Some("Text Instances"),
-            size: (std::mem::size_of::<TextInstance>() * 1024) as u64,
+            size: (std::mem::size_of::<TextInstance>() * 512) as u64,
             usage: BufferUsages::STORAGE | BufferUsages::COPY_DST,
             mapped_at_creation: false,
         });
@@ -281,7 +285,10 @@ impl CantusApp {
 
         let device = device_handle.device.clone();
         let queue = device_handle.queue.clone();
-        self.gpu_resources = Some(GpuResources {
+        let images = ImageManager::new(&device_handle.device, device_handle.queue.clone());
+        let image_view = images.create_view();
+
+        let mut gpu_resources = GpuResources {
             device,
             queue,
             shaders,
@@ -294,12 +301,77 @@ impl CantusApp {
             icon_storage_buffer,
             icon_bind_group: None,
             atlas_view,
+            image_view,
             text_storage_buffer,
             text_bind_group: None,
             bg_sampler,
-            images: ImageManager::new(device_handle.device.clone(), device_handle.queue.clone()),
+            images,
             requested_textures: HashSet::new(),
-        });
+        };
+
+        let make_standard_bg = |gpu: &GpuResources, label, layout, storage: BindingResource| {
+            gpu.device.create_bind_group(&BindGroupDescriptor {
+                label: Some(label),
+                layout,
+                entries: &[
+                    BindGroupEntry {
+                        binding: 0,
+                        resource: gpu.uniform_buffer.as_entire_binding(),
+                    },
+                    BindGroupEntry {
+                        binding: 1,
+                        resource: storage,
+                    },
+                    BindGroupEntry {
+                        binding: 2,
+                        resource: BindingResource::TextureView(&gpu.image_view),
+                    },
+                    BindGroupEntry {
+                        binding: 3,
+                        resource: BindingResource::Sampler(&gpu.bg_sampler),
+                    },
+                ],
+            })
+        };
+
+        gpu_resources.bg_bind_group = Some(make_standard_bg(
+            &gpu_resources,
+            "BG BG",
+            &gpu_resources.shaders.bg_bind_group_layout,
+            gpu_resources.bg_storage_buffer.as_entire_binding(),
+        ));
+        gpu_resources.icon_bind_group = Some(make_standard_bg(
+            &gpu_resources,
+            "Icon BG",
+            &gpu_resources.shaders.icon_bind_group_layout,
+            gpu_resources.icon_storage_buffer.as_entire_binding(),
+        ));
+        gpu_resources.text_bind_group = Some(gpu_resources.device.create_bind_group(
+            &BindGroupDescriptor {
+                label: Some("Text BG"),
+                layout: &gpu_resources.shaders.text_bind_group_layout,
+                entries: &[
+                    BindGroupEntry {
+                        binding: 0,
+                        resource: gpu_resources.uniform_buffer.as_entire_binding(),
+                    },
+                    BindGroupEntry {
+                        binding: 1,
+                        resource: gpu_resources.text_storage_buffer.as_entire_binding(),
+                    },
+                    BindGroupEntry {
+                        binding: 2,
+                        resource: BindingResource::TextureView(&gpu_resources.atlas_view),
+                    },
+                    BindGroupEntry {
+                        binding: 3,
+                        resource: BindingResource::Sampler(&gpu_resources.bg_sampler),
+                    },
+                ],
+            },
+        ));
+
+        self.gpu_resources = Some(gpu_resources);
         self.render_surface = Some(render_surface);
     }
 
@@ -323,80 +395,24 @@ impl CantusApp {
             .unwrap_or_default();
         self.create_scene(&current_indices);
 
-        let next_indices = if let Some(gpu) = self.gpu_resources.as_mut()
-            && gpu.images.update(&gpu.requested_textures)
-        {
-            Some(gpu.images.url_to_index.clone())
+        let image_updated = if let Some(gpu) = self.gpu_resources.as_mut() {
+            gpu.images.update(&gpu.requested_textures)
         } else {
-            None
+            false
         };
 
-        if let Some(idx) = next_indices {
+        if image_updated {
+            let indices = self
+                .gpu_resources
+                .as_ref()
+                .unwrap()
+                .images
+                .url_to_index
+                .clone();
             self.background_pills.clear();
             self.icon_pills.clear();
             self.text_instances.clear();
-            self.create_scene(&idx);
-
-            if let Some(gpu) = self.gpu_resources.as_mut()
-                && let Some(view) = gpu.images.create_view()
-            {
-                let make_bg = |label, layout, storage: BindingResource| {
-                    gpu.device.create_bind_group(&BindGroupDescriptor {
-                        label: Some(label),
-                        layout,
-                        entries: &[
-                            BindGroupEntry {
-                                binding: 0,
-                                resource: gpu.uniform_buffer.as_entire_binding(),
-                            },
-                            BindGroupEntry {
-                                binding: 1,
-                                resource: storage,
-                            },
-                            BindGroupEntry {
-                                binding: 2,
-                                resource: BindingResource::TextureView(&view),
-                            },
-                            BindGroupEntry {
-                                binding: 3,
-                                resource: BindingResource::Sampler(&gpu.bg_sampler),
-                            },
-                        ],
-                    })
-                };
-                gpu.bg_bind_group = Some(make_bg(
-                    "BG BG",
-                    &gpu.shaders.bg_bind_group_layout,
-                    gpu.bg_storage_buffer.as_entire_binding(),
-                ));
-                gpu.icon_bind_group = Some(make_bg(
-                    "Icon BG",
-                    &gpu.shaders.icon_bind_group_layout,
-                    gpu.icon_storage_buffer.as_entire_binding(),
-                ));
-                gpu.text_bind_group = Some(gpu.device.create_bind_group(&BindGroupDescriptor {
-                    label: Some("Text BG"),
-                    layout: &gpu.shaders.text_bind_group_layout,
-                    entries: &[
-                        BindGroupEntry {
-                            binding: 0,
-                            resource: gpu.uniform_buffer.as_entire_binding(),
-                        },
-                        BindGroupEntry {
-                            binding: 1,
-                            resource: gpu.text_storage_buffer.as_entire_binding(),
-                        },
-                        BindGroupEntry {
-                            binding: 2,
-                            resource: BindingResource::TextureView(&gpu.atlas_view),
-                        },
-                        BindGroupEntry {
-                            binding: 3,
-                            resource: BindingResource::Sampler(&gpu.bg_sampler),
-                        },
-                    ],
-                }));
-            }
+            self.create_scene(&indices);
         }
 
         if let Some(gpu) = self.gpu_resources.as_ref() {

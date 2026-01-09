@@ -44,8 +44,9 @@ pub fn update_color_palettes() {
                 .unwrap()
         };
 
-        let mut swatches =
-            get_swatches(auto_palette::ImageData::new(width, height, album_image).unwrap());
+        let mut swatches = get_swatches(
+            auto_palette::ImageData::new(width, height, album_image.as_ref()).unwrap(),
+        );
         if swatches.len() < NUM_SWATCHES
             && let Some(artist_image_url) = artist_image_url_ref.as_ref()
         {
@@ -59,9 +60,9 @@ pub fn update_color_palettes() {
             };
             let artist_new_width = (width as f32 * 0.1).round() as u32;
             let mut new_img = RgbaImage::new(width + artist_new_width, height);
-            image::imageops::overlay(&mut new_img, album_image, 0, 0);
+            image::imageops::overlay(&mut new_img, album_image.as_ref(), 0, 0);
             let artist_img_resized = image::imageops::resize(
-                artist_image,
+                artist_image.as_ref(),
                 artist_new_width,
                 height,
                 image::imageops::FilterType::Nearest,

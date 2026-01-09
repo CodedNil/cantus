@@ -7,20 +7,36 @@ use wgpu::{
     TextureViewDescriptor, TextureViewDimension,
 };
 
+const MAX_TEXTURE_LAYERS: u32 = 48;
+const IMAGE_SIZE: u32 = 64;
+
 pub struct ImageManager {
-    device: Arc<Device>,
     queue: Arc<Queue>,
-    texture_array: Option<Texture>,
+    texture_array: Texture,
     last_set: HashSet<String>,
     pub url_to_index: HashMap<String, i32>,
 }
 
 impl ImageManager {
-    pub fn new(device: Arc<Device>, queue: Arc<Queue>) -> Self {
+    pub fn new(device: &Arc<Device>, queue: Arc<Queue>) -> Self {
+        let texture_array = device.create_texture(&TextureDescriptor {
+            label: Some("Image Manager Texture Array"),
+            size: Extent3d {
+                width: IMAGE_SIZE,
+                height: IMAGE_SIZE,
+                depth_or_array_layers: MAX_TEXTURE_LAYERS,
+            },
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: TextureDimension::D2,
+            format: TextureFormat::Rgba8Unorm,
+            usage: TextureUsages::TEXTURE_BINDING | TextureUsages::COPY_DST,
+            view_formats: &[],
+        });
+
         Self {
-            device,
             queue,
-            texture_array: None,
+            texture_array,
             last_set: HashSet::new(),
             url_to_index: HashMap::new(),
         }
@@ -36,6 +52,11 @@ impl ImageManager {
             .collect();
 
         if self.last_set == available_urls {
+            return false;
+        }
+
+        if available_urls.is_empty() {
+            self.last_set.clear();
             return false;
         }
 
@@ -60,29 +81,14 @@ impl ImageManager {
             return false;
         }
 
-        let width = images_data[0].width();
-        let height = images_data[0].height();
-        let layers = images_data.len() as u32;
-
-        let texture = self.device.create_texture(&TextureDescriptor {
-            label: Some("Image Manager Texture Array"),
-            size: Extent3d {
-                width,
-                height,
-                depth_or_array_layers: layers,
-            },
-            mip_level_count: 1,
-            sample_count: 1,
-            dimension: TextureDimension::D2,
-            format: TextureFormat::Rgba8Unorm,
-            usage: TextureUsages::TEXTURE_BINDING | TextureUsages::COPY_DST,
-            view_formats: &[],
-        });
-
-        for (i, img) in images_data.iter().enumerate() {
+        for (i, img) in images_data
+            .iter()
+            .take(MAX_TEXTURE_LAYERS as usize)
+            .enumerate()
+        {
             self.queue.write_texture(
                 TexelCopyTextureInfo {
-                    texture: &texture,
+                    texture: &self.texture_array,
                     mip_level: 0,
                     origin: Origin3d {
                         x: 0,
@@ -94,29 +100,26 @@ impl ImageManager {
                 img.as_raw(),
                 TexelCopyBufferLayout {
                     offset: 0,
-                    bytes_per_row: Some(4 * width),
-                    rows_per_image: Some(height),
+                    bytes_per_row: Some(4 * IMAGE_SIZE),
+                    rows_per_image: Some(IMAGE_SIZE),
                 },
                 Extent3d {
-                    width,
-                    height,
+                    width: IMAGE_SIZE,
+                    height: IMAGE_SIZE,
                     depth_or_array_layers: 1,
                 },
             );
         }
 
-        self.texture_array = Some(texture);
         self.url_to_index = next_url_to_index;
         self.last_set = available_urls;
         true
     }
 
-    pub fn create_view(&self) -> Option<TextureView> {
-        self.texture_array.as_ref().map(|t| {
-            t.create_view(&TextureViewDescriptor {
-                dimension: Some(TextureViewDimension::D2Array),
-                ..Default::default()
-            })
+    pub fn create_view(&self) -> TextureView {
+        self.texture_array.create_view(&TextureViewDescriptor {
+            dimension: Some(TextureViewDimension::D2Array),
+            ..Default::default()
         })
     }
 }

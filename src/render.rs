@@ -45,6 +45,7 @@ impl Default for RenderState {
         }
     }
 }
+
 pub struct FontEngine {
     pub face: Face<'static>,
     pub atlas: MSDFAtlas,

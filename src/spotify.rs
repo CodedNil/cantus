@@ -13,7 +13,7 @@ use parking_lot::RwLock;
 use std::{
     collections::{HashMap, HashSet},
     fs,
-    sync::LazyLock,
+    sync::{Arc, LazyLock},
     thread::{sleep, spawn},
     time::{Duration, Instant},
 };
@@ -38,7 +38,8 @@ pub static PLAYBACK_STATE: LazyLock<RwLock<PlaybackState>> = LazyLock::new(|| {
         last_grabbed_queue: Instant::now().checked_sub(Duration::from_secs(60)).unwrap(),
     })
 });
-pub static IMAGES_CACHE: LazyLock<DashMap<String, Option<RgbaImage>>> = LazyLock::new(DashMap::new);
+pub static IMAGES_CACHE: LazyLock<DashMap<String, Option<Arc<RgbaImage>>>> =
+    LazyLock::new(DashMap::new);
 pub static ALBUM_DATA_CACHE: LazyLock<DashMap<AlbumId, Option<AlbumData>>> =
     LazyLock::new(DashMap::new);
 pub static ARTIST_DATA_CACHE: LazyLock<DashMap<ArtistId, Option<String>>> =
@@ -383,7 +384,7 @@ fn ensure_image_cached(url: &str) {
         } else {
             dynamic_image
         };
-        IMAGES_CACHE.insert(url, Some(dynamic_image.to_rgba8()));
+        IMAGES_CACHE.insert(url, Some(Arc::new(dynamic_image.to_rgba8())));
         update_color_palettes();
     });
 }

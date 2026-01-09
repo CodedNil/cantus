@@ -31,7 +31,7 @@ impl MSDFAtlas {
     pub fn new(face: &Face, _size: u32) -> Self {
         let (width, height) = (1024, 1024);
         let mut atlas = Self {
-            texture_data: vec![0; (width * height * 4) as usize],
+            texture_data: vec![0; (1024 * 1024 * 4) as usize],
             width,
             height,
             glyphs: HashMap::new(),
