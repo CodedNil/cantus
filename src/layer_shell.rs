@@ -1,6 +1,6 @@
 use crate::{
-    CantusApp, PANEL_HEIGHT_EXTENSION, PANEL_HEIGHT_START, config::CONFIG,
-    interaction::InteractionState,
+    CantusApp, PANEL_EXTENSION, PANEL_START, config::CONFIG, interaction::InteractionState,
+    render::Point,
 };
 use raw_window_handle::{
     RawDisplayHandle, RawWindowHandle, WaylandDisplayHandle, WaylandWindowHandle,
@@ -11,7 +11,6 @@ use std::{
     time::{Duration, Instant},
 };
 use tracing::error;
-use vello::{kurbo::Point, wgpu::SurfaceTargetUnsafe};
 use wayland_client::{
     Connection, Dispatch, Proxy, QueueHandle, WEnum,
     protocol::{
@@ -39,6 +38,7 @@ use wayland_protocols_wlr::layer_shell::v1::client::{
     zwlr_layer_shell_v1::{self, Layer as LayerStyle, ZwlrLayerShellV1},
     zwlr_layer_surface_v1::{self, Anchor as LayerAnchor, ZwlrLayerSurfaceV1},
 };
+use wgpu::SurfaceTargetUnsafe;
 
 pub fn run() {
     let connection = Connection::connect_to_env().expect("Failed to connect to Wayland display");
@@ -91,7 +91,7 @@ pub fn run() {
         (),
     );
     let width = CONFIG.width;
-    let total_height = CONFIG.height + PANEL_HEIGHT_EXTENSION + PANEL_HEIGHT_START;
+    let total_height = CONFIG.height + PANEL_EXTENSION + PANEL_START;
     layer_surface.set_size(width as u32, total_height as u32);
     layer_surface.set_anchor(match CONFIG.layer_anchor.as_str() {
         "top" => LayerAnchor::Top,
@@ -200,7 +200,7 @@ impl LayerShellApp {
         }
     }
 
-    fn ensure_surface(&mut self, width: f64, height: f64) {
+    fn ensure_surface(&mut self, width: f32, height: f32) {
         if width == 0.0 || height == 0.0 || !self.is_configured {
             return;
         }
@@ -249,7 +249,7 @@ impl LayerShellApp {
     fn try_render_frame(&mut self, qhandle: &QueueHandle<Self>) {
         let scale = self.cantus.scale_factor;
         let width = CONFIG.width;
-        let total_height = CONFIG.height + PANEL_HEIGHT_EXTENSION + PANEL_HEIGHT_START;
+        let total_height = CONFIG.height + PANEL_EXTENSION + PANEL_START;
         let buffer_width = (width * scale).round();
         let buffer_height = (total_height * scale).round();
         self.ensure_surface(buffer_width, buffer_height);
@@ -266,9 +266,7 @@ impl LayerShellApp {
     fn update_scale_and_viewport(&self) {
         let scale = self.cantus.scale_factor;
         let width = CONFIG.width;
-        let total_height = CONFIG.height + PANEL_HEIGHT_EXTENSION + PANEL_HEIGHT_START;
-        let buffer_width = (width * scale).round();
-        let buffer_height = (total_height * scale).round();
+        let total_height = CONFIG.height + PANEL_EXTENSION + PANEL_START;
         let viewport = self.viewport.as_ref();
         if let Some(surface) = &self.wl_surface {
             surface.set_buffer_scale(if viewport.is_some() {
@@ -278,7 +276,12 @@ impl LayerShellApp {
             });
         }
         if let Some(viewport) = viewport {
-            viewport.set_source(0.0, 0.0, buffer_width, buffer_height);
+            viewport.set_source(
+                0.0,
+                0.0,
+                f64::from(width * scale).round(),
+                f64::from(total_height * scale).round(),
+            );
             viewport.set_destination(width as i32, total_height as i32);
         }
     }
@@ -357,7 +360,7 @@ impl Dispatch<WpFractionalScaleV1, ()> for LayerShellApp {
         qhandle: &QueueHandle<Self>,
     ) {
         if let wp_fractional_scale_v1::Event::PreferredScale { scale } = event {
-            state.cantus.scale_factor = f64::from(scale) / 120.0;
+            state.cantus.scale_factor = scale as f32 / 120.0;
 
             if state.is_configured {
                 state.update_scale_and_viewport();
@@ -460,14 +463,16 @@ impl Dispatch<WlPointer, ()> for LayerShellApp {
                 surface_y,
                 ..
             } if surface_id == Some(surface.id()) => {
-                interaction.mouse_position = Point::new(surface_x * scale, surface_y * scale);
+                interaction.mouse_position =
+                    Point::new(surface_x as f32 * scale, surface_y as f32 * scale);
             }
             wl_pointer::Event::Motion {
                 surface_x,
                 surface_y,
                 ..
             } => {
-                interaction.mouse_position = Point::new(surface_x * scale, surface_y * scale);
+                interaction.mouse_position =
+                    Point::new(surface_x as f32 * scale, surface_y as f32 * scale);
                 interaction.handle_mouse_drag();
             }
             wl_pointer::Event::Leave { .. } => {

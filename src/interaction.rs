@@ -1,19 +1,19 @@
 use crate::{
-    CantusApp, PANEL_HEIGHT_START,
+    CantusApp, PANEL_START,
     config::CONFIG,
-    rspotify::{PlaylistId, Track, TrackId},
+    render::{IconInstance, Point, Rect},
     spotify::{
-        CondensedPlaylist, IMAGES_CACHE, PLAYBACK_STATE, SPOTIFY_CLIENT, update_playback_state,
+        CondensedPlaylist, PLAYBACK_STATE, PlaylistId, SPOTIFY_CLIENT, Track, TrackId,
+        update_playback_state,
     },
 };
 use itertools::Itertools;
-use std::time::Duration;
-use std::{collections::HashMap, sync::LazyLock, thread::spawn, time::Instant};
-use tracing::{error, info, warn};
-use vello::{
-    kurbo::{Affine, BezPath, Point, Rect, RoundedRect, Shape, Stroke},
-    peniko::{Color, Fill, ImageBrush},
+use std::{
+    collections::HashMap,
+    thread::spawn,
+    time::{Duration, Instant},
 };
+use tracing::{error, info, warn};
 
 pub struct IconHitbox {
     pub rect: Rect,
@@ -23,28 +23,34 @@ pub struct IconHitbox {
 }
 
 pub struct InteractionState {
-    pub last_event: InteractionEvent,
-    pub last_click: Option<(Instant, TrackId, Point)>,
+    pub last_click: (Instant, TrackId, Point),
     pub mouse_position: Point,
     #[cfg(feature = "wayland")]
     pub last_hitbox_update: Instant,
     pub play_hitbox: Rect,
-    pub track_hitboxes: Vec<(TrackId, Rect, (f64, f64))>,
+    pub track_hitboxes: Vec<(TrackId, Rect, (f32, f32))>,
     pub icon_hitboxes: Vec<IconHitbox>,
     pub mouse_down: bool,
     pub drag_origin: Option<Point>,
-    pub drag_track: Option<(TrackId, f64)>,
+    pub drag_track: Option<(TrackId, f32)>,
     pub dragging: bool,
-    pub drag_delta_pixels: f64,
+    pub drag_delta_pixels: f32,
+    // Playhead
+    pub last_event: Instant,
+    pub playing: bool,
+    pub playhead_bar: f32,
+    pub playhead_play: f32,
+    pub playhead_pause: f32,
 }
 
 impl Default for InteractionState {
     fn default() -> Self {
         Self {
-            last_event: InteractionEvent::Pause(
+            last_click: (
                 Instant::now().checked_sub(Duration::from_secs(5)).unwrap(),
+                TrackId::default(),
+                Point::default(),
             ),
-            last_click: None,
             mouse_position: Point::default(),
             #[cfg(feature = "wayland")]
             last_hitbox_update: Instant::now(),
@@ -56,6 +62,11 @@ impl Default for InteractionState {
             drag_track: None,
             dragging: false,
             drag_delta_pixels: 0.0,
+            last_event: Instant::now().checked_sub(Duration::from_secs(5)).unwrap(),
+            playing: false,
+            playhead_bar: 0.0,
+            playhead_play: 0.0,
+            playhead_pause: 0.0,
         }
     }
 }
@@ -70,7 +81,7 @@ impl InteractionState {
         PLAYBACK_STATE.write().interaction = false;
     }
 
-    pub fn left_click_released(&mut self, scale_factor: f64) {
+    pub fn left_click_released(&mut self, scale_factor: f32) {
         if !self.dragging && self.mouse_down {
             self.handle_click(scale_factor);
         }
@@ -92,7 +103,7 @@ impl InteractionState {
     }
 
     /// Handle click events.
-    fn handle_click(&mut self, scale_factor: f64) {
+    fn handle_click(&mut self, scale_factor: f32) {
         let mouse_pos = self.mouse_position;
         let (playing, interaction) = {
             let state = PLAYBACK_STATE.read();
@@ -130,17 +141,13 @@ impl InteractionState {
                 .iter()
                 .find(|(_, track_rect, _)| track_rect.contains(mouse_pos))
             {
-                self.last_click = Some((
+                self.last_click = (
                     Instant::now(),
                     *track_id,
                     Point::new(mouse_pos.x - track_rect.x0, mouse_pos.y - track_rect.y0),
-                ));
+                );
             }
-            self.last_event = if playing {
-                InteractionEvent::Pause(Instant::now())
-            } else {
-                InteractionEvent::Play(Instant::now())
-            };
+            self.last_event = Instant::now();
             spawn(move || {
                 toggle_playing(!playing);
             });
@@ -151,11 +158,11 @@ impl InteractionState {
             .find(|(_, track_rect, _)| track_rect.contains(mouse_pos))
         {
             // Seek track
-            self.last_click = Some((
+            self.last_click = (
                 Instant::now(),
                 *track_id,
                 Point::new(mouse_pos.x - track_rect.x0, mouse_pos.y - track_rect.y0),
-            ));
+            );
 
             // If click is near the very left, reset to the start of the song, else seek to clicked position
             let position = if mouse_pos.x < (CONFIG.history_width + 20.0) * scale_factor {
@@ -216,14 +223,6 @@ impl InteractionState {
     }
 }
 
-#[derive(PartialEq, Eq)]
-pub enum InteractionEvent {
-    Pause(Instant),
-    Play(Instant),
-    PauseHover(Instant),
-    PlayHover(Instant),
-}
-
 enum IconEntry<'a> {
     Star {
         index: u8,
@@ -234,12 +233,6 @@ enum IconEntry<'a> {
     },
 }
 
-/// Star images
-static STAR_SVG: LazyLock<BezPath> =
-    LazyLock::new(|| BezPath::from_svg(include_str!("../assets/star.path")).unwrap());
-static STAR_SVG_HALF: LazyLock<BezPath> =
-    LazyLock::new(|| BezPath::from_svg(include_str!("../assets/star-half.path")).unwrap());
-
 impl CantusApp {
     /// Star ratings and favourite playlists
     pub fn draw_playlist_buttons(
@@ -247,34 +240,33 @@ impl CantusApp {
         track: &Track,
         hovered: bool,
         playlists: &HashMap<PlaylistId, CondensedPlaylist>,
-        width: f64,
-        height: f64,
-        pos_x: f64,
+        width: f32,
+        height: f32,
+        pos_x: f32,
+        image_map: &HashMap<String, i32>,
     ) {
-        let track_rating_index = if CONFIG.ratings_enabled {
-            playlists
+        let (track_rating_index, mut icon_entries) = if CONFIG.ratings_enabled {
+            let index = playlists
                 .values()
-                .find(|playlist| {
-                    playlist.rating_index.is_some() && playlist.tracks.contains(&track.id)
-                })
-                .and_then(|playlist| playlist.rating_index.map(|rating| rating + 1))
-                .unwrap_or(0)
+                .find(|p| p.rating_index.is_some() && p.tracks.contains(&track.id))
+                .and_then(|p| p.rating_index.map(|r| r + 1))
+                .unwrap_or(0);
+            (
+                index,
+                (0..5).map(|index| IconEntry::Star { index }).collect_vec(),
+            )
         } else {
-            0
+            (0, Vec::new())
         };
 
-        let mut icon_entries = Vec::with_capacity(5 + playlists.len());
-        if CONFIG.ratings_enabled {
-            icon_entries.extend((0..5).map(|index| IconEntry::Star { index }));
-        }
         // Add playlists that are contained in the favourited playlists
         icon_entries.extend(
             playlists
                 .values()
-                .filter(|playlist| playlist.rating_index.is_none())
-                .filter_map(|playlist| {
-                    let contained = playlist.tracks.contains(&track.id);
-                    (contained || hovered).then_some((playlist, contained))
+                .filter(|p| p.rating_index.is_none())
+                .filter_map(|p| {
+                    let contained = p.tracks.contains(&track.id);
+                    (contained || hovered).then_some((p, contained))
                 })
                 .sorted_by(|(a, ac), (b, bc)| bc.cmp(ac).then_with(|| a.name.cmp(&b.name)))
                 .map(|(playlist, contained)| IconEntry::Playlist {
@@ -283,13 +275,12 @@ impl CantusApp {
                 }),
         );
 
-        // Fade out when there's not enough space
-        let icon_size = 14.0 * self.scale_factor;
-        let icon_spacing = 2.0 * self.scale_factor;
+        // Fade out and fit based on size
+        let icon_size = 16.0 * self.scale_factor;
+        let icon_spacing = 1.0 * self.scale_factor;
         let mouse_pos = self.interaction.mouse_position;
 
-        let needed_width = icon_size * icon_entries.len() as f64;
-        if width < needed_width {
+        if width < icon_size * icon_entries.len() as f32 {
             // Strip out all playlists that arent contained
             icon_entries.retain(|entry| {
                 if let IconEntry::Playlist { contained, .. } = entry {
@@ -299,24 +290,20 @@ impl CantusApp {
                 }
             });
         }
-        // Try fitting again
+
         let num_icons = icon_entries.len();
-        if num_icons == 0 {
-            return;
-        }
-        let needed_width = icon_size * num_icons as f64;
-        if width < needed_width {
+        let needed_width = icon_size * num_icons as f32;
+        if num_icons == 0 || width < needed_width {
             return;
         }
 
         let fade_alpha = if hovered {
             1.0
         } else {
-            ((width - needed_width) / (needed_width * 0.25)).clamp(0.0, 1.0) as f32
+            ((width - needed_width) / (needed_width * 0.25)).clamp(0.0, 1.0)
         };
-
         let center_x = pos_x + width * 0.5;
-        let center_y = PANEL_HEIGHT_START + height * 0.975;
+        let center_y = PANEL_START + height * 0.975;
 
         // Count only the standard icons for spacing
         let half_icons = icon_entries
@@ -328,155 +315,93 @@ impl CantusApp {
                     true
                 }
             })
-            .count() as f64
+            .count() as f32
             / 2.0;
 
-        // Track hovers, and add hitboxes
         let mut hover_rating_index = None;
-        let mut icon_entry_extras = Vec::new();
-        for (i, entry) in icon_entries.iter().enumerate() {
-            let icon_origin_x = center_x + (i as f64 - half_icons) * (icon_size + icon_spacing);
-            let half_icon_size = (icon_size + icon_spacing) * 0.5; // Include some spacing so the hitboxes don't have gaps
-            let button_rect = Rect::new(
-                icon_origin_x - half_icon_size,
-                center_y - half_icon_size,
-                icon_origin_x + half_icon_size,
-                center_y + half_icon_size,
+        let mut icon_data = Vec::with_capacity(num_icons);
+
+        for (i, entry) in icon_entries.into_iter().enumerate() {
+            let origin_x = center_x + (i as f32 - half_icons) * (icon_size + icon_spacing);
+            let half_size = (icon_size + icon_spacing) * 0.5;
+            let rect = Rect::new(
+                origin_x - half_size,
+                center_y - half_size,
+                origin_x + half_size,
+                center_y + half_size,
             );
-            let hovered = button_rect.contains(mouse_pos);
-            icon_entry_extras.push((hovered, icon_origin_x));
-            match entry {
+            let is_hovered = rect.contains(mouse_pos);
+
+            match &entry {
                 IconEntry::Star { index } => {
-                    if hovered {
-                        let rect_center_x = (button_rect.x0 + button_rect.x1) * 0.5;
-                        hover_rating_index =
-                            Some(*index * 2 + 1 + u8::from(mouse_pos.x >= rect_center_x));
+                    if is_hovered {
+                        hover_rating_index = Some(
+                            index * 2 + 1 + u8::from(mouse_pos.x >= (rect.x0 + rect.x1) * 0.5),
+                        );
                     }
                     self.interaction.icon_hitboxes.push(IconHitbox {
-                        rect: button_rect,
+                        rect,
                         track_id: track.id,
                         playlist_id: None,
                         rating_index: Some(*index),
                     });
                 }
-                IconEntry::Playlist {
-                    playlist,
-                    contained: _,
-                } => {
+                IconEntry::Playlist { playlist, .. } => {
                     self.interaction.icon_hitboxes.push(IconHitbox {
-                        rect: button_rect,
+                        rect,
                         track_id: track.id,
                         playlist_id: Some(playlist.id),
                         rating_index: None,
                     });
                 }
             }
+            icon_data.push((entry, is_hovered, origin_x));
         }
 
-        // Render out the icons
-        let display_rating_index = hover_rating_index.unwrap_or(track_rating_index);
-        let display_full_stars = display_rating_index / 2;
-        let display_has_half = display_rating_index % 2 == 1;
-        for (entry, (hovered, icon_origin_x)) in
-            icon_entries.into_iter().zip(icon_entry_extras.into_iter())
-        {
-            let icon_size = icon_size * if hovered { 1.6 } else { 1.0 };
-            let half_icon_size = icon_size * 0.5;
-            let icon_transform =
-                Affine::translate((icon_origin_x - half_icon_size, center_y - half_icon_size));
+        // Sort by distance to mouse for overlap rendering
+        icon_data.sort_by(|(_, _, x1), (_, _, x2)| {
+            let d1 = (x1 - mouse_pos.x).powi(2);
+            let d2 = (x2 - mouse_pos.x).powi(2);
+            d2.partial_cmp(&d1).unwrap_or(std::cmp::Ordering::Equal)
+        });
+
+        let display_rating = hover_rating_index.unwrap_or(track_rating_index);
+        let full_stars = display_rating / 2;
+        let has_half = display_rating % 2 == 1;
+
+        for (entry, is_hovered, origin_x) in icon_data {
+            let mut instance = IconInstance {
+                pos: [origin_x, center_y],
+                alpha: fade_alpha,
+                ..Default::default()
+            };
 
             match entry {
                 IconEntry::Star { index } => {
-                    let fill_transform =
-                        icon_transform * Affine::scale(icon_size / STAR_SVG.bounding_box().width());
-
-                    // Shadow outline
-                    self.scene.stroke(
-                        &Stroke::new(2.0 * self.scale_factor),
-                        fill_transform,
-                        Color::from_rgb8(0, 0, 0).with_alpha(fade_alpha),
-                        None,
-                        &*STAR_SVG,
-                    );
-
-                    self.scene.fill(
-                        Fill::EvenOdd,
-                        fill_transform,
-                        if index < display_full_stars {
-                            Color::from_rgb8(220, 180, 0)
-                        } else {
-                            Color::from_rgb8(85, 85, 85)
-                        }
-                        .with_alpha(fade_alpha),
-                        None,
-                        &*STAR_SVG,
-                    );
-                    if index == display_full_stars && display_has_half {
-                        self.scene.fill(
-                            Fill::EvenOdd,
-                            fill_transform,
-                            Color::from_rgb8(220, 180, 0).with_alpha(fade_alpha),
-                            None,
-                            &*STAR_SVG_HALF,
-                        );
-                    }
+                    instance.variant = 1.0;
+                    instance.param = if index < full_stars {
+                        1.0
+                    } else if index == full_stars && has_half {
+                        0.5
+                    } else {
+                        0.0
+                    };
                 }
                 IconEntry::Playlist {
                     playlist,
                     contained,
                 } => {
-                    let Some(playlist_image_ref) = IMAGES_CACHE.get(&playlist.image_url) else {
-                        continue;
-                    };
-                    let Some(playlist_image) = playlist_image_ref.as_ref() else {
-                        continue;
-                    };
-
-                    // Shadow outline
-                    self.scene.stroke(
-                        &Stroke::new(1.0 * self.scale_factor),
-                        icon_transform,
-                        Color::from_rgb8(0, 0, 0).with_alpha(fade_alpha),
-                        None,
-                        &RoundedRect::new(0.0, 0.0, icon_size, icon_size, 6.0),
-                    );
-
-                    self.scene.push_clip_layer(
-                        icon_transform,
-                        &RoundedRect::new(0.0, 0.0, icon_size, icon_size, 6.0),
-                    );
-                    let zoom_pixels = 12.0;
-                    let image_size = f64::from(playlist_image.image.width);
-                    self.scene.fill(
-                        Fill::EvenOdd,
-                        icon_transform
-                            * Affine::translate((-zoom_pixels, -zoom_pixels))
-                            * Affine::scale((icon_size + zoom_pixels * 2.0) / image_size),
-                        ImageBrush {
-                            image: &playlist_image.image,
-                            sampler: playlist_image.sampler.with_alpha(fade_alpha),
-                        },
-                        None,
-                        &Rect::new(0.0, 0.0, image_size, image_size),
-                    );
-                    if !contained && !hovered {
-                        self.scene.fill(
-                            Fill::EvenOdd,
-                            icon_transform,
-                            Color::from_rgb8(60, 60, 60).with_alpha(0.7 * fade_alpha),
-                            None,
-                            &Rect::new(0.0, 0.0, icon_size, icon_size),
-                        );
-                    }
-                    self.scene.pop_layer();
+                    instance.image_index = self.get_image_index(&playlist.image_url, image_map);
+                    instance.param = if !contained && !is_hovered { 0.7 } else { 0.0 };
                 }
             }
+            self.icon_pills.push(instance);
         }
     }
 }
 
 /// Skip to the specified track in the queue.
-fn skip_to_track(track_id: &TrackId, position: f64, always_seek: bool) {
+fn skip_to_track(track_id: &TrackId, position: f32, always_seek: bool) {
     let (queue_index, position_in_queue, ms_lookup) = {
         let state = PLAYBACK_STATE.read();
         let queue_index = state.queue_index;
@@ -535,11 +460,11 @@ fn skip_to_track(track_id: &TrackId, position: f64, always_seek: bool) {
         let milliseconds = if position < 0.05 {
             0.0
         } else {
-            f64::from(song_ms) * position
+            song_ms as f32 * position
         };
         info!(
             "Seeking track {track_id} to {}%",
-            (milliseconds / f64::from(song_ms) * 100.0).round()
+            (milliseconds / song_ms as f32 * 100.0).round()
         );
         update_playback_state(|state| {
             state.progress = milliseconds.round() as u32;
@@ -687,11 +612,10 @@ fn toggle_playlist_membership(track_id: &TrackId, playlist_id: &PlaylistId) {
     }
 }
 
-/// Toggle Spotify playlist membership for the given track.
+/// Set Spotify playing or paused.
 fn toggle_playing(play: bool) {
     info!("{} current track", if play { "Playing" } else { "Pausing" });
     update_playback_state(|state| {
-        state.last_interaction = Instant::now() + Duration::from_millis(2000);
         state.playing = play;
     });
     // https://developer.spotify.com/documentation/web-api/reference/#/operations/start-a-users-playback
@@ -708,9 +632,6 @@ fn toggle_playing(play: bool) {
 /// Set the volume of the current playback device.
 fn set_volume(volume_percent: u8) {
     info!("Setting volume to {}%", volume_percent);
-    update_playback_state(|state| {
-        state.last_interaction = Instant::now() + Duration::from_millis(500);
-    });
     // https://developer.spotify.com/documentation/web-api/reference/#/operations/set-volume-for-users-playback
     if let Err(err) =
         SPOTIFY_CLIENT.api_put(&format!("me/player/volume?volume_percent={volume_percent}"))

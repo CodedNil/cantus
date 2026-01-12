@@ -1,29 +1,332 @@
 use crate::{
-    CantusApp, PANEL_HEIGHT_START,
+    CantusApp, PANEL_EXTENSION, PANEL_START,
     config::CONFIG,
-    interaction::InteractionEvent,
-    lerpf32, lerpf64,
-    render_types::{Particle, ParticleUniforms},
-    rspotify::{PlaylistId, Track},
-    spotify::{ALBUM_DATA_CACHE, CondensedPlaylist, IMAGES_CACHE, PLAYBACK_STATE},
+    spotify::{ALBUM_DATA_CACHE, CondensedPlaylist, PLAYBACK_STATE, PlaylistId, Track},
+    text_render::{ATLAS_MSDF_SCALE, ATLAS_RANGE, MSDFAtlas, TextInstance},
 };
-use std::{
-    collections::HashMap,
-    ops::Range,
-    sync::LazyLock,
-    time::{Duration, Instant},
-};
+use bytemuck::{Pod, Zeroable};
+use std::{collections::HashMap, ops::Range, sync::LazyLock, time::Instant};
 use ttf_parser::{Face, Tag};
-use vello::{
-    Glyph,
-    kurbo::{Affine, BezPath, Circle, Point, Rect, RoundedRect, RoundedRectRadii, Shape},
-    peniko::{Blob, Color, Fill, FontData, ImageBrush},
+use wgpu::{
+    BindGroupLayout, BindGroupLayoutDescriptor, BindGroupLayoutEntry, BindingType, BlendState,
+    BufferBindingType, ColorTargetState, ColorWrites, Device, FragmentState, MultisampleState,
+    PipelineCompilationOptions, PipelineLayoutDescriptor, PrimitiveState, PrimitiveTopology,
+    RenderPipeline, RenderPipelineDescriptor, SamplerBindingType, ShaderModule,
+    ShaderModuleDescriptor, ShaderSource, ShaderStages, TextureFormat, TextureSampleType,
+    TextureViewDimension, VertexState,
 };
+
+pub struct Shaders {
+    pub playhead_pipeline: RenderPipeline,
+    pub playhead_bind_group_layout: BindGroupLayout,
+    pub bg_pipeline: RenderPipeline,
+    pub bg_bind_group_layout: BindGroupLayout,
+    pub icon_pipeline: RenderPipeline,
+    pub icon_bind_group_layout: BindGroupLayout,
+    pub text_pipeline: RenderPipeline,
+    pub text_bind_group_layout: BindGroupLayout,
+}
+
+impl Shaders {
+    pub fn new(device: &Device, format: TextureFormat) -> Self {
+        // Shader Modules
+        let playhead_shader = device.create_shader_module(ShaderModuleDescriptor {
+            label: Some("Playhead Shader"),
+            source: ShaderSource::Wgsl(include_str!("../assets/playhead.wgsl").into()),
+        });
+        let bg_shader = device.create_shader_module(ShaderModuleDescriptor {
+            label: Some("Background Shader"),
+            source: ShaderSource::Wgsl(include_str!("../assets/background.wgsl").into()),
+        });
+        let icon_shader = device.create_shader_module(ShaderModuleDescriptor {
+            label: Some("Icons Shader"),
+            source: ShaderSource::Wgsl(include_str!("../assets/icons.wgsl").into()),
+        });
+        let text_shader = device.create_shader_module(ShaderModuleDescriptor {
+            label: Some("Text Shader"),
+            source: ShaderSource::Wgsl(include_str!("../assets/text.wgsl").into()),
+        });
+
+        // Bind Group Layouts
+        let playhead_bind_group_layout =
+            device.create_bind_group_layout(&BindGroupLayoutDescriptor {
+                label: Some("Playhead Layout"),
+                entries: &[
+                    BindGroupLayoutEntry {
+                        binding: 0,
+                        visibility: ShaderStages::FRAGMENT,
+                        ty: BindingType::Buffer {
+                            ty: BufferBindingType::Uniform,
+                            has_dynamic_offset: false,
+                            min_binding_size: None,
+                        },
+                        count: None,
+                    },
+                    BindGroupLayoutEntry {
+                        binding: 1,
+                        visibility: ShaderStages::FRAGMENT,
+                        ty: BindingType::Buffer {
+                            ty: BufferBindingType::Storage { read_only: true },
+                            has_dynamic_offset: false,
+                            min_binding_size: None,
+                        },
+                        count: None,
+                    },
+                    BindGroupLayoutEntry {
+                        binding: 2,
+                        visibility: ShaderStages::FRAGMENT,
+                        ty: BindingType::Buffer {
+                            ty: BufferBindingType::Uniform,
+                            has_dynamic_offset: false,
+                            min_binding_size: None,
+                        },
+                        count: None,
+                    },
+                ],
+            });
+
+        let standard_bind_group_layout =
+            device.create_bind_group_layout(&BindGroupLayoutDescriptor {
+                label: Some("Standard Layout"),
+                entries: &[
+                    BindGroupLayoutEntry {
+                        binding: 0,
+                        visibility: ShaderStages::VERTEX | ShaderStages::FRAGMENT,
+                        ty: BindingType::Buffer {
+                            ty: BufferBindingType::Uniform,
+                            has_dynamic_offset: false,
+                            min_binding_size: None,
+                        },
+                        count: None,
+                    },
+                    BindGroupLayoutEntry {
+                        binding: 1,
+                        visibility: ShaderStages::VERTEX | ShaderStages::FRAGMENT,
+                        ty: BindingType::Buffer {
+                            ty: BufferBindingType::Storage { read_only: true },
+                            has_dynamic_offset: false,
+                            min_binding_size: None,
+                        },
+                        count: None,
+                    },
+                    BindGroupLayoutEntry {
+                        binding: 2,
+                        visibility: ShaderStages::FRAGMENT,
+                        ty: BindingType::Texture {
+                            multisampled: false,
+                            view_dimension: TextureViewDimension::D2Array,
+                            sample_type: TextureSampleType::Float { filterable: true },
+                        },
+                        count: None,
+                    },
+                    BindGroupLayoutEntry {
+                        binding: 3,
+                        visibility: ShaderStages::FRAGMENT,
+                        ty: BindingType::Sampler(SamplerBindingType::Filtering),
+                        count: None,
+                    },
+                ],
+            });
+
+        let text_bind_group_layout = device.create_bind_group_layout(&BindGroupLayoutDescriptor {
+            label: Some("Text Layout"),
+            entries: &[
+                BindGroupLayoutEntry {
+                    binding: 0,
+                    visibility: ShaderStages::VERTEX | ShaderStages::FRAGMENT,
+                    ty: BindingType::Buffer {
+                        ty: BufferBindingType::Uniform,
+                        has_dynamic_offset: false,
+                        min_binding_size: None,
+                    },
+                    count: None,
+                },
+                BindGroupLayoutEntry {
+                    binding: 1,
+                    visibility: ShaderStages::VERTEX | ShaderStages::FRAGMENT,
+                    ty: BindingType::Buffer {
+                        ty: BufferBindingType::Storage { read_only: true },
+                        has_dynamic_offset: false,
+                        min_binding_size: None,
+                    },
+                    count: None,
+                },
+                BindGroupLayoutEntry {
+                    binding: 2,
+                    visibility: ShaderStages::FRAGMENT,
+                    ty: BindingType::Texture {
+                        multisampled: false,
+                        view_dimension: TextureViewDimension::D2,
+                        sample_type: TextureSampleType::Float { filterable: true },
+                    },
+                    count: None,
+                },
+                BindGroupLayoutEntry {
+                    binding: 3,
+                    visibility: ShaderStages::FRAGMENT,
+                    ty: BindingType::Sampler(SamplerBindingType::Filtering),
+                    count: None,
+                },
+            ],
+        });
+
+        // Pipeline Helper
+        let create_pipe = |label: &str, shader: &ShaderModule, layout: &BindGroupLayout| {
+            let pipeline_layout = device.create_pipeline_layout(&PipelineLayoutDescriptor {
+                label: Some(&format!("{label} Pipeline Layout")),
+                bind_group_layouts: &[layout],
+                push_constant_ranges: &[],
+            });
+
+            device.create_render_pipeline(&RenderPipelineDescriptor {
+                label: Some(&format!("{label} Pipeline")),
+                layout: Some(&pipeline_layout),
+                vertex: VertexState {
+                    module: shader,
+                    entry_point: Some("vs_main"),
+                    buffers: &[],
+                    compilation_options: PipelineCompilationOptions::default(),
+                },
+                fragment: Some(FragmentState {
+                    module: shader,
+                    entry_point: Some("fs_main"),
+                    targets: &[Some(ColorTargetState {
+                        format,
+                        blend: Some(BlendState::ALPHA_BLENDING),
+                        write_mask: ColorWrites::ALL,
+                    })],
+                    compilation_options: PipelineCompilationOptions::default(),
+                }),
+                primitive: PrimitiveState {
+                    topology: PrimitiveTopology::TriangleStrip,
+                    ..Default::default()
+                },
+                depth_stencil: None,
+                multisample: MultisampleState::default(),
+                multiview: None,
+                cache: None,
+            })
+        };
+
+        let playhead_pipeline =
+            create_pipe("Playhead", &playhead_shader, &playhead_bind_group_layout);
+        let bg_pipeline = create_pipe("Background", &bg_shader, &standard_bind_group_layout);
+        let icon_pipeline = create_pipe("Icons", &icon_shader, &standard_bind_group_layout);
+        let text_pipeline = create_pipe("Text", &text_shader, &text_bind_group_layout);
+
+        Self {
+            playhead_pipeline,
+            playhead_bind_group_layout,
+            bg_pipeline,
+            bg_bind_group_layout: standard_bind_group_layout.clone(),
+            icon_pipeline,
+            icon_bind_group_layout: standard_bind_group_layout,
+            text_pipeline,
+            text_bind_group_layout,
+        }
+    }
+}
+
+#[derive(Copy, Clone, Debug, Default, PartialEq)]
+pub struct Point {
+    pub x: f32,
+    pub y: f32,
+}
+
+impl Point {
+    pub const fn new(x: f32, y: f32) -> Self {
+        Self { x, y }
+    }
+}
+
+#[derive(Copy, Clone, Debug, Default, PartialEq)]
+pub struct Rect {
+    pub x0: f32,
+    pub y0: f32,
+    pub x1: f32,
+    pub y1: f32,
+}
+
+impl Rect {
+    pub const fn new(x0: f32, y0: f32, x1: f32, y1: f32) -> Self {
+        Self { x0, y0, x1, y1 }
+    }
+
+    pub fn contains(&self, p: Point) -> bool {
+        p.x >= self.x0 && p.x <= self.x1 && p.y >= self.y0 && p.y <= self.y1
+    }
+
+    pub fn inflate(&self, dx: f32, dy: f32) -> Self {
+        Self {
+            x0: self.x0 - dx,
+            y0: self.y0 - dy,
+            x1: self.x1 + dx,
+            y1: self.y1 + dy,
+        }
+    }
+}
+
+#[repr(C)]
+#[derive(Copy, Clone, Debug, Pod, Zeroable)]
+pub struct ScreenUniforms {
+    pub screen_size: [f32; 2],
+    pub time: f32,
+    pub scale_factor: f32,
+    pub mouse_pos: [f32; 2],
+}
+
+#[repr(C)]
+#[derive(Copy, Clone, Debug, Default, Pod, Zeroable)]
+pub struct PlayheadUniforms {
+    pub origin_x: f32,
+    pub panel_start: f32,
+    pub height: f32,
+    pub volume: f32,
+    pub bar_lerp: f32,
+    pub play_lerp: f32,
+    pub pause_lerp: f32,
+    pub _padding: f32,
+}
+
+#[repr(C)]
+#[derive(Copy, Clone, Debug, Default, Pod, Zeroable)]
+pub struct Particle {
+    pub spawn_pos: [f32; 2],
+    pub spawn_vel: [f32; 2],
+    pub spawn_time: f32,
+    pub duration: f32,
+    pub color: u32,
+    pub _padding: f32,
+}
+
+#[repr(C)]
+#[derive(Copy, Clone, Debug, Default, Pod, Zeroable)]
+pub struct BackgroundPill {
+    pub rect: [f32; 4], // x, y, width, height
+    pub dark_width: f32,
+    pub alpha: f32,
+    pub colors: [u32; 4],
+    pub expansion_pos: [f32; 2],
+    pub expansion_time: f32,
+    pub image_index: i32,
+    pub _padding: [f32; 2],
+}
+
+#[repr(C)]
+#[derive(Copy, Clone, Debug, Default, Pod, Zeroable)]
+pub struct IconInstance {
+    pub pos: [f32; 2],
+    pub alpha: f32,
+    pub variant: f32,
+    pub param: f32,
+    pub image_index: i32,
+    pub _padding: [f32; 2],
+}
 
 static START_TIME: LazyLock<Instant> = LazyLock::new(Instant::now);
 
 /// Spacing between tracks in ms
-const TRACK_SPACING_MS: f64 = 4000.0;
+const TRACK_SPACING_MS: f32 = 4000.0;
 /// Particles emitted per second when playback is active.
 const SPARK_EMISSION: f32 = 60.0;
 /// Horizontal velocity range applied at spawn.
@@ -34,17 +337,14 @@ const SPARK_VELOCITY_Y: Range<usize> = 30..70;
 const SPARK_LIFETIME: Range<f32> = 0.4..0.9;
 
 /// Duration for animation events
-const ANIMATION_DURATION: Duration = Duration::from_millis(3500);
-
-static PLAY_SVG: LazyLock<BezPath> =
-    LazyLock::new(|| BezPath::from_svg(include_str!("../assets/play.path")).unwrap());
+const ANIMATION_DURATION: f32 = 2.0;
 
 pub struct RenderState {
     pub last_update: Instant,
-    pub track_offset: f64,
-    pub recent_speeds: [f64; 16],
+    pub track_offset: f32,
+    pub recent_speeds: [f32; 16],
     pub speed_idx: usize,
-    pub speed_sum: f64,
+    pub speed_sum: f32,
 }
 
 impl Default for RenderState {
@@ -58,16 +358,16 @@ impl Default for RenderState {
         }
     }
 }
+
 pub struct FontEngine {
-    pub font_data: FontData,
     pub face: Face<'static>,
-    pub coords: Vec<i16>,
+    pub atlas: MSDFAtlas,
 }
 
 pub struct TextLayout {
-    glyphs: Vec<Glyph>,
-    width: f64,
-    height: f64,
+    glyphs: Vec<(u32, f32)>, // gid, x_offset
+    width: f32,
+    line_height: f32,
     font_size: f32,
 }
 
@@ -82,15 +382,8 @@ impl Default for FontEngine {
         {
             face.set_variation(axis.tag, 700.0f32.clamp(axis.min_value, axis.max_value));
         }
-        Self {
-            font_data: FontData::new(Blob::from(bytes.to_vec()), 0),
-            coords: face
-                .variation_coordinates()
-                .iter()
-                .map(|c| c.get())
-                .collect(),
-            face,
-        }
+        let atlas = MSDFAtlas::new(&face, 48);
+        Self { face, atlas }
     }
 }
 
@@ -111,22 +404,24 @@ impl Default for ParticlesState {
 pub struct TrackRender<'a> {
     track: &'a Track,
     is_current: bool,
-    seconds_until_start: f64,
-    start_x: f64,
-    width: f64,
-    hitbox_range: (f64, f64),
+    seconds_until_start: f32,
+    start_x: f32,
+    width: f32,
+    hitbox_range: (f32, f32),
     art_only: bool,
+    image_index: i32,
 }
 
 /// Build the scene for rendering.
 impl CantusApp {
-    pub fn create_scene(&mut self) {
+    pub fn create_scene(&mut self, image_map: &HashMap<String, i32>) {
         let now = Instant::now();
         let dt = now
             .duration_since(self.render_state.last_update)
-            .as_secs_f64();
+            .as_secs_f32();
         self.render_state.last_update = now;
 
+        self.background_pills.clear();
         let scale = self.scale_factor;
         let history_width = (CONFIG.history_width * scale).ceil();
         let total_width = (CONFIG.width * scale - history_width).ceil();
@@ -135,7 +430,7 @@ impl CantusApp {
         let timeline_start_ms = -CONFIG.timeline_past_minutes * 60_000.0;
 
         let px_per_ms = total_width / timeline_duration_ms;
-        let timeline_origin_x = history_width - timeline_start_ms * px_per_ms;
+        let origin_x = history_width - timeline_start_ms * px_per_ms;
 
         let playback_state = PLAYBACK_STATE.read();
         if playback_state.queue.is_empty() {
@@ -154,76 +449,32 @@ impl CantusApp {
             .queue_index
             .min(playback_state.queue.len() - 1);
 
-        // Play button hitbox
-        let playbutton_hsize = total_height * 0.25;
-        self.interaction.play_hitbox = Rect::new(
-            timeline_origin_x - playbutton_hsize,
-            PANEL_HEIGHT_START,
-            timeline_origin_x + playbutton_hsize,
-            PANEL_HEIGHT_START + total_height,
-        );
-        let play_button_hovered = self
-            .interaction
-            .play_hitbox
-            .contains(self.interaction.mouse_position);
-        if play_button_hovered {
-            if playback_state.playing
-                && !matches!(self.interaction.last_event, InteractionEvent::PauseHover(_))
-            {
-                self.interaction.last_event = InteractionEvent::PauseHover(now);
-            }
-            if !playback_state.playing
-                && !matches!(self.interaction.last_event, InteractionEvent::PlayHover(_))
-            {
-                self.interaction.last_event = InteractionEvent::PlayHover(now);
-            }
-        }
-
-        // Update interaction events
-        match self.interaction.last_event {
-            InteractionEvent::Pause(_) => {
-                if playback_state.playing {
-                    self.interaction.last_event = InteractionEvent::Play(now);
-                }
-            }
-            InteractionEvent::Play(_) => {
-                if !playback_state.playing {
-                    self.interaction.last_event = InteractionEvent::Pause(now);
-                }
-            }
-            InteractionEvent::PauseHover(_) | InteractionEvent::PlayHover(_) => {
-                if !play_button_hovered {
-                    let instant = now.checked_sub(Duration::from_secs(5)).unwrap();
-                    self.interaction.last_event = if playback_state.playing {
-                        InteractionEvent::Play(instant)
-                    } else {
-                        InteractionEvent::Pause(instant)
-                    }
-                }
-            }
+        if playback_state.playing != self.interaction.playing {
+            self.interaction.playing = playback_state.playing;
+            self.interaction.last_event = Instant::now();
         }
         if self.interaction.dragging {
             self.interaction.drag_track = None;
         }
 
         // Lerp the progress based on when the data was last updated, get the start time of the current track
-        let playback_elapsed = f64::from(playback_state.progress)
+        let playback_elapsed = playback_state.progress as f32
             + if playback_state.playing {
-                playback_state.last_progress_update.elapsed().as_millis() as f64
+                playback_state.last_progress_update.elapsed().as_millis() as f32
             } else {
                 0.0
             };
 
         // Lerp track start based on the target and current start time
-        let past_tracks_duration: f64 = playback_state
+        let past_tracks_duration: f32 = playback_state
             .queue
             .iter()
             .take(cur_idx)
-            .map(|t| f64::from(t.duration_ms))
+            .map(|t| t.duration_ms as f32)
             .sum();
 
         let mut current_ms = -playback_elapsed - past_tracks_duration + drag_offset_ms
-            - TRACK_SPACING_MS * cur_idx as f64;
+            - TRACK_SPACING_MS * cur_idx as f32;
         let diff = current_ms - self.render_state.track_offset;
         if !self.interaction.dragging && diff.abs() > 200.0 {
             current_ms = self.render_state.track_offset + diff * 0.1;
@@ -244,7 +495,7 @@ impl CantusApp {
         let mut cur_ms = current_ms;
         for track in &playback_state.queue {
             let start = cur_ms;
-            let end = start + f64::from(track.duration_ms);
+            let end = start + track.duration_ms as f32;
             cur_ms = end + TRACK_SPACING_MS;
             if start > timeline_start_ms + timeline_duration_ms {
                 break;
@@ -263,6 +514,7 @@ impl CantusApp {
                     (end - timeline_start_ms) * px_per_ms + history_width,
                 ),
                 art_only: false,
+                image_index: self.get_image_index(&track.album.image, image_map),
             });
         }
 
@@ -298,18 +550,19 @@ impl CantusApp {
             self.draw_track(
                 track_render,
                 total_height,
-                timeline_origin_x,
+                origin_x,
                 &playback_state.playlists,
+                image_map,
             );
         }
 
         // Draw the particles
-        self.render_playing_particles(
-            dt as f32,
+        self.render_playhead_particles(
+            dt,
             &playback_state.queue[cur_idx],
-            timeline_origin_x,
+            origin_x,
             total_height,
-            avg_speed as f32,
+            avg_speed,
             playback_state.volume,
         );
     }
@@ -317,9 +570,10 @@ impl CantusApp {
     fn draw_track(
         &mut self,
         track_render: &TrackRender,
-        height: f64,
-        timeline_origin_x: f64,
+        height: f32,
+        origin_x: f32,
         playlists: &HashMap<PlaylistId, CondensedPlaylist>,
+        image_map: &HashMap<String, i32>,
     ) {
         if track_render.width <= 0.0 {
             return;
@@ -327,29 +581,21 @@ impl CantusApp {
         let width = track_render.width;
         let track = track_render.track;
         let start_x = track_render.start_x;
-        let hitbox = Rect::new(
-            start_x,
-            PANEL_HEIGHT_START,
-            start_x + width,
-            PANEL_HEIGHT_START + height,
-        );
-        let start_translation = Affine::translate((start_x, PANEL_HEIGHT_START));
+        let hitbox = Rect::new(start_x, PANEL_START, start_x + width, PANEL_START + height);
 
         // Fade out based on width
         let fade_alpha = if width < height {
-            ((width / height) as f32 * 1.5 - 0.5).max(0.0)
+            ((width / height) * 1.5 - 0.5).max(0.0)
         } else {
             1.0
         };
 
         // How much of the width is to the left of the current position
-        let dark_width = (timeline_origin_x - start_x).max(0.0);
+        let dark_width = (origin_x - start_x).max(0.0);
 
         // Add hitbox
         let (hit_start, hit_end) = track_render.hitbox_range;
         let full_width = hit_end - hit_start;
-        let crop_left = start_x - hit_start;
-        let crop_right = hit_end - (start_x + width);
         self.interaction
             .track_hitboxes
             .push((track.id, hitbox, track_render.hitbox_range));
@@ -359,184 +605,56 @@ impl CantusApp {
             self.interaction.drag_track = Some((track.id, position_within_track));
         }
 
-        let (Some(album_image_ref), Some(album_data_ref)) = (
-            IMAGES_CACHE.get(&track.album.image),
-            ALBUM_DATA_CACHE.get(&track.album.id),
-        ) else {
-            return;
-        };
-        let Some(album_image) = album_image_ref.as_ref() else {
+        let Some(album_data_ref) = ALBUM_DATA_CACHE.get(&track.album.id) else {
             return;
         };
         let Some(album_data) = album_data_ref.as_ref() else {
             return;
         };
 
-        let rounding = 14.0 * self.scale_factor;
-        let buffer_px = 20.0;
-        let left_rounding = rounding * lerpf64((crop_left / buffer_px).clamp(0.0, 1.0), 1.0, 0.3);
-        let right_rounding = rounding * lerpf64((crop_right / buffer_px).clamp(0.0, 1.0), 1.0, 0.3);
-        let radii =
-            RoundedRectRadii::new(left_rounding, right_rounding, right_rounding, left_rounding);
-
         // --- BACKGROUND ---
-        if !track_render.art_only && width > height {
-            // Don't need to render all the way to the edge since the album art is at the right edge
-            let background_width = width - height * 0.25;
-            let extra_fade_alpha = fade_alpha * ((width - height) / 30.0).min(1.0) as f32;
-
-            // Add a drop shadow
-            self.scene.draw_blurred_rounded_rect(
-                start_translation,
-                Rect::new(0.0, 0.0, width, height),
-                Color::from_rgba8(0, 0, 0, (150.0 * extra_fade_alpha).round() as u8),
-                rounding,
-                6.0,
-            );
-
-            // Start clipping
-            self.scene.push_clip_layer(
-                start_translation,
-                &RoundedRect::new(0.0, 0.0, background_width, height, radii),
-            );
-            let image_width = f64::from(album_data.palette_image.image.width);
-            let background_aspect_ratio = background_width / height;
-            self.scene.fill(
-                Fill::EvenOdd,
-                start_translation * Affine::scale(full_width / image_width),
-                ImageBrush {
-                    image: &album_data.palette_image.image,
-                    sampler: album_data
-                        .palette_image
-                        .sampler
-                        .with_alpha(extra_fade_alpha),
-                },
-                None,
-                &Rect::new(0.0, 0.0, image_width, image_width * background_aspect_ratio),
-            );
-            // Add a white glow above for a vignette effect
-            self.scene.draw_blurred_rounded_rect(
-                start_translation,
-                Rect::new(0.0, 0.0, width, height),
-                Color::from_rgba8(255, 255, 255, (30.0 * extra_fade_alpha).round() as u8),
-                rounding,
-                15.0,
-            );
-            self.scene.pop_layer();
+        let mut colors = [0u32; 4];
+        for (i, c) in album_data.primary_colors.iter().take(4).enumerate() {
+            colors[i] =
+                (u32::from(c[0])) | (u32::from(c[1]) << 8) | (u32::from(c[2]) << 16) | (255 << 24);
         }
 
-        // --- Render things within the track bounds ---
-        self.scene.push_clip_layer(
-            start_translation,
-            &RoundedRect::new(0.0, 0.0, width, height, radii),
-        );
+        // Determine which animation to show: specific track click or global playhead event
+        let (expansion_time, expansion_pos) = {
+            let (c_inst, c_track, c_pt) = self.interaction.last_click;
+            let c_time = c_inst.duration_since(*START_TIME).as_secs_f32();
+            let e_time = self
+                .interaction
+                .last_event
+                .duration_since(*START_TIME)
+                .as_secs_f32();
 
-        // Make the track dark to the left of the current time
-        if dark_width > 0.0 {
-            let extra_fade_alpha = ((width - height) / 30.0).min(1.0) as f32;
-            self.scene.fill(
-                Fill::EvenOdd,
-                start_translation,
-                Color::from_rgb8(0, 0, 0).with_alpha(0.5 * fade_alpha * extra_fade_alpha),
-                None,
-                &Rect::new(0.0, 0.0, dark_width, height),
-            );
-        }
-
-        // During animations add an expanding circle behind the line
-        if track_render.is_current {
-            let anim_lerp = match self.interaction.last_event {
-                InteractionEvent::Pause(start) | InteractionEvent::Play(start) => {
-                    start.elapsed().as_millis() as f64
-                        / (ANIMATION_DURATION.as_millis() as f64 * 0.3)
-                }
-                InteractionEvent::PauseHover(_) | InteractionEvent::PlayHover(_) => 1.0,
-            };
-            if anim_lerp < 1.0 {
-                self.scene.fill(
-                    Fill::EvenOdd,
-                    Affine::translate((timeline_origin_x, height * 0.5)),
-                    Color::from_rgb8(255, 224, 210)
-                        .with_alpha(1.0 - (anim_lerp + 0.4).min(1.0) as f32),
-                    None,
-                    &Circle::new(Point::default(), 500.0 * anim_lerp),
-                );
+            if c_track == track.id && (c_time > e_time || !track_render.is_current) {
+                (c_time, [(start_x + c_pt.x), (PANEL_START + c_pt.y)])
+            } else {
+                (e_time, [origin_x, (PANEL_START + height * 0.5)])
             }
-        }
-        // After a click, add an expanding circle behind the click point
-        if let Some((start, track_id, point)) = &self.interaction.last_click
-            && track_id == &track.id
-            && let anim_lerp =
-                start.elapsed().as_millis() as f64 / (ANIMATION_DURATION.as_millis() as f64 * 0.3)
-            && anim_lerp < 1.0
-        {
-            self.scene.fill(
-                Fill::EvenOdd,
-                start_translation * Affine::translate((point.x, point.y)),
-                Color::from_rgb8(255, 224, 210).with_alpha(1.0 - (anim_lerp + 0.4).min(1.0) as f32),
-                None,
-                &Circle::new(Point::default(), 500.0 * anim_lerp),
-            );
-        }
-        self.scene.pop_layer();
+        };
 
-        // --- ALBUM ART SQUARE ---
-        if fade_alpha > 0.0 {
-            // Add a drop shadow
-            self.scene.draw_blurred_rounded_rect(
-                start_translation * Affine::translate((width - height, 0.0)),
-                Rect::new(0.0, 0.0, height, height),
-                Color::from_rgba8(0, 0, 0, (100.0 * fade_alpha).round() as u8),
-                rounding,
-                5.0,
-            );
-
-            self.scene.push_clip_layer(
-                start_translation,
-                &RoundedRect::new(0.0, 0.0, width, height, radii),
-            );
-            self.scene.fill(
-                Fill::EvenOdd,
-                start_translation * Affine::translate((width - height, 0.0)),
-                ImageBrush {
-                    image: &album_image.image,
-                    sampler: album_image.sampler.with_alpha(fade_alpha),
-                },
-                Some(Affine::scale(height / f64::from(album_image.image.height))),
-                &RoundedRect::new(
-                    0.0,
-                    0.0,
-                    height,
-                    height,
-                    RoundedRectRadii::new(rounding, right_rounding, right_rounding, rounding),
-                ),
-            );
-            self.scene.pop_layer();
-        }
+        self.background_pills.push(BackgroundPill {
+            rect: [start_x, PANEL_START, width, height],
+            dark_width,
+            alpha: fade_alpha,
+            colors,
+            expansion_pos,
+            expansion_time,
+            image_index: track_render.image_index,
+            _padding: [0.0; 2],
+        });
 
         // --- TEXT ---
         if !track_render.art_only && fade_alpha >= 1.0 && width > height {
-            // Clipping mask to the edge of the background rectangle, shrunk by a margin
-            self.scene.push_clip_layer(
-                start_translation,
-                &RoundedRect::new(
-                    4.0,
-                    4.0,
-                    width - height - 4.0,
-                    height - 4.0,
-                    6.0 * self.scale_factor,
-                ),
-            );
             // Get available width for text
             let text_start_left = start_x + 12.0;
             let text_start_right = start_x + width - height - 8.0;
             let available_width = (text_start_right - text_start_left).max(0.0);
-            let text_brush = Color::from_rgba8(
-                240,
-                240,
-                240,
-                ((available_width / 100.0).min(1.0) * 255.0) as u8,
-            );
+            let text_alpha = (available_width / 100.0).min(1.0);
+            let text_color = [0.94, 0.94, 0.94, text_alpha];
 
             // Render the songs title (strip anything beyond a - or ( in the song title)
             let song_name = track.name[..track
@@ -546,7 +664,7 @@ impl CantusApp {
                 .unwrap_or(track.name.len())]
                 .trim();
             let font_size = 12.0;
-            let text_height = PANEL_HEIGHT_START + (height * 0.2).floor();
+            let text_height = PANEL_START + (height * 0.2).floor();
             let song_layout = self.layout_text(song_name, font_size);
             let width_ratio = available_width / song_layout.width;
             if width_ratio <= 1.0 {
@@ -554,22 +672,16 @@ impl CantusApp {
                     &self.layout_text(song_name, font_size * width_ratio.max(0.8)),
                     text_start_left,
                     text_height,
-                    false,
-                    text_brush,
+                    0.0,
+                    text_color,
                 );
             } else {
-                self.draw_text(
-                    &song_layout,
-                    text_start_right,
-                    text_height,
-                    true,
-                    text_brush,
-                );
+                self.draw_text(&song_layout, text_start_right, text_height, 1.0, text_color);
             }
 
             // Get text layouts for bottom row of text
             let font_size = 10.5;
-            let text_height = PANEL_HEIGHT_START + (height * 0.52).floor();
+            let text_height = PANEL_START + (height * 0.52).floor();
 
             let artist_text = &track.artist.name;
             let time_text = if track_render.seconds_until_start >= 60.0 {
@@ -599,28 +711,25 @@ impl CantusApp {
                         text_start_left
                     },
                     text_height,
-                    width_ratio >= 1.0,
-                    text_brush,
+                    if width_ratio >= 1.0 { 1.0 } else { 0.0 },
+                    text_color,
                 );
             } else {
                 self.draw_text(
                     &self.layout_text(&time_text, font_size),
                     start_x + 12.0,
                     text_height,
-                    false,
-                    text_brush,
+                    0.0,
+                    text_color,
                 );
                 self.draw_text(
                     &self.layout_text(artist_text, font_size),
                     text_start_right,
                     text_height,
-                    true,
-                    text_brush,
+                    1.0,
+                    text_color,
                 );
             }
-
-            // Release clipping mask
-            self.scene.pop_layer();
         }
 
         // Expand the hitbox vertically so it includes the playlist buttons
@@ -629,82 +738,80 @@ impl CantusApp {
                 && hitbox
                     .inflate(0.0, 20.0)
                     .contains(self.interaction.mouse_position);
-            self.draw_playlist_buttons(track, hovered, playlists, width, height, start_x);
+            self.draw_playlist_buttons(
+                track, hovered, playlists, width, height, start_x, image_map,
+            );
         }
     }
 
     /// Creates the text layout for a single-line string.
-    fn layout_text(&self, text: &str, size: f64) -> TextLayout {
+    fn layout_text(&self, text: &str, size: f32) -> TextLayout {
         let face = &self.font.face;
-        let psize = (size * self.scale_factor) as f32;
+        let psize = size * self.scale_factor;
         let scale = psize / f32::from(face.units_per_em());
-        let (mut px, mut glyphs, mut prev) = (0.0f32, Vec::with_capacity(text.len()), None);
+        let mut px = 0.0f32;
+        let mut glyphs = Vec::with_capacity(text.len());
+
         for ch in text.chars() {
-            let gid = face.glyph_index(ch);
-            if let (Some(l), Some(r)) = (prev, gid) {
-                px += face.tables().kern.map_or(0.0, |t| {
-                    let mut adj = 0.0f32;
-                    for s in t.subtables {
-                        if s.horizontal
-                            && !s.has_cross_stream
-                            && !s.has_state_machine
-                            && let Some(v) = s.glyphs_kerning(l, r)
-                        {
-                            adj += f32::from(v);
-                        }
-                    }
-                    adj
-                }) * scale;
-            }
-            let adv = gid
-                .and_then(|g| face.glyph_hor_advance(g))
-                .map_or_else(|| f32::from(face.units_per_em()) * 0.5, f32::from);
-            if let Some(g) = gid {
-                glyphs.push(Glyph {
-                    id: u32::from(g.0),
-                    x: px,
-                    y: f32::from(face.ascender()) * scale,
-                });
-                prev = Some(g);
-            } else {
-                prev = None;
-            }
-            px += adv * scale;
+            let gid = u32::from(face.glyph_index(ch).map_or(0, |g| g.0));
+            let advance = face
+                .glyph_hor_advance(ttf_parser::GlyphId(gid as u16))
+                .unwrap_or(0);
+
+            glyphs.push((gid, px));
+            px += f32::from(advance) * scale;
         }
+
         TextLayout {
             glyphs,
-            width: f64::from(px),
-            height: f64::from(
-                f32::from(face.ascender() + face.descender() + face.line_gap()) * scale,
-            ),
+            width: px,
+            line_height: psize,
             font_size: psize,
         }
     }
 
-    fn draw_text(&mut self, l: &TextLayout, px: f64, py: f64, align_e: bool, brush: Color) {
-        self.scene
-            .draw_glyphs(&self.font.font_data)
-            .font_size(l.font_size)
-            .normalized_coords(&self.font.coords)
-            .transform(Affine::translate((
-                px - (l.width * f64::from(u8::from(align_e))),
-                py - l.height * 0.5,
-            )))
-            .hint(true)
-            .brush(brush)
-            .draw(Fill::EvenOdd, l.glyphs.iter().copied());
+    fn draw_text(&mut self, l: &TextLayout, px: f32, py: f32, x_align: f32, color: [f32; 4]) {
+        let start_x = px - (l.width * x_align);
+        let start_y = py - l.line_height * 0.5;
+        let scale = l.font_size / f32::from(self.font.face.units_per_em());
+        let ascender = f32::from(self.font.face.ascender()) * scale;
+
+        for (gid, x_off) in &l.glyphs {
+            if let Some(info) = self.font.atlas.glyphs.get(gid) {
+                let msdf_scale = ATLAS_MSDF_SCALE;
+                let range = ATLAS_RANGE;
+
+                // Position relative to baseline
+                let gx = (start_x + x_off + (f32::from(info.metrics.x_min) * scale))
+                    / self.scale_factor
+                    - ((range + 1.0) / msdf_scale * scale);
+                let gy = (start_y + ascender - (f32::from(info.metrics.y_max) * scale))
+                    / self.scale_factor
+                    - ((range + 1.0) / msdf_scale * scale);
+
+                let gw = (info.uv_rect[2] * self.font.atlas.width as f32) * (scale / msdf_scale)
+                    / self.scale_factor;
+                let gh = (info.uv_rect[3] * self.font.atlas.height as f32) * (scale / msdf_scale)
+                    / self.scale_factor;
+
+                self.text_instances.push(TextInstance {
+                    rect: [gx, gy, gw, gh],
+                    uv_rect: info.uv_rect,
+                    color,
+                });
+            }
+        }
     }
 
-    fn render_playing_particles(
+    fn render_playhead_particles(
         &mut self,
         dt: f32,
         track: &Track,
-        x: f64,
-        height: f64,
+        origin_x: f32,
+        height: f32,
         track_move_speed: f32,
         volume: Option<u8>,
     ) {
-        let scale = self.scale_factor as f32;
         let Some(track_data_ref) = ALBUM_DATA_CACHE.get(&track.album.id) else {
             return;
         };
@@ -731,10 +838,17 @@ impl CantusApp {
         // We use a monotonic time for the GPU to calculate displacements
         let time = START_TIME.elapsed().as_secs_f32();
 
-        self.gpu_uniforms = Some(ParticleUniforms {
-            screen_size: [CONFIG.width as f32 * scale, height as f32],
+        self.gpu_uniforms = Some(ScreenUniforms {
+            screen_size: [
+                (CONFIG.width * self.scale_factor),
+                ((CONFIG.height + PANEL_START + PANEL_EXTENSION) * self.scale_factor),
+            ],
             time,
-            _padding: 0.0,
+            scale_factor: self.scale_factor,
+            mouse_pos: [
+                self.interaction.mouse_position.x,
+                self.interaction.mouse_position.y,
+            ],
         });
 
         // Emit new particles while playing
@@ -756,12 +870,12 @@ impl CantusApp {
             // Emit a new particle
             if emit_count > 0 && time > particle.spawn_time + particle.duration {
                 particle.spawn_pos = [
-                    x as f32,
-                    PANEL_HEIGHT_START as f32 + height as f32 * lerpf32(fastrand::f32(), 0.1, 0.7),
+                    origin_x,
+                    PANEL_START + height * lerpf32(fastrand::f32(), 0.1, 0.95),
                 ];
                 particle.spawn_vel = [
-                    fastrand::usize(SPARK_VELOCITY_X) as f32 * scale * horizontal_bias,
-                    fastrand::usize(SPARK_VELOCITY_Y) as f32 * -scale,
+                    fastrand::usize(SPARK_VELOCITY_X) as f32 * self.scale_factor * horizontal_bias,
+                    fastrand::usize(SPARK_VELOCITY_Y) as f32 * -self.scale_factor,
                 ];
                 particle.color = palette[fastrand::usize(0..palette.len())];
                 particle.spawn_time = time;
@@ -771,112 +885,77 @@ impl CantusApp {
             }
         }
 
-        // Line and Volume logic
-        let line_width = 4.0 * self.scale_factor;
-        let line_color = Color::from_rgb8(255, 224, 210);
-        let line_x = x - line_width * 0.5;
-        let anim_lerp = match self.interaction.last_event {
-            InteractionEvent::Play(start) => (start.elapsed().as_millis() as f64
-                / ANIMATION_DURATION.as_millis() as f64)
-                .clamp(0.0, 1.0),
-            InteractionEvent::Pause(start) => (start.elapsed().as_millis() as f64
-                / ANIMATION_DURATION.as_millis() as f64)
-                .clamp(0.0, 0.5),
-            InteractionEvent::PauseHover(start) | InteractionEvent::PlayHover(start) => {
-                (start.elapsed().as_millis() as f64
-                    / (ANIMATION_DURATION.as_millis() as f64 * 0.25))
-                    .clamp(0.0, 0.5)
-            }
-        };
-        if anim_lerp < 1.0 {
-            // Start with the lines split, then 3/4 way through close them again
-            let line_height = height * lerpf64(((anim_lerp - 0.75) * 4.0).max(0.0), 0.2, 0.5);
-            self.scene.fill(
-                Fill::EvenOdd,
-                Affine::translate((line_x, PANEL_HEIGHT_START)),
-                line_color,
-                None,
-                &RoundedRect::new(0.0, 0.0, line_width, line_height, 100.0),
-            );
-            self.scene.fill(
-                Fill::EvenOdd,
-                Affine::translate((line_x, PANEL_HEIGHT_START + height - line_height)),
-                line_color,
-                None,
-                &RoundedRect::new(0.0, 0.0, line_width, line_height, 100.0),
-            );
+        // Playhead
+        let interaction = &mut self.interaction;
+        let playbutton_hsize = height * 0.25;
+        let speed = 2.2 * dt;
+        interaction.play_hitbox = Rect::new(
+            origin_x - playbutton_hsize,
+            PANEL_START,
+            origin_x + playbutton_hsize,
+            PANEL_START + height,
+        );
+        // Get playhead states
+        let playhead_hovered = interaction.play_hitbox.contains(interaction.mouse_position);
+        let last_event = interaction.last_event.elapsed().as_secs_f32() / ANIMATION_DURATION;
 
-            let icon_height = PANEL_HEIGHT_START + height * 0.3;
-            let is_paused = matches!(
-                self.interaction.last_event,
-                InteractionEvent::Pause(_) | InteractionEvent::PauseHover(_)
-            );
-            if is_paused || anim_lerp < 0.5 {
-                // Two lines for pause, during a pause its always there, when on play it fades out
-                let anim_lerp = if is_paused {
-                    anim_lerp
-                } else {
-                    (anim_lerp + 0.5) * 1.5
-                };
-                let icon_fade = ((anim_lerp - 0.75) * 4.0).clamp(0.0, 1.0);
-                let icon_color = line_color.with_alpha(1.0 - icon_fade as f32);
-                let icon_offset = 5.0 * (anim_lerp * 4.0).min(1.0) + 4.0 * icon_fade;
-                self.scene.fill(
-                    Fill::EvenOdd,
-                    Affine::translate((line_x - icon_offset, icon_height)),
-                    icon_color,
-                    None,
-                    &RoundedRect::new(0.0, 0.0, line_width, icon_height, 100.0),
-                );
-                self.scene.fill(
-                    Fill::EvenOdd,
-                    Affine::translate((line_x + icon_offset, icon_height)),
-                    icon_color,
-                    None,
-                    &RoundedRect::new(0.0, 0.0, line_width, icon_height, 100.0),
-                );
+        // Determine the intended state for the bar
+        let bar_target =
+            u32::from(playhead_hovered || !interaction.playing || last_event < 1.0) as f32;
+        move_towards(&mut interaction.playhead_bar, bar_target, speed);
+
+        // Determine which icon (if any) is currently active
+        let (mut play_active, mut pause_active) = (false, false);
+        if playhead_hovered {
+            if interaction.playing {
+                pause_active = true;
+            } else {
+                play_active = true;
             }
-            if !is_paused || anim_lerp < 0.5 {
-                // Render out the play icon svg, grow it in the first quarter, then keep in place for half, then expand out with a fade in final quarter
-                let anim_lerp = if is_paused {
-                    (anim_lerp + 0.5) * 2.0
-                } else {
-                    anim_lerp
-                };
-                let icon_fade = ((anim_lerp - 0.75) * 4.0).clamp(0.0, 1.0);
-                let icon_color = line_color.with_alpha(1.0 - icon_fade as f32);
-                let play_icon_width = PLAY_SVG.bounding_box().width();
-                let icon_scale = icon_height * (anim_lerp * 4.0).min(1.0) + 0.5 * icon_fade;
-                self.scene.fill(
-                    Fill::EvenOdd,
-                    Affine::translate((
-                        line_x - icon_scale * 0.3,
-                        PANEL_HEIGHT_START + height * 0.5 - icon_scale * 0.5,
-                    )) * Affine::scale(icon_scale / play_icon_width),
-                    icon_color,
-                    None,
-                    &*PLAY_SVG,
-                );
-            }
-        } else {
-            // Volume display bar
-            let volume = f64::from(volume.unwrap_or(100)) / 100.0;
-            if volume < 1.0 {
-                self.scene.fill(
-                    Fill::EvenOdd,
-                    Affine::translate((line_x, PANEL_HEIGHT_START)),
-                    Color::from_rgb8(150, 150, 150),
-                    None,
-                    &RoundedRect::new(0.0, 0.0, line_width, height, 100.0),
-                );
-            }
-            self.scene.fill(
-                Fill::EvenOdd,
-                Affine::translate((line_x, PANEL_HEIGHT_START + height * (1.0 - volume))),
-                line_color,
-                None,
-                &RoundedRect::new(0.0, 0.0, line_width, height * volume, 100.0),
-            );
+        } else if !interaction.playing {
+            pause_active = true;
+        } else if interaction.playing && last_event < 1.0 {
+            interaction.playhead_play = last_event; // Hard set for the "start" animation
+            play_active = true;
         }
+
+        // If active, move toward 0.5. If inactive, finish the animation to 1.0 then reset to 0.0.
+        for (val, is_active) in [
+            (&mut interaction.playhead_play, play_active),
+            (&mut interaction.playhead_pause, pause_active),
+        ] {
+            if is_active {
+                move_towards(val, 0.5, speed);
+            } else if *val > 0.0 {
+                move_towards(val, 1.0, speed);
+                if *val >= 1.0 {
+                    *val = 0.0;
+                }
+            }
+        }
+
+        self.playhead_info = Some(PlayheadUniforms {
+            origin_x,
+            panel_start: PANEL_START,
+            height,
+            volume: f32::from(volume.unwrap_or(100)) / 100.0,
+            bar_lerp: interaction.playhead_bar,
+            play_lerp: interaction.playhead_play,
+            pause_lerp: interaction.playhead_pause,
+            _padding: 0.0,
+        });
     }
+}
+
+fn move_towards(current: &mut f32, target: f32, speed: f32) {
+    let delta = target - *current;
+    if delta.abs() <= speed {
+        *current = target;
+    } else {
+        *current += delta.signum() * speed;
+    }
+}
+
+fn lerpf32(t: f32, v0: f32, v1: f32) -> f32 {
+    v0 + t * (v1 - v0)
 }

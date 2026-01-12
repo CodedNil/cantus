@@ -1,7 +1,9 @@
-use crate::{CantusApp, PANEL_HEIGHT_EXTENSION, config::CONFIG, interaction::InteractionState};
+use crate::{
+    CantusApp, PANEL_EXTENSION, config::CONFIG, interaction::InteractionState, render::Point,
+};
 use raw_window_handle::{HasDisplayHandle, HasWindowHandle};
 use tracing::error;
-use vello::{kurbo::Point, wgpu::SurfaceTargetUnsafe};
+use wgpu::SurfaceTargetUnsafe;
 use winit::{
     application::ApplicationHandler,
     dpi::{LogicalPosition, PhysicalSize},
@@ -80,7 +82,7 @@ impl ApplicationHandler for WinitApp {
 
         let size = PhysicalSize::new(
             CONFIG.width as u32,
-            (CONFIG.height + PANEL_HEIGHT_EXTENSION) as u32,
+            (CONFIG.height + PANEL_EXTENSION) as u32,
         );
         let window = event_loop
             .create_window(
@@ -100,7 +102,7 @@ impl ApplicationHandler for WinitApp {
         if window
             .request_inner_size(PhysicalSize::new(
                 (CONFIG.width * self.cantus.scale_factor) as u32,
-                ((CONFIG.height + PANEL_HEIGHT_EXTENSION) * self.cantus.scale_factor) as u32,
+                ((CONFIG.height + PANEL_EXTENSION) * self.cantus.scale_factor) as u32,
             ))
             .is_none()
         {
