@@ -1,9 +1,11 @@
 use crate::{
     CantusApp, PANEL_START,
     config::CONFIG,
-    render_types::{IconInstance, Point, Rect},
-    rspotify::{PlaylistId, Track, TrackId},
-    spotify::{CondensedPlaylist, PLAYBACK_STATE, SPOTIFY_CLIENT, update_playback_state},
+    render::{IconInstance, Point, Rect},
+    spotify::{
+        CondensedPlaylist, PLAYBACK_STATE, PlaylistId, SPOTIFY_CLIENT, Track, TrackId,
+        update_playback_state,
+    },
 };
 use itertools::Itertools;
 use std::{

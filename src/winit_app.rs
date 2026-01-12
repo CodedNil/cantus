@@ -1,5 +1,5 @@
 use crate::{
-    CantusApp, PANEL_EXTENSION, config::CONFIG, interaction::InteractionState, render_types::Point,
+    CantusApp, PANEL_EXTENSION, config::CONFIG, interaction::InteractionState, render::Point,
 };
 use raw_window_handle::{HasDisplayHandle, HasWindowHandle};
 use tracing::error;

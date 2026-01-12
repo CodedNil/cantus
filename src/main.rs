@@ -1,10 +1,10 @@
 use crate::image_manager::ImageManager;
 use crate::interaction::InteractionState;
-use crate::render::{FontEngine, ParticlesState, RenderState};
-use crate::text_render::TextInstance;
-use render_types::{
-    BackgroundPill, IconInstance, Particle, PlayheadUniforms, ScreenUniforms, Shaders,
+use crate::render::{
+    BackgroundPill, FontEngine, IconInstance, Particle, ParticlesState, PlayheadUniforms,
+    RenderState, ScreenUniforms, Shaders,
 };
+use crate::text_render::TextInstance;
 use std::{
     collections::{HashMap, HashSet},
     sync::Arc,
@@ -30,8 +30,6 @@ mod config;
 mod image_manager;
 mod interaction;
 mod render;
-mod render_types;
-mod rspotify;
 mod spotify;
 mod text_render;
 
@@ -583,8 +581,4 @@ impl Default for RenderContext {
             devices: Vec::new(),
         }
     }
-}
-
-fn lerpf32(t: f32, v0: f32, v1: f32) -> f32 {
-    v0 + t * (v1 - v0)
 }

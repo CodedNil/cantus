@@ -1,6 +1,6 @@
 use crate::{
     CantusApp, PANEL_EXTENSION, PANEL_START, config::CONFIG, interaction::InteractionState,
-    render_types::Point,
+    render::Point,
 };
 use raw_window_handle::{
     RawDisplayHandle, RawWindowHandle, WaylandDisplayHandle, WaylandWindowHandle,
