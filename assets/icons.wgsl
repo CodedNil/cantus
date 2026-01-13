@@ -9,7 +9,7 @@ struct Uniform {
 struct IconInstance {
     pos: vec2<f32>,
     alpha: f32,
-    variant: f32,
+    variant: f32, // 1.0 for star, 0.0 for squircle
     param: f32,
     image_index: i32,
     _padding: f32,
@@ -24,16 +24,29 @@ struct VertexOutput {
     @builtin(position) position: vec4<f32>,
     @location(0) uv: vec2<f32>,
     @location(1) @interpolate(flat) icon_id: u32,
+    @location(2) @interpolate(flat) radius: f32,
 };
 
 @vertex
 fn vs_main(@builtin(vertex_index) v_idx: u32, @builtin(instance_index) i_idx: u32) -> VertexOutput {
     let icon = icons[i_idx];
-    let render_size = 30.0 * uniforms.scale_factor;
+
+    // Calculate growth from mouse position
+    let d_mouse = distance(icon.pos, uniforms.mouse_pos) / uniforms.scale_factor;
+    let growth = 1.0 + 0.6 * (1.0 - smoothstep(8.0, 24.0, d_mouse));
+
+    // Scale the quad geometry
+    let radius = 11.0 * uniforms.scale_factor * growth;
     let corner = vec2<f32>(f32(v_idx % 2u), f32(v_idx / 2u));
-    let pixel_pos = icon.pos + (corner - 0.5) * render_size;
+    let pixel_pos = icon.pos + (corner - 0.5) * (radius * 2.0);
+
     let ndc = (pixel_pos / uniforms.screen_size) * 2.0 - 1.0;
-    return VertexOutput(vec4(ndc.x, -ndc.y, 0.0, 1.0), corner, i_idx);
+    return VertexOutput(
+        vec4(ndc.x, -ndc.y, 0.0, 1.0),
+        corner,
+        i_idx,
+        radius
+    );
 }
 
 fn sd_squircle(p: vec2<f32>, b: vec2<f32>, r: f32) -> f32 {
@@ -59,28 +72,30 @@ fn sd_star(p: vec2<f32>, r: f32, rf: f32) -> f32 {
 @fragment
 fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
     let icon = icons[in.icon_id];
-    let d_mouse = distance(icon.pos, uniforms.mouse_pos);
-    let growth = 1.0 + 0.6 * (1.0 - smoothstep(8.0 * uniforms.scale_factor, 24.0 * uniforms.scale_factor, d_mouse));
-
-    let size = 16.0 * uniforms.scale_factor * growth;
-    let p = (in.uv - 0.5) * 40.0 * uniforms.scale_factor;
+    let p = (in.uv - 0.5) * (in.radius * 2.0);
 
     var color: vec3<f32>;
     var dist: f32;
     if icon.variant > 0.5 {
-        dist = sd_star(p, size * 0.38, size * 0.24) - 4.0;
-        let split_mask = clamp((in.uv.x - icon.param) / fwidth(in.uv.x) + 0.5, 0.0, 1.0);
-        color = mix(vec3(1.0, 0.85, 0.2), vec3(0.33), split_mask);
+        dist = sd_star(p, in.radius * 0.5, in.radius * 0.32) - in.radius * 0.1 * uniforms.scale_factor;
+        let line_pos = (in.uv.x - icon.param);
+        let split = clamp(line_pos / fwidth(line_pos) + 0.5, 0.0, 1.0);
+        color = mix(vec3(1.0, 0.85, 0.2), vec3(0.33), split);
     } else {
-        dist = sd_squircle(p, vec2(size * 0.5), 12.0 * uniforms.scale_factor);
-        color = mix(textureSample(t_images, s_images, p / size + 0.5, icon.image_index).rgb, vec3(0.24), icon.param);
+        dist = sd_squircle(p, vec2(in.radius * 0.6), 6.0 * uniforms.scale_factor);
+        let tex = textureSample(t_images, s_images, in.uv, icon.image_index).rgb;
+        color = mix(tex, vec3(0.24), icon.param);
     }
+    // Sharp anti-aliasing
+    let unit = fwidth(dist) * 0.5;
+    let mask = 1.0 - smoothstep(-unit, unit, dist);
 
-    let mask = 1.0 - smoothstep(-0.5, 0.5, dist);
-    let border_w = 1.0 * uniforms.scale_factor;
-    let border = smoothstep(-border_w - 0.5, -border_w + 0.5, dist);
-    color = mix(color, vec3(0.15), border);
+    // Border
+    let border_w = uniforms.scale_factor;
+    let border_mask = smoothstep(-border_w - unit, -border_w + unit, dist);
+    color = mix(color, vec3(0.15), border_mask);
 
-    if mask <= 0.01 { discard; }
-    return vec4(color * mask * icon.alpha, mask * icon.alpha);
+    // Alpha blending instead of discard for better performance
+    let final_alpha = mask * icon.alpha;
+    return vec4(color * final_alpha, final_alpha);
 }

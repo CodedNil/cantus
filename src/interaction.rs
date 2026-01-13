@@ -275,8 +275,7 @@ impl CantusApp {
         );
 
         // Fade out and fit based on size
-        let icon_size = 16.0;
-        let icon_spacing = 2.0;
+        let icon_size = 20.0;
         let mouse_pos = self.interaction.mouse_position;
 
         if width < icon_size * icon_entries.len() as f32 {
@@ -321,8 +320,8 @@ impl CantusApp {
         let mut icon_data = Vec::with_capacity(num_icons);
 
         for (i, entry) in icon_entries.into_iter().enumerate() {
-            let origin_x = center_x + (i as f32 - half_icons) * (icon_size + icon_spacing);
-            let half_size = (icon_size + icon_spacing) * 0.5;
+            let origin_x = center_x + (i as f32 - half_icons) * icon_size;
+            let half_size = icon_size * 0.6; // Add slight hitbox padding
             let rect = Rect::new(
                 origin_x - half_size,
                 center_y - half_size,

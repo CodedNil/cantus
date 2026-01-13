@@ -295,8 +295,6 @@ impl LayerShellApp {
             return;
         };
 
-        let scale = self.cantus.scale_factor;
-
         let region = compositor.create_region(qhandle, ());
         {
             let interaction = &self.cantus.interaction;
@@ -307,10 +305,10 @@ impl LayerShellApp {
                 .chain(interaction.icon_hitboxes.iter().map(|hitbox| &hitbox.rect))
             {
                 region.add(
-                    (rect.x0 * scale).round() as i32,
-                    (rect.y0 * scale).round() as i32,
-                    ((rect.x1 - rect.x0) * scale).round() as i32,
-                    ((rect.y1 - rect.y0) * scale).round() as i32,
+                    rect.x0.round() as i32,
+                    rect.y0.round() as i32,
+                    (rect.x1 - rect.x0).round() as i32,
+                    (rect.y1 - rect.y0).round() as i32,
                 );
             }
         }

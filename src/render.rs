@@ -195,15 +195,6 @@ impl Rect {
     pub fn contains(&self, p: Point) -> bool {
         p.x >= self.x0 && p.x <= self.x1 && p.y >= self.y0 && p.y <= self.y1
     }
-
-    pub fn inflate(&self, dx: f32, dy: f32) -> Self {
-        Self {
-            x0: self.x0 - dx,
-            y0: self.y0 - dy,
-            x1: self.x1 + dx,
-            y1: self.y1 + dy,
-        }
-    }
 }
 
 #[repr(C)]
@@ -664,9 +655,8 @@ impl CantusApp {
         // Expand the hitbox vertically so it includes the playlist buttons
         if !track_render.art_only {
             let hovered = !self.interaction.dragging
-                && hitbox
-                    .inflate(0.0, 20.0)
-                    .contains(self.interaction.mouse_position);
+                && self.interaction.mouse_position.x >= hitbox.x0
+                && self.interaction.mouse_position.x <= hitbox.x1;
             self.draw_playlist_buttons(track, hovered, playlists, width, start_x, image_map);
         }
     }

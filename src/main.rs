@@ -486,25 +486,6 @@ impl CantusApp {
                 rpass.draw(0..4, 0..self.background_pills.len() as u32);
             }
 
-            if let Some(icon_bind_group) = &gpu.icon_bind_group {
-                let mut rpass = encoder.begin_render_pass(&RenderPassDescriptor {
-                    label: Some("Icon Pass"),
-                    color_attachments: &[Some(RenderPassColorAttachment {
-                        view: &surface_view,
-                        resolve_target: None,
-                        ops: Operations {
-                            load: LoadOp::Load,
-                            store: StoreOp::Store,
-                        },
-                        depth_slice: None,
-                    })],
-                    ..Default::default()
-                });
-                rpass.set_pipeline(&gpu.shaders.icon_pipeline);
-                rpass.set_bind_group(0, icon_bind_group, &[]);
-                rpass.draw(0..4, 0..self.icon_pills.len() as u32);
-            }
-
             if let Some(text_bind_group) = &gpu.text_bind_group {
                 let mut rpass = encoder.begin_render_pass(&RenderPassDescriptor {
                     label: Some("Text Pass"),
@@ -524,9 +505,28 @@ impl CantusApp {
                 rpass.draw(0..4, 0..self.text_instances.len() as u32);
             }
 
+            if let Some(icon_bind_group) = &gpu.icon_bind_group {
+                let mut rpass = encoder.begin_render_pass(&RenderPassDescriptor {
+                    label: Some("Icon Pass"),
+                    color_attachments: &[Some(RenderPassColorAttachment {
+                        view: &surface_view,
+                        resolve_target: None,
+                        ops: Operations {
+                            load: LoadOp::Load,
+                            store: StoreOp::Store,
+                        },
+                        depth_slice: None,
+                    })],
+                    ..Default::default()
+                });
+                rpass.set_pipeline(&gpu.shaders.icon_pipeline);
+                rpass.set_bind_group(0, icon_bind_group, &[]);
+                rpass.draw(0..4, 0..self.icon_pills.len() as u32);
+            }
+
             {
                 let mut rpass = encoder.begin_render_pass(&RenderPassDescriptor {
-                    label: Some("Combined Pass"),
+                    label: Some("Playhead Pass"),
                     color_attachments: &[Some(RenderPassColorAttachment {
                         view: &surface_view,
                         resolve_target: None,
