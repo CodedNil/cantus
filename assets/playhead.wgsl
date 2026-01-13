@@ -4,6 +4,8 @@ struct Uniform {
     mouse_pos: vec2<f32>,
     playhead_x: f32,
     time: f32,
+    expansion_xy: vec2<f32>,
+    expansion_time: f32,
     scale_factor: f32,
 };
 

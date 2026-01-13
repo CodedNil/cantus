@@ -23,7 +23,6 @@ pub struct IconHitbox {
 }
 
 pub struct InteractionState {
-    pub last_click: (Instant, TrackId, Point),
     pub mouse_position: Point,
     #[cfg(feature = "wayland")]
     pub last_hitbox_update: Instant,
@@ -36,7 +35,8 @@ pub struct InteractionState {
     pub dragging: bool,
     pub drag_delta_pixels: f32,
     // Playhead
-    pub last_event: Instant,
+    pub last_expansion: (Instant, Point),
+    pub last_toggle_playing: Instant,
     pub playing: bool,
     pub playhead_bar: f32,
     pub playhead_play: f32,
@@ -46,11 +46,6 @@ pub struct InteractionState {
 impl Default for InteractionState {
     fn default() -> Self {
         Self {
-            last_click: (
-                Instant::now().checked_sub(Duration::from_secs(5)).unwrap(),
-                TrackId::default(),
-                Point::default(),
-            ),
             mouse_position: Point::default(),
             #[cfg(feature = "wayland")]
             last_hitbox_update: Instant::now(),
@@ -62,7 +57,11 @@ impl Default for InteractionState {
             drag_track: None,
             dragging: false,
             drag_delta_pixels: 0.0,
-            last_event: Instant::now().checked_sub(Duration::from_secs(5)).unwrap(),
+            last_expansion: (
+                Instant::now().checked_sub(Duration::from_secs(5)).unwrap(),
+                Point::default(),
+            ),
+            last_toggle_playing: Instant::now(),
             playing: false,
             playhead_bar: 0.0,
             playhead_play: 0.0,
@@ -114,6 +113,15 @@ impl InteractionState {
         }
         PLAYBACK_STATE.write().interaction = true;
 
+        // Get the x position of the playhead
+        let origin_x = {
+            let history_width = CONFIG.history_width;
+            let total_width = CONFIG.width - history_width - 10.0;
+            let timeline_duration_ms = CONFIG.timeline_future_minutes * 60_000.0;
+            let timeline_start_ms = -CONFIG.timeline_past_minutes * 60_000.0;
+            history_width - timeline_start_ms * (total_width / timeline_duration_ms)
+        };
+
         // Click on rating/playlist icons
         if let Some(hitbox) = self
             .icon_hitboxes
@@ -136,36 +144,25 @@ impl InteractionState {
             }
         } else if self.play_hitbox.contains(mouse_pos) {
             // Play/pause
-            if let Some((track_id, track_rect, _)) = self
-                .track_hitboxes
-                .iter()
-                .find(|(_, track_rect, _)| track_rect.contains(mouse_pos))
-            {
-                self.last_click = (
-                    Instant::now(),
-                    *track_id,
-                    Point::new(mouse_pos.x - track_rect.x0, mouse_pos.y - track_rect.y0),
-                );
-            }
-            self.last_event = Instant::now();
+            self.last_expansion = (
+                Instant::now(),
+                Point::new(origin_x, PANEL_START + CONFIG.height * 0.5),
+            );
+            self.last_toggle_playing = Instant::now();
             spawn(move || {
                 toggle_playing(!playing);
             });
-        } else if let Some((track_id, track_rect, (track_range_a, track_range_b))) = self
+        } else if let Some((track_id, _, (track_range_a, track_range_b))) = self
             .track_hitboxes
             .iter()
             .rev()
             .find(|(_, track_rect, _)| track_rect.contains(mouse_pos))
         {
             // Seek track
-            self.last_click = (
-                Instant::now(),
-                *track_id,
-                Point::new(mouse_pos.x - track_rect.x0, mouse_pos.y - track_rect.y0),
-            );
+            self.last_expansion = (Instant::now(), mouse_pos);
 
             // If click is near the very left, reset to the start of the song, else seek to clicked position
-            let position = if mouse_pos.x < CONFIG.history_width + 20.0 {
+            let position = if mouse_pos.x < origin_x + 20.0 {
                 0.0
             } else {
                 (mouse_pos.x - track_range_a) / (track_range_b - track_range_a)

@@ -4,13 +4,13 @@ struct Uniform {
     mouse_pos: vec2<f32>,
     playhead_x: f32,
     time: f32,
+    expansion_xy: vec2<f32>,
+    expansion_time: f32,
     scale_factor: f32,
 };
 
 struct BackgroundPill {
     rect: vec2<f32>,
-    expansion_xy: vec2<f32>,
-    expansion_time: f32,
     colors: array<u32, 4>,
     alpha: f32,
     image_index: i32,
@@ -105,10 +105,9 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
     color = mix(color, color * 0.5, is_left_of_playhead);
 
     // Expanding Circle
-    let anim_lerp = (uniforms.time - pill.expansion_time) * 0.95;
+    let anim_lerp = (uniforms.time - uniforms.expansion_time) * 0.95;
     if (anim_lerp >= 0.0 && anim_lerp < 1.0) {
-        let center = pill.expansion_xy - rect.xy - rect.zw * 0.5;
-        let dist = length(((in.uv - 0.5) * rect.zw) - center);
+        let dist = length(in.pixel_pos - uniforms.expansion_xy);
         let circle_alpha = (1.0 - clamp(anim_lerp + 0.4, 0.0, 1.0)) * (1.0 - smoothstep(500.0 * anim_lerp - 2.0, 500.0 * anim_lerp, dist));
         color = mix(color, vec3(1.0, 0.88, 0.824), circle_alpha);
     }

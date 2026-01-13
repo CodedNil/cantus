@@ -205,8 +205,9 @@ pub struct ScreenUniforms {
     mouse_pos: [f32; 2],
     playhead_x: f32, // x position where the playhead line is drawn
     time: f32,
+    expansion_xy: [f32; 2],
+    expansion_time: f32,
     scale_factor: f32,
-    _padding: [f32; 3],
 }
 
 #[repr(C)]
@@ -231,13 +232,10 @@ pub struct Particle {
 #[repr(C)]
 #[derive(Copy, Clone, Debug, Default, Pod, Zeroable)]
 pub struct BackgroundPill {
-    rect: [f32; 2], // x, width
-    expansion_xy: [f32; 2],
-    expansion_time: f32,
+    rect: [f32; 2], // pos x, width
     colors: [u32; 4],
     alpha: f32,
     image_index: i32,
-    _padding: [f32; 1],
 }
 
 #[repr(C)]
@@ -375,7 +373,11 @@ impl CantusApp {
 
         if playback_state.playing != self.interaction.playing {
             self.interaction.playing = playback_state.playing;
-            self.interaction.last_event = Instant::now();
+            self.interaction.last_expansion = (
+                Instant::now(),
+                Point::new(origin_x, PANEL_START + CONFIG.height * 0.5),
+            );
+            self.interaction.last_toggle_playing = Instant::now();
         }
         if self.interaction.dragging {
             self.interaction.drag_track = None;
@@ -517,24 +519,6 @@ impl CantusApp {
         }
 
         // --- BACKGROUND ---
-        // Determine which animation to show: specific track click or global playhead event
-        let (expansion_xy, expansion_time) = {
-            let (c_inst, c_track, c_pt) = self.interaction.last_click;
-            let c_time = c_inst.duration_since(*START_TIME).as_secs_f32();
-            let e_time = self
-                .interaction
-                .last_event
-                .duration_since(*START_TIME)
-                .as_secs_f32();
-
-            if c_track == track.id && (c_time > e_time || !track_render.is_current) {
-                ([start_x + c_pt.x, PANEL_START + c_pt.y], c_time)
-            } else {
-                ([origin_x, PANEL_START + CONFIG.height * 0.5], e_time)
-            }
-        };
-
-        // Fade out based on width
         let fade_alpha = if width < CONFIG.height {
             ((width / CONFIG.height) - 0.9).max(0.0) * 10.0
         } else {
@@ -543,15 +527,12 @@ impl CantusApp {
 
         self.background_pills.push(BackgroundPill {
             rect: [start_x, width],
-            expansion_xy,
-            expansion_time,
             colors: ALBUM_PALETTE_CACHE
                 .get(&track.album.id)
                 .and_then(|data_ref| data_ref.as_ref().copied())
                 .unwrap_or_default(),
             alpha: fade_alpha,
             image_index: track_render.image_index,
-            _padding: [0.0; 1],
         });
 
         // --- TEXT ---
@@ -714,6 +695,13 @@ impl CantusApp {
         // We use a monotonic time for the GPU to calculate displacements
         let time = START_TIME.elapsed().as_secs_f32();
 
+        // Get expansion animation variables
+        let (interaction_inst, interaction_point) = self.interaction.last_expansion;
+        let (expansion_xy, expansion_time) = (
+            [interaction_point.x, PANEL_START + interaction_point.y],
+            interaction_inst.duration_since(*START_TIME).as_secs_f32(),
+        );
+
         self.gpu_uniforms = ScreenUniforms {
             screen_size: [CONFIG.width, CONFIG.height + PANEL_START + PANEL_EXTENSION],
             bar_height: [PANEL_START, CONFIG.height],
@@ -723,8 +711,9 @@ impl CantusApp {
             ],
             playhead_x,
             time,
+            expansion_xy,
+            expansion_time,
             scale_factor: self.scale_factor,
-            _padding: [0.0; 3],
         };
 
         // Emit new particles while playing
@@ -770,11 +759,12 @@ impl CantusApp {
         );
         // Get playhead states
         let playhead_hovered = interaction.play_hitbox.contains(interaction.mouse_position);
-        let last_event = interaction.last_event.elapsed().as_secs_f32() / ANIMATION_DURATION;
+        let last_toggle =
+            interaction.last_toggle_playing.elapsed().as_secs_f32() / ANIMATION_DURATION;
 
         // Determine the intended state for the bar
         let bar_target =
-            u32::from(playhead_hovered || !interaction.playing || last_event < 1.0) as f32;
+            u32::from(playhead_hovered || !interaction.playing || last_toggle < 1.0) as f32;
         move_towards(&mut interaction.playhead_bar, bar_target, speed);
 
         // Determine which icon (if any) is currently active
@@ -787,8 +777,8 @@ impl CantusApp {
             }
         } else if !interaction.playing {
             pause_active = true;
-        } else if interaction.playing && last_event < 1.0 {
-            interaction.playhead_play = last_event; // Hard set for the "start" animation
+        } else if interaction.playing && last_toggle < 1.0 {
+            interaction.playhead_play = last_toggle; // Hard set for the "start" animation
             play_active = true;
         }
 
