@@ -47,128 +47,65 @@ impl Shaders {
             source: ShaderSource::Wgsl(include_str!("../assets/text.wgsl").into()),
         });
 
-        // Bind Group Layouts
-        let playhead_bind_group_layout =
-            device.create_bind_group_layout(&BindGroupLayoutDescriptor {
-                label: Some("Playhead Layout"),
-                entries: &[
-                    BindGroupLayoutEntry {
-                        binding: 0,
-                        visibility: ShaderStages::FRAGMENT,
-                        ty: BindingType::Buffer {
-                            ty: BufferBindingType::Uniform,
-                            has_dynamic_offset: false,
-                            min_binding_size: None,
-                        },
-                        count: None,
-                    },
-                    BindGroupLayoutEntry {
-                        binding: 1,
-                        visibility: ShaderStages::FRAGMENT,
-                        ty: BindingType::Buffer {
-                            ty: BufferBindingType::Storage { read_only: true },
-                            has_dynamic_offset: false,
-                            min_binding_size: None,
-                        },
-                        count: None,
-                    },
-                    BindGroupLayoutEntry {
-                        binding: 2,
-                        visibility: ShaderStages::FRAGMENT,
-                        ty: BindingType::Buffer {
-                            ty: BufferBindingType::Uniform,
-                            has_dynamic_offset: false,
-                            min_binding_size: None,
-                        },
-                        count: None,
-                    },
-                ],
-            });
+        let ub = |_| BindingType::Buffer {
+            ty: BufferBindingType::Uniform,
+            has_dynamic_offset: false,
+            min_binding_size: None,
+        };
+        let sb = |_| BindingType::Buffer {
+            ty: BufferBindingType::Storage { read_only: true },
+            has_dynamic_offset: false,
+            min_binding_size: None,
+        };
+        let tx = |d| BindingType::Texture {
+            multisampled: false,
+            view_dimension: d,
+            sample_type: TextureSampleType::Float { filterable: true },
+        };
+        let sp = BindingType::Sampler(SamplerBindingType::Filtering);
 
-        let standard_bind_group_layout =
+        let bgl = |l, e: &[(u32, ShaderStages, BindingType)]| {
             device.create_bind_group_layout(&BindGroupLayoutDescriptor {
-                label: Some("Standard Layout"),
-                entries: &[
-                    BindGroupLayoutEntry {
-                        binding: 0,
-                        visibility: ShaderStages::VERTEX | ShaderStages::FRAGMENT,
-                        ty: BindingType::Buffer {
-                            ty: BufferBindingType::Uniform,
-                            has_dynamic_offset: false,
-                            min_binding_size: None,
-                        },
+                label: Some(l),
+                entries: &e
+                    .iter()
+                    .map(|&(b, v, ty)| BindGroupLayoutEntry {
+                        binding: b,
+                        visibility: v,
+                        ty,
                         count: None,
-                    },
-                    BindGroupLayoutEntry {
-                        binding: 1,
-                        visibility: ShaderStages::VERTEX | ShaderStages::FRAGMENT,
-                        ty: BindingType::Buffer {
-                            ty: BufferBindingType::Storage { read_only: true },
-                            has_dynamic_offset: false,
-                            min_binding_size: None,
-                        },
-                        count: None,
-                    },
-                    BindGroupLayoutEntry {
-                        binding: 2,
-                        visibility: ShaderStages::FRAGMENT,
-                        ty: BindingType::Texture {
-                            multisampled: false,
-                            view_dimension: TextureViewDimension::D2Array,
-                            sample_type: TextureSampleType::Float { filterable: true },
-                        },
-                        count: None,
-                    },
-                    BindGroupLayoutEntry {
-                        binding: 3,
-                        visibility: ShaderStages::FRAGMENT,
-                        ty: BindingType::Sampler(SamplerBindingType::Filtering),
-                        count: None,
-                    },
-                ],
-            });
+                    })
+                    .collect::<Vec<_>>(),
+            })
+        };
 
-        let text_bind_group_layout = device.create_bind_group_layout(&BindGroupLayoutDescriptor {
-            label: Some("Text Layout"),
-            entries: &[
-                BindGroupLayoutEntry {
-                    binding: 0,
-                    visibility: ShaderStages::VERTEX | ShaderStages::FRAGMENT,
-                    ty: BindingType::Buffer {
-                        ty: BufferBindingType::Uniform,
-                        has_dynamic_offset: false,
-                        min_binding_size: None,
-                    },
-                    count: None,
-                },
-                BindGroupLayoutEntry {
-                    binding: 1,
-                    visibility: ShaderStages::VERTEX | ShaderStages::FRAGMENT,
-                    ty: BindingType::Buffer {
-                        ty: BufferBindingType::Storage { read_only: true },
-                        has_dynamic_offset: false,
-                        min_binding_size: None,
-                    },
-                    count: None,
-                },
-                BindGroupLayoutEntry {
-                    binding: 2,
-                    visibility: ShaderStages::FRAGMENT,
-                    ty: BindingType::Texture {
-                        multisampled: false,
-                        view_dimension: TextureViewDimension::D2,
-                        sample_type: TextureSampleType::Float { filterable: true },
-                    },
-                    count: None,
-                },
-                BindGroupLayoutEntry {
-                    binding: 3,
-                    visibility: ShaderStages::FRAGMENT,
-                    ty: BindingType::Sampler(SamplerBindingType::Filtering),
-                    count: None,
-                },
+        let vf = ShaderStages::VERTEX | ShaderStages::FRAGMENT;
+        let playhead_bind_group_layout = bgl(
+            "Playhead",
+            &[
+                (0, ShaderStages::FRAGMENT, ub(0)),
+                (1, ShaderStages::FRAGMENT, sb(0)),
+                (2, ShaderStages::FRAGMENT, ub(0)),
             ],
-        });
+        );
+        let standard_bind_group_layout = bgl(
+            "Standard",
+            &[
+                (0, vf, ub(0)),
+                (1, vf, sb(0)),
+                (2, ShaderStages::FRAGMENT, tx(TextureViewDimension::D2Array)),
+                (3, ShaderStages::FRAGMENT, sp),
+            ],
+        );
+        let text_bind_group_layout = bgl(
+            "Text",
+            &[
+                (0, vf, ub(0)),
+                (1, vf, sb(0)),
+                (2, ShaderStages::FRAGMENT, tx(TextureViewDimension::D2)),
+                (3, ShaderStages::FRAGMENT, sp),
+            ],
+        );
 
         // Pipeline Helper
         let create_pipe = |label: &str, shader: &ShaderModule, layout: &BindGroupLayout| {
@@ -267,49 +204,47 @@ impl Rect {
 }
 
 #[repr(C)]
-#[derive(Copy, Clone, Debug, Pod, Zeroable)]
+#[derive(Copy, Clone, Debug, Default, Pod, Zeroable)]
 pub struct ScreenUniforms {
     pub screen_size: [f32; 2],
+    pub mouse_pos: [f32; 2],
+    pub playhead_x: f32, // X position where the playhead line is drawn
     pub time: f32,
     pub scale_factor: f32,
-    pub mouse_pos: [f32; 2],
+    pub _padding: f32,
 }
 
 #[repr(C)]
 #[derive(Copy, Clone, Debug, Default, Pod, Zeroable)]
 pub struct PlayheadUniforms {
-    pub origin_x: f32,
     pub panel_start: f32,
     pub height: f32,
     pub volume: f32,
     pub bar_lerp: f32,
     pub play_lerp: f32,
     pub pause_lerp: f32,
-    pub _padding: f32,
+    pub _padding: [f32; 2],
 }
 
 #[repr(C)]
 #[derive(Copy, Clone, Debug, Default, Pod, Zeroable)]
 pub struct Particle {
-    pub spawn_pos: [f32; 2],
     pub spawn_vel: [f32; 2],
+    pub spawn_y: f32,
     pub spawn_time: f32,
     pub duration: f32,
     pub color: u32,
-    pub _padding: f32,
 }
 
 #[repr(C)]
 #[derive(Copy, Clone, Debug, Default, Pod, Zeroable)]
 pub struct BackgroundPill {
-    pub rect: [f32; 4], // x, y, width, height
-    pub dark_width: f32,
-    pub alpha: f32,
+    pub rect: [f32; 4],             // x, y, width, height
+    pub expansion_effect: [f32; 3], // x, y, time
     pub colors: [u32; 4],
-    pub expansion_pos: [f32; 2],
-    pub expansion_time: f32,
+    pub alpha: f32,
     pub image_index: i32,
-    pub _padding: [f32; 2],
+    pub _padding: [f32; 3],
 }
 
 #[repr(C)]
@@ -332,7 +267,7 @@ const SPARK_EMISSION: f32 = 60.0;
 /// Horizontal velocity range applied at spawn.
 const SPARK_VELOCITY_X: Range<usize> = 75..100;
 /// Vertical velocity range applied at spawn.
-const SPARK_VELOCITY_Y: Range<usize> = 30..70;
+const SPARK_VELOCITY_Y: Range<usize> = 20..55;
 /// Lifetime range for individual particles, in seconds.
 const SPARK_LIFETIME: Range<f32> = 0.4..0.9;
 
@@ -601,8 +536,8 @@ impl CantusApp {
             .push((track.id, hitbox, track_render.hitbox_range));
         // If dragging, set the drag target to this track, and the position within the track
         if self.interaction.dragging && track_render.is_current {
-            let position_within_track = (start_x + dark_width - hit_start) / full_width;
-            self.interaction.drag_track = Some((track.id, position_within_track));
+            self.interaction.drag_track =
+                Some((track.id, (start_x + dark_width - hit_start) / full_width));
         }
 
         let Some(album_data_ref) = ALBUM_DATA_CACHE.get(&track.album.id) else {
@@ -615,12 +550,11 @@ impl CantusApp {
         // --- BACKGROUND ---
         let mut colors = [0u32; 4];
         for (i, c) in album_data.primary_colors.iter().take(4).enumerate() {
-            colors[i] =
-                (u32::from(c[0])) | (u32::from(c[1]) << 8) | (u32::from(c[2]) << 16) | (255 << 24);
+            colors[i] = u32::from_le_bytes([c[0], c[1], c[2], 255]);
         }
 
         // Determine which animation to show: specific track click or global playhead event
-        let (expansion_time, expansion_pos) = {
+        let expansion_effect = {
             let (c_inst, c_track, c_pt) = self.interaction.last_click;
             let c_time = c_inst.duration_since(*START_TIME).as_secs_f32();
             let e_time = self
@@ -630,21 +564,19 @@ impl CantusApp {
                 .as_secs_f32();
 
             if c_track == track.id && (c_time > e_time || !track_render.is_current) {
-                (c_time, [(start_x + c_pt.x), (PANEL_START + c_pt.y)])
+                [(start_x + c_pt.x), (PANEL_START + c_pt.y), c_time]
             } else {
-                (e_time, [origin_x, (PANEL_START + height * 0.5)])
+                [origin_x, (PANEL_START + height * 0.5), e_time]
             }
         };
 
         self.background_pills.push(BackgroundPill {
             rect: [start_x, PANEL_START, width, height],
-            dark_width,
             alpha: fade_alpha,
             colors,
-            expansion_pos,
-            expansion_time,
+            expansion_effect,
             image_index: track_render.image_index,
-            _padding: [0.0; 2],
+            _padding: [0.0; 3],
         });
 
         // --- TEXT ---
@@ -657,11 +589,11 @@ impl CantusApp {
             let text_color = [0.94, 0.94, 0.94, text_alpha];
 
             // Render the songs title (strip anything beyond a - or ( in the song title)
-            let song_name = track.name[..track
+            let song_name = track
                 .name
-                .find(" (")
-                .or_else(|| track.name.find(" -"))
-                .unwrap_or(track.name.len())]
+                .split(['(', '-'])
+                .next()
+                .unwrap_or(&track.name)
                 .trim();
             let font_size = 12.0;
             let text_height = PANEL_START + (height * 0.2).floor();
@@ -778,20 +710,19 @@ impl CantusApp {
 
         for (gid, x_off) in &l.glyphs {
             if let Some(info) = self.font.atlas.glyphs.get(gid) {
-                let msdf_scale = ATLAS_MSDF_SCALE;
-                let range = ATLAS_RANGE;
-
                 // Position relative to baseline
                 let gx = (start_x + x_off + (f32::from(info.metrics.x_min) * scale))
                     / self.scale_factor
-                    - ((range + 1.0) / msdf_scale * scale);
+                    - ((ATLAS_RANGE + 1.0) / ATLAS_MSDF_SCALE * scale);
                 let gy = (start_y + ascender - (f32::from(info.metrics.y_max) * scale))
                     / self.scale_factor
-                    - ((range + 1.0) / msdf_scale * scale);
+                    - ((ATLAS_RANGE + 1.0) / ATLAS_MSDF_SCALE * scale);
 
-                let gw = (info.uv_rect[2] * self.font.atlas.width as f32) * (scale / msdf_scale)
+                let gw = (info.uv_rect[2] * self.font.atlas.width as f32)
+                    * (scale / ATLAS_MSDF_SCALE)
                     / self.scale_factor;
-                let gh = (info.uv_rect[3] * self.font.atlas.height as f32) * (scale / msdf_scale)
+                let gh = (info.uv_rect[3] * self.font.atlas.height as f32)
+                    * (scale / ATLAS_MSDF_SCALE)
                     / self.scale_factor;
 
                 self.text_instances.push(TextInstance {
@@ -807,7 +738,7 @@ impl CantusApp {
         &mut self,
         dt: f32,
         track: &Track,
-        origin_x: f32,
+        playhead_x: f32,
         height: f32,
         track_move_speed: f32,
         volume: Option<u8>,
@@ -822,10 +753,7 @@ impl CantusApp {
         let mut palette: Vec<u32> = track_data
             .primary_colors
             .iter()
-            .map(|[r, g, b, _]| {
-                // Pack as RGBA (little-endian u32) for WGSL unpack4x8unorm
-                (u32::from(*r)) | (u32::from(*g) << 8) | (u32::from(*b) << 16) | (255 << 24)
-            })
+            .map(|&[r, g, b, _]| u32::from_le_bytes([r, g, b, 255]))
             .collect();
         if palette.is_empty() {
             palette.extend_from_slice(&[
@@ -838,18 +766,20 @@ impl CantusApp {
         // We use a monotonic time for the GPU to calculate displacements
         let time = START_TIME.elapsed().as_secs_f32();
 
-        self.gpu_uniforms = Some(ScreenUniforms {
+        self.gpu_uniforms = ScreenUniforms {
             screen_size: [
                 (CONFIG.width * self.scale_factor),
                 ((CONFIG.height + PANEL_START + PANEL_EXTENSION) * self.scale_factor),
             ],
+            playhead_x,
             time,
             scale_factor: self.scale_factor,
             mouse_pos: [
                 self.interaction.mouse_position.x,
                 self.interaction.mouse_position.y,
             ],
-        });
+            _padding: 0.0,
+        };
 
         // Emit new particles while playing
         let mut emit_count = if track_move_speed.abs() > 0.000_001 {
@@ -869,10 +799,7 @@ impl CantusApp {
         for particle in &mut self.particles.particles {
             // Emit a new particle
             if emit_count > 0 && time > particle.spawn_time + particle.duration {
-                particle.spawn_pos = [
-                    origin_x,
-                    PANEL_START + height * lerpf32(fastrand::f32(), 0.1, 0.95),
-                ];
+                particle.spawn_y = PANEL_START + height * lerpf32(fastrand::f32(), 0.1, 0.95);
                 particle.spawn_vel = [
                     fastrand::usize(SPARK_VELOCITY_X) as f32 * self.scale_factor * horizontal_bias,
                     fastrand::usize(SPARK_VELOCITY_Y) as f32 * -self.scale_factor,
@@ -890,9 +817,9 @@ impl CantusApp {
         let playbutton_hsize = height * 0.25;
         let speed = 2.2 * dt;
         interaction.play_hitbox = Rect::new(
-            origin_x - playbutton_hsize,
+            playhead_x - playbutton_hsize,
             PANEL_START,
-            origin_x + playbutton_hsize,
+            playhead_x + playbutton_hsize,
             PANEL_START + height,
         );
         // Get playhead states
@@ -934,16 +861,15 @@ impl CantusApp {
             }
         }
 
-        self.playhead_info = Some(PlayheadUniforms {
-            origin_x,
+        self.playhead_info = PlayheadUniforms {
             panel_start: PANEL_START,
             height,
             volume: f32::from(volume.unwrap_or(100)) / 100.0,
             bar_lerp: interaction.playhead_bar,
             play_lerp: interaction.playhead_play,
             pause_lerp: interaction.playhead_pause,
-            _padding: 0.0,
-        });
+            _padding: [0.0, 0.0],
+        };
     }
 }
 

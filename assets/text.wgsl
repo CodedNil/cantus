@@ -6,9 +6,10 @@ struct VertexOutput {
 
 struct ScreenUniforms {
     screen_size: vec2<f32>,
+    mouse_pos: vec2<f32>,
+    playhead_x: f32,
     time: f32,
     scale_factor: f32,
-    mouse_pos: vec2<f32>,
 }
 
 struct TextInstance {

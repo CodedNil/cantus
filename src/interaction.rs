@@ -277,7 +277,7 @@ impl CantusApp {
 
         // Fade out and fit based on size
         let icon_size = 16.0 * self.scale_factor;
-        let icon_spacing = 1.0 * self.scale_factor;
+        let icon_spacing = 2.0 * self.scale_factor;
         let mouse_pos = self.interaction.mouse_position;
 
         if width < icon_size * icon_entries.len() as f32 {

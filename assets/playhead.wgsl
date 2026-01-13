@@ -1,28 +1,26 @@
 struct Uniform {
     screen_size: vec2<f32>,
+    mouse_pos: vec2<f32>,
+    playhead_x: f32,
     time: f32,
     scale_factor: f32,
-    mouse_pos: vec2<f32>,
 };
 
 struct Particle {
-    spawn_pos: vec2<f32>,
     spawn_vel: vec2<f32>,
+    spawn_y: f32,
     spawn_time: f32,
     duration: f32,
     color: u32,
-    _padding: f32,
 };
 
 struct PlayheadInfo {
-    origin_x: f32,
     panel_start: f32,
     height: f32,
     volume: f32,
     bar_lerp: f32,
     play_lerp: f32,
     pause_lerp: f32,
-    _padding: f32,
 };
 
 @group(0) @binding(0) var<uniform> uniforms: Uniform;
@@ -36,9 +34,9 @@ struct VertexOutput {
 
 @vertex
 fn vs_main(@builtin(vertex_index) vi: u32) -> VertexOutput {
-    let pos = array<vec2<f32>, 4>(vec2(-1., -1.), vec2(1., -1.), vec2(-1., 1.), vec2(1., 1.));
-    let uv = array<vec2<f32>, 4>(vec2(0., 1.), vec2(1., 1.), vec2(0., 0.), vec2(1., 0.));
-    return VertexOutput(vec4(pos[vi], 0., 1.), uv[vi]);
+    let pos = array<vec2<f32>, 4>(vec2(-1.0, -1.0), vec2(1.0, -1.0), vec2(-1.0, 1.0), vec2(1.0, 1.0));
+    let uv = array<vec2<f32>, 4>(vec2(0.0, 1.0), vec2(1.0, 1.0), vec2(0.0, 0.0), vec2(1.0, 0.0));
+    return VertexOutput(vec4(pos[vi], 0.0, 1.0), uv[vi]);
 }
 
 fn sd_segment(p: vec2<f32>, a: vec2<f32>, b: vec2<f32>, r: f32) -> f32 {
@@ -61,37 +59,37 @@ fn sd_rounded_triangle(p: vec2<f32>, r: f32, corner_radius: f32) -> f32 {
 @fragment
 fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
     let pixel_pos = in.uv * uniforms.screen_size;
-    var final_color = vec4(0.);
+    var final_color = vec4(0.0);
 
     // --- Particles ---
     for (var i = 0u; i < 64u; i++) {
         let p = particles[i];
         let dt = uniforms.time - p.spawn_time;
-        if (dt < 0. || dt > p.duration) { continue; }
+        if (dt < 0.0 || dt > p.duration) { continue; }
 
-        let p_life = 1. - (dt / p.duration);
-        let fade = p_life * smoothstep(0., 0.05, dt);
-        let pos = p.spawn_pos + p.spawn_vel * dt + vec2(0., 150. * dt * dt);
-        let dir = normalize(p.spawn_vel + vec2(0., 300. * dt));
-        let len = mix(8., 12., p_life);
+        let p_life = 1.0 - (dt / p.duration);
+        let fade = p_life * smoothstep(0.0, 0.05, dt);
+        let pos = vec2<f32>(uniforms.playhead_x, p.spawn_y) + p.spawn_vel * dt + vec2(0.0, 150.0 * dt * dt);
+        let dir = normalize(p.spawn_vel + vec2(0.0, 300.0 * dt));
+        let len = mix(8.0, 12.0, p_life);
         let thickness = mix(2.5, 4.0, p_life);
 
         let pa = (pixel_pos - pos) + (dir * len * 0.5);
         let ba = dir * len;
-        let h = clamp(dot(pa, ba) / dot(ba, ba), 0., 1.);
+        let h = clamp(dot(pa, ba) / dot(ba, ba), 0.0, 1.0);
         let dist = length(pa - ba * h);
 
         if (dist < thickness) {
-            let intensity = 1. - (dist / thickness);
+            let intensity = 1.0 - (dist / thickness);
             let alpha = fade * intensity * intensity;
-            let color = mix(unpack4x8unorm(p.color).rgb, vec3(1.), intensity * 0.5);
+            let color = mix(unpack4x8unorm(p.color).rgb, vec3(1.0), intensity * 0.5);
             final_color += vec4(color * alpha * 1.5, alpha);
         }
     }
 
     // --- Playhead ---
     let scale = uniforms.scale_factor;
-    let line_x = playhead.origin_x;
+    let line_x = uniforms.playhead_x;
     let height = playhead.height;
     let top = playhead.panel_start;
     let mid_y = top + height * 0.5;
@@ -146,6 +144,6 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
         final_color = vec4(playhead_final.rgb + final_color.rgb * (1.0 - playhead_final.a), max(playhead_final.a, final_color.a));
     }
 
-    if (final_color.a <= 0.) { discard; }
+    if (final_color.a <= 0.0) { discard; }
     return final_color;
 }

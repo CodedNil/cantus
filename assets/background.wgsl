@@ -1,16 +1,16 @@
 struct Uniform {
     screen_size: vec2<f32>,
+    mouse_pos: vec2<f32>,
+    playhead_x: f32,
     time: f32,
     scale_factor: f32,
 };
 
 struct BackgroundPill {
     rect: vec4<f32>,
-    dark_width: f32,
-    alpha: f32,
+    expansion_effect: vec3<f32>,
     colors: array<u32, 4>,
-    expansion_pos: vec2<f32>,
-    expansion_time: f32,
+    alpha: f32,
     image_index: i32,
 };
 
@@ -24,6 +24,7 @@ struct VertexOutput {
     @location(0) uv: vec2<f32>,
     @location(1) world_uv: vec2<f32>,
     @location(2) @interpolate(flat) instance_index: u32,
+    @location(3) pixel_pos: vec2<f32>,
 };
 
 @vertex
@@ -37,7 +38,7 @@ fn vs_main(@builtin(vertex_index) vi: u32, @builtin(instance_index) ii: u32) -> 
 
     // Combined NDC and Y-flip
     let ndc = (pixel_pos / uniforms.screen_size) * 2.0 - 1.0;
-    return VertexOutput(vec4(ndc.x, -ndc.y, 0.0, 1.0), local_pos / pill.rect.zw, local_pos / uniforms.screen_size.y, ii);
+    return VertexOutput(vec4(ndc.x, -ndc.y, 0.0, 1.0), local_pos / pill.rect.zw, local_pos / uniforms.screen_size.y, ii, pixel_pos);
 }
 
 fn sd_squircle(p: vec2<f32>, b: vec2<f32>, r: f32) -> f32 {
@@ -95,19 +96,20 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
     color = color * (1.0 - smoothstep(0.4, 1.2, luma) * 0.4); // Compress highlights
     color = mix(color * 1.1, color, smoothstep(0.0, -35.0, d) * 0.5); // Inner glow
 
-    // --- DARK TRACK TO THE LEFT ---
-    color = mix(color, color * 0.5, step(in.uv.x * pill.rect.z, pill.dark_width));
+    // Darken track left of playhead
+    let is_left_of_playhead = smoothstep(uniforms.playhead_x + 0.5, uniforms.playhead_x - 0.5, in.pixel_pos.x);
+    color = mix(color, color * 0.5, is_left_of_playhead);
 
-    // --- EXPANDING CIRCLE (ANIMATION OR CLICK) ---
-    let anim_lerp = (uniforms.time - pill.expansion_time) * 0.95;
+    // Expanding Circle
+    let anim_lerp = (uniforms.time - pill.expansion_effect.z) * 0.95;
     if (anim_lerp >= 0.0 && anim_lerp < 1.0) {
-        let center = pill.expansion_pos - pill.rect.xy - pill.rect.zw * 0.5;
+        let center = pill.expansion_effect.xy - pill.rect.xy - pill.rect.zw * 0.5;
         let dist = length(((in.uv - 0.5) * pill.rect.zw) - center);
         let circle_alpha = (1.0 - clamp(anim_lerp + 0.4, 0.0, 1.0)) * (1.0 - smoothstep(500.0 * anim_lerp - 2.0, 500.0 * anim_lerp, dist));
         color = mix(color, vec3(1.0, 0.88, 0.824), circle_alpha);
     }
 
-    // --- ALBUM IMAGE ---
+    // Album Image
     let image_start_x = pill.rect.z - pill.rect.w;
     let local_x = in.uv.x * pill.rect.z;
     if (pill.image_index >= 0 && local_x >= image_start_x) {

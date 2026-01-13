@@ -94,8 +94,8 @@ struct CantusApp {
     icon_pills: Vec<IconInstance>,
     text_instances: Vec<TextInstance>,
     gpu_resources: Option<GpuResources>,
-    playhead_info: Option<PlayheadUniforms>,
-    gpu_uniforms: Option<ScreenUniforms>,
+    playhead_info: PlayheadUniforms,
+    gpu_uniforms: ScreenUniforms,
 }
 
 impl Default for CantusApp {
@@ -112,8 +112,8 @@ impl Default for CantusApp {
             icon_pills: Vec::new(),
             text_instances: Vec::new(),
             gpu_resources: None,
-            playhead_info: None,
-            gpu_uniforms: None,
+            playhead_info: PlayheadUniforms::default(),
+            gpu_uniforms: ScreenUniforms::default(),
         }
     }
 }
@@ -380,7 +380,6 @@ impl CantusApp {
         self.background_pills.clear();
         self.icon_pills.clear();
         self.text_instances.clear();
-        self.playhead_info = None;
         if let Some(gpu) = self.gpu_resources.as_mut() {
             gpu.requested_textures.clear();
         }
@@ -413,10 +412,11 @@ impl CantusApp {
         }
 
         if let Some(gpu) = self.gpu_resources.as_ref() {
-            if let Some(u) = self.gpu_uniforms.as_ref() {
-                gpu.queue
-                    .write_buffer(&gpu.uniform_buffer, 0, bytemuck::bytes_of(u));
-            }
+            gpu.queue.write_buffer(
+                &gpu.uniform_buffer,
+                0,
+                bytemuck::bytes_of(&self.gpu_uniforms),
+            );
             gpu.queue.write_buffer(
                 &gpu.particles_buffer,
                 0,
@@ -444,10 +444,11 @@ impl CantusApp {
                     &bytes[..bytes.len().min(gpu.text_storage_buffer.size() as usize)],
                 );
             }
-            if let Some(p) = self.playhead_info.as_ref() {
-                gpu.queue
-                    .write_buffer(&gpu.playhead_buffer, 0, bytemuck::bytes_of(p));
-            }
+            gpu.queue.write_buffer(
+                &gpu.playhead_buffer,
+                0,
+                bytemuck::bytes_of(&self.playhead_info),
+            );
         }
 
         let rs = self.render_surface.as_mut().unwrap();
