@@ -120,21 +120,25 @@ impl Default for CantusApp {
             scale_factor: 1.0,
 
             font: FontEngine::default(),
+            screen_uniforms: ScreenUniforms::default(),
             background_pills: Vec::new(),
             icon_pills: Vec::new(),
             text_instances: Vec::new(),
-
             playhead_info: PlayheadUniforms::default(),
-            screen_uniforms: ScreenUniforms::default(),
         }
     }
 }
 
 impl CantusApp {
     fn render(&mut self) {
+        if self.gpu_resources.is_none() {
+            return;
+        }
+
         self.background_pills.clear();
         self.icon_pills.clear();
         self.text_instances.clear();
+
         if let Some(gpu) = self.gpu_resources.as_mut() {
             gpu.requested_textures.clear();
         }
@@ -163,48 +167,46 @@ impl CantusApp {
             self.create_scene(&indices);
         }
 
-        if let Some(gpu) = self.gpu_resources.as_ref() {
-            let q = &gpu.queue;
-            q.write_buffer(
-                &gpu.uniform_buffer,
+        let gpu = self.gpu_resources.as_mut().unwrap();
+        gpu.queue.write_buffer(
+            &gpu.uniform_buffer,
+            0,
+            bytemuck::bytes_of(&self.screen_uniforms),
+        );
+        gpu.queue.write_buffer(
+            &gpu.particles_buffer,
+            0,
+            bytemuck::cast_slice(&self.particles.particles),
+        );
+        gpu.queue.write_buffer(
+            &gpu.playhead_buffer,
+            0,
+            bytemuck::bytes_of(&self.playhead_info),
+        );
+
+        if !self.background_pills.is_empty() {
+            gpu.queue.write_buffer(
+                &gpu.background_storage_buffer,
                 0,
-                bytemuck::bytes_of(&self.screen_uniforms),
+                bytemuck::cast_slice(&self.background_pills),
             );
-            q.write_buffer(
-                &gpu.particles_buffer,
+        }
+        if !self.icon_pills.is_empty() {
+            gpu.queue.write_buffer(
+                &gpu.icon_storage_buffer,
                 0,
-                bytemuck::cast_slice(&self.particles.particles),
+                bytemuck::cast_slice(&self.icon_pills),
             );
-            q.write_buffer(
-                &gpu.playhead_buffer,
+        }
+        if !self.text_instances.is_empty() {
+            let bytes: &[u8] = bytemuck::cast_slice(&self.text_instances);
+            gpu.queue.write_buffer(
+                &gpu.text_storage_buffer,
                 0,
-                bytemuck::bytes_of(&self.playhead_info),
+                &bytes[..bytes.len().min(gpu.text_storage_buffer.size() as usize)],
             );
-            if !self.background_pills.is_empty() {
-                q.write_buffer(
-                    &gpu.background_storage_buffer,
-                    0,
-                    bytemuck::cast_slice(&self.background_pills),
-                );
-            }
-            if !self.icon_pills.is_empty() {
-                q.write_buffer(
-                    &gpu.icon_storage_buffer,
-                    0,
-                    bytemuck::cast_slice(&self.icon_pills),
-                );
-            }
-            if !self.text_instances.is_empty() {
-                let bytes: &[u8] = bytemuck::cast_slice(&self.text_instances);
-                q.write_buffer(
-                    &gpu.text_storage_buffer,
-                    0,
-                    &bytes[..bytes.len().min(gpu.text_storage_buffer.size() as usize)],
-                );
-            }
         }
 
-        let gpu = self.gpu_resources.as_mut().expect("No gpu resources");
         let Ok(surface_texture) = gpu.surface.get_current_texture() else {
             gpu.surface.configure(&gpu.device, &gpu.surface_config);
             return;
@@ -212,10 +214,10 @@ impl CantusApp {
         let surface_view = surface_texture
             .texture
             .create_view(&TextureViewDescriptor::default());
-
         let mut encoder = gpu
             .device
             .create_command_encoder(&CommandEncoderDescriptor::default());
+
         let passes = [
             (
                 "Background",
@@ -248,6 +250,9 @@ impl CantusApp {
         ];
 
         for (label, pipe, bg, count, load) in passes {
+            if count == 0 {
+                continue;
+            }
             let mut rpass = encoder.begin_render_pass(&RenderPassDescriptor {
                 label: Some(label),
                 color_attachments: &[Some(RenderPassColorAttachment {
@@ -265,6 +270,7 @@ impl CantusApp {
             rpass.set_bind_group(0, bg, &[]);
             rpass.draw(0..4, 0..count);
         }
+
         gpu.queue.submit([encoder.finish()]);
         surface_texture.present();
     }

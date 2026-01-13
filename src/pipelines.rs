@@ -73,9 +73,9 @@ impl CantusApp {
                 label: Some(label),
                 entries: &entries
                     .iter()
-                    .map(|&(b, v, ty)| BindGroupLayoutEntry {
-                        binding: b,
-                        visibility: v,
+                    .map(|&(binding, visibility, ty)| BindGroupLayoutEntry {
+                        binding,
+                        visibility,
                         ty,
                         count: None,
                     })
@@ -93,9 +93,9 @@ impl CantusApp {
             has_dynamic_offset: false,
             min_binding_size: None,
         };
-        let tx = |d| BindingType::Texture {
+        let tx = |view_dimension| BindingType::Texture {
             multisampled: false,
-            view_dimension: d,
+            view_dimension,
             sample_type: TextureSampleType::Float { filterable: true },
         };
         let sp = BindingType::Sampler(SamplerBindingType::Filtering);
@@ -128,15 +128,14 @@ impl CantusApp {
             ],
         );
 
-        let create_pipe = |label: &str, shader: &ShaderModule, layout: &BindGroupLayout| {
-            let layout = device.create_pipeline_layout(&PipelineLayoutDescriptor {
-                label: Some(label),
-                bind_group_layouts: &[layout],
-                ..Default::default()
-            });
+        let create_pipe = |label, shader: &ShaderModule, layout: &BindGroupLayout| {
             device.create_render_pipeline(&RenderPipelineDescriptor {
                 label: Some(label),
-                layout: Some(&layout),
+                layout: Some(&device.create_pipeline_layout(&PipelineLayoutDescriptor {
+                    label: Some(label),
+                    bind_group_layouts: &[layout],
+                    ..Default::default()
+                })),
                 vertex: VertexState {
                     module: shader,
                     entry_point: Some("vs_main"),
@@ -177,6 +176,7 @@ impl CantusApp {
                 mapped_at_creation: false,
             })
         };
+
         let uniform_buffer = mk_buf(
             "Uniforms",
             std::mem::size_of::<ScreenUniforms>() as u64,
@@ -266,6 +266,7 @@ impl CantusApp {
                 entries,
             })
         };
+
         let playhead_bind_group = mk_bg(
             "Playhead",
             &playhead_layout,
