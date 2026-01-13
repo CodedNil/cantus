@@ -1,20 +1,26 @@
-use crate::image_manager::ImageManager;
 use crate::render::{BackgroundPill, IconInstance, Particle, PlayheadUniforms, ScreenUniforms};
+use crate::spotify::IMAGES_CACHE;
 use crate::text_render::TextInstance;
 use crate::{CantusApp, DeviceHandle, GpuResources, RenderSurface};
-use std::{collections::HashSet, sync::Arc};
+use std::{
+    collections::{HashMap, HashSet},
+    sync::Arc,
+};
 use wgpu::{
-    AddressMode, BindGroupDescriptor, BindGroupEntry, BindGroupLayout, BindGroupLayoutDescriptor,
+    BindGroupDescriptor, BindGroupEntry, BindGroupLayout, BindGroupLayoutDescriptor,
     BindGroupLayoutEntry, BindingResource, BindingType, BlendState, BufferBindingType,
     BufferDescriptor, BufferUsages, ColorTargetState, ColorWrites, CompositeAlphaMode,
-    DeviceDescriptor, ExperimentalFeatures, Extent3d, Features, FilterMode, FragmentState, Limits,
-    MemoryHints, MultisampleState, PipelineCompilationOptions, PipelineLayoutDescriptor,
-    PowerPreference, PresentMode, PrimitiveState, PrimitiveTopology, RenderPipelineDescriptor,
-    RequestAdapterOptions, SamplerBindingType, SamplerDescriptor, ShaderModule,
-    ShaderModuleDescriptor, ShaderSource, ShaderStages, Surface, SurfaceConfiguration,
-    TexelCopyBufferLayout, TextureDescriptor, TextureDimension, TextureFormat, TextureSampleType,
-    TextureUsages, TextureViewDescriptor, TextureViewDimension, Trace, VertexState,
+    DeviceDescriptor, Extent3d, FilterMode, FragmentState, MultisampleState, Origin3d,
+    PipelineCompilationOptions, PipelineLayoutDescriptor, PowerPreference, PresentMode,
+    PrimitiveState, PrimitiveTopology, RenderPipelineDescriptor, RequestAdapterOptions,
+    SamplerBindingType, SamplerDescriptor, ShaderModule, ShaderModuleDescriptor, ShaderSource,
+    ShaderStages, Surface, SurfaceConfiguration, TexelCopyBufferLayout, TexelCopyTextureInfo,
+    TextureAspect, TextureDescriptor, TextureDimension, TextureFormat, TextureSampleType,
+    TextureUsages, TextureViewDescriptor, TextureViewDimension, VertexState,
 };
+
+const MAX_TEXTURE_LAYERS: u32 = 48;
+const IMAGE_SIZE: u32 = 64;
 
 impl CantusApp {
     pub fn configure_render_surface(&mut self, surface: Surface<'static>, width: u32, height: u32) {
@@ -22,41 +28,34 @@ impl CantusApp {
             &RequestAdapterOptions {
                 power_preference: PowerPreference::HighPerformance,
                 compatible_surface: Some(&surface),
-                force_fallback_adapter: false,
+                ..Default::default()
             },
         ))
-        .expect("No compatible adapter found");
-        let (device, queue) = pollster::block_on(adapter.request_device(&DeviceDescriptor {
-            label: None,
-            required_features: Features::default(),
-            required_limits: Limits::defaults(),
-            memory_hints: MemoryHints::MemoryUsage,
-            trace: Trace::Off,
-            experimental_features: ExperimentalFeatures::disabled(),
-        }))
-        .expect("No compatible device found");
+        .expect("No adapter");
+
+        let (device, queue) =
+            pollster::block_on(adapter.request_device(&DeviceDescriptor::default()))
+                .expect("No device");
+        let device = Arc::new(device);
+        let queue = Arc::new(queue);
+
         self.render_context.devices.push(DeviceHandle {
             adapter,
-            device: Arc::new(device),
-            queue: Arc::new(queue),
+            device: device.clone(),
+            queue: queue.clone(),
         });
         let dev_id = self.render_context.devices.len() - 1;
-        let device_handle = &self.render_context.devices[dev_id];
-        let capabilities = surface.get_capabilities(&device_handle.adapter);
 
-        let format = TextureFormat::Rgba8Unorm;
-        assert!(
-            capabilities.formats.contains(&format),
-            "No compatible surface format found"
-        );
+        let capabilities = surface.get_capabilities(&self.render_context.devices[dev_id].adapter);
         let alpha_mode = [
             CompositeAlphaMode::PreMultiplied,
             CompositeAlphaMode::PostMultiplied,
         ]
         .into_iter()
-        .find(|mode| capabilities.alpha_modes.contains(mode))
+        .find(|m| capabilities.alpha_modes.contains(m))
         .unwrap_or(CompositeAlphaMode::Auto);
 
+        let format = TextureFormat::Rgba8Unorm;
         let config = SurfaceConfiguration {
             usage: TextureUsages::RENDER_ATTACHMENT,
             format,
@@ -67,55 +66,24 @@ impl CantusApp {
             alpha_mode,
             view_formats: vec![],
         };
-        surface.configure(&device_handle.device, &config);
+        surface.configure(&device, &config);
 
-        let render_surface = RenderSurface {
-            surface,
-            dev_id,
-            config,
+        let create_shader = |label, source: &str| {
+            device.create_shader_module(ShaderModuleDescriptor {
+                label: Some(label),
+                source: ShaderSource::Wgsl(source.into()),
+            })
         };
+        let playhead_shader = create_shader("Playhead", include_str!("../assets/playhead.wgsl"));
+        let background_shader =
+            create_shader("Background", include_str!("../assets/background.wgsl"));
+        let icon_shader = create_shader("Icons", include_str!("../assets/icons.wgsl"));
+        let text_shader = create_shader("Text", include_str!("../assets/text.wgsl"));
 
-        let device = &device_handle.device;
-
-        // Shader Modules
-        let playhead_shader = device.create_shader_module(ShaderModuleDescriptor {
-            label: Some("Playhead Shader"),
-            source: ShaderSource::Wgsl(include_str!("../assets/playhead.wgsl").into()),
-        });
-        let background_shader = device.create_shader_module(ShaderModuleDescriptor {
-            label: Some("Background Shader"),
-            source: ShaderSource::Wgsl(include_str!("../assets/background.wgsl").into()),
-        });
-        let icon_shader = device.create_shader_module(ShaderModuleDescriptor {
-            label: Some("Icons Shader"),
-            source: ShaderSource::Wgsl(include_str!("../assets/icons.wgsl").into()),
-        });
-        let text_shader = device.create_shader_module(ShaderModuleDescriptor {
-            label: Some("Text Shader"),
-            source: ShaderSource::Wgsl(include_str!("../assets/text.wgsl").into()),
-        });
-
-        let ub = |_| BindingType::Buffer {
-            ty: BufferBindingType::Uniform,
-            has_dynamic_offset: false,
-            min_binding_size: None,
-        };
-        let sb = |_| BindingType::Buffer {
-            ty: BufferBindingType::Storage { read_only: true },
-            has_dynamic_offset: false,
-            min_binding_size: None,
-        };
-        let tx = |d| BindingType::Texture {
-            multisampled: false,
-            view_dimension: d,
-            sample_type: TextureSampleType::Float { filterable: true },
-        };
-        let sp = BindingType::Sampler(SamplerBindingType::Filtering);
-
-        let bgl = |l, e: &[(u32, ShaderStages, BindingType)]| {
+        let bgl = |label, entries: &[(u32, ShaderStages, BindingType)]| {
             device.create_bind_group_layout(&BindGroupLayoutDescriptor {
-                label: Some(l),
-                entries: &e
+                label: Some(label),
+                entries: &entries
                     .iter()
                     .map(|&(b, v, ty)| BindGroupLayoutEntry {
                         binding: b,
@@ -127,45 +95,60 @@ impl CantusApp {
             })
         };
 
+        let ub = BindingType::Buffer {
+            ty: BufferBindingType::Uniform,
+            has_dynamic_offset: false,
+            min_binding_size: None,
+        };
+        let sb = BindingType::Buffer {
+            ty: BufferBindingType::Storage { read_only: true },
+            has_dynamic_offset: false,
+            min_binding_size: None,
+        };
+        let tx = |d| BindingType::Texture {
+            multisampled: false,
+            view_dimension: d,
+            sample_type: TextureSampleType::Float { filterable: true },
+        };
+        let sp = BindingType::Sampler(SamplerBindingType::Filtering);
         let vf = ShaderStages::VERTEX | ShaderStages::FRAGMENT;
-        let playhead_bind_group_layout = bgl(
+
+        let playhead_layout = bgl(
             "Playhead",
             &[
-                (0, ShaderStages::FRAGMENT, ub(0)),
-                (1, ShaderStages::FRAGMENT, ub(0)),
-                (2, ShaderStages::FRAGMENT, sb(0)),
+                (0, ShaderStages::FRAGMENT, ub),
+                (1, ShaderStages::FRAGMENT, ub),
+                (2, ShaderStages::FRAGMENT, sb),
             ],
         );
-        let standard_bind_group_layout = bgl(
+        let std_layout = bgl(
             "Standard",
             &[
-                (0, vf, ub(0)),
-                (1, vf, sb(0)),
+                (0, vf, ub),
+                (1, vf, sb),
                 (2, ShaderStages::FRAGMENT, tx(TextureViewDimension::D2Array)),
                 (3, ShaderStages::FRAGMENT, sp),
             ],
         );
-        let text_bind_group_layout = bgl(
+        let text_layout = bgl(
             "Text",
             &[
-                (0, vf, ub(0)),
-                (1, vf, sb(0)),
+                (0, vf, ub),
+                (1, vf, sb),
                 (2, ShaderStages::FRAGMENT, tx(TextureViewDimension::D2)),
                 (3, ShaderStages::FRAGMENT, sp),
             ],
         );
 
-        // Pipeline Helper
         let create_pipe = |label: &str, shader: &ShaderModule, layout: &BindGroupLayout| {
-            let pipeline_layout = device.create_pipeline_layout(&PipelineLayoutDescriptor {
-                label: Some(&format!("{label} Pipeline Layout")),
+            let layout = device.create_pipeline_layout(&PipelineLayoutDescriptor {
+                label: Some(label),
                 bind_group_layouts: &[layout],
                 push_constant_ranges: &[],
             });
-
             device.create_render_pipeline(&RenderPipelineDescriptor {
-                label: Some(&format!("{label} Pipeline")),
-                layout: Some(&pipeline_layout),
+                label: Some(label),
+                layout: Some(&layout),
                 vertex: VertexState {
                     module: shader,
                     entry_point: Some("vs_main"),
@@ -193,50 +176,52 @@ impl CantusApp {
             })
         };
 
-        let playhead_pipeline =
-            create_pipe("Playhead", &playhead_shader, &playhead_bind_group_layout);
-        let background_pipeline = create_pipe(
-            "Background",
-            &background_shader,
-            &standard_bind_group_layout,
+        let playhead_pipeline = create_pipe("Playhead", &playhead_shader, &playhead_layout);
+        let background_pipeline = create_pipe("Background", &background_shader, &std_layout);
+        let icon_pipeline = create_pipe("Icons", &icon_shader, &std_layout);
+        let text_pipeline = create_pipe("Text", &text_shader, &text_layout);
+
+        let mk_buf = |l, s, u| {
+            device.create_buffer(&BufferDescriptor {
+                label: Some(l),
+                size: s,
+                usage: u | BufferUsages::COPY_DST,
+                mapped_at_creation: false,
+            })
+        };
+        let uniform_buffer = mk_buf(
+            "Uniforms",
+            std::mem::size_of::<ScreenUniforms>() as u64,
+            BufferUsages::UNIFORM,
         );
-        let icon_pipeline = create_pipe("Icons", &icon_shader, &standard_bind_group_layout);
-        let text_pipeline = create_pipe("Text", &text_shader, &text_bind_group_layout);
+        let particles_buffer = mk_buf(
+            "Particles",
+            (std::mem::size_of::<Particle>() * 64) as u64,
+            BufferUsages::STORAGE,
+        );
+        let playhead_buffer = mk_buf(
+            "Playhead",
+            std::mem::size_of::<PlayheadUniforms>() as u64,
+            BufferUsages::UNIFORM,
+        );
+        let background_storage_buffer = mk_buf(
+            "BG Pills",
+            (std::mem::size_of::<BackgroundPill>() * 256) as u64,
+            BufferUsages::STORAGE,
+        );
+        let icon_storage_buffer = mk_buf(
+            "Icons",
+            (std::mem::size_of::<IconInstance>() * 256) as u64,
+            BufferUsages::STORAGE,
+        );
+        let text_storage_buffer = mk_buf(
+            "Text",
+            (std::mem::size_of::<TextInstance>() * 512) as u64,
+            BufferUsages::STORAGE,
+        );
 
-        let uniform_buffer = device_handle.device.create_buffer(&BufferDescriptor {
-            label: Some("Uniforms"),
-            size: std::mem::size_of::<ScreenUniforms>() as u64,
-            usage: BufferUsages::UNIFORM | BufferUsages::COPY_DST,
-            mapped_at_creation: false,
-        });
-        let particles_buffer = device_handle.device.create_buffer(&BufferDescriptor {
-            label: Some("Particles"),
-            size: (std::mem::size_of::<Particle>() * 64) as u64,
-            usage: BufferUsages::STORAGE | BufferUsages::COPY_DST,
-            mapped_at_creation: false,
-        });
-        let playhead_buffer = device_handle.device.create_buffer(&BufferDescriptor {
-            label: Some("Playhead Info"),
-            size: std::mem::size_of::<PlayheadUniforms>() as u64,
-            usage: BufferUsages::UNIFORM | BufferUsages::COPY_DST,
-            mapped_at_creation: false,
-        });
-
-        let background_storage_buffer = device_handle.device.create_buffer(&BufferDescriptor {
-            label: Some("BG Pills"),
-            size: (std::mem::size_of::<BackgroundPill>() * 256) as u64,
-            usage: BufferUsages::STORAGE | BufferUsages::COPY_DST,
-            mapped_at_creation: false,
-        });
-        let icon_storage_buffer = device_handle.device.create_buffer(&BufferDescriptor {
-            label: Some("Icons"),
-            size: (std::mem::size_of::<IconInstance>() * 256) as u64,
-            usage: BufferUsages::STORAGE | BufferUsages::COPY_DST,
-            mapped_at_creation: false,
-        });
-
-        let atlas_texture = device_handle.device.create_texture(&TextureDescriptor {
-            label: Some("MSDF Atlas"),
+        let atlas_texture = device.create_texture(&TextureDescriptor {
+            label: Some("Atlas"),
             size: Extent3d {
                 width: self.font.atlas.width,
                 height: self.font.atlas.height,
@@ -249,8 +234,7 @@ impl CantusApp {
             usage: TextureUsages::TEXTURE_BINDING | TextureUsages::COPY_DST,
             view_formats: &[],
         });
-
-        device_handle.queue.write_texture(
+        queue.write_texture(
             atlas_texture.as_image_copy(),
             &self.font.atlas.texture_data,
             TexelCopyBufferLayout {
@@ -258,153 +242,213 @@ impl CantusApp {
                 bytes_per_row: Some(self.font.atlas.width * 4),
                 rows_per_image: None,
             },
-            Extent3d {
-                width: self.font.atlas.width,
-                height: self.font.atlas.height,
-                depth_or_array_layers: 1,
-            },
+            atlas_texture.size(),
         );
-
         let atlas_view = atlas_texture.create_view(&TextureViewDescriptor::default());
 
-        let text_storage_buffer = device_handle.device.create_buffer(&BufferDescriptor {
-            label: Some("Text Instances"),
-            size: (std::mem::size_of::<TextInstance>() * 512) as u64,
-            usage: BufferUsages::STORAGE | BufferUsages::COPY_DST,
-            mapped_at_creation: false,
+        let texture_array = device.create_texture(&TextureDescriptor {
+            label: Some("Images"),
+            size: Extent3d {
+                width: IMAGE_SIZE,
+                height: IMAGE_SIZE,
+                depth_or_array_layers: MAX_TEXTURE_LAYERS,
+            },
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: TextureDimension::D2,
+            format: TextureFormat::Rgba8Unorm,
+            usage: TextureUsages::TEXTURE_BINDING | TextureUsages::COPY_DST,
+            view_formats: &[],
         });
-
-        let sampler = device_handle.device.create_sampler(&SamplerDescriptor {
-            address_mode_u: AddressMode::ClampToEdge,
-            address_mode_v: AddressMode::ClampToEdge,
-            address_mode_w: AddressMode::ClampToEdge,
-            mag_filter: FilterMode::Linear,
-            min_filter: FilterMode::Linear,
-            mipmap_filter: FilterMode::Nearest,
+        let image_view = texture_array.create_view(&TextureViewDescriptor {
+            dimension: Some(TextureViewDimension::D2Array),
             ..Default::default()
         });
 
-        let queue = device_handle.queue.clone();
-        let images = ImageManager::new(&device_handle.device, device_handle.queue.clone());
-        let image_view = images.create_view();
+        let sampler = device.create_sampler(&SamplerDescriptor {
+            mag_filter: FilterMode::Linear,
+            min_filter: FilterMode::Linear,
+            ..Default::default()
+        });
 
-        let playhead_bind_group = device_handle
-            .device
-            .create_bind_group(&BindGroupDescriptor {
-                label: Some("Playhead BG"),
-                layout: &playhead_pipeline.get_bind_group_layout(0),
-                entries: &[
-                    BindGroupEntry {
-                        binding: 0,
-                        resource: uniform_buffer.as_entire_binding(),
-                    },
-                    BindGroupEntry {
-                        binding: 1,
-                        resource: playhead_buffer.as_entire_binding(),
-                    },
-                    BindGroupEntry {
-                        binding: 2,
-                        resource: particles_buffer.as_entire_binding(),
-                    },
-                ],
-            });
-        let background_bind_group = device_handle
-            .device
-            .create_bind_group(&BindGroupDescriptor {
-                label: Some("Background Bind Group"),
-                layout: &standard_bind_group_layout,
-                entries: &[
-                    BindGroupEntry {
-                        binding: 0,
-                        resource: uniform_buffer.as_entire_binding(),
-                    },
-                    BindGroupEntry {
-                        binding: 1,
-                        resource: background_storage_buffer.as_entire_binding(),
-                    },
-                    BindGroupEntry {
-                        binding: 2,
-                        resource: BindingResource::TextureView(&image_view),
-                    },
-                    BindGroupEntry {
-                        binding: 3,
-                        resource: BindingResource::Sampler(&sampler),
-                    },
-                ],
-            });
-        let icon_bind_group = device_handle
-            .device
-            .create_bind_group(&BindGroupDescriptor {
-                label: Some("Icon Bind Group"),
-                layout: &standard_bind_group_layout,
-                entries: &[
-                    BindGroupEntry {
-                        binding: 0,
-                        resource: uniform_buffer.as_entire_binding(),
-                    },
-                    BindGroupEntry {
-                        binding: 1,
-                        resource: icon_storage_buffer.as_entire_binding(),
-                    },
-                    BindGroupEntry {
-                        binding: 2,
-                        resource: BindingResource::TextureView(&image_view),
-                    },
-                    BindGroupEntry {
-                        binding: 3,
-                        resource: BindingResource::Sampler(&sampler),
-                    },
-                ],
-            });
-        let text_bind_group = device_handle
-            .device
-            .create_bind_group(&BindGroupDescriptor {
-                label: Some("Text Bind Group"),
-                layout: &text_bind_group_layout,
-                entries: &[
-                    BindGroupEntry {
-                        binding: 0,
-                        resource: uniform_buffer.as_entire_binding(),
-                    },
-                    BindGroupEntry {
-                        binding: 1,
-                        resource: text_storage_buffer.as_entire_binding(),
-                    },
-                    BindGroupEntry {
-                        binding: 2,
-                        resource: BindingResource::TextureView(&atlas_view),
-                    },
-                    BindGroupEntry {
-                        binding: 3,
-                        resource: BindingResource::Sampler(&sampler),
-                    },
-                ],
-            });
+        let mk_bg = |l, layout, entries: &[BindGroupEntry]| {
+            device.create_bind_group(&BindGroupDescriptor {
+                label: Some(l),
+                layout,
+                entries,
+            })
+        };
+        let playhead_bind_group = mk_bg(
+            "Playhead",
+            &playhead_layout,
+            &[
+                BindGroupEntry {
+                    binding: 0,
+                    resource: uniform_buffer.as_entire_binding(),
+                },
+                BindGroupEntry {
+                    binding: 1,
+                    resource: playhead_buffer.as_entire_binding(),
+                },
+                BindGroupEntry {
+                    binding: 2,
+                    resource: particles_buffer.as_entire_binding(),
+                },
+            ],
+        );
+        let background_bind_group = mk_bg(
+            "Background",
+            &std_layout,
+            &[
+                BindGroupEntry {
+                    binding: 0,
+                    resource: uniform_buffer.as_entire_binding(),
+                },
+                BindGroupEntry {
+                    binding: 1,
+                    resource: background_storage_buffer.as_entire_binding(),
+                },
+                BindGroupEntry {
+                    binding: 2,
+                    resource: BindingResource::TextureView(&image_view),
+                },
+                BindGroupEntry {
+                    binding: 3,
+                    resource: BindingResource::Sampler(&sampler),
+                },
+            ],
+        );
+        let icon_bind_group = mk_bg(
+            "Icon",
+            &std_layout,
+            &[
+                BindGroupEntry {
+                    binding: 0,
+                    resource: uniform_buffer.as_entire_binding(),
+                },
+                BindGroupEntry {
+                    binding: 1,
+                    resource: icon_storage_buffer.as_entire_binding(),
+                },
+                BindGroupEntry {
+                    binding: 2,
+                    resource: BindingResource::TextureView(&image_view),
+                },
+                BindGroupEntry {
+                    binding: 3,
+                    resource: BindingResource::Sampler(&sampler),
+                },
+            ],
+        );
+        let text_bind_group = mk_bg(
+            "Text",
+            &text_layout,
+            &[
+                BindGroupEntry {
+                    binding: 0,
+                    resource: uniform_buffer.as_entire_binding(),
+                },
+                BindGroupEntry {
+                    binding: 1,
+                    resource: text_storage_buffer.as_entire_binding(),
+                },
+                BindGroupEntry {
+                    binding: 2,
+                    resource: BindingResource::TextureView(&atlas_view),
+                },
+                BindGroupEntry {
+                    binding: 3,
+                    resource: BindingResource::Sampler(&sampler),
+                },
+            ],
+        );
 
-        let gpu_resources = GpuResources {
+        self.gpu_resources = Some(GpuResources {
             queue,
-
             playhead_pipeline,
             background_pipeline,
             icon_pipeline,
             text_pipeline,
-
             uniform_buffer,
             particles_buffer,
-            background_storage_buffer,
             playhead_buffer,
+            background_storage_buffer,
+            icon_storage_buffer,
+            text_storage_buffer,
             playhead_bind_group,
             background_bind_group,
-            icon_storage_buffer,
             icon_bind_group,
-            text_storage_buffer,
             text_bind_group,
-
-            images,
+            texture_array,
+            last_images_set: HashSet::new(),
+            url_to_image_index: HashMap::new(),
             requested_textures: HashSet::new(),
-        };
+        });
 
-        self.gpu_resources = Some(gpu_resources);
-        self.render_surface = Some(render_surface);
+        self.render_surface = Some(RenderSurface {
+            surface,
+            dev_id,
+            config,
+        });
+    }
+}
+
+impl GpuResources {
+    pub fn update_textures(&mut self) -> bool {
+        let available: HashSet<_> = self
+            .requested_textures
+            .iter()
+            .filter(|u| IMAGES_CACHE.contains_key(*u))
+            .cloned()
+            .collect();
+        if self.last_images_set == available || available.is_empty() {
+            return false;
+        }
+
+        let mut sorted: Vec<_> = available.iter().cloned().collect();
+        sorted.sort();
+
+        let mut idx_map = HashMap::new();
+        let mut count = 0;
+        for url in &sorted {
+            if let Some(img_ref) = IMAGES_CACHE.get(url)
+                && let Some(image) = img_ref.as_ref()
+            {
+                if count >= MAX_TEXTURE_LAYERS {
+                    break;
+                }
+                self.queue.write_texture(
+                    TexelCopyTextureInfo {
+                        texture: &self.texture_array,
+                        mip_level: 0,
+                        origin: Origin3d {
+                            x: 0,
+                            y: 0,
+                            z: count,
+                        },
+                        aspect: TextureAspect::All,
+                    },
+                    image.as_raw(),
+                    TexelCopyBufferLayout {
+                        offset: 0,
+                        bytes_per_row: Some(4 * IMAGE_SIZE),
+                        rows_per_image: Some(IMAGE_SIZE),
+                    },
+                    Extent3d {
+                        width: IMAGE_SIZE,
+                        height: IMAGE_SIZE,
+                        depth_or_array_layers: 1,
+                    },
+                );
+                idx_map.insert(url.clone(), count as i32);
+                count += 1;
+            }
+        }
+        if count == 0 {
+            return false;
+        }
+        self.url_to_image_index = idx_map;
+        self.last_images_set = available;
+        true
     }
 }
