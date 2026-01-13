@@ -4,10 +4,7 @@ use crate::render::{
     ScreenUniforms,
 };
 use crate::text_render::TextInstance;
-use std::{
-    collections::{HashMap, HashSet},
-    sync::Arc,
-};
+use std::collections::{HashMap, HashSet};
 use wgpu::{
     BindGroup, Buffer, Color, CommandEncoderDescriptor, Device, Instance, LoadOp, Operations,
     Queue, RenderPassColorAttachment, RenderPassDescriptor, RenderPipeline, StoreOp, Surface,
@@ -39,8 +36,8 @@ const PANEL_START: f32 = 6.0;
 const PANEL_EXTENSION: f32 = 12.0;
 
 struct GpuResources {
-    device: Arc<Device>,
-    queue: Arc<Queue>,
+    device: Device,
+    queue: Queue,
     surface: Surface<'static>,
     surface_config: SurfaceConfiguration,
 

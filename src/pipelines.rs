@@ -3,18 +3,18 @@ use crate::spotify::IMAGES_CACHE;
 use crate::text_render::TextInstance;
 use crate::{CantusApp, GpuResources};
 use std::collections::{HashMap, HashSet};
-use std::sync::Arc;
 use wgpu::{
     BindGroupDescriptor, BindGroupEntry, BindGroupLayout, BindGroupLayoutDescriptor,
     BindGroupLayoutEntry, BindingResource, BindingType, BlendState, BufferBindingType,
     BufferDescriptor, BufferUsages, ColorTargetState, ColorWrites, CompositeAlphaMode,
-    DeviceDescriptor, Extent3d, FilterMode, FragmentState, MultisampleState, Origin3d,
-    PipelineCompilationOptions, PipelineLayoutDescriptor, PowerPreference, PresentMode,
-    PrimitiveState, PrimitiveTopology, RenderPipelineDescriptor, RequestAdapterOptions,
-    SamplerBindingType, SamplerDescriptor, ShaderModule, ShaderModuleDescriptor, ShaderSource,
-    ShaderStages, Surface, SurfaceConfiguration, TexelCopyBufferLayout, TexelCopyTextureInfo,
-    TextureAspect, TextureDescriptor, TextureDimension, TextureFormat, TextureSampleType,
-    TextureUsages, TextureViewDescriptor, TextureViewDimension, VertexState,
+    DeviceDescriptor, ExperimentalFeatures, Extent3d, Features, FilterMode, FragmentState, Limits,
+    MemoryHints, MultisampleState, Origin3d, PipelineCompilationOptions, PipelineLayoutDescriptor,
+    PowerPreference, PresentMode, PrimitiveState, PrimitiveTopology, RenderPipelineDescriptor,
+    RequestAdapterOptions, SamplerBindingType, SamplerDescriptor, ShaderModule,
+    ShaderModuleDescriptor, ShaderSource, ShaderStages, Surface, SurfaceConfiguration,
+    TexelCopyBufferLayout, TexelCopyTextureInfo, TextureAspect, TextureDescriptor,
+    TextureDimension, TextureFormat, TextureSampleType, TextureUsages, TextureViewDescriptor,
+    TextureViewDimension, Trace, VertexState,
 };
 
 const MAX_TEXTURE_LAYERS: u32 = 48;
@@ -25,14 +25,19 @@ impl CantusApp {
         let adapter = pollster::block_on(self.instance.request_adapter(&RequestAdapterOptions {
             power_preference: PowerPreference::HighPerformance,
             compatible_surface: Some(&surface),
-            ..Default::default()
+            force_fallback_adapter: false,
         }))
         .expect("No adapter");
 
-        let (device, queue) =
-            pollster::block_on(adapter.request_device(&DeviceDescriptor::default()))
-                .expect("No device");
-        let (device, queue) = (Arc::new(device), Arc::new(queue));
+        let (device, queue) = pollster::block_on(adapter.request_device(&DeviceDescriptor {
+            label: None,
+            required_features: Features::empty(),
+            required_limits: Limits::downlevel_defaults(),
+            experimental_features: ExperimentalFeatures::disabled(),
+            memory_hints: MemoryHints::MemoryUsage,
+            trace: Trace::Off,
+        }))
+        .expect("No device");
 
         let capabilities = surface.get_capabilities(&adapter);
         let alpha_mode = [
