@@ -1,7 +1,7 @@
 use crate::{
     CantusApp, PANEL_EXTENSION, PANEL_START,
     config::CONFIG,
-    spotify::{ALBUM_DATA_CACHE, CondensedPlaylist, PLAYBACK_STATE, PlaylistId, Track},
+    spotify::{ALBUM_PALETTE_CACHE, CondensedPlaylist, PLAYBACK_STATE, PlaylistId, Track},
     text_render::{ATLAS_MSDF_SCALE, ATLAS_RANGE, MSDFAtlas, TextInstance},
 };
 use bytemuck::{Pod, Zeroable};
@@ -348,7 +348,7 @@ impl CantusApp {
 
         self.background_pills.clear();
         let history_width = CONFIG.history_width;
-        let total_width = CONFIG.width - history_width;
+        let total_width = CONFIG.width - history_width - 10.0;
         let total_height = CONFIG.height;
         let timeline_duration_ms = CONFIG.timeline_future_minutes * 60_000.0;
         let timeline_start_ms = -CONFIG.timeline_past_minutes * 60_000.0;
@@ -502,16 +502,6 @@ impl CantusApp {
             PANEL_START + CONFIG.height,
         );
 
-        // Fade out based on width
-        let fade_alpha = if width < CONFIG.height {
-            ((width / CONFIG.height) * 1.5 - 0.5).max(0.0)
-        } else {
-            1.0
-        };
-
-        // How much of the width is to the left of the current position
-        let dark_width = (origin_x - start_x).max(0.0);
-
         // Add hitbox
         let (hit_start, hit_end) = track_render.hitbox_range;
         let full_width = hit_end - hit_start;
@@ -520,23 +510,13 @@ impl CantusApp {
             .push((track.id, hitbox, track_render.hitbox_range));
         // If dragging, set the drag target to this track, and the position within the track
         if self.interaction.dragging && track_render.is_current {
-            self.interaction.drag_track =
-                Some((track.id, (start_x + dark_width - hit_start) / full_width));
+            self.interaction.drag_track = Some((
+                track.id,
+                (start_x + (origin_x - start_x).max(0.0) - hit_start) / full_width,
+            ));
         }
-
-        let Some(album_data_ref) = ALBUM_DATA_CACHE.get(&track.album.id) else {
-            return;
-        };
-        let Some(album_data) = album_data_ref.as_ref() else {
-            return;
-        };
 
         // --- BACKGROUND ---
-        let mut colors = [0u32; 4];
-        for (i, c) in album_data.primary_colors.iter().take(4).enumerate() {
-            colors[i] = u32::from_le_bytes([c[0], c[1], c[2], 255]);
-        }
-
         // Determine which animation to show: specific track click or global playhead event
         let (expansion_xy, expansion_time) = {
             let (c_inst, c_track, c_pt) = self.interaction.last_click;
@@ -554,11 +534,21 @@ impl CantusApp {
             }
         };
 
+        // Fade out based on width
+        let fade_alpha = if width < CONFIG.height {
+            ((width / CONFIG.height) - 0.9).max(0.0) * 10.0
+        } else {
+            1.0
+        };
+
         self.background_pills.push(BackgroundPill {
             rect: [start_x, width],
             expansion_xy,
             expansion_time,
-            colors,
+            colors: ALBUM_PALETTE_CACHE
+                .get(&track.album.id)
+                .and_then(|data_ref| data_ref.as_ref().copied())
+                .unwrap_or_default(),
             alpha: fade_alpha,
             image_index: track_render.image_index,
             _padding: [0.0; 1],
@@ -716,25 +706,10 @@ impl CantusApp {
         avg_speed: f32,
         volume: Option<u8>,
     ) {
-        let Some(track_data_ref) = ALBUM_DATA_CACHE.get(&track.album.id) else {
-            return;
-        };
-        let Some(track_data) = track_data_ref.as_ref() else {
-            return;
-        };
-
-        let mut palette: Vec<u32> = track_data
-            .primary_colors
-            .iter()
-            .map(|&[r, g, b, _]| u32::from_le_bytes([r, g, b, 255]))
-            .collect();
-        if palette.is_empty() {
-            palette.extend_from_slice(&[
-                102 | (102 << 8) | (102 << 16),
-                153 | (153 << 8) | (153 << 16),
-                204 | (204 << 8) | (204 << 16),
-            ]);
-        }
+        let palette = ALBUM_PALETTE_CACHE
+            .get(&track.album.id)
+            .and_then(|data_ref| data_ref.as_ref().copied())
+            .unwrap_or_default();
 
         // We use a monotonic time for the GPU to calculate displacements
         let time = START_TIME.elapsed().as_secs_f32();

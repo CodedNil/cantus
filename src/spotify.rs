@@ -509,7 +509,7 @@ pub static PLAYBACK_STATE: LazyLock<RwLock<PlaybackState>> = LazyLock::new(|| {
 });
 pub static IMAGES_CACHE: LazyLock<DashMap<String, Option<Arc<RgbaImage>>>> =
     LazyLock::new(DashMap::new);
-pub static ALBUM_DATA_CACHE: LazyLock<DashMap<AlbumId, Option<AlbumData>>> =
+pub static ALBUM_PALETTE_CACHE: LazyLock<DashMap<AlbumId, Option<[u32; NUM_SWATCHES]>>> =
     LazyLock::new(DashMap::new);
 pub static ARTIST_DATA_CACHE: LazyLock<DashMap<ArtistId, Option<String>>> =
     LazyLock::new(DashMap::new);
@@ -561,10 +561,6 @@ pub struct PlaybackState {
 
 /// Number of swatches to use in colour palette generation.
 const NUM_SWATCHES: usize = 4;
-
-pub struct AlbumData {
-    pub primary_colors: Vec<[u8; NUM_SWATCHES]>,
-}
 
 pub struct CondensedPlaylist {
     pub id: PlaylistId,
@@ -1018,7 +1014,7 @@ fn convert_to_swatches(centroids: &[palette::Lab]) -> Vec<[u8; 4]> {
 /// Gathers the 4 primary colours for each album image.
 fn update_color_palettes() {
     for track in &PLAYBACK_STATE.read().queue {
-        if ALBUM_DATA_CACHE.contains_key(&track.album.id) {
+        if ALBUM_PALETTE_CACHE.contains_key(&track.album.id) {
             continue;
         }
 
@@ -1028,7 +1024,7 @@ fn update_color_palettes() {
         let Some(album_image) = image_ref.as_ref() else {
             continue;
         };
-        ALBUM_DATA_CACHE.insert(track.album.id, None);
+        ALBUM_PALETTE_CACHE.insert(track.album.id, None);
 
         let (album_pixels, album_is_colourful) = extract_lab_pixels(album_image);
         let mut result = do_kmeans(&album_pixels);
@@ -1046,12 +1042,18 @@ fn update_color_palettes() {
                     result = do_kmeans(&artist_pixels);
                 }
             } else {
-                ALBUM_DATA_CACHE.remove(&track.album.id);
+                ALBUM_PALETTE_CACHE.remove(&track.album.id);
                 continue;
             }
         }
 
-        let primary_colors = convert_to_swatches(&result);
-        ALBUM_DATA_CACHE.insert(track.album.id, Some(AlbumData { primary_colors }));
+        let primary_colors: [u32; 4] = convert_to_swatches(&result)
+            .iter()
+            .take(4)
+            .map(|c| u32::from_le_bytes([c[0], c[1], c[2], 255]))
+            .collect::<Vec<_>>()
+            .try_into()
+            .expect("Result should have exactly 4 colors");
+        ALBUM_PALETTE_CACHE.insert(track.album.id, Some(primary_colors));
     }
 }
