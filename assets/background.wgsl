@@ -60,7 +60,7 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
 
     // Turbulent Color Field
     let t = uniforms.time * 0.8;
-    let seed = f32(pill.colors[0] % 8u) * 0.123;
+    let seed = f32(pill.colors[0] % 8u) * 7.123;
     var p = in.world_uv * 2.5 + seed;
 
     // Turbulent Color Field

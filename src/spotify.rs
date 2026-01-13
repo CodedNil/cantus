@@ -1,10 +1,8 @@
 use crate::config::CONFIG;
 use arrayvec::ArrayString;
-use auto_palette::Palette;
 use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
 use dashmap::DashMap;
 use image::RgbaImage;
-use itertools::Itertools;
 use parking_lot::RwLock;
 use serde::{Deserialize, Deserializer, Serialize, Serializer, de::DeserializeOwned};
 use sha2::{Digest, Sha256};
@@ -34,7 +32,7 @@ pub struct SpotifyClient {
     client_id: String,
     cache_path: PathBuf,
     token: RwLock<Token>,
-    pub http: Agent,
+    http: Agent,
 }
 
 pub type AlbumId = ArrayString<22>;
@@ -970,97 +968,90 @@ fn poll_playlists() {
     }
 }
 
-/// Downloads and caches an image from the given URL.
+fn extract_lab_pixels(img: &RgbaImage) -> (Vec<palette::Lab>, bool) {
+    let saturation_threshold = 30u8;
+    let srgb_to_lab = |p: &image::Rgba<u8>| {
+        palette::FromColor::from_color(palette::Srgb::new(
+            f32::from(p[0]) / 255.0,
+            f32::from(p[1]) / 255.0,
+            f32::from(p[2]) / 255.0,
+        ))
+    };
+
+    let colourful: Vec<palette::Lab> = img
+        .pixels()
+        .filter(|p| {
+            let max = p[0].max(p[1]).max(p[2]);
+            let min = p[0].min(p[1]).min(p[2]);
+            (max - min) > saturation_threshold
+        })
+        .map(srgb_to_lab)
+        .collect();
+
+    if colourful.is_empty() {
+        (img.pixels().map(srgb_to_lab).collect(), false)
+    } else {
+        (colourful, true)
+    }
+}
+
+fn do_kmeans(pixels: &[palette::Lab]) -> Vec<palette::Lab> {
+    kmeans_colors::get_kmeans_hamerly(NUM_SWATCHES, 20, 5.0, false, pixels, 0).centroids
+}
+
+fn convert_to_swatches(centroids: &[palette::Lab]) -> Vec<[u8; 4]> {
+    centroids
+        .iter()
+        .map(|c: &palette::Lab| {
+            use palette::IntoColor;
+            let rgb: palette::Srgb = (*c).into_color();
+            [
+                (rgb.red * 255.0) as u8,
+                (rgb.green * 255.0) as u8,
+                (rgb.blue * 255.0) as u8,
+                (255 / NUM_SWATCHES as u8),
+            ]
+        })
+        .collect()
+}
+
+/// Gathers the 4 primary colours for each album image.
 fn update_color_palettes() {
-    let state = PLAYBACK_STATE.read();
-    for track in &state.queue {
+    for track in &PLAYBACK_STATE.read().queue {
         if ALBUM_DATA_CACHE.contains_key(&track.album.id) {
             continue;
         }
+
         let Some(image_ref) = IMAGES_CACHE.get(&track.album.image) else {
             continue;
         };
         let Some(album_image) = image_ref.as_ref() else {
             continue;
         };
-        let Some(artist_image_url_ref) = ARTIST_DATA_CACHE
-            .get(&track.artist.id)
-            .map(|entry| entry.value().clone())
-        else {
-            continue;
-        };
         ALBUM_DATA_CACHE.insert(track.album.id, None);
 
-        let width = album_image.width();
-        let height = album_image.height();
+        let (album_pixels, album_is_colourful) = extract_lab_pixels(album_image);
+        let mut result = do_kmeans(&album_pixels);
 
-        let get_swatches = |img_data| {
-            let palette: Palette<f64> = Palette::builder()
-                .algorithm(auto_palette::Algorithm::SLIC)
-                .filter(ChromaFilter { threshold: 30 })
-                .build(&img_data)
-                .unwrap();
-            palette
-                .find_swatches_with_theme(NUM_SWATCHES, auto_palette::Theme::Light)
-                .or_else(|_| palette.find_swatches(NUM_SWATCHES))
-                .unwrap()
-        };
+        if !album_is_colourful {
+            let artist_img = ARTIST_DATA_CACHE
+                .get(&track.artist.id)
+                .and_then(|e| e.value().clone())
+                .and_then(|url| IMAGES_CACHE.get(&url))
+                .and_then(|img| img.as_ref().cloned());
 
-        let mut swatches = get_swatches(
-            auto_palette::ImageData::new(width, height, album_image.as_ref()).unwrap(),
-        );
-        if swatches.len() < NUM_SWATCHES
-            && let Some(artist_image_url) = artist_image_url_ref.as_ref()
-        {
-            let Some(artist_image_ref) = IMAGES_CACHE.get(artist_image_url) else {
+            if let Some(img) = artist_img {
+                let (artist_pixels, artist_is_colourful) = extract_lab_pixels(&img);
+                if artist_is_colourful {
+                    result = do_kmeans(&artist_pixels);
+                }
+            } else {
                 ALBUM_DATA_CACHE.remove(&track.album.id);
                 continue;
-            };
-            let Some(artist_image) = artist_image_ref.as_ref() else {
-                ALBUM_DATA_CACHE.remove(&track.album.id);
-                continue;
-            };
-            let artist_new_width = (width as f32 * 0.1).round() as u32;
-            let mut new_img = RgbaImage::new(width + artist_new_width, height);
-            image::imageops::overlay(&mut new_img, album_image.as_ref(), 0, 0);
-            let artist_img_resized = image::imageops::resize(
-                artist_image.as_ref(),
-                artist_new_width,
-                height,
-                image::imageops::FilterType::Nearest,
-            );
-            image::imageops::overlay(&mut new_img, &artist_img_resized, i64::from(width), 0);
-
-            swatches = get_swatches(
-                auto_palette::ImageData::new(new_img.width(), new_img.height(), &new_img).unwrap(),
-            );
+            }
         }
 
-        let total_ratio_sum: f64 = swatches.iter().map(auto_palette::Swatch::ratio).sum();
-        let primary_colors = swatches
-            .iter()
-            .map(|s| {
-                let rgb = s.color().to_rgb();
-                let ratio = ((s.ratio() / total_ratio_sum) as f32 * 255.0).round() as u8;
-                [rgb.r, rgb.g, rgb.b, ratio]
-            })
-            .sorted_by(|a, b| b[3].cmp(&a[3]))
-            .collect::<Vec<_>>();
-
+        let primary_colors = convert_to_swatches(&result);
         ALBUM_DATA_CACHE.insert(track.album.id, Some(AlbumData { primary_colors }));
-    }
-    drop(state);
-}
-
-/// A filter that filters chroma values.
-#[derive(Debug)]
-struct ChromaFilter {
-    threshold: u8,
-}
-impl auto_palette::Filter for ChromaFilter {
-    fn test(&self, pixel: &auto_palette::Rgba) -> bool {
-        let max = pixel[0].max(pixel[1]).max(pixel[2]);
-        let min = pixel[0].min(pixel[1]).min(pixel[2]);
-        (max - min) > self.threshold
     }
 }

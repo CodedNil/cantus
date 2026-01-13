@@ -51,6 +51,8 @@ image = { version = "0.25.9", default-features = false, features = [
     "png",
 ] }
 auto-palette = { version = "0.9.2", default-features = false }
+kmeans_colors = { version = "0.7.1", default-features = false, features = ["palette_color"] }
+palette = "0.7.6"
 
 serde = { version = "1.0.228", features = ["derive"] }
 serde_json = "1.0.149"
