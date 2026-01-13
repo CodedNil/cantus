@@ -205,8 +205,9 @@ impl LayerShellApp {
             return;
         }
 
-        let recreate = self.cantus.render_surface.as_ref().is_none_or(|surface| {
-            surface.config.width != width as u32 || surface.config.height != height as u32
+        let recreate = self.cantus.gpu_resources.as_ref().is_none_or(|surface| {
+            surface.surface_config.width != width as u32
+                || surface.surface_config.height != height as u32
         });
         if !recreate {
             return;
@@ -221,13 +222,8 @@ impl LayerShellApp {
             )),
             raw_window_handle: RawWindowHandle::Wayland(WaylandWindowHandle::new(surface_ptr)),
         };
-        let surface = unsafe {
-            self.cantus
-                .render_context
-                .instance
-                .create_surface_unsafe(target)
-        }
-        .expect("Failed to create surface");
+        let surface = unsafe { self.cantus.instance.create_surface_unsafe(target) }
+            .expect("Failed to create surface");
 
         self.cantus
             .configure_render_surface(surface, width as u32, height as u32);

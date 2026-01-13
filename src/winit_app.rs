@@ -64,7 +64,6 @@ impl WinitApp {
         };
         let surface = unsafe {
             self.cantus
-                .render_context
                 .instance
                 .create_surface_unsafe(target)
                 .expect("Failed to create surface")

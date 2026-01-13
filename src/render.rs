@@ -546,7 +546,7 @@ impl CantusApp {
             interaction_inst.duration_since(*START_TIME).as_secs_f32(),
         );
 
-        self.gpu_uniforms = ScreenUniforms {
+        self.screen_uniforms = ScreenUniforms {
             screen_size: [CONFIG.width, CONFIG.height + PANEL_START + PANEL_EXTENSION],
             bar_height: [PANEL_START, CONFIG.height],
             mouse_pos: [

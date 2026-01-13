@@ -9,9 +9,9 @@ use std::{
     sync::Arc,
 };
 use wgpu::{
-    Adapter, BindGroup, Buffer, Color, CommandEncoderDescriptor, Device, Instance,
-    InstanceDescriptor, LoadOp, Operations, Queue, RenderPassColorAttachment, RenderPassDescriptor,
-    RenderPipeline, StoreOp, Surface, SurfaceConfiguration, Texture, TextureViewDescriptor,
+    BindGroup, Buffer, Color, CommandEncoderDescriptor, Device, Instance, LoadOp, Operations,
+    Queue, RenderPassColorAttachment, RenderPassDescriptor, RenderPipeline, StoreOp, Surface,
+    SurfaceConfiguration, Texture, TextureViewDescriptor,
 };
 
 #[cfg(not(any(feature = "wayland", feature = "winit")))]
@@ -39,7 +39,10 @@ const PANEL_START: f32 = 6.0;
 const PANEL_EXTENSION: f32 = 12.0;
 
 struct GpuResources {
+    device: Arc<Device>,
     queue: Arc<Queue>,
+    surface: Surface<'static>,
+    surface_config: SurfaceConfiguration,
 
     // Pipelines
     playhead_pipeline: RenderPipeline,
@@ -86,46 +89,49 @@ fn main() {
 }
 
 struct CantusApp {
-    render_context: RenderContext,
-    render_surface: Option<RenderSurface>,
-    font: FontEngine,
-    scale_factor: f32,
+    // Core Graphics
+    instance: Instance,
+    gpu_resources: Option<GpuResources>,
+
+    // Application State
     render_state: RenderState,
     interaction: InteractionState,
     particles: ParticlesState,
+    scale_factor: f32,
+
+    // Scene & Resources
+    font: FontEngine,
+    screen_uniforms: ScreenUniforms,
     background_pills: Vec<BackgroundPill>,
     icon_pills: Vec<IconInstance>,
     text_instances: Vec<TextInstance>,
-    gpu_resources: Option<GpuResources>,
     playhead_info: PlayheadUniforms,
-    gpu_uniforms: ScreenUniforms,
 }
 
 impl Default for CantusApp {
     fn default() -> Self {
         Self {
-            render_context: RenderContext::default(),
-            render_surface: None,
-            font: FontEngine::default(),
-            scale_factor: 1.0,
+            instance: Instance::new(&wgpu::InstanceDescriptor::default()),
+            gpu_resources: None,
+
             render_state: RenderState::default(),
             interaction: InteractionState::default(),
             particles: ParticlesState::default(),
+            scale_factor: 1.0,
+
+            font: FontEngine::default(),
             background_pills: Vec::new(),
             icon_pills: Vec::new(),
             text_instances: Vec::new(),
-            gpu_resources: None,
+
             playhead_info: PlayheadUniforms::default(),
-            gpu_uniforms: ScreenUniforms::default(),
+            screen_uniforms: ScreenUniforms::default(),
         }
     }
 }
 
 impl CantusApp {
     fn render(&mut self) {
-        let rs_ptr = self.render_surface.as_ref().unwrap();
-        let dev_id = rs_ptr.dev_id;
-
         self.background_pills.clear();
         self.icon_pills.clear();
         self.text_instances.clear();
@@ -162,7 +168,7 @@ impl CantusApp {
             q.write_buffer(
                 &gpu.uniform_buffer,
                 0,
-                bytemuck::bytes_of(&self.gpu_uniforms),
+                bytemuck::bytes_of(&self.screen_uniforms),
             );
             q.write_buffer(
                 &gpu.particles_buffer,
@@ -198,72 +204,68 @@ impl CantusApp {
             }
         }
 
-        let rs = self.render_surface.as_mut().unwrap();
-        let handle = &self.render_context.devices[dev_id];
-
-        let Ok(surface_texture) = rs.surface.get_current_texture() else {
-            rs.surface.configure(&handle.device, &rs.config);
+        let gpu = self.gpu_resources.as_mut().expect("No gpu resources");
+        let Ok(surface_texture) = gpu.surface.get_current_texture() else {
+            gpu.surface.configure(&gpu.device, &gpu.surface_config);
             return;
         };
         let surface_view = surface_texture
             .texture
             .create_view(&TextureViewDescriptor::default());
 
-        if let Some(gpu) = self.gpu_resources.as_ref() {
-            let mut encoder = handle
-                .device
-                .create_command_encoder(&CommandEncoderDescriptor::default());
-            let passes = [
-                (
-                    "Background",
-                    &gpu.background_pipeline,
-                    &gpu.background_bind_group,
-                    self.background_pills.len() as u32,
-                    LoadOp::Clear(Color::TRANSPARENT),
-                ),
-                (
-                    "Text",
-                    &gpu.text_pipeline,
-                    &gpu.text_bind_group,
-                    self.text_instances.len() as u32,
-                    LoadOp::Load,
-                ),
-                (
-                    "Icon",
-                    &gpu.icon_pipeline,
-                    &gpu.icon_bind_group,
-                    self.icon_pills.len() as u32,
-                    LoadOp::Load,
-                ),
-                (
-                    "Play",
-                    &gpu.playhead_pipeline,
-                    &gpu.playhead_bind_group,
-                    1,
-                    LoadOp::Load,
-                ),
-            ];
+        let mut encoder = gpu
+            .device
+            .create_command_encoder(&CommandEncoderDescriptor::default());
+        let passes = [
+            (
+                "Background",
+                &gpu.background_pipeline,
+                &gpu.background_bind_group,
+                self.background_pills.len() as u32,
+                LoadOp::Clear(Color::TRANSPARENT),
+            ),
+            (
+                "Text",
+                &gpu.text_pipeline,
+                &gpu.text_bind_group,
+                self.text_instances.len() as u32,
+                LoadOp::Load,
+            ),
+            (
+                "Icon",
+                &gpu.icon_pipeline,
+                &gpu.icon_bind_group,
+                self.icon_pills.len() as u32,
+                LoadOp::Load,
+            ),
+            (
+                "Play",
+                &gpu.playhead_pipeline,
+                &gpu.playhead_bind_group,
+                1,
+                LoadOp::Load,
+            ),
+        ];
 
-            for (label, pipe, bg, count, load) in passes {
-                let mut rpass = encoder.begin_render_pass(&RenderPassDescriptor {
-                    label: Some(label),
-                    color_attachments: &[Some(RenderPassColorAttachment {
-                        view: &surface_view,
-                        resolve_target: None,
-                        ops: Operations {
-                            load,
-                            store: StoreOp::Store,
-                        },
-                        depth_slice: None,
-                    })],
-                    ..Default::default()
-                });
-                rpass.set_pipeline(pipe);
-                rpass.set_bind_group(0, bg, &[]);
-                rpass.draw(0..4, 0..count);
-            }
-            handle.queue.submit([encoder.finish()]);
+        for (label, pipe, bg, count, load) in passes {
+            let mut rpass = encoder.begin_render_pass(&RenderPassDescriptor {
+                label: Some(label),
+                color_attachments: &[Some(RenderPassColorAttachment {
+                    view: &surface_view,
+                    resolve_target: None,
+                    ops: Operations {
+                        load,
+                        store: StoreOp::Store,
+                    },
+                    depth_slice: None,
+                })],
+                ..Default::default()
+            });
+            rpass.set_pipeline(pipe);
+            rpass.set_bind_group(0, bg, &[]);
+            rpass.draw(0..4, 0..count);
         }
+        gpu.queue.submit([encoder.finish()]);
         surface_texture.present();
     }
 
@@ -272,31 +274,5 @@ impl CantusApp {
             gpu.requested_textures.insert(url.to_owned());
         }
         image_map.get(url).copied().unwrap_or(-1)
-    }
-}
-
-struct RenderContext {
-    instance: Instance,
-    devices: Vec<DeviceHandle>,
-}
-
-struct DeviceHandle {
-    adapter: Adapter,
-    device: Arc<Device>,
-    queue: Arc<Queue>,
-}
-
-struct RenderSurface {
-    surface: Surface<'static>,
-    dev_id: usize,
-    config: SurfaceConfiguration,
-}
-
-impl Default for RenderContext {
-    fn default() -> Self {
-        Self {
-            instance: Instance::new(&InstanceDescriptor::default()),
-            devices: Vec::new(),
-        }
     }
 }

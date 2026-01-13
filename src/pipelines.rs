@@ -1,11 +1,9 @@
 use crate::render::{BackgroundPill, IconInstance, Particle, PlayheadUniforms, ScreenUniforms};
 use crate::spotify::IMAGES_CACHE;
 use crate::text_render::TextInstance;
-use crate::{CantusApp, DeviceHandle, GpuResources, RenderSurface};
-use std::{
-    collections::{HashMap, HashSet},
-    sync::Arc,
-};
+use crate::{CantusApp, GpuResources};
+use std::collections::{HashMap, HashSet};
+use std::sync::Arc;
 use wgpu::{
     BindGroupDescriptor, BindGroupEntry, BindGroupLayout, BindGroupLayoutDescriptor,
     BindGroupLayoutEntry, BindingResource, BindingType, BlendState, BufferBindingType,
@@ -24,29 +22,19 @@ const IMAGE_SIZE: u32 = 64;
 
 impl CantusApp {
     pub fn configure_render_surface(&mut self, surface: Surface<'static>, width: u32, height: u32) {
-        let adapter = pollster::block_on(self.render_context.instance.request_adapter(
-            &RequestAdapterOptions {
-                power_preference: PowerPreference::HighPerformance,
-                compatible_surface: Some(&surface),
-                ..Default::default()
-            },
-        ))
+        let adapter = pollster::block_on(self.instance.request_adapter(&RequestAdapterOptions {
+            power_preference: PowerPreference::HighPerformance,
+            compatible_surface: Some(&surface),
+            ..Default::default()
+        }))
         .expect("No adapter");
 
         let (device, queue) =
             pollster::block_on(adapter.request_device(&DeviceDescriptor::default()))
                 .expect("No device");
-        let device = Arc::new(device);
-        let queue = Arc::new(queue);
+        let (device, queue) = (Arc::new(device), Arc::new(queue));
 
-        self.render_context.devices.push(DeviceHandle {
-            adapter,
-            device: device.clone(),
-            queue: queue.clone(),
-        });
-        let dev_id = self.render_context.devices.len() - 1;
-
-        let capabilities = surface.get_capabilities(&self.render_context.devices[dev_id].adapter);
+        let capabilities = surface.get_capabilities(&adapter);
         let alpha_mode = [
             CompositeAlphaMode::PreMultiplied,
             CompositeAlphaMode::PostMultiplied,
@@ -56,7 +44,7 @@ impl CantusApp {
         .unwrap_or(CompositeAlphaMode::Auto);
 
         let format = TextureFormat::Rgba8Unorm;
-        let config = SurfaceConfiguration {
+        let surface_config = SurfaceConfiguration {
             usage: TextureUsages::RENDER_ATTACHMENT,
             format,
             width,
@@ -66,7 +54,7 @@ impl CantusApp {
             alpha_mode,
             view_formats: vec![],
         };
-        surface.configure(&device, &config);
+        surface.configure(&device, &surface_config);
 
         let create_shader = |label, source: &str| {
             device.create_shader_module(ShaderModuleDescriptor {
@@ -144,7 +132,7 @@ impl CantusApp {
             let layout = device.create_pipeline_layout(&PipelineLayoutDescriptor {
                 label: Some(label),
                 bind_group_layouts: &[layout],
-                push_constant_ranges: &[],
+                ..Default::default()
             });
             device.create_render_pipeline(&RenderPipelineDescriptor {
                 label: Some(label),
@@ -364,7 +352,10 @@ impl CantusApp {
         );
 
         self.gpu_resources = Some(GpuResources {
+            device,
             queue,
+            surface,
+            surface_config,
             playhead_pipeline,
             background_pipeline,
             icon_pipeline,
@@ -384,12 +375,6 @@ impl CantusApp {
             url_to_image_index: HashMap::new(),
             requested_textures: HashSet::new(),
         });
-
-        self.render_surface = Some(RenderSurface {
-            surface,
-            dev_id,
-            config,
-        });
     }
 }
 
@@ -405,15 +390,17 @@ impl GpuResources {
             return false;
         }
 
-        let mut sorted: Vec<_> = available.iter().cloned().collect();
+        let mut sorted: Vec<String> = available.iter().cloned().collect();
         sorted.sort();
 
         let mut idx_map = HashMap::new();
         let mut count = 0;
         for url in &sorted {
-            if let Some(img_ref) = IMAGES_CACHE.get(url)
-                && let Some(image) = img_ref.as_ref()
-            {
+            let image_opt = IMAGES_CACHE.get(url);
+            if let Some(img_ref) = image_opt {
+                let Some(image) = img_ref.as_ref() else {
+                    continue;
+                };
                 if count >= MAX_TEXTURE_LAYERS {
                     break;
                 }
@@ -421,12 +408,12 @@ impl GpuResources {
                     TexelCopyTextureInfo {
                         texture: &self.texture_array,
                         mip_level: 0,
+                        aspect: TextureAspect::All,
                         origin: Origin3d {
                             x: 0,
                             y: 0,
                             z: count,
                         },
-                        aspect: TextureAspect::All,
                     },
                     image.as_raw(),
                     TexelCopyBufferLayout {
