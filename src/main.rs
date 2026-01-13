@@ -25,7 +25,6 @@ compile_error!("Enable at least one of the `wayland` or `winit` features.");
 #[cfg(all(feature = "wayland", feature = "winit"))]
 compile_error!("`wayland` and `winit` features cannot be enabled at the same time.");
 
-mod background;
 mod config;
 mod image_manager;
 mod interaction;
