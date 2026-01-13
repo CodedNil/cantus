@@ -273,7 +273,6 @@ pub struct RenderState {
     pub track_offset: f32,
     pub recent_speeds: [f32; 16],
     pub speed_idx: usize,
-    pub speed_sum: f32,
 }
 
 impl Default for RenderState {
@@ -283,7 +282,6 @@ impl Default for RenderState {
             track_offset: 0.0,
             recent_speeds: [0.0; 16],
             speed_idx: 0,
-            speed_sum: 0.0,
         }
     }
 }
@@ -412,11 +410,9 @@ impl CantusApp {
         let frame_move_speed = (current_ms - self.render_state.track_offset) * dt;
         self.render_state.track_offset = current_ms;
         let s_idx = self.render_state.speed_idx;
-        self.render_state.speed_sum += frame_move_speed - self.render_state.recent_speeds[s_idx];
         self.render_state.recent_speeds[s_idx] = frame_move_speed;
         self.render_state.speed_idx = (s_idx + 1) % 16;
-        // Get new average
-        let avg_speed = self.render_state.speed_sum / 16.0;
+        let avg_speed = self.render_state.recent_speeds.iter().sum::<f32>() / 16.0;
 
         // Iterate over the tracks within the timeline.
         let mut track_renders = Vec::with_capacity(playback_state.queue.len());
@@ -718,7 +714,7 @@ impl CantusApp {
         dt: f32,
         track: &Track,
         playhead_x: f32,
-        track_move_speed: f32,
+        avg_speed: f32,
         volume: Option<u8>,
     ) {
         let Some(track_data_ref) = ALBUM_DATA_CACHE.get(&track.album.id) else {
@@ -757,7 +753,7 @@ impl CantusApp {
         };
 
         // Emit new particles while playing
-        let mut emit_count = if track_move_speed.abs() > 0.000_001 {
+        let mut emit_count = if avg_speed.abs() > 0.00001 {
             self.particles.accumulator += dt * SPARK_EMISSION;
             let count = self.particles.accumulator.floor() as u8;
             self.particles.accumulator -= f32::from(count);
@@ -767,9 +763,8 @@ impl CantusApp {
             0
         };
 
-        let spawn_offset = track_move_speed.signum() * 2.0;
-        let horizontal_bias =
-            (track_move_speed.abs().powf(0.2) * spawn_offset * 0.5).clamp(-3.0, 3.0);
+        let spawn_offset = avg_speed.signum() * 2.0;
+        let horizontal_bias = (avg_speed.abs().powf(0.2) * spawn_offset * 0.5).clamp(-3.0, 3.0);
 
         for particle in &mut self.particles.particles {
             // Emit a new particle
