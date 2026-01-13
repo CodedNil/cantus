@@ -209,11 +209,11 @@ impl CantusApp {
                     },
                     BindGroupEntry {
                         binding: 1,
-                        resource: particles_buffer.as_entire_binding(),
+                        resource: playhead_buffer.as_entire_binding(),
                     },
                     BindGroupEntry {
                         binding: 2,
-                        resource: playhead_buffer.as_entire_binding(),
+                        resource: particles_buffer.as_entire_binding(),
                     },
                 ],
             });

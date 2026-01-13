@@ -87,8 +87,8 @@ impl Shaders {
             "Playhead",
             &[
                 (0, ShaderStages::FRAGMENT, ub(0)),
-                (1, ShaderStages::FRAGMENT, sb(0)),
-                (2, ShaderStages::FRAGMENT, ub(0)),
+                (1, ShaderStages::FRAGMENT, ub(0)),
+                (2, ShaderStages::FRAGMENT, sb(0)),
             ],
         );
         let standard_bind_group_layout = bgl(
@@ -200,45 +200,44 @@ impl Rect {
 #[repr(C)]
 #[derive(Copy, Clone, Debug, Default, Pod, Zeroable)]
 pub struct ScreenUniforms {
-    pub screen_size: [f32; 2],
-    pub mouse_pos: [f32; 2],
-    pub playhead_x: f32, // X position where the playhead line is drawn
-    pub time: f32,
-    pub scale_factor: f32,
-    pub _padding: f32,
+    screen_size: [f32; 2], // Full size of the layer shell
+    bar_height: [f32; 2],  // Start y and bars height
+    mouse_pos: [f32; 2],
+    playhead_x: f32, // x position where the playhead line is drawn
+    time: f32,
+    scale_factor: f32,
+    _padding: [f32; 3],
 }
 
 #[repr(C)]
 #[derive(Copy, Clone, Debug, Default, Pod, Zeroable)]
 pub struct PlayheadUniforms {
-    pub panel_start: f32,
-    pub height: f32,
-    pub volume: f32,
-    pub bar_lerp: f32,
-    pub play_lerp: f32,
-    pub pause_lerp: f32,
-    pub _padding: [f32; 2],
+    volume: f32,
+    bar_lerp: f32,
+    play_lerp: f32,
+    pause_lerp: f32,
 }
 
 #[repr(C)]
 #[derive(Copy, Clone, Debug, Default, Pod, Zeroable)]
 pub struct Particle {
-    pub spawn_vel: [f32; 2],
-    pub spawn_y: f32,
-    pub spawn_time: f32,
-    pub duration: f32,
-    pub color: u32,
+    spawn_vel: [f32; 2],
+    spawn_y: f32,
+    spawn_time: f32,
+    duration: f32,
+    color: u32,
 }
 
 #[repr(C)]
 #[derive(Copy, Clone, Debug, Default, Pod, Zeroable)]
 pub struct BackgroundPill {
-    pub rect: [f32; 4],             // x, y, width, height
-    pub expansion_effect: [f32; 3], // x, y, time
-    pub colors: [u32; 4],
-    pub alpha: f32,
-    pub image_index: i32,
-    pub _padding: [f32; 3],
+    rect: [f32; 2], // x, width
+    expansion_xy: [f32; 2],
+    expansion_time: f32,
+    colors: [u32; 4],
+    alpha: f32,
+    image_index: i32,
+    _padding: [f32; 1],
 }
 
 #[repr(C)]
@@ -249,7 +248,6 @@ pub struct IconInstance {
     pub variant: f32,
     pub param: f32,
     pub image_index: i32,
-    pub _padding: [f32; 2],
 }
 
 static START_TIME: LazyLock<Instant> = LazyLock::new(Instant::now);
@@ -540,7 +538,7 @@ impl CantusApp {
         }
 
         // Determine which animation to show: specific track click or global playhead event
-        let expansion_effect = {
+        let (expansion_xy, expansion_time) = {
             let (c_inst, c_track, c_pt) = self.interaction.last_click;
             let c_time = c_inst.duration_since(*START_TIME).as_secs_f32();
             let e_time = self
@@ -550,19 +548,20 @@ impl CantusApp {
                 .as_secs_f32();
 
             if c_track == track.id && (c_time > e_time || !track_render.is_current) {
-                [(start_x + c_pt.x), (PANEL_START + c_pt.y), c_time]
+                ([start_x + c_pt.x, PANEL_START + c_pt.y], c_time)
             } else {
-                [origin_x, (PANEL_START + CONFIG.height * 0.5), e_time]
+                ([origin_x, PANEL_START + CONFIG.height * 0.5], e_time)
             }
         };
 
         self.background_pills.push(BackgroundPill {
-            rect: [start_x, PANEL_START, width, CONFIG.height],
-            alpha: fade_alpha,
+            rect: [start_x, width],
+            expansion_xy,
+            expansion_time,
             colors,
-            expansion_effect,
+            alpha: fade_alpha,
             image_index: track_render.image_index,
-            _padding: [0.0; 3],
+            _padding: [0.0; 1],
         });
 
         // --- TEXT ---
@@ -742,14 +741,15 @@ impl CantusApp {
 
         self.gpu_uniforms = ScreenUniforms {
             screen_size: [CONFIG.width, CONFIG.height + PANEL_START + PANEL_EXTENSION],
-            playhead_x,
-            time,
-            scale_factor: self.scale_factor,
+            bar_height: [PANEL_START, CONFIG.height],
             mouse_pos: [
                 self.interaction.mouse_position.x,
                 self.interaction.mouse_position.y,
             ],
-            _padding: 0.0,
+            playhead_x,
+            time,
+            scale_factor: self.scale_factor,
+            _padding: [0.0; 3],
         };
 
         // Emit new particles while playing
@@ -833,13 +833,10 @@ impl CantusApp {
         }
 
         self.playhead_info = PlayheadUniforms {
-            panel_start: PANEL_START,
-            height: CONFIG.height,
             volume: f32::from(volume.unwrap_or(100)) / 100.0,
             bar_lerp: interaction.playhead_bar,
             play_lerp: interaction.playhead_play,
             pause_lerp: interaction.playhead_pause,
-            _padding: [0.0, 0.0],
         };
     }
 }

@@ -1,5 +1,6 @@
 struct Uniform {
     screen_size: vec2<f32>,
+    bar_height: vec2<f32>,
     mouse_pos: vec2<f32>,
     playhead_x: f32,
     time: f32,
@@ -12,7 +13,6 @@ struct IconInstance {
     variant: f32, // 1.0 for star, 0.0 for squircle
     param: f32,
     image_index: i32,
-    _padding: f32,
 };
 
 @group(0) @binding(0) var<uniform> uniforms: Uniform;

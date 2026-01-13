@@ -1,5 +1,6 @@
 struct Uniform {
     screen_size: vec2<f32>,
+    bar_height: vec2<f32>,
     mouse_pos: vec2<f32>,
     playhead_x: f32,
     time: f32,
@@ -7,8 +8,9 @@ struct Uniform {
 };
 
 struct BackgroundPill {
-    rect: vec4<f32>,
-    expansion_effect: vec3<f32>,
+    rect: vec2<f32>,
+    expansion_xy: vec2<f32>,
+    expansion_time: f32,
     colors: array<u32, 4>,
     alpha: f32,
     image_index: i32,
@@ -33,12 +35,13 @@ fn vs_main(@builtin(vertex_index) vi: u32, @builtin(instance_index) ii: u32) -> 
     let margin = 16.0;
 
     let corner = vec2<f32>(f32(vi % 2u), f32(vi / 2u));
-    let local_pos = corner * (pill.rect.zw + 2.0 * margin) - margin;
-    let pixel_pos = pill.rect.xy + local_pos;
+    let rect = vec4(pill.rect.x, uniforms.bar_height.x, pill.rect.y, uniforms.bar_height.y);
+    let local_pos = corner * (rect.zw + 2.0 * margin) - margin;
+    let pixel_pos = vec2(rect.x, rect.y) + local_pos;
 
     // Combined NDC and Y-flip
     let ndc = (pixel_pos / uniforms.screen_size) * 2.0 - 1.0;
-    return VertexOutput(vec4(ndc.x, -ndc.y, 0.0, 1.0), local_pos / pill.rect.zw, local_pos / uniforms.screen_size.y, ii, pixel_pos);
+    return VertexOutput(vec4(ndc.x, -ndc.y, 0.0, 1.0), local_pos / rect.zw, local_pos / uniforms.screen_size.y, ii, pixel_pos);
 }
 
 fn sd_squircle(p: vec2<f32>, b: vec2<f32>, r: f32) -> f32 {
@@ -51,9 +54,10 @@ fn sd_squircle(p: vec2<f32>, b: vec2<f32>, r: f32) -> f32 {
 fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
     let pill = pills[in.instance_index];
     let rounding = 22.0 * uniforms.scale_factor;
+    let rect = vec4(pill.rect.x, uniforms.bar_height.x, pill.rect.y, uniforms.bar_height.y);
 
     // Shape Masking
-    let d = sd_squircle((in.uv - 0.5) * pill.rect.zw, pill.rect.zw * 0.5, rounding);
+    let d = sd_squircle((in.uv - 0.5) * rect.zw, rect.zw * 0.5, rounding);
     let edge_mask = 1.0 - smoothstep(-0.5, 0.5, d);
     let shadow_mask = (1.0 - smoothstep(0.0, 8.0, d)) * 0.3;
 
@@ -101,21 +105,21 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
     color = mix(color, color * 0.5, is_left_of_playhead);
 
     // Expanding Circle
-    let anim_lerp = (uniforms.time - pill.expansion_effect.z) * 0.95;
+    let anim_lerp = (uniforms.time - pill.expansion_time) * 0.95;
     if (anim_lerp >= 0.0 && anim_lerp < 1.0) {
-        let center = pill.expansion_effect.xy - pill.rect.xy - pill.rect.zw * 0.5;
-        let dist = length(((in.uv - 0.5) * pill.rect.zw) - center);
+        let center = pill.expansion_xy - rect.xy - rect.zw * 0.5;
+        let dist = length(((in.uv - 0.5) * rect.zw) - center);
         let circle_alpha = (1.0 - clamp(anim_lerp + 0.4, 0.0, 1.0)) * (1.0 - smoothstep(500.0 * anim_lerp - 2.0, 500.0 * anim_lerp, dist));
         color = mix(color, vec3(1.0, 0.88, 0.824), circle_alpha);
     }
 
     // Album Image
-    let image_start_x = pill.rect.z - pill.rect.w;
-    let local_x = in.uv.x * pill.rect.z;
+    let image_start_x = rect.z - rect.w;
+    let local_x = in.uv.x * rect.z;
     if (pill.image_index >= 0 && local_x >= image_start_x) {
-        let image_uv = vec2<f32>((local_x - image_start_x) / pill.rect.w, in.uv.y);
+        let image_uv = vec2<f32>((local_x - image_start_x) / rect.w, in.uv.y);
         let tex = textureSample(t_images, s_images, image_uv, pill.image_index);
-        let image_d = sd_squircle((image_uv - 0.5) * pill.rect.w, vec2<f32>(pill.rect.w * 0.5), rounding);
+        let image_d = sd_squircle((image_uv - 0.5) * rect.w, vec2<f32>(rect.w * 0.5), rounding);
         color = mix(color, tex.rgb, (1.0 - smoothstep(-0.5, 0.5, image_d)) * tex.a);
     }
 

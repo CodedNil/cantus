@@ -4,13 +4,14 @@ struct VertexOutput {
     @location(1) color: vec4<f32>,
 }
 
-struct ScreenUniforms {
+struct Uniform {
     screen_size: vec2<f32>,
+    bar_height: vec2<f32>,
     mouse_pos: vec2<f32>,
     playhead_x: f32,
     time: f32,
     scale_factor: f32,
-}
+};
 
 struct TextInstance {
     rect: vec4<f32>,
@@ -18,7 +19,7 @@ struct TextInstance {
     color: vec4<f32>,
 }
 
-@group(0) @binding(0) var<uniform> uniforms: ScreenUniforms;
+@group(0) @binding(0) var<uniform> uniforms: Uniform;
 @group(0) @binding(1) var<storage, read> instances: array<TextInstance>;
 @group(0) @binding(2) var t_atlas: texture_2d<f32>;
 @group(0) @binding(3) var s_atlas: sampler;

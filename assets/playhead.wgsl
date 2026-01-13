@@ -1,5 +1,6 @@
 struct Uniform {
     screen_size: vec2<f32>,
+    bar_height: vec2<f32>,
     mouse_pos: vec2<f32>,
     playhead_x: f32,
     time: f32,
@@ -15,8 +16,6 @@ struct Particle {
 };
 
 struct PlayheadInfo {
-    panel_start: f32,
-    height: f32,
     volume: f32,
     bar_lerp: f32,
     play_lerp: f32,
@@ -24,8 +23,8 @@ struct PlayheadInfo {
 };
 
 @group(0) @binding(0) var<uniform> uniforms: Uniform;
-@group(0) @binding(1) var<storage, read> particles: array<Particle>;
-@group(0) @binding(2) var<uniform> playhead: PlayheadInfo;
+@group(0) @binding(1) var<uniform> playhead: PlayheadInfo;
+@group(0) @binding(2) var<storage, read> particles: array<Particle>;
 
 struct VertexOutput {
     @builtin(position) position: vec4<f32>,
@@ -90,8 +89,8 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
     // --- Playhead ---
     let scale = uniforms.scale_factor;
     let line_x = uniforms.playhead_x;
-    let height = playhead.height;
-    let top = playhead.panel_start;
+    let top = uniforms.bar_height.x;
+    let height = uniforms.bar_height.y;
     let mid_y = top + height * 0.5;
     let playhead_thickness = 3.5 * scale;
 
