@@ -296,7 +296,6 @@ impl LayerShellApp {
         };
 
         let scale = self.cantus.scale_factor;
-        let inv_scale = 1.0 / scale;
 
         let region = compositor.create_region(qhandle, ());
         {
@@ -308,10 +307,10 @@ impl LayerShellApp {
                 .chain(interaction.icon_hitboxes.iter().map(|hitbox| &hitbox.rect))
             {
                 region.add(
-                    (rect.x0 * inv_scale).round() as i32,
-                    (rect.y0 * inv_scale).round() as i32,
-                    ((rect.x1 - rect.x0) * inv_scale).round() as i32,
-                    ((rect.y1 - rect.y0) * inv_scale).round() as i32,
+                    (rect.x0 * scale).round() as i32,
+                    (rect.y0 * scale).round() as i32,
+                    ((rect.x1 - rect.x0) * scale).round() as i32,
+                    ((rect.y1 - rect.y0) * scale).round() as i32,
                 );
             }
         }
@@ -454,7 +453,7 @@ impl Dispatch<WlPointer, ()> for LayerShellApp {
         _qhandle: &QueueHandle<Self>,
     ) {
         let interaction = &mut state.cantus.interaction;
-        let scale = state.cantus.scale_factor;
+
         let surface_id = state.wl_surface.as_ref().map(wayland_client::Proxy::id);
         match event {
             wl_pointer::Event::Enter {
@@ -463,16 +462,14 @@ impl Dispatch<WlPointer, ()> for LayerShellApp {
                 surface_y,
                 ..
             } if surface_id == Some(surface.id()) => {
-                interaction.mouse_position =
-                    Point::new(surface_x as f32 * scale, surface_y as f32 * scale);
+                interaction.mouse_position = Point::new(surface_x as f32, surface_y as f32);
             }
             wl_pointer::Event::Motion {
                 surface_x,
                 surface_y,
                 ..
             } => {
-                interaction.mouse_position =
-                    Point::new(surface_x as f32 * scale, surface_y as f32 * scale);
+                interaction.mouse_position = Point::new(surface_x as f32, surface_y as f32);
                 interaction.handle_mouse_drag();
             }
             wl_pointer::Event::Leave { .. } => {
@@ -487,7 +484,7 @@ impl Dispatch<WlPointer, ()> for LayerShellApp {
             } => match (button, button_state) {
                 (0x110, WEnum::Value(wl_pointer::ButtonState::Pressed)) => interaction.left_click(),
                 (0x110, WEnum::Value(wl_pointer::ButtonState::Released)) => {
-                    interaction.left_click_released(scale);
+                    interaction.left_click_released();
                 }
                 (0x111, WEnum::Value(wl_pointer::ButtonState::Pressed)) if interaction.dragging => {
                     interaction.right_click();

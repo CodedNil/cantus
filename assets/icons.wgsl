@@ -29,7 +29,7 @@ struct VertexOutput {
 @vertex
 fn vs_main(@builtin(vertex_index) v_idx: u32, @builtin(instance_index) i_idx: u32) -> VertexOutput {
     let icon = icons[i_idx];
-    let render_size = 40.0 * uniforms.scale_factor;
+    let render_size = 30.0 * uniforms.scale_factor;
     let corner = vec2<f32>(f32(v_idx % 2u), f32(v_idx / 2u));
     let pixel_pos = icon.pos + (corner - 0.5) * render_size;
     let ndc = (pixel_pos / uniforms.screen_size) * 2.0 - 1.0;

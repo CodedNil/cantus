@@ -16,6 +16,9 @@ use wgpu::{
     TextureViewDimension, VertexState,
 };
 
+const FONT_SIZE: f32 = 12.0;
+const FONT_SIZE_SMALL: f32 = 10.5;
+
 pub struct Shaders {
     pub playhead_pipeline: RenderPipeline,
     pub playhead_bind_group_layout: BindGroupLayout,
@@ -357,10 +360,9 @@ impl CantusApp {
         self.render_state.last_update = now;
 
         self.background_pills.clear();
-        let scale = self.scale_factor;
-        let history_width = (CONFIG.history_width * scale).ceil();
-        let total_width = (CONFIG.width * scale - history_width).ceil();
-        let total_height = (CONFIG.height * scale).ceil();
+        let history_width = CONFIG.history_width;
+        let total_width = CONFIG.width - history_width;
+        let total_height = CONFIG.height;
         let timeline_duration_ms = CONFIG.timeline_future_minutes * 60_000.0;
         let timeline_start_ms = -CONFIG.timeline_past_minutes * 60_000.0;
 
@@ -482,13 +484,7 @@ impl CantusApp {
 
         // Render the tracks
         for track_render in &track_renders {
-            self.draw_track(
-                track_render,
-                total_height,
-                origin_x,
-                &playback_state.playlists,
-                image_map,
-            );
+            self.draw_track(track_render, origin_x, &playback_state.playlists, image_map);
         }
 
         // Draw the particles
@@ -496,7 +492,6 @@ impl CantusApp {
             dt,
             &playback_state.queue[cur_idx],
             origin_x,
-            total_height,
             avg_speed,
             playback_state.volume,
         );
@@ -505,7 +500,6 @@ impl CantusApp {
     fn draw_track(
         &mut self,
         track_render: &TrackRender,
-        height: f32,
         origin_x: f32,
         playlists: &HashMap<PlaylistId, CondensedPlaylist>,
         image_map: &HashMap<String, i32>,
@@ -516,11 +510,16 @@ impl CantusApp {
         let width = track_render.width;
         let track = track_render.track;
         let start_x = track_render.start_x;
-        let hitbox = Rect::new(start_x, PANEL_START, start_x + width, PANEL_START + height);
+        let hitbox = Rect::new(
+            start_x,
+            PANEL_START,
+            start_x + width,
+            PANEL_START + CONFIG.height,
+        );
 
         // Fade out based on width
-        let fade_alpha = if width < height {
-            ((width / height) * 1.5 - 0.5).max(0.0)
+        let fade_alpha = if width < CONFIG.height {
+            ((width / CONFIG.height) * 1.5 - 0.5).max(0.0)
         } else {
             1.0
         };
@@ -566,12 +565,12 @@ impl CantusApp {
             if c_track == track.id && (c_time > e_time || !track_render.is_current) {
                 [(start_x + c_pt.x), (PANEL_START + c_pt.y), c_time]
             } else {
-                [origin_x, (PANEL_START + height * 0.5), e_time]
+                [origin_x, (PANEL_START + CONFIG.height * 0.5), e_time]
             }
         };
 
         self.background_pills.push(BackgroundPill {
-            rect: [start_x, PANEL_START, width, height],
+            rect: [start_x, PANEL_START, width, CONFIG.height],
             alpha: fade_alpha,
             colors,
             expansion_effect,
@@ -580,10 +579,10 @@ impl CantusApp {
         });
 
         // --- TEXT ---
-        if !track_render.art_only && fade_alpha >= 1.0 && width > height {
+        if !track_render.art_only && fade_alpha >= 1.0 && width > CONFIG.height {
             // Get available width for text
             let text_start_left = start_x + 12.0;
-            let text_start_right = start_x + width - height - 8.0;
+            let text_start_right = start_x + width - CONFIG.height - 8.0;
             let available_width = (text_start_right - text_start_left).max(0.0);
             let text_alpha = (available_width / 100.0).min(1.0);
             let text_color = [0.94, 0.94, 0.94, text_alpha];
@@ -595,13 +594,12 @@ impl CantusApp {
                 .next()
                 .unwrap_or(&track.name)
                 .trim();
-            let font_size = 12.0;
-            let text_height = PANEL_START + (height * 0.2).floor();
-            let song_layout = self.layout_text(song_name, font_size);
+            let text_height = PANEL_START + (CONFIG.height * 0.2).floor();
+            let song_layout = self.layout_text(song_name, FONT_SIZE);
             let width_ratio = available_width / song_layout.width;
             if width_ratio <= 1.0 {
                 self.draw_text(
-                    &self.layout_text(song_name, font_size * width_ratio.max(0.8)),
+                    &self.layout_text(song_name, FONT_SIZE * width_ratio.max(0.8)),
                     text_start_left,
                     text_height,
                     0.0,
@@ -612,8 +610,7 @@ impl CantusApp {
             }
 
             // Get text layouts for bottom row of text
-            let font_size = 10.5;
-            let text_height = PANEL_START + (height * 0.52).floor();
+            let text_height = PANEL_START + (CONFIG.height * 0.52).floor();
 
             let artist_text = &track.artist.name;
             let time_text = if track_render.seconds_until_start >= 60.0 {
@@ -628,12 +625,12 @@ impl CantusApp {
             let dot_text = "\u{2004}•\u{2004}"; // Use thin spaces on either side of the bullet point
 
             let bottom_text = format!("{time_text}{dot_text}{artist_text}");
-            let mut layout = self.layout_text(&bottom_text, font_size);
+            let mut layout = self.layout_text(&bottom_text, FONT_SIZE_SMALL);
             let width_ratio = available_width / layout.width;
             if width_ratio <= 1.0 || !track_render.is_current {
                 if width_ratio < 1.0 {
-                    layout =
-                        self.layout_text(&bottom_text, font_size * width_ratio.clamp(0.8, 1.0));
+                    layout = self
+                        .layout_text(&bottom_text, FONT_SIZE_SMALL * width_ratio.clamp(0.8, 1.0));
                 }
                 self.draw_text(
                     &layout,
@@ -648,14 +645,14 @@ impl CantusApp {
                 );
             } else {
                 self.draw_text(
-                    &self.layout_text(&time_text, font_size),
+                    &self.layout_text(&time_text, FONT_SIZE_SMALL),
                     start_x + 12.0,
                     text_height,
                     0.0,
                     text_color,
                 );
                 self.draw_text(
-                    &self.layout_text(artist_text, font_size),
+                    &self.layout_text(artist_text, FONT_SIZE_SMALL),
                     text_start_right,
                     text_height,
                     1.0,
@@ -670,17 +667,14 @@ impl CantusApp {
                 && hitbox
                     .inflate(0.0, 20.0)
                     .contains(self.interaction.mouse_position);
-            self.draw_playlist_buttons(
-                track, hovered, playlists, width, height, start_x, image_map,
-            );
+            self.draw_playlist_buttons(track, hovered, playlists, width, start_x, image_map);
         }
     }
 
     /// Creates the text layout for a single-line string.
     fn layout_text(&self, text: &str, size: f32) -> TextLayout {
         let face = &self.font.face;
-        let psize = size * self.scale_factor;
-        let scale = psize / f32::from(face.units_per_em());
+        let scale = size / f32::from(face.units_per_em());
         let mut px = 0.0f32;
         let mut glyphs = Vec::with_capacity(text.len());
 
@@ -697,8 +691,8 @@ impl CantusApp {
         TextLayout {
             glyphs,
             width: px,
-            line_height: psize,
-            font_size: psize,
+            line_height: size,
+            font_size: size,
         }
     }
 
@@ -710,20 +704,15 @@ impl CantusApp {
 
         for (gid, x_off) in &l.glyphs {
             if let Some(info) = self.font.atlas.glyphs.get(gid) {
-                // Position relative to baseline
                 let gx = (start_x + x_off + (f32::from(info.metrics.x_min) * scale))
-                    / self.scale_factor
                     - ((ATLAS_RANGE + 1.0) / ATLAS_MSDF_SCALE * scale);
                 let gy = (start_y + ascender - (f32::from(info.metrics.y_max) * scale))
-                    / self.scale_factor
                     - ((ATLAS_RANGE + 1.0) / ATLAS_MSDF_SCALE * scale);
 
-                let gw = (info.uv_rect[2] * self.font.atlas.width as f32)
-                    * (scale / ATLAS_MSDF_SCALE)
-                    / self.scale_factor;
-                let gh = (info.uv_rect[3] * self.font.atlas.height as f32)
-                    * (scale / ATLAS_MSDF_SCALE)
-                    / self.scale_factor;
+                let gw =
+                    (info.uv_rect[2] * self.font.atlas.width as f32) * (scale / ATLAS_MSDF_SCALE);
+                let gh =
+                    (info.uv_rect[3] * self.font.atlas.height as f32) * (scale / ATLAS_MSDF_SCALE);
 
                 self.text_instances.push(TextInstance {
                     rect: [gx, gy, gw, gh],
@@ -739,7 +728,6 @@ impl CantusApp {
         dt: f32,
         track: &Track,
         playhead_x: f32,
-        height: f32,
         track_move_speed: f32,
         volume: Option<u8>,
     ) {
@@ -767,10 +755,7 @@ impl CantusApp {
         let time = START_TIME.elapsed().as_secs_f32();
 
         self.gpu_uniforms = ScreenUniforms {
-            screen_size: [
-                (CONFIG.width * self.scale_factor),
-                ((CONFIG.height + PANEL_START + PANEL_EXTENSION) * self.scale_factor),
-            ],
+            screen_size: [CONFIG.width, CONFIG.height + PANEL_START + PANEL_EXTENSION],
             playhead_x,
             time,
             scale_factor: self.scale_factor,
@@ -799,7 +784,8 @@ impl CantusApp {
         for particle in &mut self.particles.particles {
             // Emit a new particle
             if emit_count > 0 && time > particle.spawn_time + particle.duration {
-                particle.spawn_y = PANEL_START + height * lerpf32(fastrand::f32(), 0.1, 0.95);
+                particle.spawn_y =
+                    PANEL_START + CONFIG.height * lerpf32(fastrand::f32(), 0.1, 0.95);
                 particle.spawn_vel = [
                     fastrand::usize(SPARK_VELOCITY_X) as f32 * self.scale_factor * horizontal_bias,
                     fastrand::usize(SPARK_VELOCITY_Y) as f32 * -self.scale_factor,
@@ -814,13 +800,13 @@ impl CantusApp {
 
         // Playhead
         let interaction = &mut self.interaction;
-        let playbutton_hsize = height * 0.25;
+        let playbutton_hsize = CONFIG.height * 0.25;
         let speed = 2.2 * dt;
         interaction.play_hitbox = Rect::new(
             playhead_x - playbutton_hsize,
             PANEL_START,
             playhead_x + playbutton_hsize,
-            PANEL_START + height,
+            PANEL_START + CONFIG.height,
         );
         // Get playhead states
         let playhead_hovered = interaction.play_hitbox.contains(interaction.mouse_position);
@@ -863,7 +849,7 @@ impl CantusApp {
 
         self.playhead_info = PlayheadUniforms {
             panel_start: PANEL_START,
-            height,
+            height: CONFIG.height,
             volume: f32::from(volume.unwrap_or(100)) / 100.0,
             bar_lerp: interaction.playhead_bar,
             play_lerp: interaction.playhead_play,

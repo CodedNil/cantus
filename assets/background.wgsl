@@ -50,7 +50,7 @@ fn sd_squircle(p: vec2<f32>, b: vec2<f32>, r: f32) -> f32 {
 @fragment
 fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
     let pill = pills[in.instance_index];
-    let rounding = 28.0 * uniforms.scale_factor;
+    let rounding = 22.0 * uniforms.scale_factor;
 
     // Shape Masking
     let d = sd_squircle((in.uv - 0.5) * pill.rect.zw, pill.rect.zw * 0.5, rounding);

@@ -81,9 +81,9 @@ impl InteractionState {
         PLAYBACK_STATE.write().interaction = false;
     }
 
-    pub fn left_click_released(&mut self, scale_factor: f32) {
+    pub fn left_click_released(&mut self) {
         if !self.dragging && self.mouse_down {
-            self.handle_click(scale_factor);
+            self.handle_click();
         }
         if let Some((track_id, position)) = self.drag_track.take() {
             spawn(move || {
@@ -103,7 +103,7 @@ impl InteractionState {
     }
 
     /// Handle click events.
-    fn handle_click(&mut self, scale_factor: f32) {
+    fn handle_click(&mut self) {
         let mouse_pos = self.mouse_position;
         let (playing, interaction) = {
             let state = PLAYBACK_STATE.read();
@@ -165,7 +165,7 @@ impl InteractionState {
             );
 
             // If click is near the very left, reset to the start of the song, else seek to clicked position
-            let position = if mouse_pos.x < (CONFIG.history_width + 20.0) * scale_factor {
+            let position = if mouse_pos.x < CONFIG.history_width + 20.0 {
                 0.0
             } else {
                 (mouse_pos.x - track_range_a) / (track_range_b - track_range_a)
@@ -241,7 +241,6 @@ impl CantusApp {
         hovered: bool,
         playlists: &HashMap<PlaylistId, CondensedPlaylist>,
         width: f32,
-        height: f32,
         pos_x: f32,
         image_map: &HashMap<String, i32>,
     ) {
@@ -276,8 +275,8 @@ impl CantusApp {
         );
 
         // Fade out and fit based on size
-        let icon_size = 16.0 * self.scale_factor;
-        let icon_spacing = 2.0 * self.scale_factor;
+        let icon_size = 16.0;
+        let icon_spacing = 2.0;
         let mouse_pos = self.interaction.mouse_position;
 
         if width < icon_size * icon_entries.len() as f32 {
@@ -303,7 +302,7 @@ impl CantusApp {
             ((width - needed_width) / (needed_width * 0.25)).clamp(0.0, 1.0)
         };
         let center_x = pos_x + width * 0.5;
-        let center_y = PANEL_START + height * 0.975;
+        let center_y = PANEL_START + CONFIG.height * 0.975;
 
         // Count only the standard icons for spacing
         let half_icons = icon_entries

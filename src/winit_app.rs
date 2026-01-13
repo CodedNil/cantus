@@ -98,7 +98,9 @@ impl ApplicationHandler for WinitApp {
             )
             .expect("failed to create window");
 
-        self.cantus.scale_factor = window.scale_factor();
+        let scale_factor = window.scale_factor();
+        self.cantus.scale_factor = scale_factor as f32;
+
         if window
             .request_inner_size(PhysicalSize::new(
                 (CONFIG.width * self.cantus.scale_factor) as u32,
@@ -131,7 +133,7 @@ impl ApplicationHandler for WinitApp {
                 self.cantus.render_surface = None;
             }
             WindowEvent::ScaleFactorChanged { scale_factor, .. } => {
-                self.cantus.scale_factor = scale_factor;
+                self.cantus.scale_factor = scale_factor as f32;
                 self.cantus.render_surface = None;
             }
             WindowEvent::RedrawRequested => {
@@ -142,7 +144,11 @@ impl ApplicationHandler for WinitApp {
                 self.window().request_redraw();
             }
             WindowEvent::CursorMoved { position, .. } => {
-                self.cantus.interaction.mouse_position = Point::new(position.x, position.y);
+                let scale_factor = self.cantus.scale_factor;
+                self.cantus.interaction.mouse_position = Point::new(
+                    position.x as f32 / scale_factor,
+                    position.y as f32 / scale_factor,
+                );
                 self.cantus.interaction.handle_mouse_drag();
             }
             WindowEvent::CursorLeft { .. } => {
@@ -156,9 +162,7 @@ impl ApplicationHandler for WinitApp {
                         self.cantus.interaction.left_click();
                     }
                     ElementState::Released => {
-                        self.cantus
-                            .interaction
-                            .left_click_released(self.cantus.scale_factor);
+                        self.cantus.interaction.left_click_released();
                     }
                 },
                 MouseButton::Right => match state {

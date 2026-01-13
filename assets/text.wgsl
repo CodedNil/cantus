@@ -37,7 +37,7 @@ fn vs_main(
     );
 
     let p = pos[v_idx];
-    let world_pos = (instance.rect.xy + p * instance.rect.zw) * uniforms.scale_factor;
+    let world_pos = instance.rect.xy + p * instance.rect.zw;
     let normalized_pos = (world_pos / uniforms.screen_size) * 2.0 - 1.0;
 
     var out: VertexOutput;
