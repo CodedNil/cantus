@@ -2,6 +2,7 @@ use fdsm::{generate::generate_msdf, shape::Shape, transform::Transform};
 use image::ImageBuffer;
 use nalgebra::Affine2;
 use std::collections::HashMap;
+use tracing::error;
 use ttf_parser::{Face, GlyphId, Rect};
 
 pub const ATLAS_MSDF_SCALE: f32 = 0.08;
@@ -29,17 +30,20 @@ pub struct MSDFAtlas {
 
 impl MSDFAtlas {
     pub fn new(face: &Face, _size: u32) -> Self {
-        let (width, height) = (1024, 1024);
         let mut atlas = Self {
-            texture_data: vec![0; (1024 * 1024 * 4) as usize],
-            width,
-            height,
+            texture_data: vec![0; (2048 * 2048 * 4) as usize],
+            width: 2048,
+            height: 2048,
             glyphs: HashMap::new(),
         };
 
         let (mut x, mut y, mut row_h) = (2, 2, 0);
 
-        for c in (32u8..127).map(|b| b as char).chain(std::iter::once('•')) {
+        for c in (32u8..127)
+            .map(|b| b as char)
+            .chain((160u8..=255).map(|b| b as char))
+            .chain("•".chars())
+        {
             if let Some(gid) = face.glyph_index(c)
                 && let Some((info, gh)) = atlas.create_glyph(face, gid, &mut x, &mut y, &mut row_h)
             {
@@ -71,6 +75,7 @@ impl MSDFAtlas {
             *row_h = 0;
         }
         if *y + gh + 2 > self.height {
+            error!("Atlas full! Could not fit glyph ID {gid:?}");
             return None;
         }
 
