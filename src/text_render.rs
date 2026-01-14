@@ -31,9 +31,9 @@ pub struct MSDFAtlas {
 impl MSDFAtlas {
     pub fn new(face: &Face, _size: u32) -> Self {
         let mut atlas = Self {
-            texture_data: vec![0; (2048 * 2048 * 4) as usize],
+            texture_data: vec![0; (2048 * 1024 * 4) as usize],
             width: 2048,
-            height: 2048,
+            height: 1024,
             glyphs: HashMap::new(),
         };
 

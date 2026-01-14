@@ -1,10 +1,12 @@
 use crate::interaction::InteractionState;
+use crate::pipelines::{IMAGE_SIZE, MAX_TEXTURE_LAYERS};
 use crate::render::{
     BackgroundPill, FontEngine, IconInstance, Particle, PlayheadUniforms, RenderState,
     ScreenUniforms,
 };
+use crate::spotify::IMAGES_CACHE;
 use crate::text_render::TextInstance;
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 use wgpu::{
     BindGroup, Buffer, Color, CommandEncoderDescriptor, Device, Instance, LoadOp, Operations,
     Queue, RenderPassColorAttachment, RenderPassDescriptor, RenderPipeline, StoreOp, Surface,
@@ -53,9 +55,7 @@ struct GpuResources {
 
     // Image Management
     texture_array: Texture,
-    last_images_set: HashSet<String>,
-    url_to_image_index: HashMap<String, i32>,
-    requested_textures: HashSet<String>,
+    url_to_image_index: HashMap<String, (i32, bool)>, // (index, used_this_frame)
 }
 
 fn main() {
@@ -124,34 +124,21 @@ impl CantusApp {
         self.icon_pills.clear();
         self.text_instances.clear();
 
+        // Reset image usage
         if let Some(gpu) = self.gpu_resources.as_mut() {
-            gpu.requested_textures.clear();
+            for (_, used) in gpu.url_to_image_index.values_mut() {
+                *used = false;
+            }
         }
 
-        let current_indices = self
-            .gpu_resources
-            .as_ref()
-            .map(|g| g.url_to_image_index.clone())
-            .unwrap_or_default();
-        self.create_scene(&current_indices);
+        self.create_scene();
 
-        if self
-            .gpu_resources
-            .as_mut()
-            .is_some_and(GpuResources::update_textures)
-        {
-            let indices = self
-                .gpu_resources
-                .as_ref()
-                .unwrap()
-                .url_to_image_index
-                .clone();
-            self.background_pills.clear();
-            self.icon_pills.clear();
-            self.text_instances.clear();
-            self.create_scene(&indices);
+        // Prune unused images
+        if let Some(gpu) = self.gpu_resources.as_mut() {
+            gpu.url_to_image_index.retain(|_, (_, used)| *used);
         }
 
+        // Write the buffers
         let gpu = self.gpu_resources.as_mut().unwrap();
         gpu.queue.write_buffer(
             &gpu.uniform_buffer,
@@ -203,67 +190,101 @@ impl CantusApp {
             .device
             .create_command_encoder(&CommandEncoderDescriptor::default());
 
-        let passes = [
-            (
-                "Background",
-                &gpu.background_pipeline,
-                &gpu.background_bind_group,
-                self.background_pills.len() as u32,
-                LoadOp::Clear(Color::TRANSPARENT),
-            ),
-            (
-                "Text",
-                &gpu.text_pipeline,
-                &gpu.text_bind_group,
-                self.text_instances.len() as u32,
-                LoadOp::Load,
-            ),
-            (
-                "Icon",
-                &gpu.icon_pipeline,
-                &gpu.icon_bind_group,
-                self.icon_pills.len() as u32,
-                LoadOp::Load,
-            ),
-            (
-                "Play",
-                &gpu.playhead_pipeline,
-                &gpu.playhead_bind_group,
-                1,
-                LoadOp::Load,
-            ),
-        ];
-
-        for (label, pipe, bg, count, load) in passes {
-            if count == 0 {
-                continue;
-            }
+        {
             let mut rpass = encoder.begin_render_pass(&RenderPassDescriptor {
-                label: Some(label),
+                label: Some("Main Render Pass"),
                 color_attachments: &[Some(RenderPassColorAttachment {
                     view: &surface_view,
                     resolve_target: None,
                     ops: Operations {
-                        load,
+                        load: LoadOp::Clear(Color::TRANSPARENT),
                         store: StoreOp::Store,
                     },
                     depth_slice: None,
                 })],
                 ..Default::default()
             });
-            rpass.set_pipeline(pipe);
-            rpass.set_bind_group(0, bg, &[]);
-            rpass.draw(0..4, 0..count);
+
+            let draws = [
+                (
+                    &gpu.background_pipeline,
+                    &gpu.background_bind_group,
+                    self.background_pills.len() as u32,
+                ),
+                (
+                    &gpu.text_pipeline,
+                    &gpu.text_bind_group,
+                    self.text_instances.len() as u32,
+                ),
+                (
+                    &gpu.icon_pipeline,
+                    &gpu.icon_bind_group,
+                    self.icon_pills.len() as u32,
+                ),
+                (&gpu.playhead_pipeline, &gpu.playhead_bind_group, 1),
+            ];
+
+            for (pipe, bg, count) in draws {
+                if count > 0 {
+                    rpass.set_pipeline(pipe);
+                    rpass.set_bind_group(0, bg, &[]);
+                    rpass.draw(0..4, 0..count);
+                }
+            }
         }
 
         gpu.queue.submit([encoder.finish()]);
         surface_texture.present();
     }
 
-    fn get_image_index(&mut self, url: &str, image_map: &HashMap<String, i32>) -> i32 {
-        if let Some(gpu) = self.gpu_resources.as_mut() {
-            gpu.requested_textures.insert(url.to_owned());
+    fn get_image_index(&mut self, url: &str) -> i32 {
+        let Some(gpu) = self.gpu_resources.as_mut() else {
+            return -1;
+        };
+
+        if let Some(entry) = gpu.url_to_image_index.get_mut(url) {
+            entry.1 = true;
+            return entry.0;
         }
-        image_map.get(url).copied().unwrap_or(-1)
+
+        if let Some(img_ref) = IMAGES_CACHE.get(url)
+            && let Some(image) = img_ref.as_ref()
+        {
+            let mut used_slots = vec![false; MAX_TEXTURE_LAYERS as usize];
+            for (idx, _) in gpu.url_to_image_index.values() {
+                used_slots[*idx as usize] = true;
+            }
+
+            if let Some(slot) = used_slots.iter().position(|&used| !used) {
+                gpu.queue.write_texture(
+                    wgpu::TexelCopyTextureInfo {
+                        texture: &gpu.texture_array,
+                        mip_level: 0,
+                        aspect: wgpu::TextureAspect::All,
+                        origin: wgpu::Origin3d {
+                            x: 0,
+                            y: 0,
+                            z: slot as u32,
+                        },
+                    },
+                    image.as_raw(),
+                    wgpu::TexelCopyBufferLayout {
+                        offset: 0,
+                        bytes_per_row: Some(4 * IMAGE_SIZE),
+                        rows_per_image: Some(IMAGE_SIZE),
+                    },
+                    wgpu::Extent3d {
+                        width: IMAGE_SIZE,
+                        height: IMAGE_SIZE,
+                        depth_or_array_layers: 1,
+                    },
+                );
+
+                gpu.url_to_image_index
+                    .insert(url.to_owned(), (slot as i32, true));
+                return slot as i32;
+            }
+        }
+        -1
     }
 }

@@ -162,12 +162,11 @@ pub struct TrackRender<'a> {
     width: f32,
     hitbox_range: (f32, f32),
     art_only: bool,
-    image_index: i32,
 }
 
 /// Build the scene for rendering.
 impl CantusApp {
-    pub fn create_scene(&mut self, image_map: &HashMap<String, i32>) {
+    pub fn create_scene(&mut self) {
         let now = Instant::now();
         let dt = now
             .duration_since(self.render_state.last_update)
@@ -268,7 +267,6 @@ impl CantusApp {
                     (end - timeline_start_ms) * px_per_ms + history_width,
                 ),
                 art_only: false,
-                image_index: self.get_image_index(&track.album.image, image_map),
             });
         }
 
@@ -301,7 +299,10 @@ impl CantusApp {
 
         // Render the tracks
         for track_render in &track_renders {
-            self.draw_track(track_render, origin_x, &playback_state.playlists, image_map);
+            if track_render.width <= 0.0 || track_render.start_x + track_render.width <= 0.0 {
+                continue;
+            }
+            self.draw_track(track_render, origin_x, &playback_state.playlists);
         }
 
         // Draw the particles
@@ -319,11 +320,7 @@ impl CantusApp {
         track_render: &TrackRender,
         origin_x: f32,
         playlists: &HashMap<PlaylistId, CondensedPlaylist>,
-        image_map: &HashMap<String, i32>,
     ) {
-        if track_render.width <= 0.0 {
-            return;
-        }
         let width = track_render.width;
         let track = track_render.track;
         let start_x = track_render.start_x;
@@ -355,6 +352,7 @@ impl CantusApp {
             1.0
         };
 
+        let image_index = self.get_image_index(&track_render.track.album.image);
         self.background_pills.push(BackgroundPill {
             rect: [start_x, width],
             colors: ALBUM_PALETTE_CACHE
@@ -362,7 +360,7 @@ impl CantusApp {
                 .and_then(|data_ref| data_ref.as_ref().copied())
                 .unwrap_or_default(),
             alpha: fade_alpha,
-            image_index: track_render.image_index,
+            image_index,
         });
 
         // --- TEXT ---
@@ -464,7 +462,7 @@ impl CantusApp {
             let hovered = !self.interaction.dragging
                 && self.interaction.mouse_position.x >= hitbox.x0
                 && self.interaction.mouse_position.x <= hitbox.x1;
-            self.draw_playlist_buttons(track, hovered, playlists, width, start_x, image_map);
+            self.draw_playlist_buttons(track, hovered, playlists, width, start_x);
         }
     }
 

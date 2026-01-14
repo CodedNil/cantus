@@ -237,7 +237,6 @@ impl CantusApp {
         playlists: &HashMap<PlaylistId, CondensedPlaylist>,
         width: f32,
         pos_x: f32,
-        image_map: &HashMap<String, i32>,
     ) {
         let (track_rating_index, mut icon_entries) = if CONFIG.ratings_enabled {
             let index = playlists
@@ -384,7 +383,7 @@ impl CantusApp {
                     playlist,
                     contained,
                 } => {
-                    instance.image_index = self.get_image_index(&playlist.image_url, image_map);
+                    instance.image_index = self.get_image_index(&playlist.image_url);
                     instance.param = if !contained && !is_hovered { 0.7 } else { 0.0 };
                 }
             }

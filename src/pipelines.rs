@@ -1,24 +1,22 @@
 use crate::render::{BackgroundPill, IconInstance, Particle, PlayheadUniforms, ScreenUniforms};
-use crate::spotify::IMAGES_CACHE;
 use crate::text_render::TextInstance;
 use crate::{CantusApp, GpuResources};
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 use wgpu::{
     BindGroupDescriptor, BindGroupEntry, BindGroupLayout, BindGroupLayoutDescriptor,
     BindGroupLayoutEntry, BindingResource, BindingType, BlendState, BufferBindingType,
     BufferDescriptor, BufferUsages, ColorTargetState, ColorWrites, CompositeAlphaMode,
     DeviceDescriptor, ExperimentalFeatures, Extent3d, Features, FilterMode, FragmentState, Limits,
-    MemoryHints, MultisampleState, Origin3d, PipelineCompilationOptions, PipelineLayoutDescriptor,
+    MemoryHints, MultisampleState, PipelineCompilationOptions, PipelineLayoutDescriptor,
     PowerPreference, PresentMode, PrimitiveState, PrimitiveTopology, RenderPipelineDescriptor,
     RequestAdapterOptions, SamplerBindingType, SamplerDescriptor, ShaderModule,
     ShaderModuleDescriptor, ShaderSource, ShaderStages, Surface, SurfaceConfiguration,
-    TexelCopyBufferLayout, TexelCopyTextureInfo, TextureAspect, TextureDescriptor,
-    TextureDimension, TextureFormat, TextureSampleType, TextureUsages, TextureViewDescriptor,
-    TextureViewDimension, Trace, VertexState,
+    TexelCopyBufferLayout, TextureDescriptor, TextureDimension, TextureFormat, TextureSampleType,
+    TextureUsages, TextureViewDescriptor, TextureViewDimension, Trace, VertexState,
 };
 
-const MAX_TEXTURE_LAYERS: u32 = 48;
-const IMAGE_SIZE: u32 = 64;
+pub const MAX_TEXTURE_LAYERS: u32 = 48;
+pub const IMAGE_SIZE: u32 = 64;
 
 impl CantusApp {
     pub fn configure_render_surface(&mut self, surface: Surface<'static>, width: u32, height: u32) {
@@ -28,6 +26,9 @@ impl CantusApp {
             force_fallback_adapter: false,
         }))
         .expect("No adapter");
+
+        let info = adapter.get_info();
+        tracing::info!("Using adapter: {} ({:?})", info.name, info.device_type);
 
         let (device, queue) = pollster::block_on(adapter.request_device(&DeviceDescriptor {
             label: None,
@@ -209,7 +210,7 @@ impl CantusApp {
         );
         let text_storage_buffer = mk_buf(
             "Text",
-            (std::mem::size_of::<TextInstance>() * 512) as u64,
+            (std::mem::size_of::<TextInstance>() * 1024) as u64,
             BufferUsages::STORAGE,
         );
 
@@ -377,71 +378,7 @@ impl CantusApp {
             icon_bind_group,
             text_bind_group,
             texture_array,
-            last_images_set: HashSet::new(),
             url_to_image_index: HashMap::new(),
-            requested_textures: HashSet::new(),
         });
-    }
-}
-
-impl GpuResources {
-    pub fn update_textures(&mut self) -> bool {
-        let available: HashSet<_> = self
-            .requested_textures
-            .iter()
-            .filter(|u| IMAGES_CACHE.contains_key(*u))
-            .cloned()
-            .collect();
-        if self.last_images_set == available || available.is_empty() {
-            return false;
-        }
-
-        let mut sorted: Vec<String> = available.iter().cloned().collect();
-        sorted.sort();
-
-        let mut idx_map = HashMap::new();
-        let mut count = 0;
-        for url in &sorted {
-            let image_opt = IMAGES_CACHE.get(url);
-            if let Some(img_ref) = image_opt {
-                let Some(image) = img_ref.as_ref() else {
-                    continue;
-                };
-                if count >= MAX_TEXTURE_LAYERS {
-                    break;
-                }
-                self.queue.write_texture(
-                    TexelCopyTextureInfo {
-                        texture: &self.texture_array,
-                        mip_level: 0,
-                        aspect: TextureAspect::All,
-                        origin: Origin3d {
-                            x: 0,
-                            y: 0,
-                            z: count,
-                        },
-                    },
-                    image.as_raw(),
-                    TexelCopyBufferLayout {
-                        offset: 0,
-                        bytes_per_row: Some(4 * IMAGE_SIZE),
-                        rows_per_image: Some(IMAGE_SIZE),
-                    },
-                    Extent3d {
-                        width: IMAGE_SIZE,
-                        height: IMAGE_SIZE,
-                        depth_or_array_layers: 1,
-                    },
-                );
-                idx_map.insert(url.clone(), count as i32);
-                count += 1;
-            }
-        }
-        if count == 0 {
-            return false;
-        }
-        self.url_to_image_index = idx_map;
-        self.last_images_set = available;
-        true
     }
 }
