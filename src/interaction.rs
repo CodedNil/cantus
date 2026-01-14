@@ -24,7 +24,6 @@ pub struct IconHitbox {
 
 pub struct InteractionState {
     pub mouse_position: Point,
-    #[cfg(feature = "wayland")]
     pub last_hitbox_update: Instant,
     pub play_hitbox: Rect,
     pub track_hitboxes: Vec<(TrackId, Rect, (f32, f32))>,
@@ -47,7 +46,6 @@ impl Default for InteractionState {
     fn default() -> Self {
         Self {
             mouse_position: Point::default(),
-            #[cfg(feature = "wayland")]
             last_hitbox_update: Instant::now(),
             play_hitbox: Rect::default(),
             track_hitboxes: Vec::new(),

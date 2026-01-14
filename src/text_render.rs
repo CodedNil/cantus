@@ -1,12 +1,12 @@
 use fdsm::{generate::generate_msdf, shape::Shape, transform::Transform};
+use fdsm_ttf_parser::load_shape_from_face;
 use image::ImageBuffer;
-use nalgebra::Affine2;
+use nalgebra::{Affine2, Matrix3};
 use std::collections::HashMap;
 use tracing::error;
 use ttf_parser::{Face, GlyphId, Rect};
 
-pub const ATLAS_MSDF_SCALE: f32 = 0.08;
-pub const ATLAS_RANGE: f32 = 8.0;
+pub const ATLAS_SCALE: f32 = 0.08;
 
 #[repr(C)]
 #[derive(Copy, Clone, Debug, Default, bytemuck::Pod, bytemuck::Zeroable)]
@@ -62,12 +62,10 @@ impl MSDFAtlas {
         y: &mut u32,
         row_h: &mut u32,
     ) -> Option<(GlyphInfo, u32)> {
-        let shape = fdsm_ttf_parser::load_shape_from_face(face, gid)?;
         let bbox = face.glyph_bounding_box(gid)?;
 
-        let (range, scale) = (ATLAS_RANGE, ATLAS_MSDF_SCALE);
-        let gw = ((f32::from(bbox.width()) * scale) + (range * 2.0) + 3.0) as u32;
-        let gh = ((f32::from(bbox.height()) * scale) + (range * 2.0) + 3.0) as u32;
+        let gw = (f32::from(bbox.width()) * ATLAS_SCALE).ceil() as u32 + 2;
+        let gh = (f32::from(bbox.height()) * ATLAS_SCALE).ceil() as u32 + 2;
 
         if *x + gw + 2 > self.width {
             *x = 2;
@@ -79,31 +77,35 @@ impl MSDFAtlas {
             return None;
         }
 
-        let mut msdf_img = ImageBuffer::<image::Rgb<f32>, Vec<f32>>::new(gw, gh);
+        let shape = load_shape_from_face(face, gid)?;
         let mut shape = Shape::edge_coloring_simple(shape, 1.0, 0);
+        let mut msdf_img = ImageBuffer::<image::Rgb<f32>, Vec<f32>>::new(gw, gh);
 
-        let tx = (f64::from(-bbox.x_min) * f64::from(scale)) + f64::from(range) + 1.5;
-        let ty = (f64::from(-bbox.y_min) * f64::from(scale)) + f64::from(range) + 1.5;
-        shape.transform(&Affine2::from_matrix_unchecked(nalgebra::Matrix3::new(
-            f64::from(scale),
+        let tx = f64::from(-bbox.x_min) * f64::from(ATLAS_SCALE) + 1.0;
+        let ty = f64::from(-bbox.y_min) * f64::from(ATLAS_SCALE) + 1.0;
+
+        shape.transform(&Affine2::from_matrix_unchecked(Matrix3::new(
+            f64::from(ATLAS_SCALE),
             0.0,
             tx,
             0.0,
-            f64::from(scale),
+            f64::from(ATLAS_SCALE),
             ty,
             0.0,
             0.0,
             1.0,
         )));
 
-        generate_msdf(&shape.prepare(), f64::from(range), &mut msdf_img);
+        generate_msdf(&shape.prepare(), 2.0, &mut msdf_img);
 
         for (gx, gy, pixel) in msdf_img.enumerate_pixels() {
             let idx = ((*y + gy) * self.width + (*x + gx)) as usize * 4;
-            let p0 = (pixel[0] * 255.0) as u8;
-            let p1 = (pixel[1] * 255.0) as u8;
-            let p2 = (pixel[2] * 255.0) as u8;
-            self.texture_data[idx..idx + 4].copy_from_slice(&[p0, p1, p2, 255]);
+            self.texture_data[idx..idx + 4].copy_from_slice(&[
+                (pixel[0] * 255.0) as u8,
+                (pixel[1] * 255.0) as u8,
+                (pixel[2] * 255.0) as u8,
+                255,
+            ]);
         }
 
         let info = GlyphInfo {

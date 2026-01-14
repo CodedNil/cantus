@@ -2,7 +2,7 @@ use crate::{
     CantusApp, PANEL_EXTENSION, PANEL_START,
     config::CONFIG,
     spotify::{ALBUM_PALETTE_CACHE, CondensedPlaylist, PLAYBACK_STATE, PlaylistId, Track},
-    text_render::{ATLAS_MSDF_SCALE, ATLAS_RANGE, MSDFAtlas, TextInstance},
+    text_render::{ATLAS_SCALE, MSDFAtlas, TextInstance},
 };
 use bytemuck::{Pod, Zeroable};
 use std::{collections::HashMap, ops::Range, sync::LazyLock, time::Instant};
@@ -405,9 +405,17 @@ impl CantusApp {
                     text_height,
                     0.0,
                     text_color,
+                    available_width,
                 );
             } else {
-                self.draw_text(&song_layout, text_start_right, text_height, 1.0, text_color);
+                self.draw_text(
+                    &song_layout,
+                    text_start_right,
+                    text_height,
+                    1.0,
+                    text_color,
+                    available_width,
+                );
             }
 
             // Get text layouts for bottom row of text
@@ -443,6 +451,7 @@ impl CantusApp {
                     text_height,
                     if width_ratio >= 1.0 { 1.0 } else { 0.0 },
                     text_color,
+                    available_width,
                 );
             } else {
                 self.draw_text(
@@ -451,6 +460,7 @@ impl CantusApp {
                     text_height,
                     0.0,
                     text_color,
+                    available_width,
                 );
                 self.draw_text(
                     &self.layout_text(artist_text, FONT_SIZE_SMALL),
@@ -458,6 +468,7 @@ impl CantusApp {
                     text_height,
                     1.0,
                     text_color,
+                    available_width,
                 );
             }
         }
@@ -496,27 +507,46 @@ impl CantusApp {
         }
     }
 
-    fn draw_text(&mut self, l: &TextLayout, px: f32, py: f32, x_align: f32, color: [f32; 4]) {
+    fn draw_text(
+        &mut self,
+        l: &TextLayout,
+        px: f32,
+        py: f32,
+        x_align: f32,
+        color: [f32; 4],
+        max_w: f32,
+    ) {
         let start_x = px - (l.width * x_align);
-        let start_y = py - l.line_height * 0.5;
         let scale = l.font_size / f32::from(self.font.face.units_per_em());
-        let ascender = f32::from(self.font.face.ascender()) * scale;
+        let y_base = py + (l.line_height * 0.5) - (f32::from(self.font.face.ascender()) * scale);
 
         for (gid, x_off) in &l.glyphs {
             if let Some(info) = self.font.atlas.glyphs.get(gid) {
-                let gx = (start_x + x_off + (f32::from(info.metrics.x_min) * scale))
-                    - ((ATLAS_RANGE + 1.0) / ATLAS_MSDF_SCALE * scale);
-                let gy = (start_y + ascender - (f32::from(info.metrics.y_max) * scale))
-                    - ((ATLAS_RANGE + 1.0) / ATLAS_MSDF_SCALE * scale);
+                // Full dimensions in screen pixels
+                let world_w =
+                    (info.uv_rect[2] * self.font.atlas.width as f32) * (scale / ATLAS_SCALE);
+                let gh = (info.uv_rect[3] * self.font.atlas.height as f32) * (scale / ATLAS_SCALE);
 
-                let gw =
-                    (info.uv_rect[2] * self.font.atlas.width as f32) * (scale / ATLAS_MSDF_SCALE);
-                let gh =
-                    (info.uv_rect[3] * self.font.atlas.height as f32) * (scale / ATLAS_MSDF_SCALE);
+                // Exact screen position
+                let gx = start_x + x_off + (f32::from(info.metrics.x_min) * scale)
+                    - (1.0 * scale / ATLAS_SCALE);
+                let gy = y_base
+                    + (f32::from(self.font.face.ascender() - info.metrics.y_max) * scale)
+                    - (1.0 * scale / ATLAS_SCALE);
+
+                // Calculate clipping based on absolute screen coordinates (right edge)
+                let right_edge = start_x + max_w;
+                let visible_w = (right_edge - gx).clamp(0.0, world_w);
+
+                if visible_w <= 0.0 {
+                    continue;
+                }
+
+                let uv_width = info.uv_rect[2] * (visible_w / world_w);
 
                 self.text_instances.push(TextInstance {
-                    rect: [gx, gy, gw, gh],
-                    uv_rect: info.uv_rect,
+                    rect: [gx, gy, visible_w, gh],
+                    uv_rect: [info.uv_rect[0], info.uv_rect[1], uv_width, info.uv_rect[3]],
                     color,
                 });
             }

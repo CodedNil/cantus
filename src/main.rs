@@ -11,23 +11,13 @@ use wgpu::{
     SurfaceConfiguration, Texture, TextureViewDescriptor,
 };
 
-#[cfg(not(any(feature = "wayland", feature = "winit")))]
-compile_error!("Enable at least one of the `wayland` or `winit` features.");
-#[cfg(all(feature = "wayland", feature = "winit"))]
-compile_error!("`wayland` and `winit` features cannot be enabled at the same time.");
-
 mod config;
 mod interaction;
+mod layer_shell;
 mod pipelines;
 mod render;
 mod spotify;
 mod text_render;
-
-#[cfg(feature = "wayland")]
-mod layer_shell;
-
-#[cfg(feature = "winit")]
-mod winit_app;
 
 #[global_allocator]
 static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
@@ -78,11 +68,7 @@ fn main() {
 
     spotify::init();
 
-    #[cfg(feature = "wayland")]
     layer_shell::run();
-
-    #[cfg(feature = "winit")]
-    winit_app::run();
 }
 
 struct CantusApp {

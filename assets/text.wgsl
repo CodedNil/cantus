@@ -6,13 +6,6 @@ struct VertexOutput {
 
 struct Uniform {
     screen_size: vec2<f32>,
-    bar_height: vec2<f32>,
-    mouse_pos: vec2<f32>,
-    playhead_x: f32,
-    time: f32,
-    expansion_xy: vec2<f32>,
-    expansion_time: f32,
-    scale_factor: f32,
 };
 
 struct TextInstance {
@@ -32,20 +25,16 @@ fn vs_main(
     @builtin(instance_index) i_idx: u32,
 ) -> VertexOutput {
     let instance = instances[i_idx];
-    let pos = array<vec2<f32>, 4>(
-        vec2<f32>(0.0, 0.0),
-        vec2<f32>(1.0, 0.0),
-        vec2<f32>(0.0, 1.0),
-        vec2<f32>(1.0, 1.0),
-    );
 
-    let p = pos[v_idx];
+    let p = vec2<f32>(f32(v_idx % 2u), f32(v_idx / 2u));
+
     let world_pos = instance.rect.xy + p * instance.rect.zw;
-    let normalized_pos = (world_pos / uniforms.screen_size) * 2.0 - 1.0;
+    let normalized = (world_pos / uniforms.screen_size) * 2.0 - 1.0;
 
     var out: VertexOutput;
-    out.position = vec4<f32>(normalized_pos.x, -normalized_pos.y, 0.0, 1.0);
+    out.position = vec4<f32>(normalized.x, -normalized.y, 0.0, 1.0);
 
+    // Sample exactly in line with the quad geometry
     out.uv = instance.uv_rect.xy + vec2<f32>(p.x, 1.0 - p.y) * instance.uv_rect.zw;
     out.color = instance.color;
     return out;
@@ -53,13 +42,8 @@ fn vs_main(
 
 @fragment
 fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
-    let sample = textureSampleLevel(t_atlas, s_atlas, in.uv, 0.0).rgb;
-    let sig_dist = median(sample.r, sample.g, sample.b) - 0.5;
-
-    let opacity = clamp(sig_dist / max(fwidth(sig_dist), 0.0001) + 0.5, 0.0, 1.0);
+    let s = textureSample(t_atlas, s_atlas, in.uv).rgb;
+    let dist = max(min(s.r, s.g), min(max(s.r, s.g), s.b)) - 0.5;
+    let opacity = clamp(dist / fwidth(dist) + 0.5, 0.0, 1.0);
     return vec4<f32>(in.color.rgb, in.color.a * opacity);
-}
-
-fn median(r: f32, g: f32, b: f32) -> f32 {
-    return max(min(r, g), min(max(r, g), b));
 }
