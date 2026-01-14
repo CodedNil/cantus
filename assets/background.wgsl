@@ -1,6 +1,6 @@
-struct Uniform {
+struct GlobalUniforms {
     screen_size: vec2<f32>,
-    bar_height: vec2<f32>,
+    layer_metrics: vec2<f32>, // [start_y, height]
     mouse_pos: vec2<f32>,
     playhead_x: f32,
     time: f32,
@@ -10,117 +10,109 @@ struct Uniform {
 };
 
 struct BackgroundPill {
-    rect: vec2<f32>,
+    rect: vec2<f32>, // [x_position, width]
     colors: array<u32, 4>,
     alpha: f32,
     image_index: i32,
 };
 
-@group(0) @binding(0) var<uniform> uniforms: Uniform;
+@group(0) @binding(0) var<uniform> global: GlobalUniforms;
 @group(0) @binding(1) var<storage, read> pills: array<BackgroundPill>;
 @group(0) @binding(2) var t_images: texture_2d_array<f32>;
 @group(0) @binding(3) var s_images: sampler;
 
 struct VertexOutput {
-    @builtin(position) position: vec4<f32>,
-    @location(0) uv: vec2<f32>,
+    @builtin(position) clip_pos: vec4<f32>,
+    @location(0) local_uv: vec2<f32>,
     @location(1) world_uv: vec2<f32>,
-    @location(2) @interpolate(flat) instance_index: u32,
+    @location(2) @interpolate(flat) pill_idx: u32,
     @location(3) pixel_pos: vec2<f32>,
 };
 
 @vertex
-fn vs_main(@builtin(vertex_index) vi: u32, @builtin(instance_index) ii: u32) -> VertexOutput {
-    let pill = pills[ii];
-    let margin = 16.0;
+fn vs_main(@builtin(vertex_index) v_idx: u32, @builtin(instance_index) i_idx: u32) -> VertexOutput {
+    let pill = pills[i_idx];
+    let margin = 16.0; // Margin for shadows/rounding
 
-    let corner = vec2<f32>(f32(vi % 2u), f32(vi / 2u));
-    let rect = vec4(pill.rect.x, uniforms.bar_height.x, pill.rect.y, uniforms.bar_height.y);
-    let local_pos = corner * (rect.zw + 2.0 * margin) - margin;
-    let pixel_pos = vec2(rect.x, rect.y) + local_pos;
+    let unit_coord = vec2<f32>(f32(v_idx % 2u), f32(v_idx / 2u));
+    let pill_size = vec2(pill.rect.y, global.layer_metrics.y);
 
-    // Combined NDC and Y-flip
-    let ndc = (pixel_pos / uniforms.screen_size) * 2.0 - 1.0;
-    return VertexOutput(vec4(ndc.x, -ndc.y, 0.0, 1.0), local_pos / rect.zw, local_pos / uniforms.screen_size.y, ii, pixel_pos);
+    // Calculate local pixel position relative to pill top-left, including margin
+    let local_pixel = unit_coord * (pill_size + 2.0 * margin) - margin;
+    let pixel_pos = vec2(pill.rect.x, global.layer_metrics.x) + local_pixel;
+
+    var out: VertexOutput;
+    let ndc = (pixel_pos / global.screen_size) * 2.0 - 1.0;
+    out.clip_pos = vec4(ndc.x, -ndc.y, 0.0, 1.0);
+    out.local_uv = local_pixel / pill_size;
+    out.world_uv = local_pixel / global.screen_size.y;
+    out.pill_idx = i_idx;
+    out.pixel_pos = pixel_pos;
+    return out;
 }
 
 fn sd_squircle(p: vec2<f32>, b: vec2<f32>, r: f32) -> f32 {
     let q = abs(p) - b + r;
-    let n = 4.0;
-    return pow(pow(max(q.x, 0.0), n) + pow(max(q.y, 0.0), n), 1.0/n) - r + min(max(q.x, q.y), 0.0);
+    return pow(pow(max(q.x, 0.0), 4.0) + pow(max(q.y, 0.0), 4.0), 0.25) - r + min(max(q.x, q.y), 0.0);
 }
 
 @fragment
 fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
-    let pill = pills[in.instance_index];
-    let rounding = 22.0 * uniforms.scale_factor;
-    let rect = vec4(pill.rect.x, uniforms.bar_height.x, pill.rect.y, uniforms.bar_height.y);
+    let pill = pills[in.pill_idx];
+    let pill_size = vec2(pill.rect.y, global.layer_metrics.y);
+    let rounding = 22.0 * global.scale_factor;
 
-    // Shape Masking
-    let d = sd_squircle((in.uv - 0.5) * rect.zw, rect.zw * 0.5, rounding);
-    let edge_mask = 1.0 - smoothstep(-0.5, 0.5, d);
-    let shadow_mask = (1.0 - smoothstep(0.0, 8.0, d)) * 0.3;
+    // Geometry Mask
+    let dist = sd_squircle((in.local_uv - 0.5) * pill_size, pill_size * 0.5, rounding);
+    let mask = 1.0 - smoothstep(-0.5, 0.5, dist);
+    let shadow = (1.0 - smoothstep(0.0, 8.0, dist)) * 0.3;
+    if (mask <= 0.0 && shadow <= 0.0) { discard; }
 
-    if (edge_mask <= 0.0 && shadow_mask <= 0.0) { discard; }
+    // Animated Noise Field
+    let t = global.time * 0.8;
+    var p = in.world_uv * 2.5 + f32(pill.colors[0] % 8u) * 7.123;
+    let rot = mat2x2<f32>(0.8, -0.6, 0.6, 0.8);
 
-    // Turbulent Color Field
-    let t = uniforms.time * 0.8;
-    let seed = f32(pill.colors[0] % 8u) * 7.123;
-    var p = in.world_uv * 2.5 + seed;
-
-    // Turbulent Color Field
-    for(var i: f32 = 0.0; i < 4.0; i += 1.0) {
-        let wave_offset = i + seed;
-        p.x += sin(p.y + wave_offset + t) * 0.5;
-        p.y += sin(p.x + wave_offset * 1.5 + t * 0.7) * 0.5;
-        p = mat2x2<f32>(0.8, -0.6, 0.6, 0.8) * p;
+    for(var i = 1.0; i <= 4.0; i += 1.0) {
+        p += sin(p.yx + vec2(t, t * 0.7) + i) * 0.5;
+        p *= rot;
     }
 
-    let colors = array<vec3<f32>, 4>(
-        unpack4x8unorm(pill.colors[0]).rgb, unpack4x8unorm(pill.colors[1]).rgb,
-        unpack4x8unorm(pill.colors[2]).rgb, unpack4x8unorm(pill.colors[3]).rgb
-    );
+    // Color Mixing
+    let c0 = unpack4x8unorm(pill.colors[0]).rgb;
+    let c1 = unpack4x8unorm(pill.colors[1]).rgb;
+    let c2 = unpack4x8unorm(pill.colors[2]).rgb;
+    let c3 = unpack4x8unorm(pill.colors[3]).rgb;
 
-    // Color Selection & Mixing
-    let weights = vec3(
-        sin(p.x * 0.4 + t * 0.1) * 0.5 + 0.5,
-        sin(p.y * 0.4 - t * 0.15 + 2.0) * 0.5 + 0.5,
-        sin((p.x + p.y) * 0.3 + t * 0.05 + 1.0) * 0.5 + 0.5
-    );
+    let w = sin(p.xyx * 0.4 + vec3(t * 0.1, -t * 0.15 + 2.0, t * 0.05 + 1.0)) * 0.5 + 0.5;
+    var color = mix(mix(mix(c0, c1, w.x), c2, w.y), c3, w.z);
 
-    var color = unpack4x8unorm(pill.colors[0]).rgb;
-    color = mix(color, unpack4x8unorm(pill.colors[1]).rgb, weights.x);
-    color = mix(color, unpack4x8unorm(pill.colors[2]).rgb, weights.y);
-    color = mix(color, unpack4x8unorm(pill.colors[3]).rgb, weights.z);
-
-    // Post-processing
+    // Polish & Processing
     let luma = dot(color, vec3(0.2126, 0.7152, 0.0722));
-    color = mix(vec3(luma), color, 0.85); // Vibrancy
-    color = (color - 0.5) * 1.05 + 0.5; // Contrast
-    color = color * (1.0 - smoothstep(0.4, 1.2, luma) * 0.4); // Compress highlights
-    color = mix(color * 1.1, color, smoothstep(0.0, -35.0, d) * 0.5); // Inner glow
+    color = mix(vec3(luma), color, 0.85); // Saturation
+    color = (color - 0.5) * 1.05 + 0.5;    // Contrast
+    color *= (1.0 - smoothstep(0.4, 1.2, luma) * 0.4); // Highlight compression
+    color = mix(color * 1.1, color, smoothstep(0.0, -35.0, dist) * 0.5); // Inner glow
 
-    // Darken track left of playhead
-    let is_left_of_playhead = smoothstep(uniforms.playhead_x + 0.5, uniforms.playhead_x - 0.5, in.pixel_pos.x);
-    color = mix(color, color * 0.5, is_left_of_playhead);
+    // Darken Past Timeline
+    color = mix(color, color * 0.5, smoothstep(global.playhead_x + 0.5, global.playhead_x - 0.5, in.pixel_pos.x));
 
-    // Expanding Circle
-    let anim_lerp = (uniforms.time - uniforms.expansion_time) * 0.95;
-    if (anim_lerp >= 0.0 && anim_lerp < 1.0) {
-        let dist = length(in.pixel_pos - uniforms.expansion_xy);
-        let circle_alpha = (1.0 - clamp(anim_lerp + 0.4, 0.0, 1.0)) * (1.0 - smoothstep(500.0 * anim_lerp - 2.0, 500.0 * anim_lerp, dist));
-        color = mix(color, vec3(1.0, 0.88, 0.824), circle_alpha);
+    // Expansion Circle Effect
+    let anim_t = (global.time - global.expansion_time) * 0.95;
+    if (anim_t >= 0.0 && anim_t < 1.0) {
+        let ripple = (1.0 - clamp(anim_t + 0.4, 0.0, 1.0)) * (1.0 - smoothstep(500.0 * anim_t - 2.0, 500.0 * anim_t, length(in.pixel_pos - global.expansion_xy)));
+        color = mix(color, vec3(1.0, 0.88, 0.824), ripple);
     }
 
-    // Album Image
-    let image_start_x = rect.z - rect.w;
-    let local_x = in.uv.x * rect.z;
-    if (pill.image_index >= 0 && local_x >= image_start_x) {
-        let image_uv = vec2<f32>((local_x - image_start_x) / rect.w, in.uv.y);
-        let tex = textureSample(t_images, s_images, image_uv, pill.image_index);
-        let image_d = sd_squircle((image_uv - 0.5) * rect.w, vec2<f32>(rect.w * 0.5), rounding);
-        color = mix(color, tex.rgb, (1.0 - smoothstep(-0.5, 0.5, image_d)) * tex.a);
+    // Cover Art
+    let img_x = pill_size.x - pill_size.y;
+    let local_x = in.local_uv.x * pill_size.x;
+    if (pill.image_index >= 0 && local_x >= img_x) {
+        let uv = vec2((local_x - img_x) / pill_size.y, in.local_uv.y);
+        let tex = textureSample(t_images, s_images, uv, pill.image_index);
+        let img_m = 1.0 - smoothstep(-0.5, 0.5, sd_squircle((uv - 0.5) * pill_size.y, vec2(pill_size.y * 0.5), rounding));
+        color = mix(color, tex.rgb, img_m * tex.a);
     }
 
-    return vec4(color * edge_mask * pill.alpha, max(edge_mask, shadow_mask) * pill.alpha);
+    return vec4(color * mask * pill.alpha, max(mask, shadow) * pill.alpha);
 }

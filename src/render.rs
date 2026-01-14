@@ -154,20 +154,6 @@ impl Default for FontEngine {
     }
 }
 
-pub struct ParticlesState {
-    pub particles: [Particle; 64],
-    pub accumulator: f32,
-}
-
-impl Default for ParticlesState {
-    fn default() -> Self {
-        Self {
-            particles: [Particle::default(); 64],
-            accumulator: 0.0,
-        }
-    }
-}
-
 pub struct TrackRender<'a> {
     track: &'a Track,
     is_current: bool,
@@ -509,43 +495,45 @@ impl CantusApp {
 
     fn draw_text(
         &mut self,
-        l: &TextLayout,
-        px: f32,
-        py: f32,
+        layout: &TextLayout,
+        x: f32,
+        y: f32,
         x_align: f32,
         color: [f32; 4],
-        max_w: f32,
+        max_width: f32,
     ) {
-        let start_x = px - (l.width * x_align);
-        let scale = l.font_size / f32::from(self.font.face.units_per_em());
-        let y_base = py + (l.line_height * 0.5) - (f32::from(self.font.face.ascender()) * scale);
+        let start_x = x - (layout.width * x_align);
+        let font_to_pixel = layout.font_size / f32::from(self.font.face.units_per_em());
 
-        for (gid, x_off) in &l.glyphs {
-            if let Some(info) = self.font.atlas.glyphs.get(gid) {
+        // Vertically center text on the provided y coordinate based on font metrics
+        let baseline_y =
+            y + (layout.line_height * 0.5) - (f32::from(self.font.face.ascender()) * font_to_pixel);
+        let right_clip_edge = start_x + max_width;
+
+        for (glyph_id, x_offset) in &layout.glyphs {
+            if let Some(info) = self.font.atlas.glyphs.get(glyph_id) {
+                let px_scale = font_to_pixel / ATLAS_SCALE;
+
                 // Full dimensions in screen pixels
-                let world_w =
-                    (info.uv_rect[2] * self.font.atlas.width as f32) * (scale / ATLAS_SCALE);
-                let gh = (info.uv_rect[3] * self.font.atlas.height as f32) * (scale / ATLAS_SCALE);
+                let world_w = (info.uv_rect[2] * self.font.atlas.width as f32) * px_scale;
+                let world_h = (info.uv_rect[3] * self.font.atlas.height as f32) * px_scale;
 
-                // Exact screen position
-                let gx = start_x + x_off + (f32::from(info.metrics.x_min) * scale)
-                    - (1.0 * scale / ATLAS_SCALE);
-                let gy = y_base
-                    + (f32::from(self.font.face.ascender() - info.metrics.y_max) * scale)
-                    - (1.0 * scale / ATLAS_SCALE);
+                // Top-left position of the glyph quad
+                let glyph_x =
+                    start_x + x_offset + (f32::from(info.metrics.x_min) * font_to_pixel) - px_scale;
+                let glyph_y = baseline_y
+                    + (f32::from(self.font.face.ascender() - info.metrics.y_max) * font_to_pixel)
+                    - px_scale;
 
-                // Calculate clipping based on absolute screen coordinates (right edge)
-                let right_edge = start_x + max_w;
-                let visible_w = (right_edge - gx).clamp(0.0, world_w);
-
-                if visible_w <= 0.0 {
+                let visible_width = (right_clip_edge - glyph_x).clamp(0.0, world_w);
+                if visible_width <= 0.0 {
                     continue;
                 }
 
-                let uv_width = info.uv_rect[2] * (visible_w / world_w);
+                let uv_width = info.uv_rect[2] * (visible_width / world_w);
 
                 self.text_instances.push(TextInstance {
-                    rect: [gx, gy, visible_w, gh],
+                    rect: [glyph_x, glyph_y, visible_width, world_h],
                     uv_rect: [info.uv_rect[0], info.uv_rect[1], uv_width, info.uv_rect[3]],
                     color,
                 });
@@ -592,23 +580,26 @@ impl CantusApp {
 
         // Emit new particles while playing
         let mut emit_count = if avg_speed.abs() > 0.00001 {
-            self.particles.accumulator += dt * SPARK_EMISSION;
-            let count = self.particles.accumulator.floor() as u8;
-            self.particles.accumulator -= f32::from(count);
+            self.particles_accumulator += dt * SPARK_EMISSION;
+            let count = self.particles_accumulator.floor() as u8;
+            self.particles_accumulator -= f32::from(count);
             count
         } else {
-            self.particles.accumulator = 0.0;
+            self.particles_accumulator = 0.0;
             0
         };
 
+        // Cache active particle Y positions to avoid borrow checker conflicts
         let spawn_offset = avg_speed.signum() * 2.0;
         let horizontal_bias = (avg_speed.abs().powf(0.2) * spawn_offset * 0.5).clamp(-3.0, 3.0);
 
-        for particle in &mut self.particles.particles {
-            // Emit a new particle
+        for (i, particle) in self.particles.iter_mut().enumerate() {
             if emit_count > 0 && time > particle.spawn_time + particle.duration {
-                particle.spawn_y =
-                    PANEL_START + CONFIG.height * lerpf32(fastrand::f32(), 0.1, 0.95);
+                // Calculate a position based on golden ratio recurrence.
+                let seed = (i as f32 + time * SPARK_EMISSION) * 0.618_034;
+                let y_fraction = 0.1 + (seed.fract() * 0.85); // Map to 0.1..0.95 range
+
+                particle.spawn_y = PANEL_START + CONFIG.height * y_fraction;
                 particle.spawn_vel = [
                     fastrand::usize(SPARK_VELOCITY_X) as f32 * self.scale_factor * horizontal_bias,
                     fastrand::usize(SPARK_VELOCITY_Y) as f32 * -self.scale_factor,

@@ -1,6 +1,6 @@
 use crate::interaction::InteractionState;
 use crate::render::{
-    BackgroundPill, FontEngine, IconInstance, ParticlesState, PlayheadUniforms, RenderState,
+    BackgroundPill, FontEngine, IconInstance, Particle, PlayheadUniforms, RenderState,
     ScreenUniforms,
 };
 use crate::text_render::TextInstance;
@@ -79,7 +79,8 @@ struct CantusApp {
     // Application State
     render_state: RenderState,
     interaction: InteractionState,
-    particles: ParticlesState,
+    particles: [Particle; 64],
+    particles_accumulator: f32,
     scale_factor: f32,
 
     // Scene & Resources
@@ -99,7 +100,8 @@ impl Default for CantusApp {
 
             render_state: RenderState::default(),
             interaction: InteractionState::default(),
-            particles: ParticlesState::default(),
+            particles: [Particle::default(); 64],
+            particles_accumulator: 0.0,
             scale_factor: 1.0,
 
             font: FontEngine::default(),
@@ -159,7 +161,7 @@ impl CantusApp {
         gpu.queue.write_buffer(
             &gpu.particles_buffer,
             0,
-            bytemuck::cast_slice(&self.particles.particles),
+            bytemuck::cast_slice(&self.particles),
         );
         gpu.queue.write_buffer(
             &gpu.playhead_buffer,

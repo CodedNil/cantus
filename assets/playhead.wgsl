@@ -1,6 +1,6 @@
-struct Uniform {
+struct GlobalUniforms {
     screen_size: vec2<f32>,
-    bar_height: vec2<f32>,
+    layer_metrics: vec2<f32>, // [start_y, height]
     mouse_pos: vec2<f32>,
     playhead_x: f32,
     time: f32,
@@ -17,60 +17,64 @@ struct Particle {
     color: u32,
 };
 
-struct PlayheadInfo {
+struct PlayheadState {
     volume: f32,
-    bar_lerp: f32,
-    play_lerp: f32,
-    pause_lerp: f32,
+    bar_visibility: f32,
+    play_animation: f32,
+    pause_animation: f32,
 };
 
-@group(0) @binding(0) var<uniform> uniforms: Uniform;
-@group(0) @binding(1) var<uniform> playhead: PlayheadInfo;
+@group(0) @binding(0) var<uniform> global: GlobalUniforms;
+@group(0) @binding(1) var<uniform> state: PlayheadState;
 @group(0) @binding(2) var<storage, read> particles: array<Particle>;
 
 struct VertexOutput {
-    @builtin(position) position: vec4<f32>,
-    @location(0) uv: vec2<f32>,
+    @builtin(position) clip_pos: vec4<f32>,
+    @location(0) local_uv: vec2<f32>,
 };
 
 @vertex
-fn vs_main(@builtin(vertex_index) vi: u32) -> VertexOutput {
-    let pos = array<vec2<f32>, 4>(vec2(-1.0, -1.0), vec2(1.0, -1.0), vec2(-1.0, 1.0), vec2(1.0, 1.0));
-    let uv = array<vec2<f32>, 4>(vec2(0.0, 1.0), vec2(1.0, 1.0), vec2(0.0, 0.0), vec2(1.0, 0.0));
-    return VertexOutput(vec4(pos[vi], 0.0, 1.0), uv[vi]);
+fn vs_main(@builtin(vertex_index) v_idx: u32) -> VertexOutput {
+    let pos_data = array<vec2<f32>, 4>(vec2(-1.0, -1.0), vec2(1.0, -1.0), vec2(-1.0, 1.0), vec2(1.0, 1.0));
+    let uv_data = array<vec2<f32>, 4>(vec2(0.0, 1.0), vec2(1.0, 1.0), vec2(0.0, 0.0), vec2(1.0, 0.0));
+
+    var out: VertexOutput;
+    out.clip_pos = vec4(pos_data[v_idx], 0.0, 1.0);
+    out.local_uv = uv_data[v_idx];
+    return out;
 }
 
-fn sd_segment(p: vec2<f32>, a: vec2<f32>, b: vec2<f32>, r: f32) -> f32 {
+fn sd_segment(p: vec2<f32>, a: vec2<f32>, b: vec2<f32>, radius: f32) -> f32 {
     let ba = b - a;
     let pa = p - a;
     let h = clamp(dot(pa, ba) / dot(ba, ba), 0.0, 1.0);
-    return length(pa - h * ba) - r;
+    return length(pa - h * ba) - radius;
 }
 
-fn sd_rounded_triangle(p: vec2<f32>, r: f32, corner_radius: f32) -> f32 {
+fn sd_rounded_triangle(p: vec2<f32>, side_len: f32, radius: f32) -> f32 {
     let k = sqrt(3.0);
-    var p_mod = p;
-    p_mod.x = abs(p_mod.x);
-    let h = max(p_mod.x + k * p_mod.y, 0.0);
-    p_mod -= 0.5 * vec2(h, h * k);
-    p_mod -= vec2(clamp(p_mod.x, -0.5 * (r - corner_radius) * k, 0.5 * (r - corner_radius) * k), -0.5 * (r - corner_radius));
-    return length(p_mod) * sign(-p_mod.y) - corner_radius;
+    var p_sym = p;
+    p_sym.x = abs(p_sym.x);
+    let h = max(p_sym.x + k * p_sym.y, 0.0);
+    p_sym -= 0.5 * vec2(h, h * k);
+    p_sym -= vec2(clamp(p_sym.x, -0.5 * (side_len - radius) * k, 0.5 * (side_len - radius) * k), -0.5 * (side_len - radius));
+    return length(p_sym) * sign(-p_sym.y) - radius;
 }
 
 @fragment
 fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
-    let pixel_pos = in.uv * uniforms.screen_size;
-    var final_color = vec4(0.0);
+    let pixel_pos = in.local_uv * global.screen_size;
+    var out_rgba = vec4(0.0);
 
     // --- Particles ---
     for (var i = 0u; i < 64u; i++) {
         let p = particles[i];
-        let dt = uniforms.time - p.spawn_time;
+        let dt = global.time - p.spawn_time;
         if (dt < 0.0 || dt > p.duration) { continue; }
 
         let p_life = 1.0 - (dt / p.duration);
         let fade = p_life * smoothstep(0.0, 0.05, dt);
-        let pos = vec2<f32>(uniforms.playhead_x, p.spawn_y) + p.spawn_vel * dt + vec2(0.0, 150.0 * dt * dt);
+        let pos = vec2<f32>(global.playhead_x, p.spawn_y) + p.spawn_vel * dt + vec2(0.0, 150.0 * dt * dt);
         let dir = normalize(p.spawn_vel + vec2(0.0, 300.0 * dt));
         let len = mix(8.0, 12.0, p_life);
         let thickness = mix(2.5, 4.0, p_life);
@@ -84,67 +88,59 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
             let intensity = 1.0 - (dist / thickness);
             let alpha = fade * intensity * intensity;
             let color = mix(unpack4x8unorm(p.color).rgb, vec3(1.0), intensity * 0.5);
-            final_color += vec4(color * alpha * 1.5, alpha);
+            out_rgba += vec4(color * alpha * 1.5, alpha);
         }
     }
 
-    // --- Playhead ---
-    let scale = uniforms.scale_factor;
-    let line_x = uniforms.playhead_x;
-    let top = uniforms.bar_height.x;
-    let height = uniforms.bar_height.y;
-    let mid_y = top + height * 0.5;
-    let playhead_thickness = 3.5 * scale;
+    // --- Playhead Geometry ---
+    let scale = global.scale_factor;
+    let x_coord = global.playhead_x;
+    let start_y = global.layer_metrics.x;
+    let height = global.layer_metrics.y;
+    let mid_y = start_y + height * 0.5;
+    let line_thickness = 3.5 * scale;
 
-    var d = 1e6;
-    var d_icon = 1e6;
-
-    let bar_h = height * mix(0.5, 0.125, playhead.bar_lerp);
-    d = min(
-        sd_segment(pixel_pos, vec2(line_x, top), vec2(line_x, top + bar_h), playhead_thickness),
-        sd_segment(pixel_pos, vec2(line_x, top + height - bar_h), vec2(line_x, top + height), playhead_thickness)
+    let bar_len = height * mix(0.5, 0.125, state.bar_visibility);
+    let dist_bar = min(
+        sd_segment(pixel_pos, vec2(x_coord, start_y), vec2(x_coord, start_y + bar_len), line_thickness),
+        sd_segment(pixel_pos, vec2(x_coord, start_y + height - bar_len), vec2(x_coord, start_y + height), line_thickness)
     );
 
-    let p_off = mix(0.0, 4.0 * scale, smoothstep(0.0, 0.5, playhead.pause_lerp));
-    let d_pause = min(
-        sd_segment(pixel_pos, vec2(line_x - p_off, mid_y - height * 0.1), vec2(line_x - p_off, mid_y + height * 0.1), playhead_thickness),
-        sd_segment(pixel_pos, vec2(line_x + p_off, mid_y - height * 0.1), vec2(line_x + p_off, mid_y + height * 0.1), playhead_thickness)
+    let pause_gap = mix(0.0, 4.0 * scale, smoothstep(0.0, 0.5, state.pause_animation));
+    let dist_pause = min(
+        sd_segment(pixel_pos, vec2(x_coord - pause_gap, mid_y - height * 0.1), vec2(x_coord - pause_gap, mid_y + height * 0.1), line_thickness),
+        sd_segment(pixel_pos, vec2(x_coord + pause_gap, mid_y - height * 0.1), vec2(x_coord + pause_gap, mid_y + height * 0.1), line_thickness)
     );
-    let pause_alpha = step(0.001, playhead.pause_lerp) * (1.0 - smoothstep(0.5, 1.0, playhead.pause_lerp));
+    let pause_active = step(0.001, state.pause_animation) * (1.0 - smoothstep(0.5, 1.0, state.pause_animation));
 
-    // --- Play Icon ---
-    let p_tri = pixel_pos - vec2(line_x, mid_y);
-    let p_play = vec2(-p_tri.y, p_tri.x);
-    let play_size = mix(0.01 * height, height * 0.18, min(playhead.play_lerp * 2.0, 1.0)) * mix(1.0, 2.0, smoothstep(0.5, 1.0, playhead.play_lerp));
-    let d_play = sd_rounded_triangle(p_play, play_size, play_size * 0.5);
-    let play_alpha = step(0.001, playhead.play_lerp) * (1.0 - smoothstep(0.5, 1.0, playhead.play_lerp));
+    let p_local = pixel_pos - vec2(x_coord, mid_y);
+    let p_rotated = vec2(-p_local.y, p_local.x);
+    let play_scale = mix(0.01 * height, height * 0.18, min(state.play_animation * 2.0, 1.0)) *
+                     mix(1.0, 2.0, smoothstep(0.5, 1.0, state.play_animation));
+    let dist_play = sd_rounded_triangle(p_rotated, play_scale, play_scale * 0.5);
+    let play_active = step(0.001, state.play_animation) * (1.0 - smoothstep(0.5, 1.0, state.play_animation));
 
-    let icon_combined_alpha = clamp(pause_alpha + play_alpha, 0.0, 1.0);
-    d_icon = mix(d_play, d_pause, pause_alpha / (pause_alpha + play_alpha + 1e-6));
+    let icon_alpha = clamp(pause_active + play_active, 0.0, 1.0);
+    let dist_icon = mix(dist_play, dist_pause, pause_active / (pause_active + play_active + 1e-6));
 
-    // Final Antialiased Masks
-    let mask1 = 1.0 - smoothstep(-0.8, 0.2, d);
-    let mask2 = (1.0 - smoothstep(-0.8, 0.2, d_icon)) * icon_combined_alpha;
-    let playhead_mask = clamp(mask1 + mask2, 0.0, 1.0);
+    let mask_bar = 1.0 - smoothstep(-0.8, 0.2, dist_bar);
+    let mask_icon = (1.0 - smoothstep(-0.8, 0.2, dist_icon)) * icon_alpha;
+    let main_mask = clamp(mask_bar + mask_icon, 0.0, 1.0);
 
-    // --- Drop Shadow ---
-    let s_bar = pow(1.0 - clamp(d / (4.5 * scale), 0.0, 1.0), 2.0) * 0.4;
-    let s_icon = pow(1.0 - clamp(d_icon / (4.5 * scale), 0.0, 1.0), 2.0) * 0.4 * icon_combined_alpha;
-    let shadow_mask = max(s_bar, s_icon);
+    let shadow_bar = pow(1.0 - clamp(dist_bar / (4.5 * scale), 0.0, 1.0), 2.0) * 0.4;
+    let shadow_icon = pow(1.0 - clamp(dist_icon / (4.5 * scale), 0.0, 1.0), 2.0) * 0.4 * icon_alpha;
+    let shadow_mask = max(shadow_bar, shadow_icon);
 
-    if (playhead_mask > 0.0 || shadow_mask > 0.0) {
-        let rel_y = 1.0 - clamp((pixel_pos.y - top) / height, 0.0, 1.0);
-        let is_vol = f32(rel_y <= playhead.volume);
-        let color = mix(vec3(0.5), vec3(1.0, 0.878, 0.824), is_vol);
-        let dist_combined = min(d, d_icon);
-        let border = smoothstep(-2.5, -1.0, dist_combined);
-        let final_rgb = mix(color, vec3(0.15), border);
+    if (main_mask > 0.0 || shadow_mask > 0.0) {
+        let normalized_y = 1.0 - clamp((pixel_pos.y - start_y) / height, 0.0, 1.0);
+        let color_state = mix(vec3(0.5), vec3(1.0, 0.878, 0.824), f32(normalized_y <= state.volume));
+        let border_mask = smoothstep(-2.5, -1.0, min(dist_bar, dist_icon));
+        let final_rgb = mix(color_state, vec3(0.15), border_mask);
 
-        let playhead_final = vec4(mix(vec3(0.0), final_rgb, playhead_mask), max(playhead_mask, shadow_mask));
-        // Simple alpha blending: src + dst * (1 - src.a)
-        final_color = vec4(playhead_final.rgb + final_color.rgb * (1.0 - playhead_final.a), max(playhead_final.a, final_color.a));
+        let playhead_rgba = vec4(mix(vec3(0.0), final_rgb, main_mask), max(main_mask, shadow_mask));
+        out_rgba = vec4(playhead_rgba.rgb + out_rgba.rgb * (1.0 - playhead_rgba.a), max(playhead_rgba.a, out_rgba.a));
     }
 
-    if (final_color.a <= 0.0) { discard; }
-    return final_color;
+    if (out_rgba.a <= 0.0) { discard; }
+    return out_rgba;
 }
