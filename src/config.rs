@@ -22,8 +22,7 @@ pub struct Config {
     pub layer: String,
     /// The corner/edge the application should anchor to.
     ///
-    /// Can be one of 'top', 'topright', 'right', 'bottomright', 'bottom',
-    /// 'bottomleft', 'left', or 'topleft'.
+    /// Can be one of 'top' or 'bottom'.
     pub layer_anchor: String,
 
     /// How many minutes in the future to display in the timeline.
@@ -47,7 +46,7 @@ impl Default for Config {
             width: 1050.0,
             height: 50.0,
             layer: "top".into(),
-            layer_anchor: "topleft".into(),
+            layer_anchor: "top".into(),
             timeline_future_minutes: 12.0,
             timeline_past_minutes: 1.5,
             history_width: 100.0,

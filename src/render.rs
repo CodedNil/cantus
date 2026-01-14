@@ -176,7 +176,7 @@ impl CantusApp {
 
         self.background_pills.clear();
         let history_width = CONFIG.history_width;
-        let total_width = CONFIG.width - history_width - 10.0;
+        let total_width = CONFIG.width - history_width;
         let total_height = CONFIG.height;
         let timeline_duration_ms = CONFIG.timeline_future_minutes * 60_000.0;
         let timeline_start_ms = -CONFIG.timeline_past_minutes * 60_000.0;

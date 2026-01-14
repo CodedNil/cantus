@@ -90,21 +90,14 @@ pub fn run() {
         &qhandle,
         (),
     );
-    let width = CONFIG.width;
     let total_height = CONFIG.height + PANEL_EXTENSION + PANEL_START;
-    layer_surface.set_size(width as u32, total_height as u32);
+    layer_surface.set_size(0, total_height as u32);
     layer_surface.set_anchor(match CONFIG.layer_anchor.as_str() {
-        "top" => LayerAnchor::Top,
-        "topright" => LayerAnchor::Top | LayerAnchor::Right,
-        "right" => LayerAnchor::Right,
-        "bottomright" => LayerAnchor::Bottom | LayerAnchor::Right,
-        "bottom" => LayerAnchor::Bottom,
-        "bottomleft" => LayerAnchor::Bottom | LayerAnchor::Left,
-        "left" => LayerAnchor::Left,
-        "topleft" => LayerAnchor::Top | LayerAnchor::Left,
+        "top" => LayerAnchor::Top | LayerAnchor::Left | LayerAnchor::Right,
+        "bottom" => LayerAnchor::Bottom | LayerAnchor::Left | LayerAnchor::Right,
         other => {
-            error!("Invalid layer anchor '{other}', defaulting to 'topleft'");
-            LayerAnchor::Top | LayerAnchor::Left
+            error!("Invalid layer anchor '{other}', defaulting to 'top'");
+            LayerAnchor::Top | LayerAnchor::Left | LayerAnchor::Right
         }
     });
     layer_surface.set_margin(0, 0, 0, 0);
