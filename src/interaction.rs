@@ -24,15 +24,18 @@ pub struct IconHitbox {
 
 pub struct InteractionState {
     pub mouse_position: Point,
-    pub last_hitbox_update: Instant,
+
+    pub last_hitbox_hash: u64,
     pub play_hitbox: Rect,
     pub track_hitboxes: Vec<(TrackId, Rect, (f32, f32))>,
     pub icon_hitboxes: Vec<IconHitbox>,
+
     pub mouse_down: bool,
     pub drag_origin: Option<Point>,
     pub drag_track: Option<(TrackId, f32)>,
     pub dragging: bool,
     pub drag_delta_pixels: f32,
+
     // Playhead
     pub last_expansion: (Instant, Point),
     pub last_toggle_playing: Instant,
@@ -46,7 +49,7 @@ impl Default for InteractionState {
     fn default() -> Self {
         Self {
             mouse_position: Point::default(),
-            last_hitbox_update: Instant::now(),
+            last_hitbox_hash: 0,
             play_hitbox: Rect::default(),
             track_hitboxes: Vec::new(),
             icon_hitboxes: Vec::new(),
