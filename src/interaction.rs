@@ -362,31 +362,38 @@ impl CantusApp {
         let has_half = display_rating % 2 == 1;
 
         for (entry, is_hovered, origin_x) in icon_data {
-            let mut instance = IconInstance {
+            let instance = IconInstance {
                 pos: [origin_x, center_y],
-                alpha: fade_alpha,
-                ..Default::default()
+                data: (((fade_alpha * 65535.0) as u32) << 16)
+                    | (match entry {
+                        IconEntry::Star { index } => {
+                            (if index < full_stars {
+                                1.0
+                            } else if index == full_stars && has_half {
+                                0.75
+                            } else {
+                                0.51
+                            } * 65535.0) as u32
+                        }
+                        IconEntry::Playlist {
+                            playlist: _playlist,
+                            contained,
+                        } => {
+                            if !contained && !is_hovered {
+                                (65535.0 * 0.2) as u32
+                            } else {
+                                0
+                            }
+                        }
+                    }),
+                image_index: match entry {
+                    IconEntry::Playlist {
+                        playlist,
+                        contained: _contained,
+                    } => self.get_image_index(&playlist.image_url),
+                    IconEntry::Star { .. } => 0,
+                },
             };
-
-            match entry {
-                IconEntry::Star { index } => {
-                    instance.variant = 1.0;
-                    instance.param = if index < full_stars {
-                        1.0
-                    } else if index == full_stars && has_half {
-                        0.5
-                    } else {
-                        0.0
-                    };
-                }
-                IconEntry::Playlist {
-                    playlist,
-                    contained,
-                } => {
-                    instance.image_index = self.get_image_index(&playlist.image_url);
-                    instance.param = if !contained && !is_hovered { 0.7 } else { 0.0 };
-                }
-            }
             self.icon_pills.push(instance);
         }
     }

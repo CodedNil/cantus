@@ -11,9 +11,7 @@ struct GlobalUniforms {
 
 struct IconInstance {
     pos: vec2<f32>,    // Center coordinate in pixels
-    alpha: f32,
-    style_variant: f32, // 1.0 for Star (fav), 0.0 for Squircle (playlist)
-    activity_param: f32,   // Generic interpolator for animations/states
+    data: u32,
     image_index: i32,
 };
 
@@ -80,18 +78,24 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
     var out_color: vec3<f32>;
     var dist_to_shape: f32;
 
-    if icon.style_variant > 0.5 {
+    let data = unpack2x16unorm(icon.data);
+    let param = data.x;
+    let alpha = data.y;
+
+    if param >= 0.5 {
         // Render Favorite Star
         dist_to_shape = sd_star(local_pixel, in.pixel_radius * 0.5, in.pixel_radius * 0.32) - in.pixel_radius * 0.1 * global.scale_factor;
         // Horizontal split effect for toggle animation
-        let split_line = (in.local_uv.x - icon.activity_param);
+        let star_fullness = (param - 0.5) * 2.0 ; // Star fullness is 0.5-1.0
+        let split_line = in.local_uv.x - star_fullness;
         let selection_mask = clamp(split_line / fwidth(split_line) + 0.5, 0.0, 1.0);
         out_color = mix(vec3(1.0, 0.85, 0.2), vec3(0.33), selection_mask);
     } else {
         // Render Playlist Squircle
         dist_to_shape = sd_squircle(local_pixel, vec2(in.pixel_radius * 0.6), 6.0 * global.scale_factor);
         let tex_sample = textureSample(t_images, s_images, in.local_uv, icon.image_index).rgb;
-        out_color = mix(tex_sample, vec3(0.24), icon.activity_param);
+        let icon_saturation = select(0.0, 0.7, param > 0.0);
+        out_color = mix(tex_sample, vec3(0.24), icon_saturation);
     }
 
     let anti_alias_unit = fwidth(dist_to_shape) * 0.5;
@@ -102,6 +106,6 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
     let border_inner_mask = smoothstep(-border_width - anti_alias_unit, -border_width + anti_alias_unit, dist_to_shape);
     out_color = mix(out_color, vec3(0.15), border_inner_mask);
 
-    let final_alpha = shape_mask * icon.alpha;
+    let final_alpha = shape_mask * alpha;
     return vec4(out_color * final_alpha, final_alpha);
 }

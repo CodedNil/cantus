@@ -81,9 +81,10 @@ pub struct BackgroundPill {
 #[derive(Copy, Clone, Debug, Default, Pod, Zeroable)]
 pub struct IconInstance {
     pub pos: [f32; 2],
-    pub alpha: f32,
-    pub variant: f32,
-    pub param: f32,
+    // Packed 2 u16s
+    // First is alpha 0-1
+    // Second is 0 for dimmed icon 1 for bright icon, 2 for empty star, 3 for half star, 4 for filled star
+    pub data: u32,
     pub image_index: i32,
 }
 
