@@ -36,6 +36,7 @@ struct GpuResources {
     playhead_pipeline: RenderPipeline,
     background_pipeline: RenderPipeline,
     icon_pipeline: RenderPipeline,
+    particle_pipeline: RenderPipeline,
 
     // Uniform/Storage Buffers
     uniform_buffer: Buffer,
@@ -48,6 +49,7 @@ struct GpuResources {
     playhead_bind_group: BindGroup,
     background_bind_group: BindGroup,
     icon_bind_group: BindGroup,
+    particle_bind_group: BindGroup,
 
     // Image Management
     texture_array: Texture,
@@ -214,6 +216,10 @@ impl CantusApp {
                 rpass.set_bind_group(0, &gpu.icon_bind_group, &[]);
                 rpass.draw(0..4, 0..self.icon_pills.len() as u32);
             }
+
+            rpass.set_pipeline(&gpu.particle_pipeline);
+            rpass.set_bind_group(0, &gpu.particle_bind_group, &[]);
+            rpass.draw(0..4, 0..64);
 
             rpass.set_pipeline(&gpu.playhead_pipeline);
             rpass.set_bind_group(0, &gpu.playhead_bind_group, &[]);

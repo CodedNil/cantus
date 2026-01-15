@@ -99,7 +99,7 @@ const SPARK_VELOCITY_X: Range<usize> = 75..100;
 /// Vertical velocity range applied at spawn.
 const SPARK_VELOCITY_Y: Range<usize> = 20..55;
 /// Lifetime range for individual particles, in seconds.
-const SPARK_LIFETIME: Range<f32> = 0.4..0.9;
+const SPARK_LIFETIME: Range<f32> = 0.4..0.6;
 
 /// Duration for animation events
 const ANIMATION_DURATION: f32 = 2.0;

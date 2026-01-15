@@ -56,7 +56,7 @@ impl CantusApp {
             width,
             height,
             present_mode: PresentMode::AutoVsync,
-            desired_maximum_frame_latency: 2,
+            desired_maximum_frame_latency: 1,
             alpha_mode,
             view_formats: vec![],
         };
@@ -71,6 +71,7 @@ impl CantusApp {
             })
         };
         let playhead_shader = create_shader("Playhead", include_str!("../assets/playhead.wgsl"));
+        let particle_shader = create_shader("Particles", include_str!("../assets/particles.wgsl"));
         let background_shader =
             create_shader("Background", include_str!("../assets/background.wgsl"));
         let icon_shader = create_shader("Icons", include_str!("../assets/icons.wgsl"));
@@ -108,13 +109,10 @@ impl CantusApp {
         let sp = BindingType::Sampler(SamplerBindingType::Filtering);
         let vf = ShaderStages::VERTEX | ShaderStages::FRAGMENT;
 
-        let playhead_layout = bgl(
-            "Playhead",
-            &[
-                (0, ShaderStages::FRAGMENT, ub),
-                (1, ShaderStages::FRAGMENT, ub),
-                (2, ShaderStages::FRAGMENT, sb),
-            ],
+        let playhead_layout = bgl("Playhead", &[(0, vf, ub), (1, ShaderStages::FRAGMENT, ub)]);
+        let particle_layout = bgl(
+            "Particles",
+            &[(0, ShaderStages::VERTEX, ub), (1, ShaderStages::VERTEX, sb)],
         );
         let std_layout = bgl(
             "Standard",
@@ -162,6 +160,7 @@ impl CantusApp {
         };
 
         let playhead_pipeline = create_pipe("Playhead", &playhead_shader, &playhead_layout);
+        let particle_pipeline = create_pipe("Particles", &particle_shader, &particle_layout);
         let background_pipeline = create_pipe("Background", &background_shader, &std_layout);
         let icon_pipeline = create_pipe("Icons", &icon_shader, &std_layout);
 
@@ -245,8 +244,18 @@ impl CantusApp {
                     binding: 1,
                     resource: playhead_buffer.as_entire_binding(),
                 },
+            ],
+        );
+        let particle_bind_group = mk_bg(
+            "Particles",
+            &particle_layout,
+            &[
                 BindGroupEntry {
-                    binding: 2,
+                    binding: 0,
+                    resource: uniform_buffer.as_entire_binding(),
+                },
+                BindGroupEntry {
+                    binding: 1,
                     resource: particles_buffer.as_entire_binding(),
                 },
             ],
@@ -304,6 +313,7 @@ impl CantusApp {
             playhead_pipeline,
             background_pipeline,
             icon_pipeline,
+            particle_pipeline,
             uniform_buffer,
             particles_buffer,
             playhead_buffer,
@@ -312,6 +322,7 @@ impl CantusApp {
             playhead_bind_group,
             background_bind_group,
             icon_bind_group,
+            particle_bind_group,
             texture_array,
             url_to_image_index: HashMap::new(),
         });
