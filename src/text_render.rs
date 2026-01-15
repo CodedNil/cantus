@@ -1,124 +1,192 @@
-use fdsm::{generate::generate_msdf, shape::Shape, transform::Transform};
-use fdsm_ttf_parser::load_shape_from_face;
-use image::ImageBuffer;
-use nalgebra::{Affine2, Matrix3};
-use std::collections::HashMap;
-use tracing::error;
-use ttf_parser::{Face, GlyphId, Rect};
+use crate::PANEL_START;
+use crate::config::CONFIG;
+use crate::render::TrackRender;
+use wgpu::{Device, Queue, RenderPass};
+use wgpu_text::{
+    BrushBuilder, TextBrush,
+    glyph_brush::{
+        BuiltInLineBreaker, HorizontalAlign, Layout, OwnedSection, OwnedText, Section, Text,
+        VerticalAlign, ab_glyph::FontArc, ab_glyph::PxScale,
+    },
+};
 
-pub const ATLAS_SCALE: f32 = 0.08;
+const FONT_SIZE: f32 = 17.5;
+const FONT_SIZE_SMALL: f32 = 14.5;
 
-#[repr(C)]
-#[derive(Copy, Clone, Debug, Default, bytemuck::Pod, bytemuck::Zeroable)]
-pub struct TextInstance {
-    pub rect: [f32; 4],
-    pub uv_rect: [f32; 4],
-    pub color: [f32; 4],
+pub struct TextRenderer {
+    brush: TextBrush<FontArc>,
+    sections: Vec<OwnedSection>,
 }
 
-pub struct GlyphInfo {
-    pub uv_rect: [f32; 4],
-    pub metrics: Rect,
-}
-
-pub struct MSDFAtlas {
-    pub texture_data: Vec<u8>,
-    pub width: u32,
-    pub height: u32,
-    pub glyphs: HashMap<u32, GlyphInfo>,
-}
-
-impl MSDFAtlas {
-    pub fn new(face: &Face, _size: u32) -> Self {
-        let mut atlas = Self {
-            texture_data: vec![0; (2048 * 1024 * 4) as usize],
-            width: 2048,
-            height: 1024,
-            glyphs: HashMap::new(),
-        };
-
-        let (mut x, mut y, mut row_h) = (2, 2, 0);
-
-        for c in (32u8..127)
-            .map(|b| b as char)
-            .chain((160u8..=255).map(|b| b as char))
-            .chain("•".chars())
-        {
-            if let Some(gid) = face.glyph_index(c)
-                && let Some((info, gh)) = atlas.create_glyph(face, gid, &mut x, &mut y, &mut row_h)
-            {
-                atlas.glyphs.insert(u32::from(gid.0), info);
-                row_h = row_h.max(gh);
-            }
+impl TextRenderer {
+    pub fn new(device: &Device, format: wgpu::TextureFormat) -> Self {
+        let font = FontArc::try_from_slice(include_bytes!("../assets/NotoSans-Bold.ttf")).unwrap();
+        Self {
+            brush: BrushBuilder::using_font(font).build(device, 0, 0, format),
+            sections: Vec::new(),
         }
-        atlas
     }
 
-    fn create_glyph(
-        &mut self,
-        face: &Face,
-        gid: GlyphId,
-        x: &mut u32,
-        y: &mut u32,
-        row_h: &mut u32,
-    ) -> Option<(GlyphInfo, u32)> {
-        let bbox = face.glyph_bounding_box(gid)?;
+    pub fn render(&mut self, track_render: &TrackRender) {
+        let track = track_render.track;
+        let text_start_left = track_render.start_x + 12.0;
+        let text_start_right = track_render.start_x + track_render.width - CONFIG.height - 8.0;
+        let available_width = text_start_right - text_start_left;
 
-        let gw = (f32::from(bbox.width()) * ATLAS_SCALE).ceil() as u32 + 2;
-        let gh = (f32::from(bbox.height()) * ATLAS_SCALE).ceil() as u32 + 2;
-
-        if *x + gw + 2 > self.width {
-            *x = 2;
-            *y += *row_h + 2;
-            *row_h = 0;
-        }
-        if *y + gh + 2 > self.height {
-            error!("Atlas full! Could not fit glyph ID {gid:?}");
-            return None;
+        if available_width <= 0.0 {
+            return;
         }
 
-        let shape = load_shape_from_face(face, gid)?;
-        let mut shape = Shape::edge_coloring_simple(shape, 1.0, 0);
-        let mut msdf_img = ImageBuffer::<image::Rgb<f32>, Vec<f32>>::new(gw, gh);
+        let text_color = [0.94, 0.94, 0.94, (available_width / 100.0).min(1.0)];
 
-        let tx = f64::from(-bbox.x_min) * f64::from(ATLAS_SCALE) + 1.0;
-        let ty = f64::from(-bbox.y_min) * f64::from(ATLAS_SCALE) + 1.0;
+        let mut queue_text =
+            |text: String, pos: (f32, f32), size: f32, h_align: HorizontalAlign| {
+                self.sections.push(OwnedSection {
+                    screen_position: pos,
+                    bounds: (available_width + 2.0, f32::INFINITY),
+                    layout: Layout::SingleLine {
+                        line_breaker: BuiltInLineBreaker::AnyCharLineBreaker,
+                        h_align,
+                        v_align: VerticalAlign::Center,
+                    },
+                    text: vec![OwnedText::new(text).with_scale(size).with_color(text_color)],
+                });
+            };
 
-        shape.transform(&Affine2::from_matrix_unchecked(Matrix3::new(
-            f64::from(ATLAS_SCALE),
-            0.0,
-            tx,
-            0.0,
-            f64::from(ATLAS_SCALE),
-            ty,
-            0.0,
-            0.0,
-            1.0,
-        )));
+        let song_name = track
+            .name
+            .split(['(', '-'])
+            .next()
+            .unwrap_or(&track.name)
+            .trim();
 
-        generate_msdf(&shape.prepare(), 2.0, &mut msdf_img);
+        let top_y = PANEL_START + (CONFIG.height * 0.24).floor();
 
-        for (gx, gy, pixel) in msdf_img.enumerate_pixels() {
-            let idx = ((*y + gy) * self.width + (*x + gx)) as usize * 4;
-            self.texture_data[idx..idx + 4].copy_from_slice(&[
-                (pixel[0] * 255.0) as u8,
-                (pixel[1] * 255.0) as u8,
-                (pixel[2] * 255.0) as u8,
-                255,
-            ]);
-        }
-
-        let info = GlyphInfo {
-            uv_rect: [
-                *x as f32 / self.width as f32,
-                *y as f32 / self.height as f32,
-                gw as f32 / self.width as f32,
-                gh as f32 / self.height as f32,
-            ],
-            metrics: bbox,
+        let measure_layout = Layout::SingleLine {
+            line_breaker: BuiltInLineBreaker::AnyCharLineBreaker,
+            h_align: HorizontalAlign::Left,
+            v_align: VerticalAlign::Center,
         };
 
-        *x += gw + 2;
-        Some((info, gh))
+        let measured_width = self
+            .brush
+            .glyph_bounds(
+                Section::default()
+                    .add_text(Text::new(song_name).with_scale(FONT_SIZE))
+                    .with_layout(measure_layout),
+            )
+            .map_or(0.0, |b| b.width());
+
+        let width_ratio = available_width / measured_width;
+        let (x, align, size) = if width_ratio <= 1.0 {
+            (
+                text_start_left,
+                HorizontalAlign::Left,
+                FONT_SIZE * width_ratio.max(0.8),
+            )
+        } else {
+            (text_start_right, HorizontalAlign::Right, FONT_SIZE)
+        };
+        queue_text(song_name.to_owned(), (x, top_y), size, align);
+
+        let bottom_y = PANEL_START + (CONFIG.height * 0.55).floor();
+        let time_text = if track_render.seconds_until_start >= 60.0 {
+            format!(
+                "{}m{}s",
+                (track_render.seconds_until_start / 60.0).floor(),
+                (track_render.seconds_until_start % 60.0).floor()
+            )
+        } else {
+            format!("{}s", track_render.seconds_until_start.round())
+        };
+
+        let bottom_merged = format!("{time_text}\u{2004}•\u{2004}{}", track.artist.name);
+        let measured_bottom_width = self
+            .brush
+            .glyph_bounds(
+                Section::default()
+                    .add_text(Text::new(&bottom_merged).with_scale(FONT_SIZE_SMALL))
+                    .with_layout(measure_layout),
+            )
+            .map_or(0.0, |b| b.width());
+
+        let bottom_ratio = available_width / measured_bottom_width;
+        if bottom_ratio <= 1.0 || !track_render.is_current {
+            let align = if bottom_ratio >= 1.0 {
+                HorizontalAlign::Right
+            } else {
+                HorizontalAlign::Left
+            };
+            let x = if bottom_ratio >= 1.0 {
+                text_start_right
+            } else {
+                text_start_left
+            };
+            queue_text(
+                bottom_merged,
+                (x, bottom_y),
+                FONT_SIZE_SMALL * bottom_ratio.clamp(0.8, 1.0),
+                align,
+            );
+        } else {
+            queue_text(
+                time_text,
+                (text_start_left, bottom_y),
+                FONT_SIZE_SMALL,
+                HorizontalAlign::Left,
+            );
+            queue_text(
+                track.artist.name.clone(),
+                (text_start_right, bottom_y),
+                FONT_SIZE_SMALL,
+                HorizontalAlign::Right,
+            );
+        }
+    }
+
+    pub fn draw(
+        &mut self,
+        device: &Device,
+        queue: &Queue,
+        rpass: &mut RenderPass<'_>,
+        width: u32,
+        height: u32,
+        scale: f32,
+    ) {
+        self.brush.update_matrix(
+            [
+                [2.0 / width as f32, 0.0, 0.0, 0.0],
+                [0.0, -2.0 / height as f32, 0.0, 0.0],
+                [0.0, 0.0, 1.0, 0.0],
+                [-1.0, 1.0, 0.0, 1.0],
+            ],
+            queue,
+        );
+
+        let sections = std::mem::take(&mut self.sections);
+        let refs: Vec<Section> = sections
+            .iter()
+            .map(|s| Section {
+                screen_position: (s.screen_position.0 * scale, s.screen_position.1 * scale),
+                bounds: (s.bounds.0 * scale, s.bounds.1 * scale),
+                layout: s.layout,
+                text: s
+                    .text
+                    .iter()
+                    .map(|t| Text {
+                        text: &t.text,
+                        scale: PxScale {
+                            x: t.scale.x * scale,
+                            y: t.scale.y * scale,
+                        },
+                        font_id: t.font_id,
+                        extra: t.extra,
+                    })
+                    .collect(),
+            })
+            .collect();
+
+        self.brush.queue(device, queue, refs).unwrap();
+        self.brush.draw(rpass);
     }
 }

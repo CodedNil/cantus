@@ -1,5 +1,5 @@
 use crate::render::{BackgroundPill, IconInstance, Particle, PlayheadUniforms, ScreenUniforms};
-use crate::text_render::TextInstance;
+use crate::text_render::TextRenderer;
 use crate::{CantusApp, GpuResources};
 use std::collections::HashMap;
 use wgpu::{
@@ -11,8 +11,8 @@ use wgpu::{
     PowerPreference, PresentMode, PrimitiveState, PrimitiveTopology, RenderPipelineDescriptor,
     RequestAdapterOptions, SamplerBindingType, SamplerDescriptor, ShaderModule,
     ShaderModuleDescriptor, ShaderSource, ShaderStages, Surface, SurfaceConfiguration,
-    TexelCopyBufferLayout, TextureDescriptor, TextureDimension, TextureFormat, TextureSampleType,
-    TextureUsages, TextureViewDescriptor, TextureViewDimension, Trace, VertexState,
+    TextureDescriptor, TextureDimension, TextureFormat, TextureSampleType, TextureUsages,
+    TextureViewDescriptor, TextureViewDimension, Trace, VertexState,
 };
 
 pub const MAX_TEXTURE_LAYERS: u32 = 48;
@@ -62,6 +62,8 @@ impl CantusApp {
         };
         surface.configure(&device, &surface_config);
 
+        self.text_renderer = Some(TextRenderer::new(&device, format));
+
         let create_shader = |label, source: &str| {
             device.create_shader_module(ShaderModuleDescriptor {
                 label: Some(label),
@@ -72,7 +74,6 @@ impl CantusApp {
         let background_shader =
             create_shader("Background", include_str!("../assets/background.wgsl"));
         let icon_shader = create_shader("Icons", include_str!("../assets/icons.wgsl"));
-        let text_shader = create_shader("Text", include_str!("../assets/text.wgsl"));
 
         let bgl = |label, entries: &[(u32, ShaderStages, BindingType)]| {
             device.create_bind_group_layout(&BindGroupLayoutDescriptor {
@@ -124,15 +125,6 @@ impl CantusApp {
                 (3, ShaderStages::FRAGMENT, sp),
             ],
         );
-        let text_layout = bgl(
-            "Text",
-            &[
-                (0, vf, ub),
-                (1, vf, sb),
-                (2, ShaderStages::FRAGMENT, tx(TextureViewDimension::D2)),
-                (3, ShaderStages::FRAGMENT, sp),
-            ],
-        );
 
         let create_pipe = |label, shader: &ShaderModule, layout: &BindGroupLayout| {
             device.create_render_pipeline(&RenderPipelineDescriptor {
@@ -172,7 +164,6 @@ impl CantusApp {
         let playhead_pipeline = create_pipe("Playhead", &playhead_shader, &playhead_layout);
         let background_pipeline = create_pipe("Background", &background_shader, &std_layout);
         let icon_pipeline = create_pipe("Icons", &icon_shader, &std_layout);
-        let text_pipeline = create_pipe("Text", &text_shader, &text_layout);
 
         let mk_buf = |l, s, u| {
             device.create_buffer(&BufferDescriptor {
@@ -208,37 +199,6 @@ impl CantusApp {
             (std::mem::size_of::<IconInstance>() * 256) as u64,
             BufferUsages::STORAGE,
         );
-        let text_storage_buffer = mk_buf(
-            "Text",
-            (std::mem::size_of::<TextInstance>() * 1024) as u64,
-            BufferUsages::STORAGE,
-        );
-
-        let atlas_texture = device.create_texture(&TextureDescriptor {
-            label: Some("Atlas"),
-            size: Extent3d {
-                width: self.font.atlas.width,
-                height: self.font.atlas.height,
-                depth_or_array_layers: 1,
-            },
-            mip_level_count: 1,
-            sample_count: 1,
-            dimension: TextureDimension::D2,
-            format: TextureFormat::Rgba8Unorm,
-            usage: TextureUsages::TEXTURE_BINDING | TextureUsages::COPY_DST,
-            view_formats: &[],
-        });
-        queue.write_texture(
-            atlas_texture.as_image_copy(),
-            &self.font.atlas.texture_data,
-            TexelCopyBufferLayout {
-                offset: 0,
-                bytes_per_row: Some(self.font.atlas.width * 4),
-                rows_per_image: None,
-            },
-            atlas_texture.size(),
-        );
-        let atlas_view = atlas_texture.create_view(&TextureViewDescriptor::default());
 
         let texture_array = device.create_texture(&TextureDescriptor {
             label: Some("Images"),
@@ -335,28 +295,6 @@ impl CantusApp {
                 },
             ],
         );
-        let text_bind_group = mk_bg(
-            "Text",
-            &text_layout,
-            &[
-                BindGroupEntry {
-                    binding: 0,
-                    resource: uniform_buffer.as_entire_binding(),
-                },
-                BindGroupEntry {
-                    binding: 1,
-                    resource: text_storage_buffer.as_entire_binding(),
-                },
-                BindGroupEntry {
-                    binding: 2,
-                    resource: BindingResource::TextureView(&atlas_view),
-                },
-                BindGroupEntry {
-                    binding: 3,
-                    resource: BindingResource::Sampler(&sampler),
-                },
-            ],
-        );
 
         self.gpu_resources = Some(GpuResources {
             device,
@@ -366,17 +304,14 @@ impl CantusApp {
             playhead_pipeline,
             background_pipeline,
             icon_pipeline,
-            text_pipeline,
             uniform_buffer,
             particles_buffer,
             playhead_buffer,
             background_storage_buffer,
             icon_storage_buffer,
-            text_storage_buffer,
             playhead_bind_group,
             background_bind_group,
             icon_bind_group,
-            text_bind_group,
             texture_array,
             url_to_image_index: HashMap::new(),
         });

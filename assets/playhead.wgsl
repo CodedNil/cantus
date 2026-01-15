@@ -65,6 +65,7 @@ fn sd_rounded_triangle(p: vec2<f32>, side_len: f32, radius: f32) -> f32 {
 fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
     let pixel_pos = in.local_uv * global.screen_size;
     var out_rgba = vec4(0.0);
+    let scale = global.scale_factor;
 
     // --- Particles ---
     for (var i = 0u; i < 64u; i++) {
@@ -74,8 +75,8 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
 
         let p_life = 1.0 - (dt / p.duration);
         let fade = p_life * smoothstep(0.0, 0.05, dt);
-        let pos = vec2<f32>(global.playhead_x, p.spawn_y) + p.spawn_vel * dt + vec2(0.0, 150.0 * dt * dt);
-        let dir = normalize(p.spawn_vel + vec2(0.0, 300.0 * dt));
+        let pos = vec2<f32>(global.playhead_x, p.spawn_y) + p.spawn_vel * scale * dt + vec2(0.0, 150.0 * dt * dt);
+        let dir = normalize(p.spawn_vel * scale + vec2(0.0, 300.0 * dt));
         let len = mix(8.0, 12.0, p_life);
         let thickness = mix(2.5, 4.0, p_life);
 
@@ -93,7 +94,6 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
     }
 
     // --- Playhead Geometry ---
-    let scale = global.scale_factor;
     let x_coord = global.playhead_x;
     let start_y = global.layer_metrics.x;
     let height = global.layer_metrics.y;

@@ -1,11 +1,10 @@
 use crate::interaction::InteractionState;
 use crate::pipelines::{IMAGE_SIZE, MAX_TEXTURE_LAYERS};
 use crate::render::{
-    BackgroundPill, FontEngine, IconInstance, Particle, PlayheadUniforms, RenderState,
-    ScreenUniforms,
+    BackgroundPill, IconInstance, Particle, PlayheadUniforms, RenderState, ScreenUniforms,
 };
 use crate::spotify::IMAGES_CACHE;
-use crate::text_render::TextInstance;
+use crate::text_render::TextRenderer;
 use std::collections::HashMap;
 use wgpu::{
     BindGroup, Buffer, Color, CommandEncoderDescriptor, Device, Instance, LoadOp, Operations,
@@ -37,7 +36,6 @@ struct GpuResources {
     playhead_pipeline: RenderPipeline,
     background_pipeline: RenderPipeline,
     icon_pipeline: RenderPipeline,
-    text_pipeline: RenderPipeline,
 
     // Uniform/Storage Buffers
     uniform_buffer: Buffer,
@@ -45,13 +43,11 @@ struct GpuResources {
     playhead_buffer: Buffer,
     background_storage_buffer: Buffer,
     icon_storage_buffer: Buffer,
-    text_storage_buffer: Buffer,
 
     // Bind Groups
     playhead_bind_group: BindGroup,
     background_bind_group: BindGroup,
     icon_bind_group: BindGroup,
-    text_bind_group: BindGroup,
 
     // Image Management
     texture_array: Texture,
@@ -84,11 +80,10 @@ struct CantusApp {
     scale_factor: f32,
 
     // Scene & Resources
-    font: FontEngine,
+    text_renderer: Option<TextRenderer>,
     screen_uniforms: ScreenUniforms,
     background_pills: Vec<BackgroundPill>,
     icon_pills: Vec<IconInstance>,
-    text_instances: Vec<TextInstance>,
     playhead_info: PlayheadUniforms,
 }
 
@@ -104,11 +99,10 @@ impl Default for CantusApp {
             particles_accumulator: 0.0,
             scale_factor: 1.0,
 
-            font: FontEngine::default(),
+            text_renderer: None,
             screen_uniforms: ScreenUniforms::default(),
             background_pills: Vec::new(),
             icon_pills: Vec::new(),
-            text_instances: Vec::new(),
             playhead_info: PlayheadUniforms::default(),
         }
     }
@@ -122,7 +116,6 @@ impl CantusApp {
 
         self.background_pills.clear();
         self.icon_pills.clear();
-        self.text_instances.clear();
 
         // Reset image usage
         if let Some(gpu) = self.gpu_resources.as_mut() {
@@ -170,14 +163,6 @@ impl CantusApp {
                 bytemuck::cast_slice(&self.icon_pills),
             );
         }
-        if !self.text_instances.is_empty() {
-            let bytes: &[u8] = bytemuck::cast_slice(&self.text_instances);
-            gpu.queue.write_buffer(
-                &gpu.text_storage_buffer,
-                0,
-                &bytes[..bytes.len().min(gpu.text_storage_buffer.size() as usize)],
-            );
-        }
 
         let Ok(surface_texture) = gpu.surface.get_current_texture() else {
             gpu.surface.configure(&gpu.device, &gpu.surface_config);
@@ -202,35 +187,37 @@ impl CantusApp {
                     },
                     depth_slice: None,
                 })],
-                ..Default::default()
+                depth_stencil_attachment: None,
+                timestamp_writes: None,
+                occlusion_query_set: None,
             });
 
-            let draws = [
-                (
-                    &gpu.background_pipeline,
-                    &gpu.background_bind_group,
-                    self.background_pills.len() as u32,
-                ),
-                (
-                    &gpu.text_pipeline,
-                    &gpu.text_bind_group,
-                    self.text_instances.len() as u32,
-                ),
-                (
-                    &gpu.icon_pipeline,
-                    &gpu.icon_bind_group,
-                    self.icon_pills.len() as u32,
-                ),
-                (&gpu.playhead_pipeline, &gpu.playhead_bind_group, 1),
-            ];
-
-            for (pipe, bg, count) in draws {
-                if count > 0 {
-                    rpass.set_pipeline(pipe);
-                    rpass.set_bind_group(0, bg, &[]);
-                    rpass.draw(0..4, 0..count);
-                }
+            if !self.background_pills.is_empty() {
+                rpass.set_pipeline(&gpu.background_pipeline);
+                rpass.set_bind_group(0, &gpu.background_bind_group, &[]);
+                rpass.draw(0..4, 0..self.background_pills.len() as u32);
             }
+
+            if let Some(text_renderer) = &mut self.text_renderer {
+                text_renderer.draw(
+                    &gpu.device,
+                    &gpu.queue,
+                    &mut rpass,
+                    gpu.surface_config.width,
+                    gpu.surface_config.height,
+                    self.scale_factor,
+                );
+            }
+
+            if !self.icon_pills.is_empty() {
+                rpass.set_pipeline(&gpu.icon_pipeline);
+                rpass.set_bind_group(0, &gpu.icon_bind_group, &[]);
+                rpass.draw(0..4, 0..self.icon_pills.len() as u32);
+            }
+
+            rpass.set_pipeline(&gpu.playhead_pipeline);
+            rpass.set_bind_group(0, &gpu.playhead_bind_group, &[]);
+            rpass.draw(0..4, 0..1);
         }
 
         gpu.queue.submit([encoder.finish()]);

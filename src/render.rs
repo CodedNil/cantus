@@ -2,14 +2,9 @@ use crate::{
     CantusApp, PANEL_EXTENSION, PANEL_START,
     config::CONFIG,
     spotify::{ALBUM_PALETTE_CACHE, CondensedPlaylist, PLAYBACK_STATE, PlaylistId, Track},
-    text_render::{ATLAS_SCALE, MSDFAtlas, TextInstance},
 };
 use bytemuck::{Pod, Zeroable};
 use std::{collections::HashMap, ops::Range, sync::LazyLock, time::Instant};
-use ttf_parser::{Face, Tag};
-
-const FONT_SIZE: f32 = 12.0;
-const FONT_SIZE_SMALL: f32 = 10.5;
 
 #[derive(Copy, Clone, Debug, Default, PartialEq)]
 pub struct Point {
@@ -126,42 +121,14 @@ impl Default for RenderState {
     }
 }
 
-pub struct FontEngine {
-    pub face: Face<'static>,
-    pub atlas: MSDFAtlas,
-}
-
-pub struct TextLayout {
-    glyphs: Vec<(u32, f32)>, // gid, x_offset
-    width: f32,
-    line_height: f32,
-    font_size: f32,
-}
-
-impl Default for FontEngine {
-    fn default() -> Self {
-        let bytes = include_bytes!("../assets/NotoSans.ttf");
-        let mut face = Face::parse(bytes, 0).expect("failed to parse font");
-        if let Some(axis) = face
-            .variation_axes()
-            .into_iter()
-            .find(|a| a.tag == Tag::from_bytes(b"wght"))
-        {
-            face.set_variation(axis.tag, 700.0f32.clamp(axis.min_value, axis.max_value));
-        }
-        let atlas = MSDFAtlas::new(&face, 48);
-        Self { face, atlas }
-    }
-}
-
 pub struct TrackRender<'a> {
-    track: &'a Track,
-    is_current: bool,
-    seconds_until_start: f32,
-    start_x: f32,
-    width: f32,
-    hitbox_range: (f32, f32),
-    art_only: bool,
+    pub track: &'a Track,
+    pub is_current: bool,
+    pub seconds_until_start: f32,
+    pub start_x: f32,
+    pub width: f32,
+    pub hitbox_range: (f32, f32),
+    pub art_only: bool,
 }
 
 /// Build the scene for rendering.
@@ -175,7 +142,7 @@ impl CantusApp {
 
         self.background_pills.clear();
         let history_width = CONFIG.history_width;
-        let total_width = CONFIG.width - history_width;
+        let total_width = CONFIG.width - history_width - 10.0;
         let total_height = CONFIG.height;
         let timeline_duration_ms = CONFIG.timeline_future_minutes * 60_000.0;
         let timeline_start_ms = -CONFIG.timeline_past_minutes * 60_000.0;
@@ -364,97 +331,12 @@ impl CantusApp {
         });
 
         // --- TEXT ---
-        if !track_render.art_only && fade_alpha >= 1.0 && width > CONFIG.height {
-            // Get available width for text
-            let text_start_left = start_x + 12.0;
-            let text_start_right = start_x + width - CONFIG.height - 8.0;
-            let available_width = (text_start_right - text_start_left).max(0.0);
-            let text_alpha = (available_width / 100.0).min(1.0);
-            let text_color = [0.94, 0.94, 0.94, text_alpha];
-
-            // Render the songs title (strip anything beyond a - or ( in the song title)
-            let song_name = track
-                .name
-                .split(['(', '-'])
-                .next()
-                .unwrap_or(&track.name)
-                .trim();
-            let text_height = PANEL_START + (CONFIG.height * 0.2).floor();
-            let song_layout = self.layout_text(song_name, FONT_SIZE);
-            let width_ratio = available_width / song_layout.width;
-            if width_ratio <= 1.0 {
-                self.draw_text(
-                    &self.layout_text(song_name, FONT_SIZE * width_ratio.max(0.8)),
-                    text_start_left,
-                    text_height,
-                    0.0,
-                    text_color,
-                    available_width,
-                );
-            } else {
-                self.draw_text(
-                    &song_layout,
-                    text_start_right,
-                    text_height,
-                    1.0,
-                    text_color,
-                    available_width,
-                );
-            }
-
-            // Get text layouts for bottom row of text
-            let text_height = PANEL_START + (CONFIG.height * 0.52).floor();
-
-            let artist_text = &track.artist.name;
-            let time_text = if track_render.seconds_until_start >= 60.0 {
-                format!(
-                    "{}m{}s",
-                    (track_render.seconds_until_start / 60.0).floor(),
-                    (track_render.seconds_until_start % 60.0).floor()
-                )
-            } else {
-                format!("{}s", track_render.seconds_until_start.round())
-            };
-            let dot_text = "\u{2004}•\u{2004}"; // Use thin spaces on either side of the bullet point
-
-            let bottom_text = format!("{time_text}{dot_text}{artist_text}");
-            let mut layout = self.layout_text(&bottom_text, FONT_SIZE_SMALL);
-            let width_ratio = available_width / layout.width;
-            if width_ratio <= 1.0 || !track_render.is_current {
-                if width_ratio < 1.0 {
-                    layout = self
-                        .layout_text(&bottom_text, FONT_SIZE_SMALL * width_ratio.clamp(0.8, 1.0));
-                }
-                self.draw_text(
-                    &layout,
-                    if width_ratio >= 1.0 {
-                        text_start_right
-                    } else {
-                        text_start_left
-                    },
-                    text_height,
-                    if width_ratio >= 1.0 { 1.0 } else { 0.0 },
-                    text_color,
-                    available_width,
-                );
-            } else {
-                self.draw_text(
-                    &self.layout_text(&time_text, FONT_SIZE_SMALL),
-                    start_x + 12.0,
-                    text_height,
-                    0.0,
-                    text_color,
-                    available_width,
-                );
-                self.draw_text(
-                    &self.layout_text(artist_text, FONT_SIZE_SMALL),
-                    text_start_right,
-                    text_height,
-                    1.0,
-                    text_color,
-                    available_width,
-                );
-            }
+        if let Some(text_renderer) = &mut self.text_renderer
+            && !track_render.art_only
+            && fade_alpha >= 1.0
+            && width > CONFIG.height
+        {
+            text_renderer.render(track_render);
         }
 
         // Expand the hitbox vertically so it includes the playlist buttons
@@ -463,79 +345,6 @@ impl CantusApp {
                 && self.interaction.mouse_position.x >= hitbox.x0
                 && self.interaction.mouse_position.x <= hitbox.x1;
             self.draw_playlist_buttons(track, hovered, playlists, width, start_x);
-        }
-    }
-
-    /// Creates the text layout for a single-line string.
-    fn layout_text(&self, text: &str, size: f32) -> TextLayout {
-        let face = &self.font.face;
-        let scale = size / f32::from(face.units_per_em());
-        let mut px = 0.0f32;
-        let mut glyphs = Vec::with_capacity(text.len());
-
-        for ch in text.chars() {
-            let gid = u32::from(face.glyph_index(ch).map_or(0, |g| g.0));
-            let advance = face
-                .glyph_hor_advance(ttf_parser::GlyphId(gid as u16))
-                .unwrap_or(0);
-
-            glyphs.push((gid, px));
-            px += f32::from(advance) * scale;
-        }
-
-        TextLayout {
-            glyphs,
-            width: px,
-            line_height: size,
-            font_size: size,
-        }
-    }
-
-    fn draw_text(
-        &mut self,
-        layout: &TextLayout,
-        x: f32,
-        y: f32,
-        x_align: f32,
-        color: [f32; 4],
-        max_width: f32,
-    ) {
-        let start_x = x - (layout.width * x_align);
-        let font_to_pixel = layout.font_size / f32::from(self.font.face.units_per_em());
-
-        // Vertically center text on the provided y coordinate based on font metrics
-        let baseline_y =
-            y + (layout.line_height * 0.5) - (f32::from(self.font.face.ascender()) * font_to_pixel);
-        let right_clip_edge = start_x + max_width;
-
-        for (glyph_id, x_offset) in &layout.glyphs {
-            if let Some(info) = self.font.atlas.glyphs.get(glyph_id) {
-                let px_scale = font_to_pixel / ATLAS_SCALE;
-
-                // Full dimensions in screen pixels
-                let world_w = (info.uv_rect[2] * self.font.atlas.width as f32) * px_scale;
-                let world_h = (info.uv_rect[3] * self.font.atlas.height as f32) * px_scale;
-
-                // Top-left position of the glyph quad
-                let glyph_x =
-                    start_x + x_offset + (f32::from(info.metrics.x_min) * font_to_pixel) - px_scale;
-                let glyph_y = baseline_y
-                    + (f32::from(self.font.face.ascender() - info.metrics.y_max) * font_to_pixel)
-                    - px_scale;
-
-                let visible_width = (right_clip_edge - glyph_x).clamp(0.0, world_w);
-                if visible_width <= 0.0 {
-                    continue;
-                }
-
-                let uv_width = info.uv_rect[2] * (visible_width / world_w);
-
-                self.text_instances.push(TextInstance {
-                    rect: [glyph_x, glyph_y, visible_width, world_h],
-                    uv_rect: [info.uv_rect[0], info.uv_rect[1], uv_width, info.uv_rect[3]],
-                    color,
-                });
-            }
         }
     }
 
@@ -552,7 +361,6 @@ impl CantusApp {
             .and_then(|data_ref| data_ref.as_ref().copied())
             .unwrap_or_default();
 
-        // We use a monotonic time for the GPU to calculate displacements
         let time = START_TIME.elapsed().as_secs_f32();
 
         // Get expansion animation variables
@@ -599,8 +407,8 @@ impl CantusApp {
 
                 particle.spawn_y = PANEL_START + CONFIG.height * y_fraction;
                 particle.spawn_vel = [
-                    fastrand::usize(SPARK_VELOCITY_X) as f32 * self.scale_factor * horizontal_bias,
-                    fastrand::usize(SPARK_VELOCITY_Y) as f32 * -self.scale_factor,
+                    fastrand::usize(SPARK_VELOCITY_X) as f32 * horizontal_bias,
+                    -(fastrand::usize(SPARK_VELOCITY_Y) as f32),
                 ];
                 particle.color = palette[fastrand::usize(0..palette.len())];
                 particle.spawn_time = time;

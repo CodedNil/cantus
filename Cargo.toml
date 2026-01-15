@@ -22,6 +22,7 @@ wgpu = { version = "27.0.1", default-features = false, features = [
     "vulkan",
     "wgsl",
 ] }
+wgpu_text = { version = "27.0.1", default-features = false }
 
 time = { version = "0.3.45", features = ["serde"] }
 image = { version = "0.25.9", default-features = false, features = [
@@ -51,14 +52,6 @@ url = "2.5.8"
 sha2 = "0.10.9"
 webbrowser = "1.0.6"
 bytemuck = { version = "1.24.0", features = ["derive"] }
-
-ttf-parser = { version = "0.25.1", default-features = false, features = [
-    "std",
-    "variable-fonts",
-] }
-fdsm = "0.8.0"
-fdsm-ttf-parser = "0.2.0"
-nalgebra = "0.34.1"
 
 [lints.clippy]
 pedantic = { level = "warn", priority = -1 }
