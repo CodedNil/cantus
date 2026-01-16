@@ -1,7 +1,7 @@
 # cantus
 A beautiful interactive music widget for Wayland
 
-<img width="1331" height="67" alt="image" src="https://github.com/user-attachments/assets/3ccc53d0-6968-4b78-b337-08253f471fb4" />
+<img width="1755" height="81" alt="image" src="https://github.com/user-attachments/assets/a447d690-f36c-4c72-95e3-5be8a5c9041b" />
 
 ## Features
 
@@ -13,9 +13,11 @@ A beautiful interactive music widget for Wayland
 
 **Playlist Editing**: Favourite playlists to be displayed, shows when a song is contained in that playlist and allows you to add/remove songs from the playlist. (Also includes star ratings!)
 
-<img width="390" height="76" alt="image" src="https://github.com/user-attachments/assets/aa33d279-c7f2-4565-b893-f3382fc9b9ed" />
+<img width="430" height="88" alt="image" src="https://github.com/user-attachments/assets/dd8c185b-a12d-42ec-86d4-dee96ceb9ae9" />
 
-https://github.com/user-attachments/assets/bca138db-197d-403d-a6e2-c0b025df3c74
+https://github.com/user-attachments/assets/5215392e-bdb2-4ae1-9ce9-04e4aa75a455
+
+
 
 ## Usage
 
@@ -26,15 +28,16 @@ https://github.com/user-attachments/assets/bca138db-197d-403d-a6e2-c0b025df3c74
 Due to spotify's rate limiting you will need to get a spotify API key from https://developer.spotify.com/dashboard/applications. And add that to the config file under the `spotify_client_id` key.
 
 ## Installing with Nix
+Avaiable in nixpkgs.
 
-As a flake:
+As a flake for home manager:
 Add to flake.nix inputs `cantus.url = "github:CodedNil/cantus";`
 Enable it as a systemd module with home-manager:
 ```
 imports = [ inputs.cantus.homeManagerModules.default ];
 programs.cantus = {
   enable = true;
-  package = inputs.cantus.packages.${pkgs.stdenv.system}.cantus;
+  package = pkgs.cantus;
   settings = {
     monitor = "eDP-1";
     width = 1050.0;
