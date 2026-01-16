@@ -32,10 +32,9 @@ pub struct InteractionState {
     pub icon_hitboxes: Vec<IconHitbox>,
 
     pub mouse_down: bool,
+    pub dragging: bool,
     pub drag_origin: Option<Point>,
     pub drag_track: Option<(TrackId, f32)>,
-    pub dragging: bool,
-    pub drag_delta_pixels: f32,
 
     // Playhead
     pub last_expansion: (Instant, Point),
@@ -56,10 +55,9 @@ impl Default for InteractionState {
             track_hitboxes: Vec::new(),
             icon_hitboxes: Vec::new(),
             mouse_down: false,
+            dragging: false,
             drag_origin: None,
             drag_track: None,
-            dragging: false,
-            drag_delta_pixels: 0.0,
             last_expansion: (
                 Instant::now().checked_sub(Duration::from_secs(5)).unwrap(),
                 Point::default(),
@@ -81,7 +79,6 @@ impl CantusApp {
         interaction.drag_origin = Some(interaction.mouse_position);
         interaction.drag_track = None;
         interaction.dragging = false;
-        interaction.drag_delta_pixels = 0.0;
         PLAYBACK_STATE.write().interaction = false;
     }
 
@@ -102,7 +99,6 @@ impl CantusApp {
         }
         interaction.drag_origin = None;
         interaction.dragging = false;
-        interaction.drag_delta_pixels = 0.0;
         interaction.mouse_down = false;
         interaction.mouse_pressure = 1.0;
         PLAYBACK_STATE.write().interaction = false;
@@ -206,9 +202,6 @@ impl CantusApp {
                 interaction.dragging = true;
                 PLAYBACK_STATE.write().interaction = true;
             }
-            interaction.drag_delta_pixels = if interaction.dragging { delta_x } else { 0.0 };
-        } else {
-            interaction.drag_delta_pixels = 0.0;
         }
     }
 
@@ -238,7 +231,6 @@ impl CantusApp {
         interaction.drag_track = None;
         interaction.drag_origin = None;
         interaction.dragging = false;
-        interaction.drag_delta_pixels = 0.0;
         PLAYBACK_STATE.write().interaction = false;
     }
 }

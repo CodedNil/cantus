@@ -109,16 +109,13 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
     let c3 = unpack4x8unorm(pill.colors[3]).rgb;
 
     // Vibrancy Post-Processing
-    var bg = mix(mix(c0, c1, mix_val), mix(c3, c2, s2 * 0.5 + 0.5), mix_val);
-    bg = mix(bg, (c0 + c1 + c2 + c3) * 0.25, 0.1); // Base color blend
+    var color = mix(mix(c0, c1, mix_val), mix(c3, c2, s2 * 0.5 + 0.5), mix_val);
+    color = mix(color, (c0 + c1 + c2 + c3) * 0.25, 0.1); // Base color blend
 
-    let luma = dot(bg, vec3(0.2126, 0.7152, 0.0722));
-    bg = mix(vec3(luma), bg, mix(3.2, 1.6, smoothstep(0.1, 0.4, luma))); // Saturation boost
-    bg = clamp(bg, vec3(0.06), vec3(0.85)) * min(1.0, 0.52 / max(luma, 0.001)); // Luma cap for UI readability
-    bg = mix(bg, bg * 0.45, smoothstep(global.playhead_x + 1.2, global.playhead_x - 1.2, in.pixel_pos.x));
-
-    // --- Layering & FX ---
-    var color = bg;
+    let luma = dot(color, vec3(0.2126, 0.7152, 0.0722));
+    color = mix(vec3(luma), color, mix(3.2, 1.6, smoothstep(0.1, 0.4, luma))); // Saturation boost
+    color = clamp(color, vec3(0.06), vec3(0.85)) * min(1.0, 0.52 / max(luma, 0.001)); // Luma cap for UI readability
+    color = mix(color, color * 0.45, smoothstep(global.playhead_x + 1.2, global.playhead_x - 1.2, in.pixel_pos.x));
 
     // Cover art
     let img_x = pill_size.x - pill_size.y;

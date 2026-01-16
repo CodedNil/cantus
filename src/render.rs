@@ -158,8 +158,8 @@ impl CantusApp {
         self.interaction.icon_hitboxes.clear();
         self.interaction.track_hitboxes.clear();
 
-        let drag_offset_ms = if self.interaction.dragging {
-            self.interaction.drag_delta_pixels / px_per_ms
+        let drag_offset_ms = if let Some(origin_pos) = self.interaction.drag_origin {
+            (self.interaction.mouse_position.x - origin_pos.x) / px_per_ms
         } else {
             0.0
         };
