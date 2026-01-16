@@ -1,7 +1,4 @@
-use crate::{
-    CantusApp, PANEL_EXTENSION, PANEL_START, config::CONFIG, interaction::InteractionState,
-    render::Point,
-};
+use crate::{CantusApp, PANEL_EXTENSION, PANEL_START, config::CONFIG, render::Point};
 use itertools::Itertools;
 use raw_window_handle::{
     RawDisplayHandle, RawWindowHandle, WaylandDisplayHandle, WaylandWindowHandle,
@@ -449,7 +446,8 @@ impl Dispatch<WlPointer, ()> for LayerShellApp {
         _conn: &Connection,
         _qhandle: &QueueHandle<Self>,
     ) {
-        let interaction = &mut state.cantus.interaction;
+        let cantus = &mut state.cantus;
+        let interaction = &mut cantus.interaction;
 
         let surface_id = state.wl_surface.as_ref().map(wayland_client::Proxy::id);
         match event {
@@ -469,24 +467,24 @@ impl Dispatch<WlPointer, ()> for LayerShellApp {
             } => {
                 interaction.mouse_position = Point::new(surface_x as f32, surface_y as f32);
                 interaction.mouse_pressure = if interaction.mouse_down { 2.0 } else { 1.0 };
-                interaction.handle_mouse_drag();
+                cantus.handle_mouse_drag();
             }
             wl_pointer::Event::Leave { .. } => {
                 interaction.mouse_pressure = 0.0;
-                interaction.cancel_drag();
                 interaction.mouse_down = false;
+                cantus.cancel_drag();
             }
             wl_pointer::Event::Button {
                 button,
                 state: button_state,
                 ..
             } => match (button, button_state) {
-                (0x110, WEnum::Value(wl_pointer::ButtonState::Pressed)) => interaction.left_click(),
+                (0x110, WEnum::Value(wl_pointer::ButtonState::Pressed)) => cantus.left_click(),
                 (0x110, WEnum::Value(wl_pointer::ButtonState::Released)) => {
-                    interaction.left_click_released();
+                    cantus.left_click_released();
                 }
                 (0x111, WEnum::Value(wl_pointer::ButtonState::Pressed)) if interaction.dragging => {
-                    interaction.right_click();
+                    cantus.right_click();
                 }
                 _ => {}
             },
@@ -500,7 +498,7 @@ impl Dispatch<WlPointer, ()> for LayerShellApp {
                 value120: discrete,
                 ..
             } => {
-                InteractionState::handle_scroll(discrete.signum());
+                CantusApp::handle_scroll(discrete.signum());
             }
             _ => {}
         }

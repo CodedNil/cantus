@@ -6,6 +6,7 @@ use crate::render::{
 use crate::spotify::IMAGES_CACHE;
 use crate::text_render::TextRenderer;
 use std::collections::HashMap;
+use std::time::Instant;
 use wgpu::{
     BindGroup, Buffer, Color, CommandEncoderDescriptor, Device, Instance, LoadOp, Operations,
     Queue, RenderPassColorAttachment, RenderPassDescriptor, RenderPipeline, StoreOp, Surface,
@@ -75,6 +76,7 @@ struct CantusApp {
     gpu_resources: Option<GpuResources>,
 
     // Application State
+    start_time: Instant,
     render_state: RenderState,
     interaction: InteractionState,
     particles: [Particle; 64],
@@ -95,6 +97,7 @@ impl Default for CantusApp {
             instance: Instance::new(&wgpu::InstanceDescriptor::default()),
             gpu_resources: None,
 
+            start_time: Instant::now(),
             render_state: RenderState::default(),
             interaction: InteractionState::default(),
             particles: [Particle::default(); 64],

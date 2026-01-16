@@ -1,7 +1,7 @@
 use crate::{
     CantusApp, PANEL_START,
     config::CONFIG,
-    render::{IconInstance, Point, Rect},
+    render::{IconInstance, Point, Rect, lerpf32},
     spotify::{
         CondensedPlaylist, PLAYBACK_STATE, PlaylistId, SPOTIFY_CLIENT, Track, TrackId,
         update_playback_state,
@@ -24,7 +24,7 @@ pub struct IconHitbox {
 
 pub struct InteractionState {
     pub mouse_position: Point,
-    pub mouse_pressure: f32,
+    pub mouse_pressure: f32, // 0 not hovered - 1 hovered - 2 mouse down
 
     pub last_hitbox_hash: u64,
     pub play_hitbox: Rect,
@@ -73,42 +73,49 @@ impl Default for InteractionState {
     }
 }
 
-impl InteractionState {
+impl CantusApp {
     pub fn left_click(&mut self) {
-        self.mouse_down = true;
-        self.mouse_pressure = 2.0;
-        self.drag_origin = Some(self.mouse_position);
-        self.drag_track = None;
-        self.dragging = false;
-        self.drag_delta_pixels = 0.0;
+        let interaction = &mut self.interaction;
+        interaction.mouse_down = true;
+        interaction.mouse_pressure = 2.0;
+        interaction.drag_origin = Some(interaction.mouse_position);
+        interaction.drag_track = None;
+        interaction.dragging = false;
+        interaction.drag_delta_pixels = 0.0;
         PLAYBACK_STATE.write().interaction = false;
     }
 
     pub fn left_click_released(&mut self) {
-        if !self.dragging && self.mouse_down {
+        if !self.interaction.dragging && self.interaction.mouse_down {
             self.handle_click();
         }
-        if let Some((track_id, position)) = self.drag_track.take() {
+        let interaction = &mut self.interaction;
+        if let Some((track_id, position)) = interaction.drag_track.take() {
+            // Get the x position of the playhead, run an expansion animation there
+            interaction.last_expansion = (
+                Instant::now(),
+                Point::new(CONFIG.playhead_x(), PANEL_START + CONFIG.height * 0.5),
+            );
             spawn(move || {
                 skip_to_track(&track_id, position, false);
             });
         }
-        self.drag_origin = None;
-        self.dragging = false;
-        self.drag_delta_pixels = 0.0;
-        self.mouse_down = false;
-        self.mouse_pressure = 1.0;
+        interaction.drag_origin = None;
+        interaction.dragging = false;
+        interaction.drag_delta_pixels = 0.0;
+        interaction.mouse_down = false;
+        interaction.mouse_pressure = 1.0;
         PLAYBACK_STATE.write().interaction = false;
     }
 
     pub fn right_click(&mut self) {
         self.cancel_drag();
-        self.mouse_down = false;
+        self.interaction.mouse_down = false;
     }
 
     /// Handle click events.
     fn handle_click(&mut self) {
-        let mouse_pos = self.mouse_position;
+        let mouse_pos = self.interaction.mouse_position;
         let (playing, interaction) = {
             let state = PLAYBACK_STATE.read();
             (state.playing, state.interaction)
@@ -119,11 +126,29 @@ impl InteractionState {
         PLAYBACK_STATE.write().interaction = true;
 
         // Click on rating/playlist icons
-        if let Some(hitbox) = self
+        let interaction = &mut self.interaction;
+        if let Some(hitbox) = interaction
             .icon_hitboxes
             .iter()
             .find(|h| h.rect.contains(mouse_pos))
         {
+            // Spawn particles
+            let time = self.start_time.elapsed().as_secs_f32();
+            let mut emit_count = 20;
+            for particle in &mut self.particles {
+                if emit_count > 0 && time > particle.end_time {
+                    particle.spawn_pos = [mouse_pos.x, mouse_pos.y];
+                    let angle = fastrand::f32() * 2.0 * std::f32::consts::PI;
+                    let speed = 30.0 + (fastrand::f32() * 20.0);
+                    particle.spawn_vel = [angle.cos() * speed, angle.sin() * speed];
+                    let duration = lerpf32(fastrand::f32(), 0.5, 1.5);
+                    particle.color =
+                        u32::from_le_bytes([255, 215, 50, (duration * 100.0).min(255.0) as u8]);
+                    particle.end_time = time + duration;
+                    emit_count -= 1;
+                }
+            }
+
             let track_id = hitbox.track_id;
             if CONFIG.ratings_enabled
                 && let Some(index) = hitbox.rating_index
@@ -138,33 +163,24 @@ impl InteractionState {
                     toggle_playlist_membership(&track_id, &playlist_id);
                 });
             }
-        } else if self.play_hitbox.contains(mouse_pos) {
-            // Get the x position of the playhead
-            let origin_x = {
-                let history_width = CONFIG.history_width;
-                let total_width = CONFIG.width - history_width - 10.0;
-                let timeline_duration_ms = CONFIG.timeline_future_minutes * 60_000.0;
-                let timeline_start_ms = -CONFIG.timeline_past_minutes * 60_000.0;
-                history_width - timeline_start_ms * (total_width / timeline_duration_ms)
-            };
-
+        } else if interaction.play_hitbox.contains(mouse_pos) {
             // Play/pause
-            self.last_expansion = (
+            interaction.last_expansion = (
                 Instant::now(),
-                Point::new(origin_x, PANEL_START + CONFIG.height * 0.5),
+                Point::new(CONFIG.playhead_x(), PANEL_START + CONFIG.height * 0.5),
             );
-            self.last_toggle_playing = Instant::now();
+            interaction.last_toggle_playing = Instant::now();
             spawn(move || {
                 toggle_playing(!playing);
             });
-        } else if let Some((track_id, _, (track_range_a, track_range_b))) = self
+        } else if let Some((track_id, _, (track_range_a, track_range_b))) = interaction
             .track_hitboxes
             .iter()
             .rev()
             .find(|(_, track_rect, _)| track_rect.contains(mouse_pos))
         {
             // Seek track
-            self.last_expansion = (Instant::now(), mouse_pos);
+            interaction.last_expansion = (Instant::now(), mouse_pos);
 
             // If click is near the very left, reset to the start of the song, else seek to clicked position
             let position = if mouse_pos.x < CONFIG.history_width + 40.0 {
@@ -182,16 +198,17 @@ impl InteractionState {
 
     /// Drag across the progress bar to seek.
     pub fn handle_mouse_drag(&mut self) {
-        if let Some(origin_pos) = self.drag_origin {
-            let delta_x = self.mouse_position.x - origin_pos.x;
-            let delta_y = self.mouse_position.y - origin_pos.y;
-            if !self.dragging && (delta_x.abs() >= 2.0 || delta_y.abs() >= 2.0) {
-                self.dragging = true;
+        let interaction = &mut self.interaction;
+        if let Some(origin_pos) = interaction.drag_origin {
+            let delta_x = interaction.mouse_position.x - origin_pos.x;
+            let delta_y = interaction.mouse_position.y - origin_pos.y;
+            if !interaction.dragging && (delta_x.abs() >= 2.0 || delta_y.abs() >= 2.0) {
+                interaction.dragging = true;
                 PLAYBACK_STATE.write().interaction = true;
             }
-            self.drag_delta_pixels = if self.dragging { delta_x } else { 0.0 };
+            interaction.drag_delta_pixels = if interaction.dragging { delta_x } else { 0.0 };
         } else {
-            self.drag_delta_pixels = 0.0;
+            interaction.drag_delta_pixels = 0.0;
         }
     }
 
@@ -217,10 +234,11 @@ impl InteractionState {
     }
 
     pub fn cancel_drag(&mut self) {
-        self.drag_track = None;
-        self.drag_origin = None;
-        self.dragging = false;
-        self.drag_delta_pixels = 0.0;
+        let interaction = &mut self.interaction;
+        interaction.drag_track = None;
+        interaction.drag_origin = None;
+        interaction.dragging = false;
+        interaction.drag_delta_pixels = 0.0;
         PLAYBACK_STATE.write().interaction = false;
     }
 }

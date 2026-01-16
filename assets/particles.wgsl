@@ -11,10 +11,9 @@ struct GlobalUniforms {
 };
 
 struct Particle {
+    spawn_pos: vec2<f32>,
     spawn_vel: vec2<f32>,
-    spawn_y: f32,
-    spawn_time: f32,
-    duration: f32,
+    end_time: f32,
     color: u32,
 };
 
@@ -30,24 +29,32 @@ struct VertexOutput {
 @vertex
 fn vs_main(@builtin(vertex_index) v_idx: u32, @builtin(instance_index) i_idx: u32) -> VertexOutput {
     let p = particles[i_idx];
-    let dt = global.time - p.spawn_time;
+
+    // Unpack Color and Duration
+    let color_vec = unpack4x8unorm(p.color);
+    let rgb = color_vec.rgb;
+    let duration = (color_vec.a * 255.0) / 100.0;
+
+    // Calculate Timing
+    let spawn_time = p.end_time - duration;
+    let dt = global.time - spawn_time;
 
     // Discard inactive particles
-    if (dt < 0.0 || dt > p.duration) {
+    if (dt < 0.0 || dt > duration) {
         return VertexOutput(vec4(0.0), vec4(0.0), vec2(0.0));
     }
 
-    let p_life = dt / p.duration;
+    let p_life = dt / duration;
     let p_life_inv = 1.0 - p_life;
     let scale = global.scale_factor;
 
     // Initial velocity + linear gravity
-    let pos = vec2(global.playhead_x, p.spawn_y) + p.spawn_vel * dt * scale;
+    let pos = p.spawn_pos + p.spawn_vel * dt * scale;
     let dir = normalize(p.spawn_vel * scale);
     let perp = vec2(-dir.y, dir.x);
 
     // Expand length from 0 on spawn to full stretch
-    let stretch = smoothstep(0.0, 0.1, dt / p.duration);
+    let stretch = smoothstep(0.0, 0.1, dt / duration);
     let growth = p_life + 0.5;
     let half_len = 5.0 * scale * growth;
     let half_thick = 2.5 * scale * growth;
@@ -57,7 +64,6 @@ fn vs_main(@builtin(vertex_index) v_idx: u32, @builtin(instance_index) i_idx: u3
     let world_pos = pos + (dir * uv.x * half_len) + (perp * uv.y * half_thick);
 
     // Saturated color with a bright core
-    let rgb = unpack4x8unorm(p.color).rgb;
     let luma = dot(rgb, vec3(0.299, 0.587, 0.114));
     let spark_color = mix(mix(vec3(luma), rgb, 2.0), vec3(1.0), 0.2) * 2.0;
 

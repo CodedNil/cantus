@@ -78,3 +78,13 @@ fn load_config() -> Config {
         }
     }
 }
+
+impl Config {
+    pub fn playhead_x(&self) -> f32 {
+        let history_width = self.history_width;
+        let total_width = self.width - history_width - 10.0;
+        let timeline_duration_ms = self.timeline_future_minutes * 60_000.0;
+        let timeline_start_ms = -self.timeline_past_minutes * 60_000.0;
+        history_width - timeline_start_ms * (total_width / timeline_duration_ms)
+    }
+}

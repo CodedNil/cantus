@@ -45,7 +45,7 @@ fn vs_main(@builtin(vertex_index) v_idx: u32, @builtin(instance_index) i_idx: u3
     let offset_pos = icon.pos + vec2(x_push, 0.0);
 
     // Rotation based on x difference
-    let angle = x_push * 0.03;
+    let angle = x_push * 0.01;
     let rotation = (unit_coord - 0.5) * (pixel_radius * 2.0);
     let rotated_pos = vec2(
         rotation.x * cos(angle) - rotation.y * sin(angle),
@@ -119,7 +119,7 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
     if (mask <= 0.0 && shadow <= 0.0) { discard; }
 
     // A subtle rim light around the edge
-    let highlighting = pow((1.0 - smoothstep(0.0, -5.0, dist_to_shape)), 4.0) * 0.08;
+    let highlighting = pow((1.0 - smoothstep(0.0, -5.0, dist_to_shape)), 4.0) * 0.04;
     out_color += highlighting * mask;
 
     return vec4(out_color * mask * alpha, max(mask, shadow) * alpha);

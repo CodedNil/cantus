@@ -4,7 +4,7 @@ use crate::{
     spotify::{ALBUM_PALETTE_CACHE, CondensedPlaylist, PLAYBACK_STATE, PlaylistId, Track},
 };
 use bytemuck::{Pod, Zeroable};
-use std::{collections::HashMap, ops::Range, sync::LazyLock, time::Instant};
+use std::{collections::HashMap, ops::Range, time::Instant};
 
 #[derive(Copy, Clone, Debug, Default, PartialEq)]
 pub struct Point {
@@ -63,11 +63,10 @@ pub struct PlayheadUniforms {
 #[repr(C)]
 #[derive(Copy, Clone, Debug, Default, Pod, Zeroable)]
 pub struct Particle {
-    spawn_vel: [f32; 2],
-    spawn_y: f32,
-    spawn_time: f32,
-    duration: f32,
-    color: u32,
+    pub spawn_pos: [f32; 2], // x, y
+    pub spawn_vel: [f32; 2], // x, y
+    pub end_time: f32,       // The time the particle will be pruned
+    pub color: u32,          // r, g, b, duration
 }
 
 #[repr(C)]
@@ -89,8 +88,6 @@ pub struct IconInstance {
     pub data: u32,
     pub image_index: i32,
 }
-
-static START_TIME: LazyLock<Instant> = LazyLock::new(Instant::now);
 
 /// Spacing between tracks in ms
 const TRACK_SPACING_MS: f32 = 4000.0;
@@ -268,10 +265,8 @@ impl CantusApp {
             }
         }
 
-        let time = START_TIME.elapsed().as_secs_f32();
-        self.global_uniforms.time = time;
-
         // Screen uniforms
+        self.global_uniforms.time = self.start_time.elapsed().as_secs_f32();
         self.global_uniforms.screen_size =
             [CONFIG.width, CONFIG.height + PANEL_START + PANEL_EXTENSION];
         self.global_uniforms.bar_height = [PANEL_START, CONFIG.height];
@@ -292,8 +287,9 @@ impl CantusApp {
         // Get expansion animation variables
         let (interaction_inst, interaction_point) = self.interaction.last_expansion;
         self.global_uniforms.expansion_xy = [interaction_point.x, interaction_point.y];
-        self.global_uniforms.expansion_time =
-            interaction_inst.duration_since(*START_TIME).as_secs_f32();
+        self.global_uniforms.expansion_time = interaction_inst
+            .duration_since(self.start_time)
+            .as_secs_f32();
 
         // Render the tracks
         let mut current_track = None;
@@ -416,18 +412,22 @@ impl CantusApp {
         let time = self.global_uniforms.time;
 
         for particle in &mut self.particles {
-            if emit_count > 0 && time > particle.spawn_time + particle.duration {
+            if emit_count > 0 && time > particle.end_time {
                 let y_fraction = fastrand::f32();
 
-                particle.spawn_y = PANEL_START + CONFIG.height * (0.1 + (y_fraction * 0.85)); // Map to 0.1..0.95 range
+                particle.spawn_pos = [
+                    playhead_x,
+                    PANEL_START + CONFIG.height * (0.1 + (y_fraction * 0.85)), // Map to 0.1..0.95 range
+                ];
                 particle.spawn_vel = [
                     fastrand::usize(SPARK_VELOCITY_X) as f32 * horizontal_bias,
                     (y_fraction - 0.5) * 2.0 * SPARK_VELOCITY_Y,
                 ];
-                particle.color = palette[fastrand::usize(0..palette.len())];
-                particle.spawn_time = time;
-                particle.duration =
-                    lerpf32(fastrand::f32(), SPARK_LIFETIME.start, SPARK_LIFETIME.end);
+                let duration = lerpf32(fastrand::f32(), SPARK_LIFETIME.start, SPARK_LIFETIME.end);
+                let packed_duration = (duration * 100.0).min(255.0) as u8;
+                let base_color = palette[fastrand::usize(0..palette.len())];
+                particle.color = (base_color & 0x00FF_FFFF) | (u32::from(packed_duration) << 24);
+                particle.end_time = time + duration;
                 emit_count -= 1;
             }
         }
@@ -501,6 +501,6 @@ fn move_towards(current: &mut f32, target: f32, speed: f32) {
     }
 }
 
-fn lerpf32(t: f32, v0: f32, v1: f32) -> f32 {
+pub fn lerpf32(t: f32, v0: f32, v1: f32) -> f32 {
     v0 + t * (v1 - v0)
 }

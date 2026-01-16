@@ -855,6 +855,7 @@ fn poll_playlists() {
             .map(|page| page.items)
             .unwrap_or_default();
 
+        let mut to_fetch_fresh = Vec::new();
         for playlist in playlists {
             if !(target_playlists.contains(playlist.name.as_str())
                 || (include_ratings && RATING_PLAYLISTS.contains(&playlist.name.as_str())))
@@ -893,15 +894,19 @@ fn poll_playlists() {
                 continue;
             }
             if Some(&playlist.snapshot_id)
-                == PLAYBACK_STATE
+                != PLAYBACK_STATE
                     .read()
                     .playlists
                     .get(&playlist.id)
                     .map(|p| &p.snapshot_id)
             {
-                continue;
+                // Queue to fetch again
+                to_fetch_fresh.push((playlist, rating_index));
             }
+        }
 
+        // Fetch the fresh playlists as needed
+        for (playlist, rating_index) in to_fetch_fresh {
             let chunk_size = 50;
             let num_pages = playlist.total_tracks.div_ceil(chunk_size) as usize;
             info!("Fetching {num_pages} pages from playlist {}", playlist.name);
