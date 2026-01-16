@@ -95,13 +95,13 @@ static START_TIME: LazyLock<Instant> = LazyLock::new(Instant::now);
 /// Spacing between tracks in ms
 const TRACK_SPACING_MS: f32 = 4000.0;
 /// Particles emitted per second when playback is active.
-const SPARK_EMISSION: f32 = 60.0;
+const SPARK_EMISSION: f32 = 20.0;
 /// Horizontal velocity range applied at spawn.
-const SPARK_VELOCITY_X: Range<usize> = 75..100;
+const SPARK_VELOCITY_X: Range<usize> = 40..60;
 /// Vertical velocity range applied at spawn.
-const SPARK_VELOCITY_Y: Range<usize> = 20..55;
+const SPARK_VELOCITY_Y: f32 = 5.0;
 /// Lifetime range for individual particles, in seconds.
-const SPARK_LIFETIME: Range<f32> = 0.4..0.6;
+const SPARK_LIFETIME: Range<f32> = 1.2..1.5;
 
 /// Duration for animation events
 const ANIMATION_DURATION: f32 = 2.0;
@@ -109,7 +109,7 @@ const ANIMATION_DURATION: f32 = 2.0;
 pub struct RenderState {
     pub last_update: Instant,
     pub track_offset: f32,
-    pub recent_speeds: [f32; 16],
+    pub recent_speeds: [f32; 8],
     pub speed_idx: usize,
 }
 
@@ -118,7 +118,7 @@ impl Default for RenderState {
         Self {
             last_update: Instant::now(),
             track_offset: 0.0,
-            recent_speeds: [0.0; 16],
+            recent_speeds: [0.0; 8],
             speed_idx: 0,
         }
     }
@@ -145,7 +145,7 @@ impl CantusApp {
 
         self.background_pills.clear();
         let history_width = CONFIG.history_width;
-        let total_width = CONFIG.width - history_width - 10.0;
+        let total_width = CONFIG.width - history_width - 16.0;
         let total_height = CONFIG.height;
         let timeline_duration_ms = CONFIG.timeline_future_minutes * 60_000.0;
         let timeline_start_ms = -CONFIG.timeline_past_minutes * 60_000.0;
@@ -210,8 +210,8 @@ impl CantusApp {
         self.render_state.track_offset = current_ms;
         let s_idx = self.render_state.speed_idx;
         self.render_state.recent_speeds[s_idx] = frame_move_speed;
-        self.render_state.speed_idx = (s_idx + 1) % 16;
-        let avg_speed = self.render_state.recent_speeds.iter().sum::<f32>() / 16.0;
+        self.render_state.speed_idx = (s_idx + 1) % 8;
+        let avg_speed = self.render_state.recent_speeds.iter().sum::<f32>() / 8.0;
 
         // Iterate over the tracks within the timeline.
         let mut track_renders = Vec::with_capacity(playback_state.queue.len());
@@ -295,17 +295,23 @@ impl CantusApp {
             interaction_inst.duration_since(*START_TIME).as_secs_f32();
 
         // Render the tracks
+        let mut current_track = None;
         for track_render in &track_renders {
             if track_render.width <= 0.0 || track_render.start_x + track_render.width <= 0.0 {
                 continue;
             }
             self.draw_track(track_render, playhead_x, &playback_state.playlists);
+            if playhead_x >= track_render.start_x
+                && playhead_x <= track_render.start_x + track_render.width
+            {
+                current_track = Some(track_render.track);
+            }
         }
 
         // Draw the particles
         self.render_playhead_particles(
             dt,
-            &playback_state.queue[cur_idx],
+            current_track.unwrap_or(&playback_state.queue[cur_idx]),
             playhead_x,
             avg_speed,
             playback_state.volume,
@@ -408,16 +414,14 @@ impl CantusApp {
         let horizontal_bias = (avg_speed.abs().powf(0.2) * spawn_offset * 0.5).clamp(-3.0, 3.0);
         let time = self.global_uniforms.time;
 
-        for (i, particle) in self.particles.iter_mut().enumerate() {
+        for particle in &mut self.particles {
             if emit_count > 0 && time > particle.spawn_time + particle.duration {
-                // Calculate a position based on golden ratio recurrence.
-                let seed = (i as f32 + time * SPARK_EMISSION) * 0.618_034;
-                let y_fraction = 0.1 + (seed.fract() * 0.85); // Map to 0.1..0.95 range
+                let y_fraction = fastrand::f32();
 
-                particle.spawn_y = PANEL_START + CONFIG.height * y_fraction;
+                particle.spawn_y = PANEL_START + CONFIG.height * (0.1 + (y_fraction * 0.85)); // Map to 0.1..0.95 range
                 particle.spawn_vel = [
                     fastrand::usize(SPARK_VELOCITY_X) as f32 * horizontal_bias,
-                    -(fastrand::usize(SPARK_VELOCITY_Y) as f32),
+                    (y_fraction - 0.5) * 2.0 * SPARK_VELOCITY_Y,
                 ];
                 particle.color = palette[fastrand::usize(0..palette.len())];
                 particle.spawn_time = time;

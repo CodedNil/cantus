@@ -31,16 +31,29 @@ struct VertexOutput {
 @vertex
 fn vs_main(@builtin(vertex_index) v_idx: u32, @builtin(instance_index) i_idx: u32) -> VertexOutput {
     let icon = icons[i_idx];
-
-    // Proximity-based interactive growth
-    let distance_to_mouse = distance(icon.pos, global.mouse_pos) / global.scale_factor / min(global.mouse_pressure, 1.0);
-    let growth_factor = 1.0 + 0.6 * (1.0 - smoothstep(8.0, 24.0, distance_to_mouse));
-
-    let pixel_radius = 11.0 * global.scale_factor * growth_factor;
     let unit_coord = vec2<f32>(f32(v_idx % 2u), f32(v_idx / 2u));
 
-    // Scale quad centered on icon.pos
-    let screen_pixel = icon.pos + (unit_coord - 0.5) * (pixel_radius * 2.0);
+    // Proximity-based interactive growth
+    let dist = distance(icon.pos, global.mouse_pos) / global.scale_factor / min(global.mouse_pressure, 1.0);
+    let proximity = smoothstep(30.0, 8.0, dist); // 1.0 when touching, 0.0 when far
+
+    let growth = 1.0 + (0.6 * proximity);
+    let pixel_radius = 11.0 * global.scale_factor * growth;
+
+    // Smoothly push left/right based on x difference
+    let x_push = (icon.pos.x - global.mouse_pos.x) * proximity * 0.5;
+    let offset_pos = icon.pos + vec2(x_push, 0.0);
+
+    // Rotation based on x difference
+    let angle = x_push * 0.03;
+    let rotation = (unit_coord - 0.5) * (pixel_radius * 2.0);
+    let rotated_pos = vec2(
+        rotation.x * cos(angle) - rotation.y * sin(angle),
+        rotation.x * sin(angle) + rotation.y * cos(angle)
+    );
+
+    // Final output
+    let screen_pixel = offset_pos + rotated_pos;
     let ndc_pos = (screen_pixel / global.screen_size) * 2.0 - 1.0;
 
     var out: VertexOutput;
