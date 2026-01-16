@@ -290,8 +290,7 @@ impl CantusApp {
 
         // Get expansion animation variables
         let (interaction_inst, interaction_point) = self.interaction.last_expansion;
-        self.global_uniforms.expansion_xy =
-            [interaction_point.x, PANEL_START + interaction_point.y];
+        self.global_uniforms.expansion_xy = [interaction_point.x, interaction_point.y];
         self.global_uniforms.expansion_time =
             interaction_inst.duration_since(*START_TIME).as_secs_f32();
 

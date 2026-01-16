@@ -81,6 +81,7 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
 
     // --- Masking & Depth ---
     let bulge = ripple_str * 22.0 * global.scale_factor + mouse_inf * 8.0;
+    let stretched_uv_y = (in.local_uv.y - 0.5) * (pill_size.y / (pill_size.y + bulge)) + 0.5;
     let dist = sd_squircle((in.local_uv - 0.5) * pill_size, (pill_size + vec2(0.0, bulge)) * 0.5, rounding);
     let mask = clamp(0.5 - dist, 0.0, 1.0); // Simple AA mask
     let shadow = (1.0 - smoothstep(0.0, 16.0, dist)) * 0.2;
@@ -122,21 +123,22 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
     // Cover art
     let img_x = pill_size.x - pill_size.y;
     let local_x = in.local_uv.x * pill_size.x;
-    let uv_img = vec2((local_x - img_x) / pill_size.y, in.local_uv.y);
+    let uv_img = vec2((local_x - img_x) / pill_size.y, stretched_uv_y);
     let tex = textureSample(t_images, s_images, uv_img, max(0, pill.image_index));
     let img_mask = (1.0 - smoothstep(-0.5, 0.5, sd_squircle((uv_img - 0.5) * pill_size.y, vec2(pill_size.y * 0.5), rounding)))
                  * step(0.0, f32(pill.image_index)) * step(img_x, local_x);
     color = mix(color, tex.rgb, img_mask * tex.a);
 
     // Glass sheen, rim light, and mouse-reactive highlight
-    let sheen = smoothstep(0.1, 0.0, in.local_uv.y) * mask * 0.15;
+    let sheen = smoothstep(0.1, 0.0, stretched_uv_y) * mask * 0.15;
     let rim = (1.0 - smoothstep(0.0, -6.0, dist)) * 0.1;
     let mouse_sheen = smoothstep(30.0, 0.0, abs(mouse_d - 15.0)) * mouse_inf * 0.2;
     color += mix(color, vec3(1.0), 0.3) * (sheen + rim + mouse_sheen);
 
     // Corner glints
-    let glint = smoothstep(60.0, 0.0, length(in.local_uv * pill_size - 20.0)) * 0.1
-              + smoothstep(60.0, 0.0, length(in.local_uv * pill_size - (pill_size - 20.0))) * 0.05;
+    let stretched_local_uv = vec2(in.local_uv.x, stretched_uv_y);
+    let glint = smoothstep(60.0, 0.0, length(stretched_local_uv * pill_size - 20.0)) * 0.1
+              + smoothstep(60.0, 0.0, length(stretched_local_uv * pill_size - (pill_size - 20.0))) * 0.05;
     color += glint * mask;
 
     // Expansion flash
