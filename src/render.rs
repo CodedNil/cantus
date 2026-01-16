@@ -1,231 +1,10 @@
 use crate::{
     CantusApp, PANEL_EXTENSION, PANEL_START,
     config::CONFIG,
-    spotify::{ALBUM_DATA_CACHE, CondensedPlaylist, PLAYBACK_STATE, PlaylistId, Track},
-    text_render::{ATLAS_MSDF_SCALE, ATLAS_RANGE, MSDFAtlas, TextInstance},
+    spotify::{ALBUM_PALETTE_CACHE, CondensedPlaylist, PLAYBACK_STATE, PlaylistId, Track},
 };
 use bytemuck::{Pod, Zeroable};
-use std::{collections::HashMap, ops::Range, sync::LazyLock, time::Instant};
-use ttf_parser::{Face, Tag};
-use wgpu::{
-    BindGroupLayout, BindGroupLayoutDescriptor, BindGroupLayoutEntry, BindingType, BlendState,
-    BufferBindingType, ColorTargetState, ColorWrites, Device, FragmentState, MultisampleState,
-    PipelineCompilationOptions, PipelineLayoutDescriptor, PrimitiveState, PrimitiveTopology,
-    RenderPipeline, RenderPipelineDescriptor, SamplerBindingType, ShaderModule,
-    ShaderModuleDescriptor, ShaderSource, ShaderStages, TextureFormat, TextureSampleType,
-    TextureViewDimension, VertexState,
-};
-
-pub struct Shaders {
-    pub playhead_pipeline: RenderPipeline,
-    pub playhead_bind_group_layout: BindGroupLayout,
-    pub bg_pipeline: RenderPipeline,
-    pub bg_bind_group_layout: BindGroupLayout,
-    pub icon_pipeline: RenderPipeline,
-    pub icon_bind_group_layout: BindGroupLayout,
-    pub text_pipeline: RenderPipeline,
-    pub text_bind_group_layout: BindGroupLayout,
-}
-
-impl Shaders {
-    pub fn new(device: &Device, format: TextureFormat) -> Self {
-        // Shader Modules
-        let playhead_shader = device.create_shader_module(ShaderModuleDescriptor {
-            label: Some("Playhead Shader"),
-            source: ShaderSource::Wgsl(include_str!("../assets/playhead.wgsl").into()),
-        });
-        let bg_shader = device.create_shader_module(ShaderModuleDescriptor {
-            label: Some("Background Shader"),
-            source: ShaderSource::Wgsl(include_str!("../assets/background.wgsl").into()),
-        });
-        let icon_shader = device.create_shader_module(ShaderModuleDescriptor {
-            label: Some("Icons Shader"),
-            source: ShaderSource::Wgsl(include_str!("../assets/icons.wgsl").into()),
-        });
-        let text_shader = device.create_shader_module(ShaderModuleDescriptor {
-            label: Some("Text Shader"),
-            source: ShaderSource::Wgsl(include_str!("../assets/text.wgsl").into()),
-        });
-
-        // Bind Group Layouts
-        let playhead_bind_group_layout =
-            device.create_bind_group_layout(&BindGroupLayoutDescriptor {
-                label: Some("Playhead Layout"),
-                entries: &[
-                    BindGroupLayoutEntry {
-                        binding: 0,
-                        visibility: ShaderStages::FRAGMENT,
-                        ty: BindingType::Buffer {
-                            ty: BufferBindingType::Uniform,
-                            has_dynamic_offset: false,
-                            min_binding_size: None,
-                        },
-                        count: None,
-                    },
-                    BindGroupLayoutEntry {
-                        binding: 1,
-                        visibility: ShaderStages::FRAGMENT,
-                        ty: BindingType::Buffer {
-                            ty: BufferBindingType::Storage { read_only: true },
-                            has_dynamic_offset: false,
-                            min_binding_size: None,
-                        },
-                        count: None,
-                    },
-                    BindGroupLayoutEntry {
-                        binding: 2,
-                        visibility: ShaderStages::FRAGMENT,
-                        ty: BindingType::Buffer {
-                            ty: BufferBindingType::Uniform,
-                            has_dynamic_offset: false,
-                            min_binding_size: None,
-                        },
-                        count: None,
-                    },
-                ],
-            });
-
-        let standard_bind_group_layout =
-            device.create_bind_group_layout(&BindGroupLayoutDescriptor {
-                label: Some("Standard Layout"),
-                entries: &[
-                    BindGroupLayoutEntry {
-                        binding: 0,
-                        visibility: ShaderStages::VERTEX | ShaderStages::FRAGMENT,
-                        ty: BindingType::Buffer {
-                            ty: BufferBindingType::Uniform,
-                            has_dynamic_offset: false,
-                            min_binding_size: None,
-                        },
-                        count: None,
-                    },
-                    BindGroupLayoutEntry {
-                        binding: 1,
-                        visibility: ShaderStages::VERTEX | ShaderStages::FRAGMENT,
-                        ty: BindingType::Buffer {
-                            ty: BufferBindingType::Storage { read_only: true },
-                            has_dynamic_offset: false,
-                            min_binding_size: None,
-                        },
-                        count: None,
-                    },
-                    BindGroupLayoutEntry {
-                        binding: 2,
-                        visibility: ShaderStages::FRAGMENT,
-                        ty: BindingType::Texture {
-                            multisampled: false,
-                            view_dimension: TextureViewDimension::D2Array,
-                            sample_type: TextureSampleType::Float { filterable: true },
-                        },
-                        count: None,
-                    },
-                    BindGroupLayoutEntry {
-                        binding: 3,
-                        visibility: ShaderStages::FRAGMENT,
-                        ty: BindingType::Sampler(SamplerBindingType::Filtering),
-                        count: None,
-                    },
-                ],
-            });
-
-        let text_bind_group_layout = device.create_bind_group_layout(&BindGroupLayoutDescriptor {
-            label: Some("Text Layout"),
-            entries: &[
-                BindGroupLayoutEntry {
-                    binding: 0,
-                    visibility: ShaderStages::VERTEX | ShaderStages::FRAGMENT,
-                    ty: BindingType::Buffer {
-                        ty: BufferBindingType::Uniform,
-                        has_dynamic_offset: false,
-                        min_binding_size: None,
-                    },
-                    count: None,
-                },
-                BindGroupLayoutEntry {
-                    binding: 1,
-                    visibility: ShaderStages::VERTEX | ShaderStages::FRAGMENT,
-                    ty: BindingType::Buffer {
-                        ty: BufferBindingType::Storage { read_only: true },
-                        has_dynamic_offset: false,
-                        min_binding_size: None,
-                    },
-                    count: None,
-                },
-                BindGroupLayoutEntry {
-                    binding: 2,
-                    visibility: ShaderStages::FRAGMENT,
-                    ty: BindingType::Texture {
-                        multisampled: false,
-                        view_dimension: TextureViewDimension::D2,
-                        sample_type: TextureSampleType::Float { filterable: true },
-                    },
-                    count: None,
-                },
-                BindGroupLayoutEntry {
-                    binding: 3,
-                    visibility: ShaderStages::FRAGMENT,
-                    ty: BindingType::Sampler(SamplerBindingType::Filtering),
-                    count: None,
-                },
-            ],
-        });
-
-        // Pipeline Helper
-        let create_pipe = |label: &str, shader: &ShaderModule, layout: &BindGroupLayout| {
-            let pipeline_layout = device.create_pipeline_layout(&PipelineLayoutDescriptor {
-                label: Some(&format!("{label} Pipeline Layout")),
-                bind_group_layouts: &[layout],
-                push_constant_ranges: &[],
-            });
-
-            device.create_render_pipeline(&RenderPipelineDescriptor {
-                label: Some(&format!("{label} Pipeline")),
-                layout: Some(&pipeline_layout),
-                vertex: VertexState {
-                    module: shader,
-                    entry_point: Some("vs_main"),
-                    buffers: &[],
-                    compilation_options: PipelineCompilationOptions::default(),
-                },
-                fragment: Some(FragmentState {
-                    module: shader,
-                    entry_point: Some("fs_main"),
-                    targets: &[Some(ColorTargetState {
-                        format,
-                        blend: Some(BlendState::ALPHA_BLENDING),
-                        write_mask: ColorWrites::ALL,
-                    })],
-                    compilation_options: PipelineCompilationOptions::default(),
-                }),
-                primitive: PrimitiveState {
-                    topology: PrimitiveTopology::TriangleStrip,
-                    ..Default::default()
-                },
-                depth_stencil: None,
-                multisample: MultisampleState::default(),
-                multiview: None,
-                cache: None,
-            })
-        };
-
-        let playhead_pipeline =
-            create_pipe("Playhead", &playhead_shader, &playhead_bind_group_layout);
-        let bg_pipeline = create_pipe("Background", &bg_shader, &standard_bind_group_layout);
-        let icon_pipeline = create_pipe("Icons", &icon_shader, &standard_bind_group_layout);
-        let text_pipeline = create_pipe("Text", &text_shader, &text_bind_group_layout);
-
-        Self {
-            playhead_pipeline,
-            playhead_bind_group_layout,
-            bg_pipeline,
-            bg_bind_group_layout: standard_bind_group_layout.clone(),
-            icon_pipeline,
-            icon_bind_group_layout: standard_bind_group_layout,
-            text_pipeline,
-            text_bind_group_layout,
-        }
-    }
-}
+use std::{collections::HashMap, ops::Range, time::Instant};
 
 #[derive(Copy, Clone, Debug, Default, PartialEq)]
 pub struct Point {
@@ -255,86 +34,71 @@ impl Rect {
     pub fn contains(&self, p: Point) -> bool {
         p.x >= self.x0 && p.x <= self.x1 && p.y >= self.y0 && p.y <= self.y1
     }
-
-    pub fn inflate(&self, dx: f32, dy: f32) -> Self {
-        Self {
-            x0: self.x0 - dx,
-            y0: self.y0 - dy,
-            x1: self.x1 + dx,
-            y1: self.y1 + dy,
-        }
-    }
 }
 
 #[repr(C)]
-#[derive(Copy, Clone, Debug, Pod, Zeroable)]
-pub struct ScreenUniforms {
-    pub screen_size: [f32; 2],
-    pub time: f32,
-    pub scale_factor: f32,
-    pub mouse_pos: [f32; 2],
+#[derive(Copy, Clone, Debug, Default, Pod, Zeroable)]
+pub struct GlobalUniforms {
+    screen_size: [f32; 2], // x, y, full size of the layer shell
+    bar_height: [f32; 2],  // Start y, and bars height
+    mouse_pos: [f32; 2],   // x, y
+    mouse_pressure: f32,   // 0 - 1 for hovered - 2 for mouse down
+    playhead_x: f32,       // x position where the playhead line is drawn
+    expansion_xy: [f32; 2],
+    expansion_time: f32,
+    time: f32,
+    scale_factor: f32,
+    _padding: [f32; 3],
 }
 
 #[repr(C)]
 #[derive(Copy, Clone, Debug, Default, Pod, Zeroable)]
 pub struct PlayheadUniforms {
-    pub origin_x: f32,
-    pub panel_start: f32,
-    pub height: f32,
-    pub volume: f32,
-    pub bar_lerp: f32,
-    pub play_lerp: f32,
-    pub pause_lerp: f32,
-    pub _padding: f32,
+    volume: f32,
+    bar_lerp: f32,
+    play_lerp: f32,
+    pause_lerp: f32,
 }
 
 #[repr(C)]
 #[derive(Copy, Clone, Debug, Default, Pod, Zeroable)]
 pub struct Particle {
-    pub spawn_pos: [f32; 2],
-    pub spawn_vel: [f32; 2],
-    pub spawn_time: f32,
-    pub duration: f32,
-    pub color: u32,
-    pub _padding: f32,
+    pub spawn_pos: [f32; 2], // x, y
+    pub spawn_vel: [f32; 2], // x, y
+    pub end_time: f32,       // The time the particle will be pruned
+    pub color: u32,          // r, g, b, duration
 }
 
 #[repr(C)]
 #[derive(Copy, Clone, Debug, Default, Pod, Zeroable)]
 pub struct BackgroundPill {
-    pub rect: [f32; 4], // x, y, width, height
-    pub dark_width: f32,
-    pub alpha: f32,
-    pub colors: [u32; 4],
-    pub expansion_pos: [f32; 2],
-    pub expansion_time: f32,
-    pub image_index: i32,
-    pub _padding: [f32; 2],
+    rect: [f32; 2], // pos x, width
+    colors: [u32; 4],
+    alpha: f32,
+    image_index: i32,
 }
 
 #[repr(C)]
 #[derive(Copy, Clone, Debug, Default, Pod, Zeroable)]
 pub struct IconInstance {
     pub pos: [f32; 2],
-    pub alpha: f32,
-    pub variant: f32,
-    pub param: f32,
+    // Packed 2 u16s
+    // First is alpha 0-1
+    // Second is 0 for dimmed icon 1 for bright icon, 2 for empty star, 3 for half star, 4 for filled star
+    pub data: u32,
     pub image_index: i32,
-    pub _padding: [f32; 2],
 }
-
-static START_TIME: LazyLock<Instant> = LazyLock::new(Instant::now);
 
 /// Spacing between tracks in ms
 const TRACK_SPACING_MS: f32 = 4000.0;
 /// Particles emitted per second when playback is active.
-const SPARK_EMISSION: f32 = 60.0;
+const SPARK_EMISSION: f32 = 20.0;
 /// Horizontal velocity range applied at spawn.
-const SPARK_VELOCITY_X: Range<usize> = 75..100;
+const SPARK_VELOCITY_X: Range<usize> = 40..60;
 /// Vertical velocity range applied at spawn.
-const SPARK_VELOCITY_Y: Range<usize> = 30..70;
+const SPARK_VELOCITY_Y: f32 = 5.0;
 /// Lifetime range for individual particles, in seconds.
-const SPARK_LIFETIME: Range<f32> = 0.4..0.9;
+const SPARK_LIFETIME: Range<f32> = 1.2..1.5;
 
 /// Duration for animation events
 const ANIMATION_DURATION: f32 = 2.0;
@@ -342,9 +106,8 @@ const ANIMATION_DURATION: f32 = 2.0;
 pub struct RenderState {
     pub last_update: Instant,
     pub track_offset: f32,
-    pub recent_speeds: [f32; 16],
+    pub recent_speeds: [f32; 8],
     pub speed_idx: usize,
-    pub speed_sum: f32,
 }
 
 impl Default for RenderState {
@@ -352,69 +115,25 @@ impl Default for RenderState {
         Self {
             last_update: Instant::now(),
             track_offset: 0.0,
-            recent_speeds: [0.0; 16],
+            recent_speeds: [0.0; 8],
             speed_idx: 0,
-            speed_sum: 0.0,
-        }
-    }
-}
-
-pub struct FontEngine {
-    pub face: Face<'static>,
-    pub atlas: MSDFAtlas,
-}
-
-pub struct TextLayout {
-    glyphs: Vec<(u32, f32)>, // gid, x_offset
-    width: f32,
-    line_height: f32,
-    font_size: f32,
-}
-
-impl Default for FontEngine {
-    fn default() -> Self {
-        let bytes = include_bytes!("../assets/NotoSans.ttf");
-        let mut face = Face::parse(bytes, 0).expect("failed to parse font");
-        if let Some(axis) = face
-            .variation_axes()
-            .into_iter()
-            .find(|a| a.tag == Tag::from_bytes(b"wght"))
-        {
-            face.set_variation(axis.tag, 700.0f32.clamp(axis.min_value, axis.max_value));
-        }
-        let atlas = MSDFAtlas::new(&face, 48);
-        Self { face, atlas }
-    }
-}
-
-pub struct ParticlesState {
-    pub particles: [Particle; 64],
-    pub accumulator: f32,
-}
-
-impl Default for ParticlesState {
-    fn default() -> Self {
-        Self {
-            particles: [Particle::default(); 64],
-            accumulator: 0.0,
         }
     }
 }
 
 pub struct TrackRender<'a> {
-    track: &'a Track,
-    is_current: bool,
-    seconds_until_start: f32,
-    start_x: f32,
-    width: f32,
-    hitbox_range: (f32, f32),
-    art_only: bool,
-    image_index: i32,
+    pub track: &'a Track,
+    pub is_current: bool,
+    pub seconds_until_start: f32,
+    pub start_x: f32,
+    pub width: f32,
+    pub hitbox_range: (f32, f32),
+    pub art_only: bool,
 }
 
 /// Build the scene for rendering.
 impl CantusApp {
-    pub fn create_scene(&mut self, image_map: &HashMap<String, i32>) {
+    pub fn create_scene(&mut self) {
         let now = Instant::now();
         let dt = now
             .duration_since(self.render_state.last_update)
@@ -422,15 +141,14 @@ impl CantusApp {
         self.render_state.last_update = now;
 
         self.background_pills.clear();
-        let scale = self.scale_factor;
-        let history_width = (CONFIG.history_width * scale).ceil();
-        let total_width = (CONFIG.width * scale - history_width).ceil();
-        let total_height = (CONFIG.height * scale).ceil();
+        let history_width = CONFIG.history_width;
+        let total_width = CONFIG.width - history_width - 16.0;
+        let total_height = CONFIG.height;
         let timeline_duration_ms = CONFIG.timeline_future_minutes * 60_000.0;
         let timeline_start_ms = -CONFIG.timeline_past_minutes * 60_000.0;
 
         let px_per_ms = total_width / timeline_duration_ms;
-        let origin_x = history_width - timeline_start_ms * px_per_ms;
+        let playhead_x = history_width - timeline_start_ms * px_per_ms;
 
         let playback_state = PLAYBACK_STATE.read();
         if playback_state.queue.is_empty() {
@@ -451,7 +169,11 @@ impl CantusApp {
 
         if playback_state.playing != self.interaction.playing {
             self.interaction.playing = playback_state.playing;
-            self.interaction.last_event = Instant::now();
+            self.interaction.last_expansion = (
+                Instant::now(),
+                Point::new(playhead_x, PANEL_START + CONFIG.height * 0.5),
+            );
+            self.interaction.last_toggle_playing = Instant::now();
         }
         if self.interaction.dragging {
             self.interaction.drag_track = None;
@@ -476,19 +198,18 @@ impl CantusApp {
         let mut current_ms = -playback_elapsed - past_tracks_duration + drag_offset_ms
             - TRACK_SPACING_MS * cur_idx as f32;
         let diff = current_ms - self.render_state.track_offset;
+        self.interaction.last_expansion.1.x += diff * px_per_ms * dt; // Offset the expansion so it moves with the tracks
         if !self.interaction.dragging && diff.abs() > 200.0 {
-            current_ms = self.render_state.track_offset + diff * 0.1;
+            current_ms = self.render_state.track_offset + diff * 3.5 * dt;
         }
 
         // Add the new move speed to the array move_speeds, trim the previous ones
         let frame_move_speed = (current_ms - self.render_state.track_offset) * dt;
         self.render_state.track_offset = current_ms;
         let s_idx = self.render_state.speed_idx;
-        self.render_state.speed_sum += frame_move_speed - self.render_state.recent_speeds[s_idx];
         self.render_state.recent_speeds[s_idx] = frame_move_speed;
-        self.render_state.speed_idx = (s_idx + 1) % 16;
-        // Get new average
-        let avg_speed = self.render_state.speed_sum / 16.0;
+        self.render_state.speed_idx = (s_idx + 1) % 8;
+        let avg_speed = self.render_state.recent_speeds.iter().sum::<f32>() / 8.0;
 
         // Iterate over the tracks within the timeline.
         let mut track_renders = Vec::with_capacity(playback_state.queue.len());
@@ -514,7 +235,6 @@ impl CantusApp {
                     (end - timeline_start_ms) * px_per_ms + history_width,
                 ),
                 art_only: false,
-                image_index: self.get_image_index(&track.album.image, image_map),
             });
         }
 
@@ -545,23 +265,51 @@ impl CantusApp {
             }
         }
 
+        // Screen uniforms
+        self.global_uniforms.time = self.start_time.elapsed().as_secs_f32();
+        self.global_uniforms.screen_size =
+            [CONFIG.width, CONFIG.height + PANEL_START + PANEL_EXTENSION];
+        self.global_uniforms.bar_height = [PANEL_START, CONFIG.height];
+        self.global_uniforms.playhead_x = playhead_x;
+        self.global_uniforms.scale_factor = self.scale_factor;
+
+        // Mouse uniforms
+        self.global_uniforms.mouse_pos = [
+            self.interaction.mouse_position.x,
+            self.interaction.mouse_position.y,
+        ];
+        move_towards(
+            &mut self.global_uniforms.mouse_pressure,
+            self.interaction.mouse_pressure,
+            5.0 * dt,
+        );
+
+        // Get expansion animation variables
+        let (interaction_inst, interaction_point) = self.interaction.last_expansion;
+        self.global_uniforms.expansion_xy = [interaction_point.x, interaction_point.y];
+        self.global_uniforms.expansion_time = interaction_inst
+            .duration_since(self.start_time)
+            .as_secs_f32();
+
         // Render the tracks
+        let mut current_track = None;
         for track_render in &track_renders {
-            self.draw_track(
-                track_render,
-                total_height,
-                origin_x,
-                &playback_state.playlists,
-                image_map,
-            );
+            if track_render.width <= 0.0 || track_render.start_x + track_render.width <= 0.0 {
+                continue;
+            }
+            self.draw_track(track_render, playhead_x, &playback_state.playlists);
+            if playhead_x >= track_render.start_x
+                && playhead_x <= track_render.start_x + track_render.width
+            {
+                current_track = Some(track_render.track);
+            }
         }
 
         // Draw the particles
         self.render_playhead_particles(
             dt,
-            &playback_state.queue[cur_idx],
-            origin_x,
-            total_height,
+            current_track.unwrap_or(&playback_state.queue[cur_idx]),
+            playhead_x,
             avg_speed,
             playback_state.volume,
         );
@@ -570,28 +318,18 @@ impl CantusApp {
     fn draw_track(
         &mut self,
         track_render: &TrackRender,
-        height: f32,
         origin_x: f32,
         playlists: &HashMap<PlaylistId, CondensedPlaylist>,
-        image_map: &HashMap<String, i32>,
     ) {
-        if track_render.width <= 0.0 {
-            return;
-        }
         let width = track_render.width;
         let track = track_render.track;
         let start_x = track_render.start_x;
-        let hitbox = Rect::new(start_x, PANEL_START, start_x + width, PANEL_START + height);
-
-        // Fade out based on width
-        let fade_alpha = if width < height {
-            ((width / height) * 1.5 - 0.5).max(0.0)
-        } else {
-            1.0
-        };
-
-        // How much of the width is to the left of the current position
-        let dark_width = (origin_x - start_x).max(0.0);
+        let hitbox = Rect::new(
+            start_x,
+            PANEL_START,
+            start_x + width,
+            PANEL_START + CONFIG.height,
+        );
 
         // Add hitbox
         let (hit_start, hit_end) = track_render.hitbox_range;
@@ -601,205 +339,46 @@ impl CantusApp {
             .push((track.id, hitbox, track_render.hitbox_range));
         // If dragging, set the drag target to this track, and the position within the track
         if self.interaction.dragging && track_render.is_current {
-            let position_within_track = (start_x + dark_width - hit_start) / full_width;
-            self.interaction.drag_track = Some((track.id, position_within_track));
+            self.interaction.drag_track = Some((
+                track.id,
+                (start_x + (origin_x - start_x).max(0.0) - hit_start) / full_width,
+            ));
         }
-
-        let Some(album_data_ref) = ALBUM_DATA_CACHE.get(&track.album.id) else {
-            return;
-        };
-        let Some(album_data) = album_data_ref.as_ref() else {
-            return;
-        };
 
         // --- BACKGROUND ---
-        let mut colors = [0u32; 4];
-        for (i, c) in album_data.primary_colors.iter().take(4).enumerate() {
-            colors[i] =
-                (u32::from(c[0])) | (u32::from(c[1]) << 8) | (u32::from(c[2]) << 16) | (255 << 24);
-        }
-
-        // Determine which animation to show: specific track click or global playhead event
-        let (expansion_time, expansion_pos) = {
-            let (c_inst, c_track, c_pt) = self.interaction.last_click;
-            let c_time = c_inst.duration_since(*START_TIME).as_secs_f32();
-            let e_time = self
-                .interaction
-                .last_event
-                .duration_since(*START_TIME)
-                .as_secs_f32();
-
-            if c_track == track.id && (c_time > e_time || !track_render.is_current) {
-                (c_time, [(start_x + c_pt.x), (PANEL_START + c_pt.y)])
-            } else {
-                (e_time, [origin_x, (PANEL_START + height * 0.5)])
-            }
+        let fade_alpha = if width < CONFIG.height {
+            ((width / CONFIG.height) - 0.9).max(0.0) * 10.0
+        } else {
+            1.0
         };
 
+        let image_index = self.get_image_index(&track_render.track.album.image);
         self.background_pills.push(BackgroundPill {
-            rect: [start_x, PANEL_START, width, height],
-            dark_width,
+            rect: [start_x, width],
+            colors: ALBUM_PALETTE_CACHE
+                .get(&track.album.id)
+                .and_then(|data_ref| data_ref.as_ref().copied())
+                .unwrap_or_default(),
             alpha: fade_alpha,
-            colors,
-            expansion_pos,
-            expansion_time,
-            image_index: track_render.image_index,
-            _padding: [0.0; 2],
+            image_index,
         });
 
         // --- TEXT ---
-        if !track_render.art_only && fade_alpha >= 1.0 && width > height {
-            // Get available width for text
-            let text_start_left = start_x + 12.0;
-            let text_start_right = start_x + width - height - 8.0;
-            let available_width = (text_start_right - text_start_left).max(0.0);
-            let text_alpha = (available_width / 100.0).min(1.0);
-            let text_color = [0.94, 0.94, 0.94, text_alpha];
-
-            // Render the songs title (strip anything beyond a - or ( in the song title)
-            let song_name = track.name[..track
-                .name
-                .find(" (")
-                .or_else(|| track.name.find(" -"))
-                .unwrap_or(track.name.len())]
-                .trim();
-            let font_size = 12.0;
-            let text_height = PANEL_START + (height * 0.2).floor();
-            let song_layout = self.layout_text(song_name, font_size);
-            let width_ratio = available_width / song_layout.width;
-            if width_ratio <= 1.0 {
-                self.draw_text(
-                    &self.layout_text(song_name, font_size * width_ratio.max(0.8)),
-                    text_start_left,
-                    text_height,
-                    0.0,
-                    text_color,
-                );
-            } else {
-                self.draw_text(&song_layout, text_start_right, text_height, 1.0, text_color);
-            }
-
-            // Get text layouts for bottom row of text
-            let font_size = 10.5;
-            let text_height = PANEL_START + (height * 0.52).floor();
-
-            let artist_text = &track.artist.name;
-            let time_text = if track_render.seconds_until_start >= 60.0 {
-                format!(
-                    "{}m{}s",
-                    (track_render.seconds_until_start / 60.0).floor(),
-                    (track_render.seconds_until_start % 60.0).floor()
-                )
-            } else {
-                format!("{}s", track_render.seconds_until_start.round())
-            };
-            let dot_text = "\u{2004}•\u{2004}"; // Use thin spaces on either side of the bullet point
-
-            let bottom_text = format!("{time_text}{dot_text}{artist_text}");
-            let mut layout = self.layout_text(&bottom_text, font_size);
-            let width_ratio = available_width / layout.width;
-            if width_ratio <= 1.0 || !track_render.is_current {
-                if width_ratio < 1.0 {
-                    layout =
-                        self.layout_text(&bottom_text, font_size * width_ratio.clamp(0.8, 1.0));
-                }
-                self.draw_text(
-                    &layout,
-                    if width_ratio >= 1.0 {
-                        text_start_right
-                    } else {
-                        text_start_left
-                    },
-                    text_height,
-                    if width_ratio >= 1.0 { 1.0 } else { 0.0 },
-                    text_color,
-                );
-            } else {
-                self.draw_text(
-                    &self.layout_text(&time_text, font_size),
-                    start_x + 12.0,
-                    text_height,
-                    0.0,
-                    text_color,
-                );
-                self.draw_text(
-                    &self.layout_text(artist_text, font_size),
-                    text_start_right,
-                    text_height,
-                    1.0,
-                    text_color,
-                );
-            }
+        if let Some(text_renderer) = &mut self.text_renderer
+            && !track_render.art_only
+            && fade_alpha >= 1.0
+            && width > CONFIG.height
+        {
+            text_renderer.render(track_render);
         }
 
         // Expand the hitbox vertically so it includes the playlist buttons
         if !track_render.art_only {
             let hovered = !self.interaction.dragging
-                && hitbox
-                    .inflate(0.0, 20.0)
-                    .contains(self.interaction.mouse_position);
-            self.draw_playlist_buttons(
-                track, hovered, playlists, width, height, start_x, image_map,
-            );
-        }
-    }
-
-    /// Creates the text layout for a single-line string.
-    fn layout_text(&self, text: &str, size: f32) -> TextLayout {
-        let face = &self.font.face;
-        let psize = size * self.scale_factor;
-        let scale = psize / f32::from(face.units_per_em());
-        let mut px = 0.0f32;
-        let mut glyphs = Vec::with_capacity(text.len());
-
-        for ch in text.chars() {
-            let gid = u32::from(face.glyph_index(ch).map_or(0, |g| g.0));
-            let advance = face
-                .glyph_hor_advance(ttf_parser::GlyphId(gid as u16))
-                .unwrap_or(0);
-
-            glyphs.push((gid, px));
-            px += f32::from(advance) * scale;
-        }
-
-        TextLayout {
-            glyphs,
-            width: px,
-            line_height: psize,
-            font_size: psize,
-        }
-    }
-
-    fn draw_text(&mut self, l: &TextLayout, px: f32, py: f32, x_align: f32, color: [f32; 4]) {
-        let start_x = px - (l.width * x_align);
-        let start_y = py - l.line_height * 0.5;
-        let scale = l.font_size / f32::from(self.font.face.units_per_em());
-        let ascender = f32::from(self.font.face.ascender()) * scale;
-
-        for (gid, x_off) in &l.glyphs {
-            if let Some(info) = self.font.atlas.glyphs.get(gid) {
-                let msdf_scale = ATLAS_MSDF_SCALE;
-                let range = ATLAS_RANGE;
-
-                // Position relative to baseline
-                let gx = (start_x + x_off + (f32::from(info.metrics.x_min) * scale))
-                    / self.scale_factor
-                    - ((range + 1.0) / msdf_scale * scale);
-                let gy = (start_y + ascender - (f32::from(info.metrics.y_max) * scale))
-                    / self.scale_factor
-                    - ((range + 1.0) / msdf_scale * scale);
-
-                let gw = (info.uv_rect[2] * self.font.atlas.width as f32) * (scale / msdf_scale)
-                    / self.scale_factor;
-                let gh = (info.uv_rect[3] * self.font.atlas.height as f32) * (scale / msdf_scale)
-                    / self.scale_factor;
-
-                self.text_instances.push(TextInstance {
-                    rect: [gx, gy, gw, gh],
-                    uv_rect: info.uv_rect,
-                    color,
-                });
-            }
+                && self.interaction.mouse_pressure > 0.0
+                && self.interaction.mouse_position.x >= hitbox.x0
+                && self.interaction.mouse_position.x <= hitbox.x1;
+            self.draw_playlist_buttons(track, hovered, playlists, width, start_x);
         }
     }
 
@@ -807,101 +386,71 @@ impl CantusApp {
         &mut self,
         dt: f32,
         track: &Track,
-        origin_x: f32,
-        height: f32,
-        track_move_speed: f32,
+        playhead_x: f32,
+        avg_speed: f32,
         volume: Option<u8>,
     ) {
-        let Some(track_data_ref) = ALBUM_DATA_CACHE.get(&track.album.id) else {
-            return;
-        };
-        let Some(track_data) = track_data_ref.as_ref() else {
-            return;
-        };
-
-        let mut palette: Vec<u32> = track_data
-            .primary_colors
-            .iter()
-            .map(|[r, g, b, _]| {
-                // Pack as RGBA (little-endian u32) for WGSL unpack4x8unorm
-                (u32::from(*r)) | (u32::from(*g) << 8) | (u32::from(*b) << 16) | (255 << 24)
-            })
-            .collect();
-        if palette.is_empty() {
-            palette.extend_from_slice(&[
-                102 | (102 << 8) | (102 << 16),
-                153 | (153 << 8) | (153 << 16),
-                204 | (204 << 8) | (204 << 16),
-            ]);
-        }
-
-        // We use a monotonic time for the GPU to calculate displacements
-        let time = START_TIME.elapsed().as_secs_f32();
-
-        self.gpu_uniforms = Some(ScreenUniforms {
-            screen_size: [
-                (CONFIG.width * self.scale_factor),
-                ((CONFIG.height + PANEL_START + PANEL_EXTENSION) * self.scale_factor),
-            ],
-            time,
-            scale_factor: self.scale_factor,
-            mouse_pos: [
-                self.interaction.mouse_position.x,
-                self.interaction.mouse_position.y,
-            ],
-        });
+        let palette = ALBUM_PALETTE_CACHE
+            .get(&track.album.id)
+            .and_then(|data_ref| data_ref.as_ref().copied())
+            .unwrap_or_default();
 
         // Emit new particles while playing
-        let mut emit_count = if track_move_speed.abs() > 0.000_001 {
-            self.particles.accumulator += dt * SPARK_EMISSION;
-            let count = self.particles.accumulator.floor() as u8;
-            self.particles.accumulator -= f32::from(count);
+        let mut emit_count = if avg_speed.abs() > 0.00001 {
+            self.particles_accumulator += dt * SPARK_EMISSION;
+            let count = self.particles_accumulator.floor() as u8;
+            self.particles_accumulator -= f32::from(count);
             count
         } else {
-            self.particles.accumulator = 0.0;
+            self.particles_accumulator = 0.0;
             0
         };
 
-        let spawn_offset = track_move_speed.signum() * 2.0;
-        let horizontal_bias =
-            (track_move_speed.abs().powf(0.2) * spawn_offset * 0.5).clamp(-3.0, 3.0);
+        // Cache active particle Y positions to avoid borrow checker conflicts
+        let spawn_offset = avg_speed.signum() * 2.0;
+        let horizontal_bias = (avg_speed.abs().powf(0.2) * spawn_offset * 0.5).clamp(-3.0, 3.0);
+        let time = self.global_uniforms.time;
 
-        for particle in &mut self.particles.particles {
-            // Emit a new particle
-            if emit_count > 0 && time > particle.spawn_time + particle.duration {
+        for particle in &mut self.particles {
+            if emit_count > 0 && time > particle.end_time {
+                let y_fraction = fastrand::f32();
+
                 particle.spawn_pos = [
-                    origin_x,
-                    PANEL_START + height * lerpf32(fastrand::f32(), 0.1, 0.95),
+                    playhead_x,
+                    PANEL_START + CONFIG.height * (0.1 + (y_fraction * 0.85)), // Map to 0.1..0.95 range
                 ];
                 particle.spawn_vel = [
-                    fastrand::usize(SPARK_VELOCITY_X) as f32 * self.scale_factor * horizontal_bias,
-                    fastrand::usize(SPARK_VELOCITY_Y) as f32 * -self.scale_factor,
+                    fastrand::usize(SPARK_VELOCITY_X) as f32 * horizontal_bias,
+                    (y_fraction - 0.5) * 2.0 * SPARK_VELOCITY_Y,
                 ];
-                particle.color = palette[fastrand::usize(0..palette.len())];
-                particle.spawn_time = time;
-                particle.duration =
-                    lerpf32(fastrand::f32(), SPARK_LIFETIME.start, SPARK_LIFETIME.end);
+                let duration = lerpf32(fastrand::f32(), SPARK_LIFETIME.start, SPARK_LIFETIME.end);
+                let packed_duration = (duration * 100.0).min(255.0) as u8;
+                let base_color = palette[fastrand::usize(0..palette.len())];
+                particle.color = (base_color & 0x00FF_FFFF) | (u32::from(packed_duration) << 24);
+                particle.end_time = time + duration;
                 emit_count -= 1;
             }
         }
 
         // Playhead
         let interaction = &mut self.interaction;
-        let playbutton_hsize = height * 0.25;
+        let playbutton_hsize = CONFIG.height * 0.25;
         let speed = 2.2 * dt;
         interaction.play_hitbox = Rect::new(
-            origin_x - playbutton_hsize,
+            playhead_x - playbutton_hsize,
             PANEL_START,
-            origin_x + playbutton_hsize,
-            PANEL_START + height,
+            playhead_x + playbutton_hsize,
+            PANEL_START + CONFIG.height,
         );
         // Get playhead states
-        let playhead_hovered = interaction.play_hitbox.contains(interaction.mouse_position);
-        let last_event = interaction.last_event.elapsed().as_secs_f32() / ANIMATION_DURATION;
+        let playhead_hovered = interaction.play_hitbox.contains(interaction.mouse_position)
+            && interaction.mouse_pressure > 0.0;
+        let last_toggle =
+            interaction.last_toggle_playing.elapsed().as_secs_f32() / ANIMATION_DURATION;
 
         // Determine the intended state for the bar
         let bar_target =
-            u32::from(playhead_hovered || !interaction.playing || last_event < 1.0) as f32;
+            u32::from(playhead_hovered || !interaction.playing || last_toggle < 1.0) as f32;
         move_towards(&mut interaction.playhead_bar, bar_target, speed);
 
         // Determine which icon (if any) is currently active
@@ -914,8 +463,8 @@ impl CantusApp {
             }
         } else if !interaction.playing {
             pause_active = true;
-        } else if interaction.playing && last_event < 1.0 {
-            interaction.playhead_play = last_event; // Hard set for the "start" animation
+        } else if interaction.playing && last_toggle < 1.0 {
+            interaction.playhead_play = last_toggle; // Hard set for the "start" animation
             play_active = true;
         }
 
@@ -934,16 +483,12 @@ impl CantusApp {
             }
         }
 
-        self.playhead_info = Some(PlayheadUniforms {
-            origin_x,
-            panel_start: PANEL_START,
-            height,
+        self.playhead_info = PlayheadUniforms {
             volume: f32::from(volume.unwrap_or(100)) / 100.0,
             bar_lerp: interaction.playhead_bar,
             play_lerp: interaction.playhead_play,
             pause_lerp: interaction.playhead_pause,
-            _padding: 0.0,
-        });
+        };
     }
 }
 
@@ -956,6 +501,6 @@ fn move_towards(current: &mut f32, target: f32, speed: f32) {
     }
 }
 
-fn lerpf32(t: f32, v0: f32, v1: f32) -> f32 {
+pub fn lerpf32(t: f32, v0: f32, v1: f32) -> f32 {
     v0 + t * (v1 - v0)
 }

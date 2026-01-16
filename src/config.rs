@@ -22,8 +22,7 @@ pub struct Config {
     pub layer: String,
     /// The corner/edge the application should anchor to.
     ///
-    /// Can be one of 'top', 'topright', 'right', 'bottomright', 'bottom',
-    /// 'bottomleft', 'left', or 'topleft'.
+    /// Can be one of 'top' or 'bottom'.
     pub layer_anchor: String,
 
     /// How many minutes in the future to display in the timeline.
@@ -47,7 +46,7 @@ impl Default for Config {
             width: 1050.0,
             height: 50.0,
             layer: "top".into(),
-            layer_anchor: "topleft".into(),
+            layer_anchor: "top".into(),
             timeline_future_minutes: 12.0,
             timeline_past_minutes: 1.5,
             history_width: 100.0,
@@ -77,5 +76,15 @@ fn load_config() -> Config {
             warn!("Falling back to default config, unable to read {path:?}: {err}");
             Config::default()
         }
+    }
+}
+
+impl Config {
+    pub fn playhead_x(&self) -> f32 {
+        let history_width = self.history_width;
+        let total_width = self.width - history_width - 10.0;
+        let timeline_duration_ms = self.timeline_future_minutes * 60_000.0;
+        let timeline_start_ms = -self.timeline_past_minutes * 60_000.0;
+        history_width - timeline_start_ms * (total_width / timeline_duration_ms)
     }
 }

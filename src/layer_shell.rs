@@ -1,14 +1,13 @@
-use crate::{
-    CantusApp, PANEL_EXTENSION, PANEL_START, config::CONFIG, interaction::InteractionState,
-    render::Point,
-};
+use crate::{CantusApp, PANEL_EXTENSION, PANEL_START, config::CONFIG, render::Point};
+use itertools::Itertools;
 use raw_window_handle::{
     RawDisplayHandle, RawWindowHandle, WaylandDisplayHandle, WaylandWindowHandle,
 };
 use std::{
+    collections::hash_map::DefaultHasher,
     ffi::c_void,
+    hash::{Hash, Hasher},
     ptr::NonNull,
-    time::{Duration, Instant},
 };
 use tracing::error;
 use wayland_client::{
@@ -90,21 +89,14 @@ pub fn run() {
         &qhandle,
         (),
     );
-    let width = CONFIG.width;
     let total_height = CONFIG.height + PANEL_EXTENSION + PANEL_START;
-    layer_surface.set_size(width as u32, total_height as u32);
+    layer_surface.set_size(0, total_height as u32);
     layer_surface.set_anchor(match CONFIG.layer_anchor.as_str() {
-        "top" => LayerAnchor::Top,
-        "topright" => LayerAnchor::Top | LayerAnchor::Right,
-        "right" => LayerAnchor::Right,
-        "bottomright" => LayerAnchor::Bottom | LayerAnchor::Right,
-        "bottom" => LayerAnchor::Bottom,
-        "bottomleft" => LayerAnchor::Bottom | LayerAnchor::Left,
-        "left" => LayerAnchor::Left,
-        "topleft" => LayerAnchor::Top | LayerAnchor::Left,
+        "top" => LayerAnchor::Top | LayerAnchor::Left | LayerAnchor::Right,
+        "bottom" => LayerAnchor::Bottom | LayerAnchor::Left | LayerAnchor::Right,
         other => {
-            error!("Invalid layer anchor '{other}', defaulting to 'topleft'");
-            LayerAnchor::Top | LayerAnchor::Left
+            error!("Invalid layer anchor '{other}', defaulting to 'top'");
+            LayerAnchor::Top | LayerAnchor::Left | LayerAnchor::Right
         }
     });
     layer_surface.set_margin(0, 0, 0, 0);
@@ -205,8 +197,9 @@ impl LayerShellApp {
             return;
         }
 
-        let recreate = self.cantus.render_surface.as_ref().is_none_or(|surface| {
-            surface.config.width != width as u32 || surface.config.height != height as u32
+        let recreate = self.cantus.gpu_resources.as_ref().is_none_or(|surface| {
+            surface.surface_config.width != width as u32
+                || surface.surface_config.height != height as u32
         });
         if !recreate {
             return;
@@ -221,13 +214,8 @@ impl LayerShellApp {
             )),
             raw_window_handle: RawWindowHandle::Wayland(WaylandWindowHandle::new(surface_ptr)),
         };
-        let surface = unsafe {
-            self.cantus
-                .render_context
-                .instance
-                .create_surface_unsafe(target)
-        }
-        .expect("Failed to create surface");
+        let surface = unsafe { self.cantus.instance.create_surface_unsafe(target) }
+            .expect("Failed to create surface");
 
         self.cantus
             .configure_render_surface(surface, width as u32, height as u32);
@@ -248,10 +236,8 @@ impl LayerShellApp {
 
     fn try_render_frame(&mut self, qhandle: &QueueHandle<Self>) {
         let scale = self.cantus.scale_factor;
-        let width = CONFIG.width;
-        let total_height = CONFIG.height + PANEL_EXTENSION + PANEL_START;
-        let buffer_width = (width * scale).round();
-        let buffer_height = (total_height * scale).round();
+        let buffer_width = (CONFIG.width * scale).round();
+        let buffer_height = ((CONFIG.height + PANEL_EXTENSION + PANEL_START) * scale).round();
         self.ensure_surface(buffer_width, buffer_height);
 
         self.update_input_region(qhandle);
@@ -265,60 +251,70 @@ impl LayerShellApp {
 
     fn update_scale_and_viewport(&self) {
         let scale = self.cantus.scale_factor;
-        let width = CONFIG.width;
         let total_height = CONFIG.height + PANEL_EXTENSION + PANEL_START;
-        let viewport = self.viewport.as_ref();
         if let Some(surface) = &self.wl_surface {
-            surface.set_buffer_scale(if viewport.is_some() {
+            surface.set_buffer_scale(if self.viewport.is_some() {
                 1
             } else {
                 scale.ceil() as i32
             });
         }
-        if let Some(viewport) = viewport {
+        if let Some(viewport) = &self.viewport {
             viewport.set_source(
                 0.0,
                 0.0,
-                f64::from(width * scale).round(),
+                f64::from(CONFIG.width * scale).round(),
                 f64::from(total_height * scale).round(),
             );
-            viewport.set_destination(width as i32, total_height as i32);
+            viewport.set_destination(CONFIG.width as i32, total_height as i32);
         }
     }
 
     fn update_input_region(&mut self, qhandle: &QueueHandle<Self>) {
-        if self.cantus.interaction.last_hitbox_update.elapsed() <= Duration::from_millis(500) {
-            return;
-        }
-
         let (Some(wl_surface), Some(compositor)) = (&self.wl_surface, &self.compositor) else {
             return;
         };
+        let rects = self
+            .cantus
+            .interaction
+            .track_hitboxes
+            .iter()
+            .map(|(_, r, _)| r)
+            .chain(
+                self.cantus
+                    .interaction
+                    .icon_hitboxes
+                    .iter()
+                    .map(|h| &h.rect),
+            )
+            .collect_vec();
 
-        let scale = self.cantus.scale_factor;
-        let inv_scale = 1.0 / scale;
+        // Hash every hitbox rect at low precision so it only updates input regions on substantial changes
+        let mut hasher = DefaultHasher::new();
+        for r in &rects {
+            (
+                (r.x0 * 0.01).round() as u16,
+                (r.y0 * 0.01).round() as u16,
+                (r.x1 * 0.01).round() as u16,
+                (r.y1 * 0.01).round() as u16,
+            )
+                .hash(&mut hasher);
+        }
+        let hash = hasher.finish();
 
-        let region = compositor.create_region(qhandle, ());
-        {
-            let interaction = &self.cantus.interaction;
-            for rect in interaction
-                .track_hitboxes
-                .iter()
-                .map(|(_, rect, _)| rect)
-                .chain(interaction.icon_hitboxes.iter().map(|hitbox| &hitbox.rect))
-            {
+        if hash != self.cantus.interaction.last_hitbox_hash {
+            let region = compositor.create_region(qhandle, ());
+            for r in rects {
                 region.add(
-                    (rect.x0 * inv_scale).round() as i32,
-                    (rect.y0 * inv_scale).round() as i32,
-                    ((rect.x1 - rect.x0) * inv_scale).round() as i32,
-                    ((rect.y1 - rect.y0) * inv_scale).round() as i32,
+                    r.x0.round() as i32,
+                    r.y0.round() as i32,
+                    (r.x1 - r.x0).round() as i32,
+                    (r.y1 - r.y0).round() as i32,
                 );
             }
+            wl_surface.set_input_region(Some(&region));
+            self.cantus.interaction.last_hitbox_hash = hash;
         }
-
-        wl_surface.set_input_region(Some(&region));
-        wl_surface.commit();
-        self.cantus.interaction.last_hitbox_update = Instant::now();
     }
 }
 
@@ -413,10 +409,7 @@ impl Dispatch<WlOutput, ()> for LayerShellApp {
                 wl_output::Event::Description { description } => {
                     info.description = Some(description);
                 }
-                wl_output::Event::Mode { .. }
-                | wl_output::Event::Done
-                | wl_output::Event::Scale { .. }
-                | _ => {}
+                _ => {}
             }
         }
         state.try_select_output();
@@ -453,8 +446,9 @@ impl Dispatch<WlPointer, ()> for LayerShellApp {
         _conn: &Connection,
         _qhandle: &QueueHandle<Self>,
     ) {
-        let interaction = &mut state.cantus.interaction;
-        let scale = state.cantus.scale_factor;
+        let cantus = &mut state.cantus;
+        let interaction = &mut cantus.interaction;
+
         let surface_id = state.wl_surface.as_ref().map(wayland_client::Proxy::id);
         match event {
             wl_pointer::Event::Enter {
@@ -463,34 +457,34 @@ impl Dispatch<WlPointer, ()> for LayerShellApp {
                 surface_y,
                 ..
             } if surface_id == Some(surface.id()) => {
-                interaction.mouse_position =
-                    Point::new(surface_x as f32 * scale, surface_y as f32 * scale);
+                interaction.mouse_position = Point::new(surface_x as f32, surface_y as f32);
+                interaction.mouse_pressure = 1.0;
             }
             wl_pointer::Event::Motion {
                 surface_x,
                 surface_y,
                 ..
             } => {
-                interaction.mouse_position =
-                    Point::new(surface_x as f32 * scale, surface_y as f32 * scale);
-                interaction.handle_mouse_drag();
+                interaction.mouse_position = Point::new(surface_x as f32, surface_y as f32);
+                interaction.mouse_pressure = if interaction.mouse_down { 2.0 } else { 1.0 };
+                cantus.handle_mouse_drag();
             }
             wl_pointer::Event::Leave { .. } => {
-                interaction.mouse_position = Point::new(-100.0, -100.0);
-                interaction.cancel_drag();
+                interaction.mouse_pressure = 0.0;
                 interaction.mouse_down = false;
+                cantus.cancel_drag();
             }
             wl_pointer::Event::Button {
                 button,
                 state: button_state,
                 ..
             } => match (button, button_state) {
-                (0x110, WEnum::Value(wl_pointer::ButtonState::Pressed)) => interaction.left_click(),
+                (0x110, WEnum::Value(wl_pointer::ButtonState::Pressed)) => cantus.left_click(),
                 (0x110, WEnum::Value(wl_pointer::ButtonState::Released)) => {
-                    interaction.left_click_released(scale);
+                    cantus.left_click_released();
                 }
                 (0x111, WEnum::Value(wl_pointer::ButtonState::Pressed)) if interaction.dragging => {
-                    interaction.right_click();
+                    cantus.right_click();
                 }
                 _ => {}
             },
@@ -504,14 +498,9 @@ impl Dispatch<WlPointer, ()> for LayerShellApp {
                 value120: discrete,
                 ..
             } => {
-                InteractionState::handle_scroll(discrete.signum());
+                CantusApp::handle_scroll(discrete.signum());
             }
-            wl_pointer::Event::Axis { .. }
-            | wl_pointer::Event::Frame
-            | wl_pointer::Event::AxisSource { .. }
-            | wl_pointer::Event::AxisStop { .. }
-            | wl_pointer::Event::AxisRelativeDirection { .. }
-            | _ => {}
+            _ => {}
         }
     }
 }
