@@ -201,8 +201,9 @@ impl CantusApp {
         let mut current_ms = -playback_elapsed - past_tracks_duration + drag_offset_ms
             - TRACK_SPACING_MS * cur_idx as f32;
         let diff = current_ms - self.render_state.track_offset;
+        self.interaction.last_expansion.1.x += diff * px_per_ms * dt; // Offset the expansion so it moves with the tracks
         if !self.interaction.dragging && diff.abs() > 200.0 {
-            current_ms = self.render_state.track_offset + diff * 0.1;
+            current_ms = self.render_state.track_offset + diff * 3.5 * dt;
         }
 
         // Add the new move speed to the array move_speeds, trim the previous ones

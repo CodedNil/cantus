@@ -118,15 +118,6 @@ impl InteractionState {
         }
         PLAYBACK_STATE.write().interaction = true;
 
-        // Get the x position of the playhead
-        let origin_x = {
-            let history_width = CONFIG.history_width;
-            let total_width = CONFIG.width - history_width - 10.0;
-            let timeline_duration_ms = CONFIG.timeline_future_minutes * 60_000.0;
-            let timeline_start_ms = -CONFIG.timeline_past_minutes * 60_000.0;
-            history_width - timeline_start_ms * (total_width / timeline_duration_ms)
-        };
-
         // Click on rating/playlist icons
         if let Some(hitbox) = self
             .icon_hitboxes
@@ -148,6 +139,15 @@ impl InteractionState {
                 });
             }
         } else if self.play_hitbox.contains(mouse_pos) {
+            // Get the x position of the playhead
+            let origin_x = {
+                let history_width = CONFIG.history_width;
+                let total_width = CONFIG.width - history_width - 10.0;
+                let timeline_duration_ms = CONFIG.timeline_future_minutes * 60_000.0;
+                let timeline_start_ms = -CONFIG.timeline_past_minutes * 60_000.0;
+                history_width - timeline_start_ms * (total_width / timeline_duration_ms)
+            };
+
             // Play/pause
             self.last_expansion = (
                 Instant::now(),
@@ -167,7 +167,7 @@ impl InteractionState {
             self.last_expansion = (Instant::now(), mouse_pos);
 
             // If click is near the very left, reset to the start of the song, else seek to clicked position
-            let position = if mouse_pos.x < origin_x + 20.0 {
+            let position = if mouse_pos.x < CONFIG.history_width + 40.0 {
                 0.0
             } else {
                 (mouse_pos.x - track_range_a) / (track_range_b - track_range_a)

@@ -709,8 +709,10 @@ fn get_spotify_playback() {
         }
 
         state.volume = current_playback.device.volume_percent.map(|v| v as u8);
-        state.playing = current_playback.is_playing;
-        state.progress = current_playback.progress_ms;
+        if now >= state.last_interaction {
+            state.playing = current_playback.is_playing;
+            state.progress = current_playback.progress_ms;
+        }
         state.last_progress_update = now;
         state.last_grabbed_playback = now;
     });
