@@ -89,15 +89,15 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
     if (mask <= 0.0 && shadow <= 0.0) { discard; }
 
     // --- Background Synthesis ---
-    let seed = f32(pill.colors[0] % 1000u) * 2.537;
-    let t = (global.time * 0.15) + seed;
+    let seed = f32(pill.colors[0] % 1000u) * 29.537;
+    let t = global.time * 0.15 + seed;
 
     // Lens Refraction: combines edge curvature warp, ripple wave, and mouse pull
     let lens_warp = pow(clamp(1.0 + min(dist, 0.0) / 120.0, 0.0, 1.0), 2.0) * 0.6;
     let uv = in.world_uv - (in.local_uv - 0.5) * lens_warp - normalize(ripple_vec + 0.001) * ripple_str - mouse_pull * 0.002;
 
     // Procedural Flow Mixing
-    let p = uv * 0.2 * vec2(1.0, global.screen_size.y / global.screen_size.x);
+    let p = uv * 0.2 * vec2(1.0, global.screen_size.y / global.screen_size.x) + seed;
     let s1 = sin(p.x * 6.0 + t + sin(p.y * 4.0 + t * 0.5));
     let s2 = sin(p.y * 5.0 - t + sin(p.x * 3.0 + t * 0.8));
     let mix_val = clamp((s1 * 0.5 + s2 * 0.3 + sin(length(p) * 4.0 + s1 + t) * 0.2) * 0.5 + 0.5, 0.0, 1.0);
