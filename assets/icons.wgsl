@@ -38,7 +38,7 @@ fn vs_main(@builtin(vertex_index) v_idx: u32, @builtin(instance_index) i_idx: u3
     let proximity = smoothstep(30.0, 8.0, dist); // 1.0 when touching, 0.0 when far
 
     let growth = 1.0 + (0.6 * proximity);
-    let pixel_radius = 11.0 * global.scale_factor * growth;
+    let pixel_radius = 9.0 * global.scale_factor * growth;
 
     // Smoothly push left/right based on x difference
     let x_push = (icon.pos.x - global.mouse_pos.x) * proximity * 0.5;
@@ -112,14 +112,15 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
         out_color = mix(tex_sample, vec3(0.24), icon_saturation);
     }
 
-    let anti_alias_unit = fwidth(dist_to_shape) * 0.5;
-    let shape_mask = 1.0 - smoothstep(-anti_alias_unit, anti_alias_unit, dist_to_shape);
+    // Masking & Shadow
+    let mask = clamp(0.5 - dist_to_shape, 0.0, 1.0);
+    let shadow = pow(1.0 - smoothstep(0.0, 6.0, dist_to_shape), 2.0) * 0.2;
 
-    // Subtle outline border
-    let border_width = global.scale_factor;
-    let border_inner_mask = smoothstep(-border_width - anti_alias_unit, -border_width + anti_alias_unit, dist_to_shape);
-    out_color = mix(out_color, vec3(0.15), border_inner_mask);
+    if (mask <= 0.0 && shadow <= 0.0) { discard; }
 
-    let final_alpha = shape_mask * alpha;
-    return vec4(out_color * final_alpha, final_alpha);
+    // A subtle rim light around the edge
+    let highlighting = pow((1.0 - smoothstep(0.0, -5.0, dist_to_shape)), 4.0) * 0.08;
+    out_color += highlighting * mask;
+
+    return vec4(out_color * mask * alpha, max(mask, shadow) * alpha);
 }
