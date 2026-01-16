@@ -89,7 +89,7 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
     if (mask <= 0.0 && shadow <= 0.0) { discard; }
 
     // --- Background Synthesis ---
-    let seed = f32(pill.colors[0] % 1000u) * 0.137 + f32(in.pill_idx) * 2.4;
+    let seed = f32(pill.colors[0] % 1000u) * 2.537;
     let t = (global.time * 0.15) + seed;
 
     // Lens Refraction: combines edge curvature warp, ripple wave, and mouse pull

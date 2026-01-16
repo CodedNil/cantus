@@ -15,8 +15,7 @@ A beautiful interactive music widget for Wayland
 
 <img width="430" height="88" alt="image" src="https://github.com/user-attachments/assets/dd8c185b-a12d-42ec-86d4-dee96ceb9ae9" />
 
-https://github.com/user-attachments/assets/5215392e-bdb2-4ae1-9ce9-04e4aa75a455
-
+https://github.com/user-attachments/assets/86c0bc3c-8e50-49bc-a955-86975910b7ae
 
 
 ## Usage
