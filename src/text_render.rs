@@ -10,8 +10,8 @@ use wgpu_text::{
     },
 };
 
-const FONT_SIZE: f32 = 17.5;
-const FONT_SIZE_SMALL: f32 = 14.5;
+const FONT_SIZE: f32 = 17.0;
+const FONT_SIZE_SMALL: f32 = 14.0;
 
 pub struct TextRenderer {
     brush: TextBrush<FontArc>,
@@ -60,7 +60,8 @@ impl TextRenderer {
             .unwrap_or(&track.name)
             .trim();
 
-        let top_y = PANEL_START + (CONFIG.height * 0.24).floor();
+        let top_y = PANEL_START + (CONFIG.height * 0.26).floor();
+        let bottom_y = PANEL_START + (CONFIG.height * 0.57).floor();
 
         let measure_layout = Layout::SingleLine {
             line_breaker: BuiltInLineBreaker::AnyCharLineBreaker,
@@ -89,7 +90,6 @@ impl TextRenderer {
         };
         queue_text(song_name.to_owned(), (x, top_y), size, align);
 
-        let bottom_y = PANEL_START + (CONFIG.height * 0.55).floor();
         let time_text = if track_render.seconds_until_start >= 60.0 {
             format!(
                 "{}m{}s",

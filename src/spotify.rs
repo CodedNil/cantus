@@ -3,6 +3,7 @@ use arrayvec::ArrayString;
 use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
 use dashmap::DashMap;
 use image::RgbaImage;
+use palette::IntoColor;
 use parking_lot::RwLock;
 use serde::{Deserialize, Deserializer, Serialize, Serializer, de::DeserializeOwned};
 use sha2::{Digest, Sha256};
@@ -995,17 +996,15 @@ fn do_kmeans(pixels: &[palette::Lab]) -> Vec<palette::Lab> {
     kmeans_colors::get_kmeans_hamerly(NUM_SWATCHES, 20, 5.0, false, pixels, 0).centroids
 }
 
-fn convert_to_swatches(centroids: &[palette::Lab]) -> Vec<[u8; 4]> {
+fn convert_to_swatches(centroids: &[palette::Lab]) -> Vec<[u8; 3]> {
     centroids
         .iter()
         .map(|c: &palette::Lab| {
-            use palette::IntoColor;
             let rgb: palette::Srgb = (*c).into_color();
             [
                 (rgb.red * 255.0) as u8,
                 (rgb.green * 255.0) as u8,
                 (rgb.blue * 255.0) as u8,
-                (255 / NUM_SWATCHES as u8),
             ]
         })
         .collect()

@@ -7,14 +7,14 @@ struct GlobalUniforms {
     expansion_xy: vec2<f32>,
     expansion_time: f32,
     scale_factor: f32,
-};
+}
 
 struct BackgroundPill {
     rect: vec2<f32>, // [x_position, width]
     colors: array<u32, 4>,
     alpha: f32,
     image_index: i32,
-};
+}
 
 @group(0) @binding(0) var<uniform> global: GlobalUniforms;
 @group(0) @binding(1) var<storage, read> pills: array<BackgroundPill>;
@@ -27,17 +27,16 @@ struct VertexOutput {
     @location(1) world_uv: vec2<f32>,
     @location(2) @interpolate(flat) pill_idx: u32,
     @location(3) pixel_pos: vec2<f32>,
-};
+}
 
 @vertex
 fn vs_main(@builtin(vertex_index) v_idx: u32, @builtin(instance_index) i_idx: u32) -> VertexOutput {
     let pill = pills[i_idx];
-    let margin = 16.0; // Margin for shadows/rounding
-
+    let margin = 16.0;
     let unit_coord = vec2<f32>(f32(v_idx % 2u), f32(v_idx / 2u));
     let pill_size = vec2(pill.rect.y, global.layer_metrics.y);
 
-    // Calculate local pixel position relative to pill top-left, including margin
+    // Expand vertex bounds to accommodate shadows/glows
     let local_pixel = unit_coord * (pill_size + 2.0 * margin) - margin;
     let pixel_pos = vec2(pill.rect.x, global.layer_metrics.x) + local_pixel;
 
@@ -51,6 +50,7 @@ fn vs_main(@builtin(vertex_index) v_idx: u32, @builtin(instance_index) i_idx: u3
     return out;
 }
 
+/// 4th-order squircle distance function
 fn sd_squircle(p: vec2<f32>, b: vec2<f32>, r: f32) -> f32 {
     let q = abs(p) - b + r;
     return pow(pow(max(q.x, 0.0), 4.0) + pow(max(q.y, 0.0), 4.0), 0.25) - r + min(max(q.x, q.y), 0.0);
@@ -62,57 +62,84 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
     let pill_size = vec2(pill.rect.y, global.layer_metrics.y);
     let rounding = 22.0 * global.scale_factor;
 
-    // Geometry Mask
-    let dist = sd_squircle((in.local_uv - 0.5) * pill_size, pill_size * 0.5, rounding);
+    // --- Interaction Logic ---
+    let anim_t = (global.time - global.expansion_time) * 1.2;
+    let ripple_active = step(0.0, anim_t) * step(anim_t, 1.0);
+
+    // Geometry Ripple (Expand wave from expansion_xy)
+    let ripple_vec = in.pixel_pos - global.expansion_xy;
+    let wave_dist = abs(length(ripple_vec) - anim_t * 600.0);
+    let wave_prof = (0.5 + 0.5 * cos(clamp(wave_dist / 80.0, 0.0, 1.0) * 3.14159)) * step(wave_dist, 80.0);
+    let ripple_str = pow(1.0 - anim_t, 2.0) * wave_prof * 0.5 * ripple_active;
+
+    // Cursor Influence (Non-linear falloff for enlargement and UV pull)
+    let mouse_vec = in.pixel_pos - global.mouse_pos;
+    let mouse_d = length(mouse_vec);
+    let mouse_inf = pow(smoothstep(120.0 * global.scale_factor, 0.0, mouse_d), 2.0);
+    let mouse_pull = normalize(mouse_vec + 0.001) * mouse_inf * 15.0 * global.scale_factor;
+
+    // --- Masking & Depth ---
+    let bulge = ripple_str * 22.0 * global.scale_factor + mouse_inf * 8.0;
+    let dist = sd_squircle((in.local_uv - 0.5) * pill_size, (pill_size + vec2(0.0, bulge)) * 0.5, rounding);
     let mask = 1.0 - smoothstep(-0.5, 0.5, dist);
-    let shadow = (1.0 - smoothstep(0.0, 8.0, dist)) * 0.3;
+    let shadow = (1.0 - smoothstep(0.0, 16.0, dist)) * 0.2;
+
     if (mask <= 0.0 && shadow <= 0.0) { discard; }
 
-    // Animated Noise Field
-    let t = global.time * 0.8;
-    var p = in.world_uv * 2.5 + f32(pill.colors[0] % 8u) * 7.123;
-    let rot = mat2x2<f32>(0.8, -0.6, 0.6, 0.8);
+    // --- Background Synthesis ---
+    let seed = f32(pill.colors[0] % 1000u) * 0.137 + f32(in.pill_idx) * 2.4;
+    let t = (global.time * 0.15) + seed;
 
-    for(var i = 1.0; i <= 4.0; i += 1.0) {
-        p += sin(p.yx + vec2(t, t * 0.7) + i) * 0.5;
-        p *= rot;
-    }
+    // Lens Refraction: combines edge curvature warp, ripple wave, and mouse pull
+    let lens_warp = pow(clamp(1.0 + dist / 120.0, 0.0, 1.0), 2.0) * 0.6;
+    let uv = in.world_uv - (in.local_uv - 0.5) * lens_warp - normalize(ripple_vec + 0.001) * ripple_str - mouse_pull * 0.002;
 
-    // Color Mixing
+    // Procedural Flow Mixing
+    let p = uv * 0.2 * vec2(1.0, global.screen_size.y / global.screen_size.x);
+    let s1 = sin(p.x * 6.0 + t + sin(p.y * 4.0 + t * 0.5));
+    let s2 = sin(p.y * 5.0 - t + sin(p.x * 3.0 + t * 0.8));
+    let mix_val = clamp((s1 * 0.5 + s2 * 0.3 + sin(length(p) * 4.0 + s1 + t) * 0.2) * 0.5 + 0.5, 0.0, 1.0);
+
+    // Color Palette Unpacking
     let c0 = unpack4x8unorm(pill.colors[0]).rgb;
     let c1 = unpack4x8unorm(pill.colors[1]).rgb;
     let c2 = unpack4x8unorm(pill.colors[2]).rgb;
     let c3 = unpack4x8unorm(pill.colors[3]).rgb;
 
-    let w = sin(p.xyx * 0.4 + vec3(t * 0.1, -t * 0.15 + 2.0, t * 0.05 + 1.0)) * 0.5 + 0.5;
-    var color = mix(mix(mix(c0, c1, w.x), c2, w.y), c3, w.z);
+    // Vibrancy Post-Processing
+    var bg = mix(mix(c0, c1, mix_val), mix(c3, c2, s2 * 0.5 + 0.5), mix_val);
+    bg = mix(bg, (c0 + c1 + c2 + c3) * 0.25, 0.1); // Base color blend
 
-    // Polish & Processing
-    let luma = dot(color, vec3(0.2126, 0.7152, 0.0722));
-    color = mix(vec3(luma), color, 0.85); // Saturation
-    color = (color - 0.5) * 1.05 + 0.5;    // Contrast
-    color *= (1.0 - smoothstep(0.4, 1.2, luma) * 0.4); // Highlight compression
-    color = mix(color * 1.1, color, smoothstep(0.0, -35.0, dist) * 0.5); // Inner glow
+    let luma = dot(bg, vec3(0.2126, 0.7152, 0.0722));
+    bg = mix(vec3(luma), bg, mix(3.2, 1.6, smoothstep(0.1, 0.4, luma))); // Saturation boost
+    bg = clamp(bg, vec3(0.06), vec3(0.85)) * min(1.0, 0.52 / max(luma, 0.001)); // Luma cap for UI readability
+    bg = mix(bg, bg * 0.45, smoothstep(global.playhead_x + 1.2, global.playhead_x - 1.2, in.pixel_pos.x));
 
-    // Darken Past Timeline
-    color = mix(color, color * 0.5, smoothstep(global.playhead_x + 0.5, global.playhead_x - 0.5, in.pixel_pos.x));
+    // --- Layering & FX ---
+    var color = bg;
 
-    // Expansion Circle Effect
-    let anim_t = (global.time - global.expansion_time) * 0.95;
-    if (anim_t >= 0.0 && anim_t < 1.0) {
-        let ripple = (1.0 - clamp(anim_t + 0.4, 0.0, 1.0)) * (1.0 - smoothstep(500.0 * anim_t - 2.0, 500.0 * anim_t, length(in.pixel_pos - global.expansion_xy)));
-        color = mix(color, vec3(1.0, 0.88, 0.824), ripple);
-    }
-
-    // Cover Art
+    // Cover art
     let img_x = pill_size.x - pill_size.y;
     let local_x = in.local_uv.x * pill_size.x;
-    if (pill.image_index >= 0 && local_x >= img_x) {
-        let uv = vec2((local_x - img_x) / pill_size.y, in.local_uv.y);
-        let tex = textureSample(t_images, s_images, uv, pill.image_index);
-        let img_m = 1.0 - smoothstep(-0.5, 0.5, sd_squircle((uv - 0.5) * pill_size.y, vec2(pill_size.y * 0.5), rounding));
-        color = mix(color, tex.rgb, img_m * tex.a);
-    }
+    let uv_img = vec2((local_x - img_x) / pill_size.y, in.local_uv.y);
+    let tex = textureSample(t_images, s_images, uv_img, max(0, pill.image_index));
+    let img_mask = (1.0 - smoothstep(-0.5, 0.5, sd_squircle((uv_img - 0.5) * pill_size.y, vec2(pill_size.y * 0.5), rounding)))
+                 * step(0.0, f32(pill.image_index)) * step(img_x, local_x);
+    color = mix(color, tex.rgb, img_mask * tex.a);
+
+    // Glass sheen, rim light, and mouse-reactive highlight
+    let sheen = smoothstep(0.1, 0.0, in.local_uv.y) * mask * 0.15;
+    let rim = (1.0 - smoothstep(0.0, -6.0, dist)) * 0.1;
+    let mouse_sheen = smoothstep(30.0, 0.0, abs(mouse_d - 15.0)) * mouse_inf * 0.2;
+    color += mix(color, vec3(1.0), 0.3) * (sheen + rim + mouse_sheen);
+
+    // Corner glints
+    let glint = smoothstep(60.0, 0.0, length(in.local_uv * pill_size - 20.0)) * 0.1
+              + smoothstep(60.0, 0.0, length(in.local_uv * pill_size - (pill_size - 20.0))) * 0.05;
+    color += glint * mask;
+
+    // Expansion flash
+    color = mix(color, color * 1.5 + 0.1, (1.0 - anim_t) * smoothstep(80.0, 0.0, wave_dist) * ripple_active * 0.5);
 
     return vec4(color * mask * pill.alpha, max(mask, shadow) * pill.alpha);
 }
