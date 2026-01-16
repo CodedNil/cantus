@@ -1,7 +1,7 @@
 use crate::interaction::InteractionState;
 use crate::pipelines::{IMAGE_SIZE, MAX_TEXTURE_LAYERS};
 use crate::render::{
-    BackgroundPill, IconInstance, Particle, PlayheadUniforms, RenderState, ScreenUniforms,
+    BackgroundPill, GlobalUniforms, IconInstance, Particle, PlayheadUniforms, RenderState,
 };
 use crate::spotify::IMAGES_CACHE;
 use crate::text_render::TextRenderer;
@@ -83,7 +83,7 @@ struct CantusApp {
 
     // Scene & Resources
     text_renderer: Option<TextRenderer>,
-    screen_uniforms: ScreenUniforms,
+    global_uniforms: GlobalUniforms,
     background_pills: Vec<BackgroundPill>,
     icon_pills: Vec<IconInstance>,
     playhead_info: PlayheadUniforms,
@@ -102,7 +102,7 @@ impl Default for CantusApp {
             scale_factor: 1.0,
 
             text_renderer: None,
-            screen_uniforms: ScreenUniforms::default(),
+            global_uniforms: GlobalUniforms::default(),
             background_pills: Vec::new(),
             icon_pills: Vec::new(),
             playhead_info: PlayheadUniforms::default(),
@@ -138,7 +138,7 @@ impl CantusApp {
         gpu.queue.write_buffer(
             &gpu.uniform_buffer,
             0,
-            bytemuck::bytes_of(&self.screen_uniforms),
+            bytemuck::bytes_of(&self.global_uniforms),
         );
         gpu.queue.write_buffer(
             &gpu.particles_buffer,

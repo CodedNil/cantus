@@ -1,11 +1,12 @@
 struct GlobalUniforms {
     screen_size: vec2<f32>,
-    layer_metrics: vec2<f32>,
+    bar_height: vec2<f32>, // [start_y, height]
     mouse_pos: vec2<f32>,
+    mouse_pressure: f32,
     playhead_x: f32,
-    time: f32,
     expansion_xy: vec2<f32>,
     expansion_time: f32,
+    time: f32,
     scale_factor: f32,
 };
 
@@ -56,7 +57,7 @@ fn vs_main(@builtin(vertex_index) v_idx: u32, @builtin(instance_index) i_idx: u3
     // Saturated color with a bright core
     let rgb = unpack4x8unorm(p.color).rgb;
     let luma = dot(rgb, vec3(0.299, 0.587, 0.114));
-    let spark_color = mix(mix(vec3(luma), rgb, 2.0), vec3(1.0), 0.2) * 3.5;
+    let spark_color = mix(mix(vec3(luma), rgb, 2.0), vec3(1.0), 0.2) * 2.0;
 
     var out: VertexOutput;
     out.clip_pos = vec4((world_pos / global.screen_size * 2.0 - 1.0) * vec2(1.0, -1.0), 0.0, 1.0);

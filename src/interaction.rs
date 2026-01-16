@@ -24,6 +24,7 @@ pub struct IconHitbox {
 
 pub struct InteractionState {
     pub mouse_position: Point,
+    pub mouse_pressure: f32,
 
     pub last_hitbox_hash: u64,
     pub play_hitbox: Rect,
@@ -49,6 +50,7 @@ impl Default for InteractionState {
     fn default() -> Self {
         Self {
             mouse_position: Point::default(),
+            mouse_pressure: 0.0,
             last_hitbox_hash: 0,
             play_hitbox: Rect::default(),
             track_hitboxes: Vec::new(),
@@ -74,6 +76,7 @@ impl Default for InteractionState {
 impl InteractionState {
     pub fn left_click(&mut self) {
         self.mouse_down = true;
+        self.mouse_pressure = 2.0;
         self.drag_origin = Some(self.mouse_position);
         self.drag_track = None;
         self.dragging = false;
@@ -94,6 +97,7 @@ impl InteractionState {
         self.dragging = false;
         self.drag_delta_pixels = 0.0;
         self.mouse_down = false;
+        self.mouse_pressure = 1.0;
         PLAYBACK_STATE.write().interaction = false;
     }
 
@@ -325,7 +329,7 @@ impl CantusApp {
                 origin_x + half_size,
                 center_y + half_size,
             );
-            let is_hovered = rect.contains(mouse_pos);
+            let is_hovered = rect.contains(mouse_pos) && self.interaction.mouse_pressure > 0.0;
 
             match &entry {
                 IconEntry::Star { index } => {

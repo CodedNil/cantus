@@ -1,11 +1,12 @@
 struct GlobalUniforms {
     screen_size: vec2<f32>,
-    layer_metrics: vec2<f32>, // [start_y, height]
+    bar_height: vec2<f32>, // [start_y, height]
     mouse_pos: vec2<f32>,
+    mouse_pressure: f32,
     playhead_x: f32,
-    time: f32,
     expansion_xy: vec2<f32>,
     expansion_time: f32,
+    time: f32,
     scale_factor: f32,
 };
 
@@ -32,7 +33,7 @@ fn vs_main(@builtin(vertex_index) v_idx: u32, @builtin(instance_index) i_idx: u3
     let icon = icons[i_idx];
 
     // Proximity-based interactive growth
-    let distance_to_mouse = distance(icon.pos, global.mouse_pos) / global.scale_factor;
+    let distance_to_mouse = distance(icon.pos, global.mouse_pos) / global.scale_factor / min(global.mouse_pressure, 1.0);
     let growth_factor = 1.0 + 0.6 * (1.0 - smoothstep(8.0, 24.0, distance_to_mouse));
 
     let pixel_radius = 11.0 * global.scale_factor * growth_factor;

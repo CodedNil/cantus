@@ -38,15 +38,17 @@ impl Rect {
 
 #[repr(C)]
 #[derive(Copy, Clone, Debug, Default, Pod, Zeroable)]
-pub struct ScreenUniforms {
-    screen_size: [f32; 2], // Full size of the layer shell
-    bar_height: [f32; 2],  // Start y and bars height
-    mouse_pos: [f32; 2],
-    playhead_x: f32, // x position where the playhead line is drawn
-    time: f32,
+pub struct GlobalUniforms {
+    screen_size: [f32; 2], // x, y, full size of the layer shell
+    bar_height: [f32; 2],  // Start y, and bars height
+    mouse_pos: [f32; 2],   // x, y
+    mouse_pressure: f32,   // 0 - 1 for hovered - 2 for mouse down
+    playhead_x: f32,       // x position where the playhead line is drawn
     expansion_xy: [f32; 2],
     expansion_time: f32,
+    time: f32,
     scale_factor: f32,
+    _padding: [f32; 3],
 }
 
 #[repr(C)]
@@ -149,7 +151,7 @@ impl CantusApp {
         let timeline_start_ms = -CONFIG.timeline_past_minutes * 60_000.0;
 
         let px_per_ms = total_width / timeline_duration_ms;
-        let origin_x = history_width - timeline_start_ms * px_per_ms;
+        let playhead_x = history_width - timeline_start_ms * px_per_ms;
 
         let playback_state = PLAYBACK_STATE.read();
         if playback_state.queue.is_empty() {
@@ -172,7 +174,7 @@ impl CantusApp {
             self.interaction.playing = playback_state.playing;
             self.interaction.last_expansion = (
                 Instant::now(),
-                Point::new(origin_x, PANEL_START + CONFIG.height * 0.5),
+                Point::new(playhead_x, PANEL_START + CONFIG.height * 0.5),
             );
             self.interaction.last_toggle_playing = Instant::now();
         }
@@ -265,19 +267,47 @@ impl CantusApp {
             }
         }
 
+        let time = START_TIME.elapsed().as_secs_f32();
+        self.global_uniforms.time = time;
+
+        // Screen uniforms
+        self.global_uniforms.screen_size =
+            [CONFIG.width, CONFIG.height + PANEL_START + PANEL_EXTENSION];
+        self.global_uniforms.bar_height = [PANEL_START, CONFIG.height];
+        self.global_uniforms.playhead_x = playhead_x;
+        self.global_uniforms.scale_factor = self.scale_factor;
+
+        // Mouse uniforms
+        self.global_uniforms.mouse_pos = [
+            self.interaction.mouse_position.x,
+            self.interaction.mouse_position.y,
+        ];
+        move_towards(
+            &mut self.global_uniforms.mouse_pressure,
+            self.interaction.mouse_pressure,
+            5.0 * dt,
+        );
+
+        // Get expansion animation variables
+        let (interaction_inst, interaction_point) = self.interaction.last_expansion;
+        self.global_uniforms.expansion_xy =
+            [interaction_point.x, PANEL_START + interaction_point.y];
+        self.global_uniforms.expansion_time =
+            interaction_inst.duration_since(*START_TIME).as_secs_f32();
+
         // Render the tracks
         for track_render in &track_renders {
             if track_render.width <= 0.0 || track_render.start_x + track_render.width <= 0.0 {
                 continue;
             }
-            self.draw_track(track_render, origin_x, &playback_state.playlists);
+            self.draw_track(track_render, playhead_x, &playback_state.playlists);
         }
 
         // Draw the particles
         self.render_playhead_particles(
             dt,
             &playback_state.queue[cur_idx],
-            origin_x,
+            playhead_x,
             avg_speed,
             playback_state.volume,
         );
@@ -343,6 +373,7 @@ impl CantusApp {
         // Expand the hitbox vertically so it includes the playlist buttons
         if !track_render.art_only {
             let hovered = !self.interaction.dragging
+                && self.interaction.mouse_pressure > 0.0
                 && self.interaction.mouse_position.x >= hitbox.x0
                 && self.interaction.mouse_position.x <= hitbox.x1;
             self.draw_playlist_buttons(track, hovered, playlists, width, start_x);
@@ -362,29 +393,6 @@ impl CantusApp {
             .and_then(|data_ref| data_ref.as_ref().copied())
             .unwrap_or_default();
 
-        let time = START_TIME.elapsed().as_secs_f32();
-
-        // Get expansion animation variables
-        let (interaction_inst, interaction_point) = self.interaction.last_expansion;
-        let (expansion_xy, expansion_time) = (
-            [interaction_point.x, PANEL_START + interaction_point.y],
-            interaction_inst.duration_since(*START_TIME).as_secs_f32(),
-        );
-
-        self.screen_uniforms = ScreenUniforms {
-            screen_size: [CONFIG.width, CONFIG.height + PANEL_START + PANEL_EXTENSION],
-            bar_height: [PANEL_START, CONFIG.height],
-            mouse_pos: [
-                self.interaction.mouse_position.x,
-                self.interaction.mouse_position.y,
-            ],
-            playhead_x,
-            time,
-            expansion_xy,
-            expansion_time,
-            scale_factor: self.scale_factor,
-        };
-
         // Emit new particles while playing
         let mut emit_count = if avg_speed.abs() > 0.00001 {
             self.particles_accumulator += dt * SPARK_EMISSION;
@@ -399,6 +407,7 @@ impl CantusApp {
         // Cache active particle Y positions to avoid borrow checker conflicts
         let spawn_offset = avg_speed.signum() * 2.0;
         let horizontal_bias = (avg_speed.abs().powf(0.2) * spawn_offset * 0.5).clamp(-3.0, 3.0);
+        let time = self.global_uniforms.time;
 
         for (i, particle) in self.particles.iter_mut().enumerate() {
             if emit_count > 0 && time > particle.spawn_time + particle.duration {
@@ -430,7 +439,8 @@ impl CantusApp {
             PANEL_START + CONFIG.height,
         );
         // Get playhead states
-        let playhead_hovered = interaction.play_hitbox.contains(interaction.mouse_position);
+        let playhead_hovered = interaction.play_hitbox.contains(interaction.mouse_position)
+            && interaction.mouse_pressure > 0.0;
         let last_toggle =
             interaction.last_toggle_playing.elapsed().as_secs_f32() / ANIMATION_DURATION;
 

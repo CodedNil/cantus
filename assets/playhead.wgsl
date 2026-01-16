@@ -1,11 +1,12 @@
 struct GlobalUniforms {
     screen_size: vec2<f32>,
-    layer_metrics: vec2<f32>, // [start_y, height]
+    bar_height: vec2<f32>, // [start_y, height]
     mouse_pos: vec2<f32>,
+    mouse_pressure: f32,
     playhead_x: f32,
-    time: f32,
     expansion_xy: vec2<f32>,
     expansion_time: f32,
+    time: f32,
     scale_factor: f32,
 };
 
@@ -28,15 +29,15 @@ struct VertexOutput {
 fn vs_main(@builtin(vertex_index) v_idx: u32) -> VertexOutput {
     let scale = global.scale_factor;
     let x_coord = global.playhead_x;
-    let start_y = global.layer_metrics.x;
-    let height = global.layer_metrics.y;
-    
+    let start_y = global.bar_height.x;
+    let height = global.bar_height.y;
+
     // Constraint rendering to a tight bounding box around the playhead/buttons
-    let h_width = height * 0.3; 
+    let h_width = height * 0.4;
     let uv = vec2<f32>(f32(v_idx % 2u), f32(v_idx / 2u));
     let world_pos = vec2(
         x_coord + (uv.x * 2.0 - 1.0) * h_width,
-        start_y + uv.y * height
+        start_y - 5.0 + uv.y * (height + 10.0)
     );
 
     var out: VertexOutput;
@@ -67,8 +68,8 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
     let pixel_pos = in.world_pos;
     let scale = global.scale_factor;
     let x_coord = global.playhead_x;
-    let start_y = global.layer_metrics.x;
-    let height = global.layer_metrics.y;
+    let start_y = global.bar_height.x;
+    let height = global.bar_height.y;
     let mid_y = start_y + height * 0.5;
     let line_thickness = 3.5 * scale;
 

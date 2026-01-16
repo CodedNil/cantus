@@ -1,4 +1,4 @@
-use crate::render::{BackgroundPill, IconInstance, Particle, PlayheadUniforms, ScreenUniforms};
+use crate::render::{BackgroundPill, GlobalUniforms, IconInstance, Particle, PlayheadUniforms};
 use crate::text_render::TextRenderer;
 use crate::{CantusApp, GpuResources};
 use std::collections::HashMap;
@@ -143,7 +143,7 @@ impl CantusApp {
                     entry_point: Some("fs_main"),
                     targets: &[Some(ColorTargetState {
                         format,
-                        blend: Some(BlendState::ALPHA_BLENDING),
+                        blend: Some(BlendState::PREMULTIPLIED_ALPHA_BLENDING),
                         write_mask: ColorWrites::ALL,
                     })],
                     compilation_options: PipelineCompilationOptions::default(),
@@ -175,7 +175,7 @@ impl CantusApp {
 
         let uniform_buffer = mk_buf(
             "Uniforms",
-            std::mem::size_of::<ScreenUniforms>() as u64,
+            std::mem::size_of::<GlobalUniforms>() as u64,
             BufferUsages::UNIFORM,
         );
         let particles_buffer = mk_buf(

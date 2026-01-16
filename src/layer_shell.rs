@@ -460,6 +460,7 @@ impl Dispatch<WlPointer, ()> for LayerShellApp {
                 ..
             } if surface_id == Some(surface.id()) => {
                 interaction.mouse_position = Point::new(surface_x as f32, surface_y as f32);
+                interaction.mouse_pressure = 1.0;
             }
             wl_pointer::Event::Motion {
                 surface_x,
@@ -467,10 +468,11 @@ impl Dispatch<WlPointer, ()> for LayerShellApp {
                 ..
             } => {
                 interaction.mouse_position = Point::new(surface_x as f32, surface_y as f32);
+                interaction.mouse_pressure = if interaction.mouse_down { 2.0 } else { 1.0 };
                 interaction.handle_mouse_drag();
             }
             wl_pointer::Event::Leave { .. } => {
-                interaction.mouse_position = Point::new(-100.0, -100.0);
+                interaction.mouse_pressure = 0.0;
                 interaction.cancel_drag();
                 interaction.mouse_down = false;
             }
