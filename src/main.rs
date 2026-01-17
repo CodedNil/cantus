@@ -48,15 +48,6 @@ struct PlaybackState {
     interaction: bool,
     last_interaction: Instant,
     last_progress_update: Instant,
-
-    #[cfg(feature = "spotify")]
-    current_context: Option<String>,
-    #[cfg(feature = "spotify")]
-    context_updated: bool,
-    #[cfg(feature = "spotify")]
-    last_grabbed_playback: Instant,
-    #[cfg(feature = "spotify")]
-    last_grabbed_queue: Instant,
 }
 
 /// Number of swatches to use in colour palette generation.
@@ -112,7 +103,6 @@ struct Image {
 static PLAYBACK_STATE: LazyLock<RwLock<PlaybackState>> = LazyLock::new(|| {
     #[cfg(feature = "spotify")]
     {
-        use std::time::Duration;
         RwLock::new(PlaybackState {
             playing: false,
             progress: 0,
@@ -124,11 +114,6 @@ static PLAYBACK_STATE: LazyLock<RwLock<PlaybackState>> = LazyLock::new(|| {
             interaction: false,
             last_interaction: Instant::now(),
             last_progress_update: Instant::now(),
-
-            current_context: None,
-            context_updated: false,
-            last_grabbed_playback: Instant::now().checked_sub(Duration::from_secs(60)).unwrap(),
-            last_grabbed_queue: Instant::now().checked_sub(Duration::from_secs(60)).unwrap(),
         })
     }
     #[cfg(not(feature = "spotify"))]

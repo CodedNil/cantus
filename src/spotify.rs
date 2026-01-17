@@ -12,7 +12,7 @@ use std::{
     collections::{HashMap, HashSet},
     fs,
     io::{BufRead, BufReader, Write},
-    net::{IpAddr, SocketAddr, TcpListener},
+    net::TcpListener,
     path::PathBuf,
     sync::{Arc, LazyLock},
     thread::{sleep, spawn},
@@ -23,6 +23,23 @@ use time::{Duration as TimeDuration, OffsetDateTime};
 use tracing::{error, info, warn};
 use ureq::Agent;
 use url::Url;
+
+struct SpotifyState {
+    current_context: Option<String>,
+    context_updated: bool,
+    last_grabbed_playback: Instant,
+    last_grabbed_queue: Instant,
+}
+
+static SPOTIFY_STATE: LazyLock<RwLock<SpotifyState>> = LazyLock::new(|| {
+    let one_min_ago = Instant::now().checked_sub(Duration::from_secs(60)).unwrap();
+    RwLock::new(SpotifyState {
+        current_context: None,
+        context_updated: false,
+        last_grabbed_playback: one_min_ago,
+        last_grabbed_queue: one_min_ago,
+    })
+});
 
 // --- RSPOTIFY LOGIC ---
 const VERIFIER_BYTES: usize = 43;
@@ -35,11 +52,6 @@ pub struct SpotifyClient {
     cache_path: PathBuf,
     token: RwLock<Token>,
     http: Agent,
-}
-
-#[derive(Deserialize)]
-struct Artists {
-    artists: Vec<Artist>,
 }
 
 #[derive(Deserialize)]
@@ -111,6 +123,11 @@ impl Token {
             OffsetDateTime::now_utc() + TimeDuration::seconds(10) >= expiration
         })
     }
+
+    fn set_expiration(&mut self) {
+        self.expires_at = OffsetDateTime::now_utc()
+            .checked_add(TimeDuration::seconds(i64::from(self.expires_in)));
+    }
 }
 
 fn read_token_cache(
@@ -139,38 +156,36 @@ fn prompt_for_token(
     }
     match webbrowser::open(url) {
         Ok(()) => println!("Opened {url} in your browser."),
-        Err(why) => eprintln!(
-            "Error when trying to open an URL in your browser: {why:?}. \
-             Please navigate here manually: {url}"
+        Err(err) => eprintln!(
+            "Error when trying to open an URL in your browser: {err:?}. Please navigate here manually: {url}"
         ),
     }
 
-    let listener = TcpListener::bind(SocketAddr::new(
-        REDIRECT_HOST.parse::<IpAddr>().unwrap(),
-        REDIRECT_PORT,
+    let listener = TcpListener::bind((REDIRECT_HOST, REDIRECT_PORT)).unwrap();
+    let mut stream = listener.incoming().flatten().next().unwrap();
+    let mut request_line = String::new();
+    BufReader::new(&stream)
+        .read_line(&mut request_line)
+        .unwrap();
+
+    let code = Url::parse(&format!(
+        "http://{REDIRECT_HOST}:{REDIRECT_PORT}/callback{}",
+        request_line.split_whitespace().nth(1).unwrap()
     ))
+    .unwrap()
+    .query_pairs()
+    .find(|(key, _)| key == "code")
+    .map(|(_, value)| value.into_owned())
     .unwrap();
 
-    let mut stream = listener.incoming().flatten().next().unwrap();
-    let mut reader = BufReader::new(&stream);
-    let mut request_line = String::new();
-    reader.read_line(&mut request_line).unwrap();
-    let request_path = request_line.split_whitespace().nth(1).unwrap();
-    let redirect_full_url =
-        format!("http://{REDIRECT_HOST}:{REDIRECT_PORT}/callback{request_path}");
-    let code = Url::parse(&redirect_full_url)
-        .unwrap()
-        .query_pairs()
-        .find(|(key, _)| key == "code")
-        .map(|(_, value)| value.into_owned())
-        .unwrap();
     let message = "Cantus connected successfully, this tab can be closed.";
-    let response = format!(
+    write!(
+        stream,
         "HTTP/1.1 200 OK\r\ncontent-length: {}\r\n\r\n{}",
         message.len(),
         message
-    );
-    stream.write_all(response.as_bytes()).unwrap();
+    )
+    .unwrap();
 
     let response = http
         .post("https://accounts.spotify.com/api/token")
@@ -189,8 +204,7 @@ fn prompt_for_token(
         .read_to_string()
         .unwrap();
     let mut token = serde_json::from_str::<Token>(&response).unwrap();
-    token.expires_at =
-        OffsetDateTime::now_utc().checked_add(TimeDuration::seconds(i64::from(token.expires_in)));
+    token.set_expiration();
     token
 }
 
@@ -289,8 +303,7 @@ impl SpotifyClient {
             .into_body()
             .read_to_string()?;
         let mut token = serde_json::from_str::<Token>(&response)?;
-        token.expires_at = OffsetDateTime::now_utc()
-            .checked_add(TimeDuration::seconds(i64::from(token.expires_in)));
+        token.set_expiration();
         Ok(token)
     }
 
@@ -364,16 +377,12 @@ fn generate_random_string(length: usize, alphabet: &[u8]) -> String {
 pub enum ClientError {
     #[error("json parse error: {0}")]
     ParseJson(#[from] serde_json::Error),
-
     #[error("url parse error: {0}")]
     ParseUrl(#[from] url::ParseError),
-
     #[error("http error: {0}")]
     Http(String),
-
     #[error("input/output error: {0}")]
     Io(#[from] std::io::Error),
-
     #[error("Token is not valid")]
     InvalidToken,
 }
@@ -398,8 +407,7 @@ fn serialize_scopes<S>(scopes: &HashSet<String>, s: S) -> Result<S::Ok, S::Error
 where
     S: Serializer,
 {
-    let scopes = scopes.clone().into_iter().collect::<Vec<_>>().join(" ");
-    s.serialize_str(&scopes)
+    s.serialize_str(&scopes.iter().cloned().collect::<Vec<_>>().join(" "))
 }
 
 #[derive(Deserialize)]
@@ -411,8 +419,7 @@ fn deserialize_tracks_total<'de, D>(deserializer: D) -> Result<u32, D::Error>
 where
     D: Deserializer<'de>,
 {
-    let tracks_ref = TracksRef::deserialize(deserializer)?;
-    Ok(tracks_ref.total)
+    Ok(TracksRef::deserialize(deserializer)?.total)
 }
 
 fn vec_without_nulls<'de, D, T>(deserializer: D) -> Result<Vec<T>, D::Error>
@@ -437,16 +444,21 @@ const RATING_PLAYLISTS: [&str; 10] = [
 ];
 
 pub static SPOTIFY_CLIENT: LazyLock<SpotifyClient> = LazyLock::new(|| {
-    let mut scopes = HashSet::new();
-    scopes.insert("user-read-playback-state".to_owned());
-    scopes.insert("user-modify-playback-state".to_owned());
-    scopes.insert("user-read-currently-playing".to_owned());
-    scopes.insert("playlist-read-private".to_owned());
-    scopes.insert("playlist-read-collaborative".to_owned());
-    scopes.insert("playlist-modify-private".to_owned());
-    scopes.insert("playlist-modify-public".to_owned());
-    scopes.insert("user-library-read".to_owned());
-    scopes.insert("user-library-modify".to_owned());
+    let scopes = [
+        "user-read-playback-state",
+        "user-modify-playback-state",
+        "user-read-currently-playing",
+        "playlist-read-private",
+        "playlist-read-collaborative",
+        "playlist-modify-private",
+        "playlist-modify-public",
+        "user-library-read",
+        "user-library-modify",
+    ]
+    .iter()
+    .map(std::string::ToString::to_string)
+    .collect();
+
     SpotifyClient::new(
         CONFIG.spotify_client_id.clone().expect(
             "Spotify client ID not set, set it in the config file under key `spotify_client_id`.",
@@ -462,25 +474,18 @@ pub static SPOTIFY_CLIENT: LazyLock<SpotifyClient> = LazyLock::new(|| {
 type PlaylistCache = HashMap<PlaylistId, (ArrayString<32>, HashSet<TrackId>)>;
 
 fn load_cached_playlist_tracks() -> PlaylistCache {
-    let cache_path = dirs::config_dir()
+    let path = dirs::config_dir()
         .unwrap()
         .join("cantus")
         .join("cantus_playlist_tracks.json");
-    let bytes = match fs::read(&cache_path) {
-        Ok(bytes) => bytes,
-        Err(err) => {
-            warn!("Failed to read playlist cache at {cache_path:?}: {err}");
-            return HashMap::new();
-        }
-    };
-
-    match serde_json::from_slice::<PlaylistCache>(&bytes) {
-        Ok(map) => map,
-        Err(err) => {
-            warn!("Failed to parse playlist cache at {cache_path:?}: {err}",);
-            HashMap::new()
-        }
-    }
+    fs::read(&path)
+        .ok()
+        .and_then(|b| {
+            serde_json::from_slice(&b)
+                .map_err(|e| warn!("Failed to parse playlist cache: {e}"))
+                .ok()
+        })
+        .unwrap_or_default()
 }
 
 fn persist_playlist_cache() {
@@ -488,35 +493,15 @@ fn persist_playlist_cache() {
         .read()
         .playlists
         .values()
-        .map(|playlist| {
-            (
-                playlist.id,
-                (
-                    playlist.snapshot_id,
-                    playlist.tracks.iter().copied().collect(),
-                ),
-            )
-        })
+        .map(|p| (p.id, (p.snapshot_id, p.tracks.iter().copied().collect())))
         .collect();
-    if cache_payload.is_empty() {
-        return;
-    }
-
-    let cache_path = dirs::config_dir()
-        .unwrap()
-        .join("cantus")
-        .join("cantus_playlist_tracks.json");
-    match serde_json::to_vec(&cache_payload) {
-        Ok(serialized) => {
-            if let Err(err) = fs::write(cache_path.clone(), serialized) {
-                warn!("Failed to write playlist cache at {cache_path:?}: {err}");
-            }
-        }
-        Err(err) => {
-            warn!(
-                "Failed to serialise playlist cache for {} playlists: {err}",
-                cache_payload.len(),
-            );
+    if !cache_payload.is_empty() {
+        let path = dirs::config_dir()
+            .unwrap()
+            .join("cantus")
+            .join("cantus_playlist_tracks.json");
+        if let Ok(ser) = serde_json::to_vec(&cache_payload) {
+            let _ = fs::write(path, ser);
         }
     }
 }
@@ -524,11 +509,9 @@ fn persist_playlist_cache() {
 pub fn init() {
     let cantus_dir = dirs::config_dir().unwrap().join("cantus");
     if !cantus_dir.exists() {
-        std::fs::create_dir(&cantus_dir).unwrap();
+        fs::create_dir(&cantus_dir).unwrap();
     }
-
     let _ = &*SPOTIFY_CLIENT;
-
     spawn(poll_playlists);
     spawn(|| {
         loop {
@@ -541,13 +524,10 @@ pub fn init() {
 
 fn get_spotify_playback() {
     let now = Instant::now();
+    if now < PLAYBACK_STATE.read().last_interaction
+        || now < SPOTIFY_STATE.read().last_grabbed_playback + Duration::from_secs(1)
     {
-        let state = PLAYBACK_STATE.read();
-        if now < state.last_interaction
-            || now < state.last_grabbed_playback + Duration::from_secs(1)
-        {
-            return;
-        }
+        return;
     }
 
     let current_playback_opt = SPOTIFY_CLIENT
@@ -559,20 +539,20 @@ fn get_spotify_playback() {
                 .map_err(|e| error!("Failed to parse playback: {e}"))
                 .ok()
         });
-    update_playback_state(|state| state.last_grabbed_playback = Instant::now());
     let Some(current_playback) = current_playback_opt else {
         return;
     };
 
+    let now = Instant::now();
+    let mut spotify_state = SPOTIFY_STATE.write();
     update_playback_state(|state| {
         let new_context = current_playback.context.as_ref().map(|c| &c.uri);
-        let now = Instant::now();
         let queue_deadline = now.checked_sub(Duration::from_secs(60)).unwrap();
 
-        if state.current_context.as_ref() != new_context {
-            state.context_updated = true;
-            state.current_context = new_context.map(String::from);
-            state.last_grabbed_queue = queue_deadline;
+        if spotify_state.current_context.as_ref() != new_context {
+            spotify_state.context_updated = true;
+            spotify_state.current_context = new_context.map(String::from);
+            spotify_state.last_grabbed_queue = queue_deadline;
         }
 
         if let Some(track) = current_playback.item {
@@ -581,7 +561,7 @@ fn get_spotify_playback() {
                 .iter()
                 .position(|t| t.name == track.name)
                 .unwrap_or_else(|| {
-                    state.last_grabbed_queue = queue_deadline;
+                    spotify_state.last_grabbed_queue = queue_deadline;
                     0
                 });
         }
@@ -592,21 +572,19 @@ fn get_spotify_playback() {
             state.progress = current_playback.progress_ms;
         }
         state.last_progress_update = now;
-        state.last_grabbed_playback = now;
+        spotify_state.last_grabbed_playback = now;
     });
 }
 
 fn get_spotify_queue() {
     let now = Instant::now();
+    if now < PLAYBACK_STATE.read().last_interaction
+        || now < SPOTIFY_STATE.read().last_grabbed_queue + Duration::from_secs(15)
     {
-        let state = PLAYBACK_STATE.read();
-        if now < state.last_interaction || now < state.last_grabbed_queue + Duration::from_secs(15)
-        {
-            return;
-        }
+        return;
     }
 
-    let queue_opt = SPOTIFY_CLIENT
+    let queue_data = SPOTIFY_CLIENT
         .api_get("me/player/queue")
         .map_err(|e| error!("Failed to fetch queue: {e}"))
         .ok()
@@ -615,36 +593,22 @@ fn get_spotify_queue() {
                 .map_err(|e| error!("Failed to parse queue: {e}"))
                 .ok()
         });
-    update_playback_state(|state| state.last_grabbed_queue = Instant::now());
-
-    let Some(queue) = queue_opt else {
+    let Some(queue) = queue_data.and_then(|q| q.currently_playing.map(|cp| (cp, q.queue))) else {
         return;
     };
 
-    let Some(currently_playing) = queue.currently_playing else {
-        return;
-    };
-    let new_queue: Vec<Track> = std::iter::once(currently_playing)
-        .chain(queue.queue)
-        .collect();
-    let current_title = new_queue.first().unwrap().name.clone();
+    let new_queue: Vec<Track> = std::iter::once(queue.0).chain(queue.1).collect();
+    let current_title = new_queue[0].name.clone();
 
-    let mut missing_urls = HashSet::new();
     let mut missing_artists = HashSet::new();
     for track in &new_queue {
-        if let Some(key) = &track.album.image
-            && !IMAGES_CACHE.contains_key(key)
-        {
-            missing_urls.insert(key.clone());
+        if let Some(key) = &track.album.image {
+            ensure_image_cached(key);
         }
         if !ARTIST_DATA_CACHE.contains_key(&track.artist.id) {
             missing_artists.insert(track.artist.id);
         }
     }
-    for url in missing_urls {
-        ensure_image_cached(url.as_str());
-    }
-
     if !missing_artists.is_empty() {
         let artist_query = missing_artists
             .into_iter()
@@ -656,11 +620,20 @@ fn get_spotify_queue() {
                 .api_get(&format!("artists/?ids={artist_query}"))
                 .map_err(|e| error!("Failed to fetch artists: {e}"))
                 .ok()
-                .and_then(|res| serde_json::from_str::<Artists>(&res).ok())
+                .and_then(|res| {
+                    let result = serde_json::from_str::<HashMap<String, Vec<Artist>>>(&res);
+                    match result {
+                        Ok(mut map) => map.remove("artists"),
+                        Err(err) => {
+                            error!("Deserialization error: {err:?}");
+                            None
+                        }
+                    }
+                })
             else {
                 return;
             };
-            for artist in artists.artists {
+            for artist in artists {
                 ARTIST_DATA_CACHE.insert(artist.id, artist.image.clone());
                 if let Some(image) = artist.image.as_deref() {
                     ensure_image_cached(image);
@@ -669,20 +642,20 @@ fn get_spotify_queue() {
         });
     }
 
+    let mut spotify_state = SPOTIFY_STATE.write();
     update_playback_state(|state| {
-        if !state.context_updated
+        if !spotify_state.context_updated
             && let Some(new_index) = state.queue.iter().position(|t| t.name == current_title)
         {
             state.queue_index = new_index;
             state.queue.truncate(new_index);
             state.queue.extend(new_queue);
         } else {
-            state.context_updated = false;
+            spotify_state.context_updated = false;
             state.queue = new_queue;
             state.queue_index = 0;
         }
-
-        state.last_grabbed_queue = Instant::now();
+        spotify_state.last_grabbed_queue = Instant::now();
     });
 }
 
@@ -694,54 +667,40 @@ fn ensure_image_cached(url: &str) {
 
     let url = url.to_owned();
     spawn(move || {
-        let mut response = match SPOTIFY_CLIENT.http.get(&url).call() {
-            Ok(response) => response,
-            Err(err) => {
-                warn!("Failed to cache image {url}: {err}");
-                return;
-            }
-        };
-        let Ok(dynamic_image) =
-            image::load_from_memory(&response.body_mut().read_to_vec().unwrap())
-        else {
-            warn!("Failed to cache image {url}: failed to read image");
-            return;
-        };
-        let dynamic_image = if dynamic_image.width() != 64 || dynamic_image.height() != 64 {
-            dynamic_image.resize_to_fill(64, 64, image::imageops::FilterType::Lanczos3)
-        } else {
-            dynamic_image
-        };
-        IMAGES_CACHE.insert(url, Some(Arc::new(dynamic_image.to_rgba8())));
-        update_color_palettes();
+        if let Ok(mut resp) = SPOTIFY_CLIENT.http.get(&url).call()
+            && let Ok(img) = image::load_from_memory(&resp.body_mut().read_to_vec().unwrap())
+        {
+            let img = if img.width() != 64 || img.height() != 64 {
+                img.resize_to_fill(64, 64, image::imageops::FilterType::Lanczos3)
+            } else {
+                img
+            };
+            IMAGES_CACHE.insert(url, Some(Arc::new(img.to_rgba8())));
+            update_color_palettes();
+        }
     });
 }
 
 fn poll_playlists() {
-    let target_playlists = CONFIG
+    let targets = CONFIG
         .playlists
         .iter()
         .map(String::as_str)
         .collect::<HashSet<_>>();
-    let include_ratings = CONFIG.ratings_enabled;
-    let cached_playlist_tracks = load_cached_playlist_tracks();
+    let mut cached = load_cached_playlist_tracks();
 
     loop {
         let playlists = SPOTIFY_CLIENT
             .api_get_payload("me/playlists", &[("limit", "50")])
-            .map_err(|err| error!("Failed to fetch users playlists: {err}"))
-            .and_then(|res| {
-                serde_json::from_str::<Page<Playlist>>(&res)
-                    .map_err(|err| error!("Failed to parse users playlists: {err}"))
-            })
-            .map(|page| page.items)
+            .ok()
+            .and_then(|res| serde_json::from_str::<Page<Playlist>>(&res).ok())
+            .map(|p| p.items)
             .unwrap_or_default();
 
-        let mut to_fetch_fresh = Vec::new();
         for playlist in playlists {
-            if !(target_playlists.contains(playlist.name.as_str())
-                || (include_ratings && RATING_PLAYLISTS.contains(&playlist.name.as_str())))
-            {
+            let is_rating =
+                CONFIG.ratings_enabled && RATING_PLAYLISTS.contains(&playlist.name.as_str());
+            if !targets.contains(playlist.name.as_str()) && !is_rating {
                 continue;
             }
             if let Some(image) = &playlist.image {
@@ -751,32 +710,32 @@ fn poll_playlists() {
             let rating_index = if CONFIG.ratings_enabled {
                 RATING_PLAYLISTS
                     .iter()
-                    .enumerate()
-                    .find(|(_, p)| *p == &playlist.name)
-                    .map(|(i, _)| i as u8)
+                    .position(|&p| p == playlist.name)
+                    .map(|i| i as u8)
             } else {
                 None
             };
 
-            if let Some(cached) = cached_playlist_tracks.get(&playlist.id)
-                && playlist.snapshot_id == cached.0
+            // Take from cache if exists
+            if let Some((snapshot_id, tracks)) = cached.remove(&playlist.id)
+                && snapshot_id == playlist.snapshot_id
             {
-                update_playback_state(|state| {
-                    state.playlists.insert(
-                        playlist.id,
-                        CondensedPlaylist {
-                            id: playlist.id,
-                            name: playlist.name,
-                            image_url: playlist.image,
-                            tracks: cached.1.clone(),
-                            tracks_total: playlist.total_tracks,
-                            snapshot_id: cached.0,
-                            rating_index,
-                        },
-                    );
-                });
+                PLAYBACK_STATE.write().playlists.insert(
+                    playlist.id,
+                    CondensedPlaylist {
+                        id: playlist.id,
+                        name: playlist.name.clone(),
+                        image_url: playlist.image.clone(),
+                        tracks,
+                        tracks_total: playlist.total_tracks,
+                        snapshot_id,
+                        rating_index,
+                    },
+                );
                 continue;
             }
+
+            // State mismatched, fetch new
             if Some(&playlist.snapshot_id)
                 != PLAYBACK_STATE
                     .read()
@@ -784,74 +743,63 @@ fn poll_playlists() {
                     .get(&playlist.id)
                     .map(|p| &p.snapshot_id)
             {
-                // Queue to fetch again
-                to_fetch_fresh.push((playlist, rating_index));
-            }
-        }
+                // Fetch the fresh playlists as needed
+                let chunk_size = 50;
+                let num_pages = playlist.total_tracks.div_ceil(chunk_size);
+                info!("Fetching {num_pages} pages from playlist {}", playlist.name);
+                let mut total = 0;
+                let mut playlist_track_ids = HashSet::new();
+                for page in 0..num_pages {
+                    let page_data = SPOTIFY_CLIENT
+                        .api_get_payload(
+                            &format!("playlists/{}/tracks", playlist.id),
+                            &[
+                                (
+                                    "fields",
+                                    "href,limit,offset,total,items(is_local,track(id))",
+                                ),
+                                ("limit", &chunk_size.to_string()),
+                                ("offset", &(page * chunk_size).to_string()),
+                            ],
+                        )
+                        .ok()
+                        .and_then(|res| {
+                            serde_json::from_str::<Page<PlaylistItem>>(&res)
+                                .map_err(|e| error!("Failed to parse playlist page: {e}"))
+                                .ok()
+                        });
 
-        // Fetch the fresh playlists as needed
-        for (playlist, rating_index) in to_fetch_fresh {
-            let chunk_size = 50;
-            let num_pages = playlist.total_tracks.div_ceil(chunk_size) as usize;
-            info!("Fetching {num_pages} pages from playlist {}", playlist.name);
-            let mut pages = Vec::new();
-            for page in 0..num_pages {
-                let page_data = SPOTIFY_CLIENT
-                    .api_get_payload(
-                        &format!("playlists/{}/tracks", playlist.id),
-                        &[
-                            (
-                                "fields",
-                                "href,limit,offset,total,items(is_local,track(id))",
-                            ),
-                            ("limit", &chunk_size.to_string()),
-                            ("offset", &((page as u32) * chunk_size).to_string()),
-                        ],
-                    )
-                    .map_err(|e| error!("Failed to fetch playlist page: {e}"))
-                    .ok()
-                    .and_then(|res| {
-                        serde_json::from_str::<Page<PlaylistItem>>(&res)
-                            .map_err(|e| error!("Failed to parse playlist page: {e}"))
-                            .ok()
-                    });
-
-                if let Some(p) = page_data {
-                    pages.push(p);
-                } else {
-                    return;
+                    if let Some(page) = page_data {
+                        total = page.total;
+                        playlist_track_ids.extend(page.items.iter().map(|item| item.track.id));
+                    } else {
+                        return;
+                    }
                 }
+
+                update_playback_state(|state| {
+                    state
+                        .playlists
+                        .entry(playlist.id)
+                        .and_modify(|state_playlist| {
+                            state_playlist.tracks.clone_from(&playlist_track_ids);
+                            state_playlist.tracks_total = total;
+                            state_playlist.snapshot_id = playlist.snapshot_id;
+                        })
+                        .or_insert_with(|| CondensedPlaylist {
+                            id: playlist.id,
+                            name: playlist.name,
+                            image_url: playlist.image,
+                            tracks: playlist_track_ids,
+                            tracks_total: total,
+                            snapshot_id: playlist.snapshot_id,
+                            rating_index,
+                        });
+                });
+                persist_playlist_cache();
             }
-
-            let new_total = pages.first().map_or(0, |p| p.total);
-            let playlist_track_ids: HashSet<TrackId> = pages
-                .into_iter()
-                .flat_map(|page| page.items)
-                .map(|item| item.track.id)
-                .collect();
-
-            update_playback_state(|state| {
-                state
-                    .playlists
-                    .entry(playlist.id)
-                    .and_modify(|state_playlist| {
-                        state_playlist.tracks.clone_from(&playlist_track_ids);
-                        state_playlist.tracks_total = new_total;
-                        state_playlist.snapshot_id = playlist.snapshot_id;
-                    })
-                    .or_insert_with(|| CondensedPlaylist {
-                        id: playlist.id,
-                        name: playlist.name,
-                        image_url: playlist.image,
-                        tracks: playlist_track_ids,
-                        tracks_total: new_total,
-                        snapshot_id: playlist.snapshot_id,
-                        rating_index,
-                    });
-            });
-            persist_playlist_cache();
         }
 
-        sleep(Duration::from_secs(12));
+        sleep(Duration::from_secs(20));
     }
 }

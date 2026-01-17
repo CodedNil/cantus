@@ -299,7 +299,7 @@ impl CantusApp {
 
         let num_icons = icon_entries.len();
         let needed_width = icon_size * num_icons as f32;
-        if num_icons == 0 || width < needed_width {
+        if num_icons == 0 {
             return;
         }
 
