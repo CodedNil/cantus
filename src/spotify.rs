@@ -42,7 +42,7 @@ pub type AlbumId = ArrayString<22>;
 pub struct Album {
     pub id: AlbumId,
     #[serde(default, deserialize_with = "deserialize_images", rename = "images")]
-    pub image: String,
+    pub image: Option<String>,
 }
 
 pub type ArtistId = ArrayString<22>;
@@ -52,7 +52,7 @@ pub struct Artist {
     pub id: ArtistId,
     pub name: String,
     #[serde(default, deserialize_with = "deserialize_images", rename = "images")]
-    pub image: String,
+    pub image: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -84,7 +84,7 @@ pub struct Playlist {
     pub id: PlaylistId,
     pub name: String,
     #[serde(default, deserialize_with = "deserialize_images", rename = "images")]
-    pub image: String,
+    pub image: Option<String>,
     pub snapshot_id: ArrayString<32>,
     #[serde(deserialize_with = "deserialize_tracks_total", rename = "tracks")]
     pub total_tracks: u32,
@@ -452,7 +452,7 @@ struct Image {
     url: String,
     width: Option<u32>,
 }
-fn deserialize_images<'de, D>(deserializer: D) -> Result<String, D::Error>
+fn deserialize_images<'de, D>(deserializer: D) -> Result<Option<String>, D::Error>
 where
     D: Deserializer<'de>,
 {
@@ -460,8 +460,7 @@ where
     Ok(images
         .into_iter()
         .min_by_key(|img| img.width)
-        .map(|img| img.url)
-        .unwrap())
+        .map(|img| img.url))
 }
 
 fn deserialize_first_artist<'de, D>(deserializer: D) -> Result<Artist, D::Error>
@@ -566,7 +565,7 @@ const NUM_SWATCHES: usize = 4;
 pub struct CondensedPlaylist {
     pub id: PlaylistId,
     pub name: String,
-    pub image_url: String,
+    pub image_url: Option<String>,
     pub tracks: HashSet<TrackId>,
     pub tracks_total: u32,
     snapshot_id: ArrayString<32>,
@@ -754,8 +753,10 @@ fn get_spotify_queue() {
     let mut missing_urls = HashSet::new();
     let mut missing_artists = HashSet::new();
     for track in &new_queue {
-        if !IMAGES_CACHE.contains_key(&track.album.image) {
-            missing_urls.insert(track.album.image.clone());
+        if let Some(key) = &track.album.image
+            && !IMAGES_CACHE.contains_key(key)
+        {
+            missing_urls.insert(key.clone());
         }
         if !ARTIST_DATA_CACHE.contains_key(&track.artist.id) {
             missing_artists.insert(track.artist.id);
@@ -781,8 +782,10 @@ fn get_spotify_queue() {
                 return;
             };
             for artist in artists.artists {
-                ARTIST_DATA_CACHE.insert(artist.id, Some(artist.image.clone()));
-                ensure_image_cached(artist.image.as_str());
+                ARTIST_DATA_CACHE.insert(artist.id, artist.image.clone());
+                if let Some(image) = artist.image.as_deref() {
+                    ensure_image_cached(image);
+                }
             }
         });
     }
@@ -862,7 +865,9 @@ fn poll_playlists() {
             {
                 continue;
             }
-            ensure_image_cached(&playlist.image);
+            if let Some(image) = &playlist.image {
+                ensure_image_cached(image);
+            }
 
             let rating_index = if CONFIG.ratings_enabled {
                 RATING_PLAYLISTS
@@ -1024,7 +1029,11 @@ fn update_color_palettes() {
             continue;
         }
 
-        let Some(image_ref) = IMAGES_CACHE.get(&track.album.image) else {
+        let Some(image_path) = &track.album.image else {
+            continue;
+        };
+
+        let Some(image_ref) = IMAGES_CACHE.get(image_path) else {
             continue;
         };
         let Some(album_image) = image_ref.as_ref() else {

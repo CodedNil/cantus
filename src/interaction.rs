@@ -405,10 +405,14 @@ impl CantusApp {
                     }),
                 image_index: match entry {
                     IconEntry::Playlist {
-                        playlist,
+                        playlist:
+                            CondensedPlaylist {
+                                image_url: Some(url),
+                                ..
+                            },
                         contained: _contained,
-                    } => self.get_image_index(&playlist.image_url),
-                    IconEntry::Star { .. } => 0,
+                    } => self.get_image_index(url),
+                    _ => 0,
                 },
             };
             self.icon_pills.push(instance);
