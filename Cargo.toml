@@ -3,11 +3,14 @@ name = "cantus"
 version = "0.6.1"
 edition = "2024"
 
+[features]
+default = ["spotify"]
+spotify = ["webbrowser"]
+
 [dependencies]
 tracing = "0.1.44"
 tracing-subscriber = { version = "0.3.22", features = ["env-filter"] }
 
-ureq = { version = "3.1.4", default-features = false, features = ["rustls"] }
 pollster = "0.4.0"
 raw-window-handle = "0.6.2"
 
@@ -39,7 +42,6 @@ serde = { version = "1.0.228", features = ["derive"] }
 serde_json = "1.0.149"
 toml = "0.9.11+spec-1.1.0"
 
-mimalloc = { version = "0.1.48", default-features = false }
 fastrand = "2.3.0"
 parking_lot = "0.12.5"
 dashmap = "6.1.0"
@@ -50,8 +52,11 @@ thiserror = "2.0.17"
 base64 = "0.22.1"
 url = "2.5.8"
 sha2 = "0.10.9"
-webbrowser = "1.0.6"
 bytemuck = { version = "1.24.0", features = ["derive"] }
+
+# Spotify
+ureq = { version = "3.1.4", default-features = false, features = ["rustls"] }
+webbrowser = { version = "1.0.6", optional = true }
 
 [lints.clippy]
 pedantic = { level = "warn", priority = -1 }
@@ -64,6 +69,7 @@ cast-sign-loss = "allow"
 cast-possible-wrap = "allow"
 suboptimal_flops = "allow"
 missing-panics-doc = "allow"
+unreadable_literal = "allow"
 
 separated_literal_suffix = "warn"
 renamed_function_params = "warn"

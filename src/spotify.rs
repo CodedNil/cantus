@@ -1,9 +1,10 @@
-use crate::config::CONFIG;
+use crate::{
+    ARTIST_DATA_CACHE, Artist, CondensedPlaylist, IMAGES_CACHE, PLAYBACK_STATE, PlaylistId, Track,
+    TrackId, config::CONFIG, deserialize_images, render::update_color_palettes,
+    update_playback_state,
+};
 use arrayvec::ArrayString;
 use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
-use dashmap::DashMap;
-use image::RgbaImage;
-use palette::IntoColor;
 use parking_lot::RwLock;
 use serde::{Deserialize, Deserializer, Serialize, Serializer, de::DeserializeOwned};
 use sha2::{Digest, Sha256};
@@ -36,89 +37,56 @@ pub struct SpotifyClient {
     http: Agent,
 }
 
-pub type AlbumId = ArrayString<22>;
+#[derive(Deserialize)]
+struct Artists {
+    artists: Vec<Artist>,
+}
 
 #[derive(Deserialize)]
-pub struct Album {
-    pub id: AlbumId,
+struct PartialTrack {
+    id: TrackId,
+}
+
+#[derive(Deserialize)]
+struct Playlist {
+    id: PlaylistId,
+    name: String,
     #[serde(default, deserialize_with = "deserialize_images", rename = "images")]
-    pub image: Option<String>,
-}
-
-pub type ArtistId = ArrayString<22>;
-
-#[derive(Deserialize)]
-pub struct Artist {
-    pub id: ArtistId,
-    pub name: String,
-    #[serde(default, deserialize_with = "deserialize_images", rename = "images")]
-    pub image: Option<String>,
-}
-
-#[derive(Deserialize)]
-pub struct Artists {
-    pub artists: Vec<Artist>,
-}
-
-pub type TrackId = ArrayString<22>;
-
-#[derive(Deserialize)]
-pub struct Track {
-    pub id: TrackId,
-    pub name: String,
-    pub album: Album,
-    #[serde(deserialize_with = "deserialize_first_artist", rename = "artists")]
-    pub artist: Artist,
-    pub duration_ms: u32,
-}
-
-#[derive(Deserialize)]
-pub struct PartialTrack {
-    pub id: TrackId,
-}
-
-pub type PlaylistId = ArrayString<22>;
-
-#[derive(Deserialize)]
-pub struct Playlist {
-    pub id: PlaylistId,
-    pub name: String,
-    #[serde(default, deserialize_with = "deserialize_images", rename = "images")]
-    pub image: Option<String>,
-    pub snapshot_id: ArrayString<32>,
+    image: Option<String>,
+    snapshot_id: ArrayString<32>,
     #[serde(deserialize_with = "deserialize_tracks_total", rename = "tracks")]
-    pub total_tracks: u32,
+    total_tracks: u32,
 }
 
 #[derive(Deserialize)]
-pub struct PlaylistItem {
-    pub track: PartialTrack,
+struct PlaylistItem {
+    track: PartialTrack,
 }
 
 #[derive(Deserialize)]
-pub struct Context {
-    pub uri: String,
+struct Context {
+    uri: String,
 }
 
 #[derive(Deserialize)]
-pub struct CurrentPlaybackContext {
-    pub device: Device,
-    pub context: Option<Context>,
+struct CurrentPlaybackContext {
+    device: Device,
+    context: Option<Context>,
     #[serde(default)]
-    pub progress_ms: u32,
-    pub is_playing: bool,
-    pub item: Option<Track>,
+    progress_ms: u32,
+    is_playing: bool,
+    item: Option<Track>,
 }
 
 #[derive(Deserialize)]
-pub struct CurrentUserQueue {
-    pub currently_playing: Option<Track>,
-    pub queue: Vec<Track>,
+struct CurrentUserQueue {
+    currently_playing: Option<Track>,
+    queue: Vec<Track>,
 }
 
 #[derive(Deserialize)]
-pub struct Device {
-    pub volume_percent: Option<u32>,
+struct Device {
+    volume_percent: Option<u32>,
 }
 
 #[derive(Debug, Serialize, Deserialize, PartialEq, Eq)]
@@ -338,7 +306,7 @@ impl SpotifyClient {
             client_id,
             cache_path,
             token: RwLock::new(token),
-            http: Agent::new_with_defaults(),
+            http: agent,
         };
         spotify_client.write_token_cache();
         spotify_client
@@ -416,7 +384,7 @@ impl From<ureq::Error> for ClientError {
     }
 }
 
-pub type ClientResult<T> = Result<T, ClientError>;
+type ClientResult<T> = Result<T, ClientError>;
 
 fn deserialize_scopes<'de, D>(d: D) -> Result<HashSet<String>, D::Error>
 where
@@ -447,30 +415,6 @@ where
     Ok(tracks_ref.total)
 }
 
-#[derive(Deserialize)]
-struct Image {
-    url: String,
-    width: Option<u32>,
-}
-fn deserialize_images<'de, D>(deserializer: D) -> Result<Option<String>, D::Error>
-where
-    D: Deserializer<'de>,
-{
-    let images: Vec<Image> = Vec::deserialize(deserializer)?;
-    Ok(images
-        .into_iter()
-        .min_by_key(|img| img.width)
-        .map(|img| img.url))
-}
-
-fn deserialize_first_artist<'de, D>(deserializer: D) -> Result<Artist, D::Error>
-where
-    D: Deserializer<'de>,
-{
-    let artists: Vec<Artist> = Vec::deserialize(deserializer)?;
-    Ok(artists.into_iter().next().unwrap())
-}
-
 fn vec_without_nulls<'de, D, T>(deserializer: D) -> Result<Vec<T>, D::Error>
 where
     T: serde::Deserialize<'de>,
@@ -481,39 +425,13 @@ where
 }
 
 #[derive(Deserialize)]
-pub struct Page<T: DeserializeOwned> {
+struct Page<T: DeserializeOwned> {
     #[serde(deserialize_with = "vec_without_nulls")]
-    pub items: Vec<T>,
-    pub total: u32,
+    items: Vec<T>,
+    total: u32,
 }
 
 // --- SPOTIFY LOGIC ---
-pub static PLAYBACK_STATE: LazyLock<RwLock<PlaybackState>> = LazyLock::new(|| {
-    RwLock::new(PlaybackState {
-        playing: false,
-        progress: 0,
-        volume: None,
-        queue: Vec::new(),
-        queue_index: 0,
-        playlists: HashMap::new(),
-
-        current_context: None,
-        context_updated: false,
-
-        interaction: false,
-        last_interaction: Instant::now(),
-        last_progress_update: Instant::now(),
-        last_grabbed_playback: Instant::now().checked_sub(Duration::from_secs(60)).unwrap(),
-        last_grabbed_queue: Instant::now().checked_sub(Duration::from_secs(60)).unwrap(),
-    })
-});
-pub static IMAGES_CACHE: LazyLock<DashMap<String, Option<Arc<RgbaImage>>>> =
-    LazyLock::new(DashMap::new);
-pub static ALBUM_PALETTE_CACHE: LazyLock<DashMap<AlbumId, Option<[u32; NUM_SWATCHES]>>> =
-    LazyLock::new(DashMap::new);
-pub static ARTIST_DATA_CACHE: LazyLock<DashMap<ArtistId, Option<String>>> =
-    LazyLock::new(DashMap::new);
-
 const RATING_PLAYLISTS: [&str; 10] = [
     "0.5", "1.0", "1.5", "2.0", "2.5", "3.0", "3.5", "4.0", "4.5", "5.0",
 ];
@@ -540,45 +458,6 @@ pub static SPOTIFY_CLIENT: LazyLock<SpotifyClient> = LazyLock::new(|| {
             .join("spotify_cache.json"),
     )
 });
-
-pub struct PlaybackState {
-    pub playing: bool,
-    pub progress: u32,
-    pub volume: Option<u8>,
-    pub queue: Vec<Track>,
-    pub queue_index: usize,
-    pub playlists: HashMap<PlaylistId, CondensedPlaylist>,
-
-    current_context: Option<String>,
-    context_updated: bool,
-
-    pub interaction: bool,
-    pub last_interaction: Instant,
-    pub last_progress_update: Instant,
-    last_grabbed_playback: Instant,
-    last_grabbed_queue: Instant,
-}
-
-/// Number of swatches to use in colour palette generation.
-const NUM_SWATCHES: usize = 4;
-
-pub struct CondensedPlaylist {
-    pub id: PlaylistId,
-    pub name: String,
-    pub image_url: Option<String>,
-    pub tracks: HashSet<TrackId>,
-    pub tracks_total: u32,
-    snapshot_id: ArrayString<32>,
-    pub rating_index: Option<u8>,
-}
-
-pub fn update_playback_state<F>(update: F)
-where
-    F: FnOnce(&mut PlaybackState),
-{
-    let mut state = PLAYBACK_STATE.write();
-    update(&mut state);
-}
 
 type PlaylistCache = HashMap<PlaylistId, (ArrayString<32>, HashSet<TrackId>)>;
 
@@ -974,101 +853,5 @@ fn poll_playlists() {
         }
 
         sleep(Duration::from_secs(12));
-    }
-}
-
-fn extract_lab_pixels(img: &RgbaImage) -> (Vec<palette::Lab>, bool) {
-    let saturation_threshold = 30u8;
-    let srgb_to_lab = |p: &image::Rgba<u8>| {
-        palette::FromColor::from_color(palette::Srgb::new(
-            f32::from(p[0]) / 255.0,
-            f32::from(p[1]) / 255.0,
-            f32::from(p[2]) / 255.0,
-        ))
-    };
-
-    let colourful: Vec<palette::Lab> = img
-        .pixels()
-        .filter(|p| {
-            let max = p[0].max(p[1]).max(p[2]);
-            let min = p[0].min(p[1]).min(p[2]);
-            (max - min) > saturation_threshold
-        })
-        .map(srgb_to_lab)
-        .collect();
-
-    if colourful.is_empty() {
-        (img.pixels().map(srgb_to_lab).collect(), false)
-    } else {
-        (colourful, true)
-    }
-}
-
-fn do_kmeans(pixels: &[palette::Lab]) -> Vec<palette::Lab> {
-    kmeans_colors::get_kmeans_hamerly(NUM_SWATCHES, 20, 5.0, false, pixels, 0).centroids
-}
-
-fn convert_to_swatches(centroids: &[palette::Lab]) -> Vec<[u8; 3]> {
-    centroids
-        .iter()
-        .map(|c: &palette::Lab| {
-            let rgb: palette::Srgb = (*c).into_color();
-            [
-                (rgb.red * 255.0) as u8,
-                (rgb.green * 255.0) as u8,
-                (rgb.blue * 255.0) as u8,
-            ]
-        })
-        .collect()
-}
-
-/// Gathers the 4 primary colours for each album image.
-fn update_color_palettes() {
-    for track in &PLAYBACK_STATE.read().queue {
-        if ALBUM_PALETTE_CACHE.contains_key(&track.album.id) {
-            continue;
-        }
-
-        let Some(image_path) = &track.album.image else {
-            continue;
-        };
-
-        let Some(image_ref) = IMAGES_CACHE.get(image_path) else {
-            continue;
-        };
-        let Some(album_image) = image_ref.as_ref() else {
-            continue;
-        };
-        ALBUM_PALETTE_CACHE.insert(track.album.id, None);
-
-        let (album_pixels, album_is_colourful) = extract_lab_pixels(album_image);
-        let mut result = do_kmeans(&album_pixels);
-
-        if !album_is_colourful {
-            let artist_img = ARTIST_DATA_CACHE
-                .get(&track.artist.id)
-                .and_then(|e| e.value().clone())
-                .and_then(|url| IMAGES_CACHE.get(&url))
-                .and_then(|img| img.as_ref().cloned());
-
-            if let Some(img) = artist_img {
-                let (artist_pixels, artist_is_colourful) = extract_lab_pixels(&img);
-                if artist_is_colourful {
-                    result = do_kmeans(&artist_pixels);
-                }
-            } else {
-                ALBUM_PALETTE_CACHE.remove(&track.album.id);
-                continue;
-            }
-        }
-
-        let primary_colors: [u32; 4] = convert_to_swatches(&result)
-            .iter()
-            .take(4)
-            .map(|c| u32::from_le_bytes([c[0], c[1], c[2], 255]))
-            .collect::<Vec<_>>()
-            .try_into()
-            .expect("Result should have exactly 4 colors");
-        ALBUM_PALETTE_CACHE.insert(track.album.id, Some(primary_colors));
     }
 }

@@ -55,9 +55,12 @@ impl TextRenderer {
 
         let song_name = track
             .name
-            .split(['(', '-'])
+            .split(" -")
             .next()
             .unwrap_or(&track.name)
+            .split('(')
+            .next()
+            .unwrap_or("")
             .trim();
 
         let top_y = PANEL_START + (CONFIG.height * 0.26).floor();

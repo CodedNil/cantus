@@ -1,9 +1,10 @@
 use crate::{
-    CantusApp, PANEL_EXTENSION, PANEL_START,
-    config::CONFIG,
-    spotify::{ALBUM_PALETTE_CACHE, CondensedPlaylist, PLAYBACK_STATE, PlaylistId, Track},
+    ALBUM_PALETTE_CACHE, ARTIST_DATA_CACHE, CantusApp, CondensedPlaylist, IMAGES_CACHE,
+    NUM_SWATCHES, PANEL_EXTENSION, PANEL_START, PLAYBACK_STATE, PlaylistId, Track, config::CONFIG,
 };
 use bytemuck::{Pod, Zeroable};
+use image::RgbaImage;
+use palette::IntoColor;
 use std::{collections::HashMap, ops::Range, time::Instant};
 
 #[derive(Copy, Clone, Debug, Default, PartialEq)]
@@ -509,4 +510,96 @@ fn move_towards(current: &mut f32, target: f32, speed: f32) {
 
 pub fn lerpf32(t: f32, v0: f32, v1: f32) -> f32 {
     v0 + t * (v1 - v0)
+}
+
+fn extract_lab_pixels(img: &RgbaImage) -> (Vec<palette::Lab>, bool) {
+    let saturation_threshold = 30u8;
+    let srgb_to_lab = |p: &image::Rgba<u8>| {
+        palette::FromColor::from_color(palette::Srgb::new(
+            f32::from(p[0]) / 255.0,
+            f32::from(p[1]) / 255.0,
+            f32::from(p[2]) / 255.0,
+        ))
+    };
+
+    let colourful: Vec<palette::Lab> = img
+        .pixels()
+        .filter(|p| {
+            let max = p[0].max(p[1]).max(p[2]);
+            let min = p[0].min(p[1]).min(p[2]);
+            (max - min) > saturation_threshold
+        })
+        .map(srgb_to_lab)
+        .collect();
+
+    if colourful.is_empty() {
+        (img.pixels().map(srgb_to_lab).collect(), false)
+    } else {
+        (colourful, true)
+    }
+}
+
+fn do_kmeans(pixels: &[palette::Lab]) -> Vec<palette::Lab> {
+    kmeans_colors::get_kmeans_hamerly(NUM_SWATCHES, 20, 5.0, false, pixels, 0).centroids
+}
+
+fn convert_to_swatches(centroids: &[palette::Lab]) -> Vec<[u8; 3]> {
+    centroids
+        .iter()
+        .map(|c: &palette::Lab| {
+            let rgb: palette::Srgb = (*c).into_color();
+            [
+                (rgb.red * 255.0) as u8,
+                (rgb.green * 255.0) as u8,
+                (rgb.blue * 255.0) as u8,
+            ]
+        })
+        .collect()
+}
+
+/// Gathers the 4 primary colours for each album image.
+pub fn update_color_palettes() {
+    for track in &PLAYBACK_STATE.read().queue {
+        if ALBUM_PALETTE_CACHE.contains_key(&track.album.id) {
+            continue;
+        }
+
+        let Some(image_ref) = track.album.image.as_ref().and_then(|p| IMAGES_CACHE.get(p)) else {
+            continue;
+        };
+        let Some(album_image) = image_ref.as_ref() else {
+            continue;
+        };
+        ALBUM_PALETTE_CACHE.insert(track.album.id, None);
+
+        let (album_pixels, album_is_colourful) = extract_lab_pixels(album_image);
+        let mut result = do_kmeans(&album_pixels);
+
+        if !album_is_colourful {
+            let artist_img = ARTIST_DATA_CACHE
+                .get(&track.artist.id)
+                .and_then(|e| e.value().clone())
+                .and_then(|url| IMAGES_CACHE.get(&url))
+                .and_then(|img| img.as_ref().cloned());
+
+            if let Some(img) = artist_img {
+                let (artist_pixels, artist_is_colourful) = extract_lab_pixels(&img);
+                if artist_is_colourful {
+                    result = do_kmeans(&artist_pixels);
+                }
+            } else {
+                ALBUM_PALETTE_CACHE.remove(&track.album.id);
+                continue;
+            }
+        }
+
+        let primary_colors: [u32; 4] = convert_to_swatches(&result)
+            .iter()
+            .take(4)
+            .map(|c| u32::from_le_bytes([c[0], c[1], c[2], 255]))
+            .collect::<Vec<_>>()
+            .try_into()
+            .expect("Result should have exactly 4 colors");
+        ALBUM_PALETTE_CACHE.insert(track.album.id, Some(primary_colors));
+    }
 }

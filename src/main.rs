@@ -3,10 +3,18 @@ use crate::pipelines::{IMAGE_SIZE, MAX_TEXTURE_LAYERS};
 use crate::render::{
     BackgroundPill, GlobalUniforms, IconInstance, Particle, PlayheadUniforms, RenderState,
 };
-use crate::spotify::IMAGES_CACHE;
 use crate::text_render::TextRenderer;
-use std::collections::HashMap;
-use std::time::Instant;
+use arrayvec::ArrayString;
+use dashmap::DashMap;
+use image::RgbaImage;
+use parking_lot::RwLock;
+use serde::{Deserialize, Deserializer};
+use std::collections::HashSet;
+use std::{
+    collections::HashMap,
+    sync::{Arc, LazyLock},
+    time::Instant,
+};
 use wgpu::{
     BindGroup, Buffer, Color, CommandEncoderDescriptor, Device, Instance, LoadOp, Operations,
     Queue, RenderPassColorAttachment, RenderPassDescriptor, RenderPipeline, StoreOp, Surface,
@@ -18,14 +26,171 @@ mod interaction;
 mod layer_shell;
 mod pipelines;
 mod render;
-mod spotify;
 mod text_render;
 
-#[global_allocator]
-static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
+#[cfg(feature = "spotify")]
+mod spotify;
+
+#[cfg(not(feature = "spotify"))]
+mod spotify_debug;
 
 const PANEL_START: f32 = 6.0;
 const PANEL_EXTENSION: f32 = 12.0;
+
+struct PlaybackState {
+    playing: bool,
+    progress: u32,
+    volume: Option<u8>,
+    queue: Vec<Track>,
+    queue_index: usize,
+    playlists: HashMap<PlaylistId, CondensedPlaylist>,
+
+    interaction: bool,
+    last_interaction: Instant,
+    last_progress_update: Instant,
+
+    #[cfg(feature = "spotify")]
+    current_context: Option<String>,
+    #[cfg(feature = "spotify")]
+    context_updated: bool,
+    #[cfg(feature = "spotify")]
+    last_grabbed_playback: Instant,
+    #[cfg(feature = "spotify")]
+    last_grabbed_queue: Instant,
+}
+
+/// Number of swatches to use in colour palette generation.
+const NUM_SWATCHES: usize = 4;
+
+type AlbumId = ArrayString<22>;
+type ArtistId = ArrayString<22>;
+type TrackId = ArrayString<22>;
+type PlaylistId = ArrayString<22>;
+
+#[derive(Deserialize)]
+struct Album {
+    id: AlbumId,
+    #[serde(default, deserialize_with = "deserialize_images", rename = "images")]
+    image: Option<String>,
+}
+
+#[derive(Deserialize)]
+struct Artist {
+    id: ArtistId,
+    name: String,
+    #[serde(default, deserialize_with = "deserialize_images", rename = "images")]
+    image: Option<String>,
+}
+
+#[derive(Deserialize)]
+struct Track {
+    id: TrackId,
+    name: String,
+    album: Album,
+    #[serde(deserialize_with = "deserialize_first_artist", rename = "artists")]
+    artist: Artist,
+    duration_ms: u32,
+}
+
+struct CondensedPlaylist {
+    id: PlaylistId,
+    name: String,
+    image_url: Option<String>,
+    tracks: HashSet<TrackId>,
+    rating_index: Option<u8>,
+    tracks_total: u32,
+    #[cfg(feature = "spotify")]
+    snapshot_id: ArrayString<32>,
+}
+
+#[derive(Deserialize)]
+struct Image {
+    url: String,
+    width: Option<u32>,
+}
+
+static PLAYBACK_STATE: LazyLock<RwLock<PlaybackState>> = LazyLock::new(|| {
+    #[cfg(feature = "spotify")]
+    {
+        use std::time::Duration;
+        RwLock::new(PlaybackState {
+            playing: false,
+            progress: 0,
+            volume: None,
+            queue: Vec::new(),
+            queue_index: 0,
+            playlists: HashMap::new(),
+
+            interaction: false,
+            last_interaction: Instant::now(),
+            last_progress_update: Instant::now(),
+
+            current_context: None,
+            context_updated: false,
+            last_grabbed_playback: Instant::now().checked_sub(Duration::from_secs(60)).unwrap(),
+            last_grabbed_queue: Instant::now().checked_sub(Duration::from_secs(60)).unwrap(),
+        })
+    }
+    #[cfg(not(feature = "spotify"))]
+    RwLock::new(spotify_debug::debug_playbackstate())
+});
+
+fn update_playback_state<F>(update: F)
+where
+    F: FnOnce(&mut PlaybackState),
+{
+    let mut state = PLAYBACK_STATE.write();
+    update(&mut state);
+}
+
+static IMAGES_CACHE: LazyLock<DashMap<String, Option<Arc<RgbaImage>>>> =
+    LazyLock::new(DashMap::new);
+static ALBUM_PALETTE_CACHE: LazyLock<DashMap<AlbumId, Option<[u32; NUM_SWATCHES]>>> =
+    LazyLock::new(DashMap::new);
+static ARTIST_DATA_CACHE: LazyLock<DashMap<ArtistId, Option<String>>> = LazyLock::new(DashMap::new);
+
+struct CantusApp {
+    // Core Graphics
+    instance: Instance,
+    gpu_resources: Option<GpuResources>,
+
+    // Application State
+    start_time: Instant,
+    render_state: RenderState,
+    interaction: InteractionState,
+    particles: [Particle; 64],
+    particles_accumulator: f32,
+    scale_factor: f32,
+
+    // Scene & Resources
+    text_renderer: Option<TextRenderer>,
+    global_uniforms: GlobalUniforms,
+    background_pills: Vec<BackgroundPill>,
+    icon_pills: Vec<IconInstance>,
+    playhead_info: PlayheadUniforms,
+}
+
+impl Default for CantusApp {
+    fn default() -> Self {
+        Self {
+            instance: Instance::default(),
+            gpu_resources: None,
+
+            start_time: Instant::now(),
+            render_state: RenderState::default(),
+            interaction: InteractionState::default(),
+            particles: [Particle::default(); 64],
+            particles_accumulator: 0.0,
+            scale_factor: 1.0,
+
+            text_renderer: None,
+            global_uniforms: GlobalUniforms::default(),
+            background_pills: Vec::new(),
+            icon_pills: Vec::new(),
+            playhead_info: PlayheadUniforms::default(),
+        }
+    }
+}
 
 struct GpuResources {
     device: Device,
@@ -65,52 +230,10 @@ fn main() {
         .with_writer(std::io::stderr)
         .init();
 
+    #[cfg(feature = "spotify")]
     spotify::init();
 
     layer_shell::run();
-}
-
-struct CantusApp {
-    // Core Graphics
-    instance: Instance,
-    gpu_resources: Option<GpuResources>,
-
-    // Application State
-    start_time: Instant,
-    render_state: RenderState,
-    interaction: InteractionState,
-    particles: [Particle; 64],
-    particles_accumulator: f32,
-    scale_factor: f32,
-
-    // Scene & Resources
-    text_renderer: Option<TextRenderer>,
-    global_uniforms: GlobalUniforms,
-    background_pills: Vec<BackgroundPill>,
-    icon_pills: Vec<IconInstance>,
-    playhead_info: PlayheadUniforms,
-}
-
-impl Default for CantusApp {
-    fn default() -> Self {
-        Self {
-            instance: Instance::new(&wgpu::InstanceDescriptor::default()),
-            gpu_resources: None,
-
-            start_time: Instant::now(),
-            render_state: RenderState::default(),
-            interaction: InteractionState::default(),
-            particles: [Particle::default(); 64],
-            particles_accumulator: 0.0,
-            scale_factor: 1.0,
-
-            text_renderer: None,
-            global_uniforms: GlobalUniforms::default(),
-            background_pills: Vec::new(),
-            icon_pills: Vec::new(),
-            playhead_info: PlayheadUniforms::default(),
-        }
-    }
 }
 
 impl CantusApp {
@@ -283,4 +406,23 @@ impl CantusApp {
         }
         -1
     }
+}
+
+fn deserialize_images<'de, D>(deserializer: D) -> Result<Option<String>, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    let images: Vec<Image> = Vec::deserialize(deserializer)?;
+    Ok(images
+        .into_iter()
+        .min_by_key(|img| img.width)
+        .map(|img| img.url))
+}
+
+fn deserialize_first_artist<'de, D>(deserializer: D) -> Result<Artist, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    let artists: Vec<Artist> = Vec::deserialize(deserializer)?;
+    Ok(artists.into_iter().next().unwrap())
 }

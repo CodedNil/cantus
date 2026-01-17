@@ -1,11 +1,8 @@
 use crate::{
-    CantusApp, PANEL_START,
+    CantusApp, CondensedPlaylist, PANEL_START, PLAYBACK_STATE, PlaylistId, Track, TrackId,
     config::CONFIG,
     render::{IconInstance, Point, Rect, lerpf32},
-    spotify::{
-        CondensedPlaylist, PLAYBACK_STATE, PlaylistId, SPOTIFY_CLIENT, Track, TrackId,
-        update_playback_state,
-    },
+    update_playback_state,
 };
 use itertools::Itertools;
 use std::{
@@ -455,20 +452,15 @@ fn skip_to_track(track_id: &TrackId, position: f32, always_seek: bool) {
             "{} to track {track_id}, {skips} skips",
             if forward { "Skipping" } else { "Rewinding" }
         );
+        #[cfg(feature = "spotify")]
         for _ in 0..skips.min(10) {
             let result = if forward {
                 // https://developer.spotify.com/documentation/web-api/reference/#/operations/skip-users-playback-to-next-track
-                SPOTIFY_CLIENT.api_post("me/player/next")
+                crate::spotify::SPOTIFY_CLIENT.api_post("me/player/next")
             } else {
                 // https://developer.spotify.com/documentation/web-api/reference/#/operations/skip-users-playback-to-previous-track
-                SPOTIFY_CLIENT.api_post("me/player/previous")
+                crate::spotify::SPOTIFY_CLIENT.api_post("me/player/previous")
             };
-            update_playback_state(|state| {
-                state.queue_index = position_in_queue;
-                state.progress = 0;
-                state.last_progress_update = Instant::now();
-                state.last_interaction = Instant::now() + Duration::from_millis(2000);
-            });
             if let Err(err) = result {
                 error!("Failed to skip to track: {err}");
             }
@@ -491,12 +483,16 @@ fn skip_to_track(track_id: &TrackId, position: f32, always_seek: bool) {
             state.last_progress_update = Instant::now();
             state.last_interaction = Instant::now() + Duration::from_millis(2000);
         });
-        // https://developer.spotify.com/documentation/web-api/reference/#/operations/seek-to-position-in-currently-playing-track
-        if let Err(err) = SPOTIFY_CLIENT.api_put(&format!(
-            "me/player/seek?position_ms={}",
-            milliseconds.round()
-        )) {
-            error!("Failed to seek track: {err}");
+
+        #[cfg(feature = "spotify")]
+        {
+            // https://developer.spotify.com/documentation/web-api/reference/#/operations/seek-to-position-in-currently-playing-track
+            if let Err(err) = crate::spotify::SPOTIFY_CLIENT.api_put(&format!(
+                "me/player/seek?position_ms={}",
+                milliseconds.round()
+            )) {
+                error!("Failed to seek track: {err}");
+            }
         }
     }
 }
@@ -507,7 +503,9 @@ fn update_star_rating(track_id: &TrackId, rating_slot: u8) {
         return;
     }
 
+    #[cfg(feature = "spotify")]
     let mut playlists_to_remove_from = Vec::new();
+    #[cfg(feature = "spotify")]
     let mut playlists_to_add_to = Vec::new();
 
     // Remove tracks from existing playlists, add to target playlist if not present
@@ -518,60 +516,72 @@ fn update_star_rating(track_id: &TrackId, rating_slot: u8) {
                 && playlist.rating_index != Some(rating_slot)
                 && playlist.tracks.remove(track_id)
             {
+                #[cfg(feature = "spotify")]
                 playlists_to_remove_from.push((playlist.id, playlist.name.clone()));
             }
             if playlist.rating_index == Some(rating_slot) && playlist.tracks.insert(*track_id) {
+                #[cfg(feature = "spotify")]
                 playlists_to_add_to.push((playlist.id, playlist.name.clone()));
             }
         });
     });
 
-    // Make the changes
-    for (playlist_id, playlist_name) in playlists_to_remove_from {
-        info!("Removing track {track_id} from rating playlist {playlist_name}");
-        let track_uri = format!("spotify:track:{track_id}");
-        // https://developer.spotify.com/documentation/web-api/reference/#/operations/remove-tracks-playlist
-        if let Err(err) = SPOTIFY_CLIENT.api_delete_payload(
-            &format!("playlists/{playlist_id}/tracks"),
-            &format!(r#"{{"tracks": [ {{"uri": "{track_uri}"}} ]}}"#),
-        ) {
-            error!("Failed to remove track {track_id} from rating playlist {playlist_name}: {err}");
+    #[cfg(feature = "spotify")]
+    {
+        // Make the changes
+        for (playlist_id, playlist_name) in playlists_to_remove_from {
+            info!("Removing track {track_id} from rating playlist {playlist_name}");
+            let track_uri = format!("spotify:track:{track_id}");
+            // https://developer.spotify.com/documentation/web-api/reference/#/operations/remove-tracks-playlist
+            if let Err(err) = crate::spotify::SPOTIFY_CLIENT.api_delete_payload(
+                &format!("playlists/{playlist_id}/tracks"),
+                &format!(r#"{{"tracks": [ {{"uri": "{track_uri}"}} ]}}"#),
+            ) {
+                error!(
+                    "Failed to remove track {track_id} from rating playlist {playlist_name}: {err}"
+                );
+            }
         }
-    }
-    for (playlist_id, playlist_name) in playlists_to_add_to {
-        info!("Adding track {track_id} to rating playlist {playlist_name}");
-        let track_uri = format!("spotify:track:{track_id}");
-        // https://developer.spotify.com/documentation/web-api/reference/#/operations/add-tracks-to-playlist)
-        if let Err(err) = SPOTIFY_CLIENT.api_post_payload(
-            &format!("playlists/{playlist_id}/tracks"),
-            &format!(r#"{{"uris": ["{track_uri}"]}}"#),
-        ) {
-            error!("Failed to add track {track_id} to rating playlist {playlist_name}: {err}");
+        for (playlist_id, playlist_name) in playlists_to_add_to {
+            info!("Adding track {track_id} to rating playlist {playlist_name}");
+            let track_uri = format!("spotify:track:{track_id}");
+            // https://developer.spotify.com/documentation/web-api/reference/#/operations/add-tracks-to-playlist)
+            if let Err(err) = crate::spotify::SPOTIFY_CLIENT.api_post_payload(
+                &format!("playlists/{playlist_id}/tracks"),
+                &format!(r#"{{"uris": ["{track_uri}"]}}"#),
+            ) {
+                error!("Failed to add track {track_id} to rating playlist {playlist_name}: {err}");
+            }
         }
-    }
 
-    // Add the track the liked songs if its rated above 3 stars
-    // https://developer.spotify.com/documentation/web-api/reference/#/operations/check-users-saved-tracks
-    match SPOTIFY_CLIENT.api_get(&format!("me/tracks/contains/?ids={track_id}")) {
-        Ok(already_liked) => match (already_liked == "[true]", rating_slot >= 5) {
-            (true, false) => {
-                info!("Removing track {track_id} from liked songs");
-                // https://developer.spotify.com/documentation/web-api/reference/#/operations/remove-tracks-user
-                if let Err(err) = SPOTIFY_CLIENT.api_delete(&format!("me/tracks/?ids={track_id}")) {
-                    error!("Failed to remove track {track_id} from liked songs: {err}");
+        // Add the track the liked songs if its rated above 3 stars
+        // https://developer.spotify.com/documentation/web-api/reference/#/operations/check-users-saved-tracks
+        match crate::spotify::SPOTIFY_CLIENT.api_get(&format!("me/tracks/contains/?ids={track_id}"))
+        {
+            Ok(already_liked) => match (already_liked == "[true]", rating_slot >= 5) {
+                (true, false) => {
+                    info!("Removing track {track_id} from liked songs");
+                    // https://developer.spotify.com/documentation/web-api/reference/#/operations/remove-tracks-user
+                    if let Err(err) = crate::spotify::SPOTIFY_CLIENT
+                        .api_delete(&format!("me/tracks/?ids={track_id}"))
+                    {
+                        error!("Failed to remove track {track_id} from liked songs: {err}");
+                    }
                 }
-            }
-            (false, true) => {
-                info!("Adding track {track_id} to liked songs");
-                // https://developer.spotify.com/documentation/web-api/reference/#/operations/save-tracks-user
-                if let Err(err) = SPOTIFY_CLIENT.api_put(&format!("me/tracks/?ids={track_id}")) {
-                    error!("Failed to add track {track_id} to liked songs: {err}");
+                (false, true) => {
+                    info!("Adding track {track_id} to liked songs");
+                    // https://developer.spotify.com/documentation/web-api/reference/#/operations/save-tracks-user
+                    if let Err(err) = crate::spotify::SPOTIFY_CLIENT
+                        .api_put(&format!("me/tracks/?ids={track_id}"))
+                    {
+                        error!("Failed to add track {track_id} to liked songs: {err}");
+                    }
                 }
+                _ => {}
+            },
+            Err(err) => {
+                error!("Failed to check if track {track_id} is already liked: {err}");
             }
-            _ => {}
-        },
-        Err(err) => {
-            error!("Failed to check if track {track_id} is already liked: {err}");
         }
     }
 }
@@ -611,24 +621,27 @@ fn toggle_playlist_membership(track_id: &TrackId, playlist_id: &PlaylistId) {
         state.last_interaction = Instant::now() + Duration::from_millis(500);
     });
 
-    let track_uri = format!("spotify:track:{track_id}");
-    let result = if contained {
-        SPOTIFY_CLIENT.api_delete_payload(
-            &format!("playlists/{playlist_id}/tracks"),
-            &format!(r#"{{"tracks": [ {{"uri": "{track_uri}"}} ]}}"#),
-        )
-    } else {
-        SPOTIFY_CLIENT.api_post_payload(
-            &format!("playlists/{playlist_id}/tracks"),
-            &format!(r#"{{"uris": ["{track_uri}"]}}"#),
-        )
-    };
-    if let Err(err) = result {
-        error!(
-            "Failed to {} track {track_id} {} playlist {playlist_name}: {err}",
-            if contained { "remove" } else { "add" },
-            if contained { "from" } else { "to" }
-        );
+    #[cfg(feature = "spotify")]
+    {
+        let track_uri = format!("spotify:track:{track_id}");
+        let result = if contained {
+            crate::spotify::SPOTIFY_CLIENT.api_delete_payload(
+                &format!("playlists/{playlist_id}/tracks"),
+                &format!(r#"{{"tracks": [ {{"uri": "{track_uri}"}} ]}}"#),
+            )
+        } else {
+            crate::spotify::SPOTIFY_CLIENT.api_post_payload(
+                &format!("playlists/{playlist_id}/tracks"),
+                &format!(r#"{{"uris": ["{track_uri}"]}}"#),
+            )
+        };
+        if let Err(err) = result {
+            error!(
+                "Failed to {} track {track_id} {} playlist {playlist_name}: {err}",
+                if contained { "remove" } else { "add" },
+                if contained { "from" } else { "to" }
+            );
+        }
     }
 }
 
@@ -638,24 +651,32 @@ fn toggle_playing(play: bool) {
     update_playback_state(|state| {
         state.playing = play;
     });
-    // https://developer.spotify.com/documentation/web-api/reference/#/operations/start-a-users-playback
-    // https://developer.spotify.com/documentation/web-api/reference/#/operations/pause-a-users-playback
-    if play {
-        if let Err(err) = SPOTIFY_CLIENT.api_put("me/player/play") {
-            error!("Failed to play playback: {err}");
+
+    #[cfg(feature = "spotify")]
+    {
+        // https://developer.spotify.com/documentation/web-api/reference/#/operations/start-a-users-playback
+        // https://developer.spotify.com/documentation/web-api/reference/#/operations/pause-a-users-playback
+        if play {
+            if let Err(err) = crate::spotify::SPOTIFY_CLIENT.api_put("me/player/play") {
+                error!("Failed to play playback: {err}");
+            }
+        } else if let Err(err) = crate::spotify::SPOTIFY_CLIENT.api_put("me/player/pause") {
+            error!("Failed to pause playback: {err}");
         }
-    } else if let Err(err) = SPOTIFY_CLIENT.api_put("me/player/pause") {
-        error!("Failed to pause playback: {err}");
     }
 }
 
 /// Set the volume of the current playback device.
 fn set_volume(volume_percent: u8) {
     info!("Setting volume to {}%", volume_percent);
-    // https://developer.spotify.com/documentation/web-api/reference/#/operations/set-volume-for-users-playback
-    if let Err(err) =
-        SPOTIFY_CLIENT.api_put(&format!("me/player/volume?volume_percent={volume_percent}"))
+
+    #[cfg(feature = "spotify")]
     {
-        error!("Failed to set volume: {err}");
+        // https://developer.spotify.com/documentation/web-api/reference/#/operations/set-volume-for-users-playback
+        if let Err(err) = crate::spotify::SPOTIFY_CLIENT
+            .api_put(&format!("me/player/volume?volume_percent={volume_percent}"))
+        {
+            error!("Failed to set volume: {err}");
+        }
     }
 }
