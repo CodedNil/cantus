@@ -352,7 +352,13 @@ impl CantusApp {
             1.0
         };
 
-        let image_index = self.get_image_index(&track_render.track.album.image);
+        let image_index = track_render
+            .track
+            .album
+            .image
+            .as_deref()
+            .map(|path| self.get_image_index(path))
+            .unwrap_or_default();
         self.background_pills.push(BackgroundPill {
             rect: [start_x, width],
             colors: ALBUM_PALETTE_CACHE
