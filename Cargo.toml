@@ -32,7 +32,6 @@ image = { version = "0.25.9", default-features = false, features = [
     "jpeg",
     "png",
 ] }
-auto-palette = { version = "0.9.2", default-features = false }
 kmeans_colors = { version = "0.7.1", default-features = false, features = [
     "palette_color",
 ] }
@@ -48,7 +47,7 @@ dashmap = "6.1.0"
 arrayvec = { version = "0.7.6", features = ["serde"] }
 itertools = "0.14.0"
 dirs = "6.0.0"
-thiserror = "2.0.17"
+thiserror = "2.0.18"
 base64 = "0.22.1"
 url = "2.5.8"
 sha2 = "0.10.9"
@@ -62,14 +61,11 @@ webbrowser = { version = "1.0.6", optional = true }
 pedantic = { level = "warn", priority = -1 }
 nursery = { level = "warn", priority = -1 }
 too-many-lines = "allow"
-too-many-arguments = "allow"
 cast-possible-truncation = "allow"
 cast-precision-loss = "allow"
 cast-sign-loss = "allow"
 cast-possible-wrap = "allow"
 suboptimal_flops = "allow"
-missing-panics-doc = "allow"
-unreadable_literal = "allow"
 
 separated_literal_suffix = "warn"
 renamed_function_params = "warn"

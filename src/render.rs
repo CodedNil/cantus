@@ -445,6 +445,7 @@ impl CantusApp {
 
         // Playhead
         let interaction = &mut self.interaction;
+        self.playhead_info.volume = f32::from(volume.unwrap_or(100)) / 100.0;
         let playbutton_hsize = CONFIG.height * 0.25;
         let speed = 2.2 * dt;
         interaction.play_hitbox = Rect::new(
@@ -462,7 +463,7 @@ impl CantusApp {
         // Determine the intended state for the bar
         let bar_target =
             u32::from(playhead_hovered || !interaction.playing || last_toggle < 1.0) as f32;
-        move_towards(&mut interaction.playhead_bar, bar_target, speed);
+        move_towards(&mut self.playhead_info.bar_lerp, bar_target, speed);
 
         // Determine which icon (if any) is currently active
         let (mut play_active, mut pause_active) = (false, false);
@@ -475,14 +476,14 @@ impl CantusApp {
         } else if !interaction.playing {
             pause_active = true;
         } else if interaction.playing && last_toggle < 1.0 {
-            interaction.playhead_play = last_toggle; // Hard set for the "start" animation
+            self.playhead_info.play_lerp = last_toggle; // Hard set for the "start" animation
             play_active = true;
         }
 
         // If active, move toward 0.5. If inactive, finish the animation to 1.0 then reset to 0.0.
         for (val, is_active) in [
-            (&mut interaction.playhead_play, play_active),
-            (&mut interaction.playhead_pause, pause_active),
+            (&mut self.playhead_info.play_lerp, play_active),
+            (&mut self.playhead_info.pause_lerp, pause_active),
         ] {
             if is_active {
                 move_towards(val, 0.5, speed);
@@ -493,13 +494,6 @@ impl CantusApp {
                 }
             }
         }
-
-        self.playhead_info = PlayheadUniforms {
-            volume: f32::from(volume.unwrap_or(100)) / 100.0,
-            bar_lerp: interaction.playhead_bar,
-            play_lerp: interaction.playhead_play,
-            pause_lerp: interaction.playhead_pause,
-        };
     }
 }
 

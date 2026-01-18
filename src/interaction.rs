@@ -37,9 +37,6 @@ pub struct InteractionState {
     pub last_expansion: (Instant, Point),
     pub last_toggle_playing: Instant,
     pub playing: bool,
-    pub playhead_bar: f32,
-    pub playhead_play: f32,
-    pub playhead_pause: f32,
 }
 
 impl Default for InteractionState {
@@ -61,9 +58,6 @@ impl Default for InteractionState {
             ),
             last_toggle_playing: Instant::now(),
             playing: false,
-            playhead_bar: 0.0,
-            playhead_play: 0.0,
-            playhead_pause: 0.0,
         }
     }
 }
