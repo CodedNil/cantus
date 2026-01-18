@@ -53,34 +53,34 @@ struct PlaybackState {
 /// Number of swatches to use in colour palette generation.
 const NUM_SWATCHES: usize = 4;
 
+type TrackId = ArrayString<22>;
 type AlbumId = ArrayString<22>;
 type ArtistId = ArrayString<22>;
-type TrackId = ArrayString<22>;
 type PlaylistId = ArrayString<22>;
 
 #[derive(Deserialize)]
+struct Track {
+    id: Option<TrackId>,
+    name: String,
+    album: Album,
+    #[serde(deserialize_with = "deserialize_first_artist", rename = "artists")]
+    artist: Artist,
+    duration_ms: u32,
+}
+
+#[derive(Deserialize)]
 struct Album {
-    id: AlbumId,
+    id: Option<AlbumId>,
     #[serde(default, deserialize_with = "deserialize_images", rename = "images")]
     image: Option<String>,
 }
 
 #[derive(Deserialize)]
 struct Artist {
-    id: ArtistId,
+    id: Option<ArtistId>,
     name: String,
     #[serde(default, deserialize_with = "deserialize_images", rename = "images")]
     image: Option<String>,
-}
-
-#[derive(Deserialize)]
-struct Track {
-    id: TrackId,
-    name: String,
-    album: Album,
-    #[serde(deserialize_with = "deserialize_first_artist", rename = "artists")]
-    artist: Artist,
-    duration_ms: u32,
 }
 
 struct CondensedPlaylist {

@@ -605,8 +605,10 @@ fn get_spotify_queue() {
         if let Some(key) = &track.album.image {
             ensure_image_cached(key);
         }
-        if !ARTIST_DATA_CACHE.contains_key(&track.artist.id) {
-            missing_artists.insert(track.artist.id);
+        if let Some(artist_id) = track.artist.id
+            && !ARTIST_DATA_CACHE.contains_key(&artist_id)
+        {
+            missing_artists.insert(artist_id);
         }
     }
     if !missing_artists.is_empty() {
@@ -634,9 +636,11 @@ fn get_spotify_queue() {
                 return;
             };
             for artist in artists {
-                ARTIST_DATA_CACHE.insert(artist.id, artist.image.clone());
-                if let Some(image) = artist.image.as_deref() {
-                    ensure_image_cached(image);
+                if let Some(artist_id) = artist.id {
+                    ARTIST_DATA_CACHE.insert(artist_id, artist.image.clone());
+                    if let Some(image) = artist.image.as_deref() {
+                        ensure_image_cached(image);
+                    }
                 }
             }
         });

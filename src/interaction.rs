@@ -25,13 +25,13 @@ pub struct InteractionState {
 
     pub last_hitbox_hash: u64,
     pub play_hitbox: Rect,
-    pub track_hitboxes: Vec<(TrackId, Rect, (f32, f32))>,
+    pub track_hitboxes: Vec<(Option<TrackId>, Rect, (f32, f32))>,
     pub icon_hitboxes: Vec<IconHitbox>,
 
     pub mouse_down: bool,
     pub dragging: bool,
     pub drag_origin: Option<Point>,
-    pub drag_track: Option<(TrackId, f32)>,
+    pub drag_track: Option<(Option<TrackId>, f32)>,
 
     // Playhead
     pub last_expansion: (Instant, Point),
@@ -90,9 +90,11 @@ impl CantusApp {
                 Instant::now(),
                 Point::new(CONFIG.playhead_x(), PANEL_START + CONFIG.height * 0.5),
             );
-            spawn(move || {
-                skip_to_track(&track_id, position, false);
-            });
+            if let Some(track_id) = track_id {
+                spawn(move || {
+                    skip_to_track(track_id, position, false);
+                });
+            }
         }
         interaction.drag_origin = None;
         interaction.dragging = false;
@@ -181,10 +183,11 @@ impl CantusApp {
             } else {
                 (mouse_pos.x - track_range_a) / (track_range_b - track_range_a)
             };
-            let track_id = *track_id;
-            spawn(move || {
-                skip_to_track(&track_id, position, false);
-            });
+            if let Some(track_id) = *track_id {
+                spawn(move || {
+                    skip_to_track(track_id, position, false);
+                });
+            }
         }
         PLAYBACK_STATE.write().interaction = false;
     }
@@ -252,10 +255,11 @@ impl CantusApp {
         width: f32,
         pos_x: f32,
     ) {
+        let Some(track_id) = track.id else { return };
         let (track_rating_index, mut icon_entries) = if CONFIG.ratings_enabled {
             let index = playlists
                 .values()
-                .find(|p| p.rating_index.is_some() && p.tracks.contains(&track.id))
+                .find(|p| p.rating_index.is_some() && p.tracks.contains(&track_id))
                 .and_then(|p| p.rating_index.map(|r| r + 1))
                 .unwrap_or(0);
             (
@@ -272,7 +276,7 @@ impl CantusApp {
                 .values()
                 .filter(|p| p.rating_index.is_none())
                 .filter_map(|p| {
-                    let contained = p.tracks.contains(&track.id);
+                    let contained = p.tracks.contains(&track_id);
                     (contained || hovered).then_some((p, contained))
                 })
                 .sorted_by(|(a, ac), (b, bc)| bc.cmp(ac).then_with(|| a.name.cmp(&b.name)))
@@ -347,7 +351,7 @@ impl CantusApp {
                     }
                     self.interaction.icon_hitboxes.push(IconHitbox {
                         rect,
-                        track_id: track.id,
+                        track_id,
                         playlist_id: None,
                         rating_index: Some(*index),
                     });
@@ -355,7 +359,7 @@ impl CantusApp {
                 IconEntry::Playlist { playlist, .. } => {
                     self.interaction.icon_hitboxes.push(IconHitbox {
                         rect,
-                        track_id: track.id,
+                        track_id,
                         playlist_id: Some(playlist.id),
                         rating_index: None,
                     });
@@ -418,11 +422,12 @@ impl CantusApp {
 }
 
 /// Skip to the specified track in the queue.
-fn skip_to_track(track_id: &TrackId, position: f32, always_seek: bool) {
+fn skip_to_track(track_id: TrackId, position: f32, always_seek: bool) {
     let (queue_index, position_in_queue, ms_lookup) = {
         let state = PLAYBACK_STATE.read();
         let queue_index = state.queue_index;
-        let Some(position_in_queue) = state.queue.iter().position(|t| &t.id == track_id) else {
+        let Some(position_in_queue) = state.queue.iter().position(|t| t.id == Some(track_id))
+        else {
             error!("Track not found in queue");
             return;
         };
