@@ -599,7 +599,7 @@ pub fn update_color_palettes() {
             .map(|c| u32::from_le_bytes([c[0], c[1], c[2], 255]))
             .collect::<Vec<_>>()
             .try_into()
-            .expect("Result should have exactly 4 colors");
+            .unwrap_or_default();
         ALBUM_PALETTE_CACHE.insert(album_id, Some(primary_colors));
     }
 }
