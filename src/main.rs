@@ -303,6 +303,7 @@ impl CantusApp {
                 depth_stencil_attachment: None,
                 timestamp_writes: None,
                 occlusion_query_set: None,
+                multiview_mask: None,
             });
 
             if !self.background_pills.is_empty() {

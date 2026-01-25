@@ -19,15 +19,15 @@ wayland-client = { version = "0.31.12", default-features = false }
 wayland-protocols = { version = "0.32", features = ["client", "staging"] }
 wayland-protocols-wlr = { version = "0.3.10", features = ["client"] }
 
-wgpu = { version = "27.0.1", default-features = false, features = [
+wgpu = { version = "28.0.0", default-features = false, features = [
     "parking_lot",
     "std",
     "vulkan",
     "wgsl",
 ] }
-wgpu_text = { version = "27.0.1", default-features = false }
+wgpu_text = { version = "28.0.1", default-features = false }
 
-time = { version = "0.3.45", features = ["serde"] }
+time = { version = "0.3.46", features = ["serde"] }
 image = { version = "0.25.9", default-features = false, features = [
     "jpeg",
     "png",

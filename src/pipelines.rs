@@ -154,7 +154,7 @@ impl CantusApp {
                 },
                 depth_stencil: None,
                 multisample: MultisampleState::default(),
-                multiview: None,
+                multiview_mask: None,
                 cache: None,
             })
         };
