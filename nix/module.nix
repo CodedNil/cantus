@@ -13,10 +13,7 @@ in
   options.programs.cantus = {
     enable = lib.mkEnableOption "cantus, a beautiful interactive music widget for wayland";
 
-    package = lib.mkPackageOption self.packages.${pkgs.stdenv.system} "cantus" {
-      default = "default";
-      pkgsText = "cantus.packages.\${pkgs.stdenv.system}";
-    };
+    package = lib.mkPackageOption pkgs "cantus" { };
 
     autoStart = lib.mkOption {
       type = lib.types.bool;
