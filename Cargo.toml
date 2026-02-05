@@ -27,7 +27,7 @@ wgpu = { version = "28.0.0", default-features = false, features = [
 ] }
 wgpu_text = { version = "28.0.1", default-features = false }
 
-time = { version = "0.3.46", features = ["serde"] }
+time = { version = "0.3.47", features = ["serde"] }
 image = { version = "0.25.9", default-features = false, features = [
     "jpeg",
     "png",
@@ -51,10 +51,10 @@ thiserror = "2.0.18"
 base64 = "0.22.1"
 url = "2.5.8"
 sha2 = "0.10.9"
-bytemuck = { version = "1.24.0", features = ["derive"] }
+bytemuck = { version = "1.25.0", features = ["derive"] }
 
 # Spotify
-ureq = { version = "3.1.4", default-features = false, features = ["rustls"] }
+ureq = { version = "3.2.0", default-features = false, features = ["rustls"] }
 webbrowser = { version = "1.0.6", optional = true }
 
 [lints.clippy]

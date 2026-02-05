@@ -62,6 +62,11 @@ impl TextRenderer {
             .next()
             .unwrap_or("")
             .trim();
+        let song_name = if song_name.is_empty() {
+            track.name.trim()
+        } else {
+            song_name
+        };
 
         let top_y = PANEL_START + (CONFIG.height * 0.26).floor();
         let bottom_y = PANEL_START + (CONFIG.height * 0.57).floor();
