@@ -527,14 +527,14 @@ fn update_star_rating(track_id: &TrackId, rating_slot: u8) {
 
     #[cfg(feature = "spotify")]
     {
+        let track_uri = format!("spotify:track:{track_id}");
         // Make the changes
         for (playlist_id, playlist_name) in playlists_to_remove_from {
             info!("Removing track {track_id} from rating playlist {playlist_name}");
-            let track_uri = format!("spotify:track:{track_id}");
-            // https://developer.spotify.com/documentation/web-api/reference/#/operations/remove-tracks-playlist
+            // https://developer.spotify.com/documentation/web-api/reference/remove-items-playlist
             if let Err(err) = crate::spotify::SPOTIFY_CLIENT.api_delete_payload(
-                &format!("playlists/{playlist_id}/tracks"),
-                &format!(r#"{{"tracks": [ {{"uri": "{track_uri}"}} ]}}"#),
+                &format!("playlists/{playlist_id}/items"),
+                &format!(r#"{{"items": [{{"uri": "{track_uri}"}}]}}"#),
             ) {
                 error!(
                     "Failed to remove track {track_id} from rating playlist {playlist_name}: {err}"
@@ -543,10 +543,9 @@ fn update_star_rating(track_id: &TrackId, rating_slot: u8) {
         }
         for (playlist_id, playlist_name) in playlists_to_add_to {
             info!("Adding track {track_id} to rating playlist {playlist_name}");
-            let track_uri = format!("spotify:track:{track_id}");
-            // https://developer.spotify.com/documentation/web-api/reference/#/operations/add-tracks-to-playlist)
+            // https://developer.spotify.com/documentation/web-api/reference/add-items-to-playlist
             if let Err(err) = crate::spotify::SPOTIFY_CLIENT.api_post_payload(
-                &format!("playlists/{playlist_id}/tracks"),
+                &format!("playlists/{playlist_id}/items"),
                 &format!(r#"{{"uris": ["{track_uri}"]}}"#),
             ) {
                 error!("Failed to add track {track_id} to rating playlist {playlist_name}: {err}");
@@ -554,15 +553,16 @@ fn update_star_rating(track_id: &TrackId, rating_slot: u8) {
         }
 
         // Add the track the liked songs if its rated above 3 stars
-        // https://developer.spotify.com/documentation/web-api/reference/#/operations/check-users-saved-tracks
-        match crate::spotify::SPOTIFY_CLIENT.api_get(&format!("me/tracks/contains/?ids={track_id}"))
+        // https://developer.spotify.com/documentation/web-api/reference/check-library-contains
+        match crate::spotify::SPOTIFY_CLIENT
+            .api_get(&format!("me/library/contains/?uris={track_uri}"))
         {
             Ok(already_liked) => match (already_liked == "[true]", rating_slot >= 5) {
                 (true, false) => {
                     info!("Removing track {track_id} from liked songs");
                     // https://developer.spotify.com/documentation/web-api/reference/#/operations/remove-tracks-user
                     if let Err(err) = crate::spotify::SPOTIFY_CLIENT
-                        .api_delete(&format!("me/tracks/?ids={track_id}"))
+                        .api_delete(&format!("me/library/?uris={track_uri}"))
                     {
                         error!("Failed to remove track {track_id} from liked songs: {err}");
                     }
@@ -571,7 +571,7 @@ fn update_star_rating(track_id: &TrackId, rating_slot: u8) {
                     info!("Adding track {track_id} to liked songs");
                     // https://developer.spotify.com/documentation/web-api/reference/#/operations/save-tracks-user
                     if let Err(err) = crate::spotify::SPOTIFY_CLIENT
-                        .api_put(&format!("me/tracks/?ids={track_id}"))
+                        .api_put(&format!("me/library/?uris={track_uri}"))
                     {
                         error!("Failed to add track {track_id} to liked songs: {err}");
                     }
@@ -624,13 +624,15 @@ fn toggle_playlist_membership(track_id: &TrackId, playlist_id: &PlaylistId) {
     {
         let track_uri = format!("spotify:track:{track_id}");
         let result = if contained {
+            // https://developer.spotify.com/documentation/web-api/reference/remove-items-playlist
             crate::spotify::SPOTIFY_CLIENT.api_delete_payload(
-                &format!("playlists/{playlist_id}/tracks"),
+                &format!("playlists/{playlist_id}/items"),
                 &format!(r#"{{"tracks": [ {{"uri": "{track_uri}"}} ]}}"#),
             )
         } else {
+            // https://developer.spotify.com/documentation/web-api/reference/add-items-to-playlist
             crate::spotify::SPOTIFY_CLIENT.api_post_payload(
-                &format!("playlists/{playlist_id}/tracks"),
+                &format!("playlists/{playlist_id}/items"),
                 &format!(r#"{{"uris": ["{track_uri}"]}}"#),
             )
         };

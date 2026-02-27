@@ -1,6 +1,6 @@
 [package]
 name = "cantus"
-version = "0.6.2"
+version = "0.6.3"
 edition = "2024"
 
 [features]
@@ -39,7 +39,7 @@ palette = "0.7.6"
 
 serde = { version = "1.0.228", features = ["derive"] }
 serde_json = "1.0.149"
-toml = "0.9.11+spec-1.1.0"
+toml = "1.0.3+spec-1.1.0"
 
 fastrand = "2.3.0"
 parking_lot = "0.12.5"
@@ -55,7 +55,7 @@ bytemuck = { version = "1.25.0", features = ["derive"] }
 
 # Spotify
 ureq = { version = "3.2.0", default-features = false, features = ["rustls"] }
-webbrowser = { version = "1.0.6", optional = true }
+webbrowser = { version = "1.1.0", optional = true }
 
 [lints.clippy]
 pedantic = { level = "warn", priority = -1 }

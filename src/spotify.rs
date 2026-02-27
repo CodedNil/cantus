@@ -530,6 +530,7 @@ fn get_spotify_playback() {
         return;
     }
 
+    // https://developer.spotify.com/documentation/web-api/reference/get-information-about-the-users-current-playback
     let current_playback_opt = SPOTIFY_CLIENT
         .api_get("me/player")
         .ok()
@@ -584,6 +585,7 @@ fn get_spotify_queue() {
         return;
     }
 
+    // https://developer.spotify.com/documentation/web-api/reference/get-queue
     let queue_data = SPOTIFY_CLIENT
         .api_get("me/player/queue")
         .map_err(|e| error!("Failed to fetch queue: {e}"))
@@ -611,36 +613,29 @@ fn get_spotify_queue() {
             missing_artists.insert(artist_id);
         }
     }
-    if !missing_artists.is_empty() {
-        let artist_query = missing_artists
-            .into_iter()
-            .map(|artist| artist.as_str().to_owned())
-            .collect::<Vec<_>>()
-            .join(",");
+    for artist_id_str in missing_artists {
+        let id = artist_id_str.to_string();
         spawn(move || {
-            let Some(artists) = SPOTIFY_CLIENT
-                .api_get(&format!("artists/?ids={artist_query}"))
-                .map_err(|e| error!("Failed to fetch artists: {e}"))
-                .ok()
-                .and_then(|res| {
-                    let result = serde_json::from_str::<HashMap<String, Vec<Artist>>>(&res);
-                    match result {
-                        Ok(mut map) => map.remove("artists"),
-                        Err(err) => {
-                            error!("Deserialization error: {err:?}");
-                            None
-                        }
-                    }
-                })
-            else {
-                return;
+            let artist: Artist = match serde_json::from_str(&match SPOTIFY_CLIENT
+                .api_get(&format!("artists/{id}"))
+            {
+                Ok(res) => res,
+                Err(e) => {
+                    error!("Failed to fetch artist {id}: {e}");
+                    return;
+                }
+            }) {
+                Ok(data) => data,
+                Err(err) => {
+                    error!("Deserialization error for artist {id}: {err:?}");
+                    return;
+                }
             };
-            for artist in artists {
-                if let Some(artist_id) = artist.id {
-                    ARTIST_DATA_CACHE.insert(artist_id, artist.image.clone());
-                    if let Some(image) = artist.image.as_deref() {
-                        ensure_image_cached(image);
-                    }
+            if let Some(actual_id) = artist.id {
+                ARTIST_DATA_CACHE.insert(actual_id, artist.image.clone());
+
+                if let Some(image) = artist.image.as_deref() {
+                    ensure_image_cached(image);
                 }
             }
         });
@@ -694,6 +689,7 @@ fn poll_playlists() {
     let mut cached = load_cached_playlist_tracks();
 
     loop {
+        // https://developer.spotify.com/documentation/web-api/reference/get-a-list-of-current-users-playlists
         let playlists = SPOTIFY_CLIENT
             .api_get_payload("me/playlists", &[("limit", "50")])
             .ok()
@@ -754,9 +750,10 @@ fn poll_playlists() {
                 let mut total = 0;
                 let mut playlist_track_ids = HashSet::new();
                 for page in 0..num_pages {
+                    // https://developer.spotify.com/documentation/web-api/reference/get-playlists-items
                     let page_data = SPOTIFY_CLIENT
                         .api_get_payload(
-                            &format!("playlists/{}/tracks", playlist.id),
+                            &format!("playlists/{}/items", playlist.id),
                             &[
                                 (
                                     "fields",
