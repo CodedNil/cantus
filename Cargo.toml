@@ -14,10 +14,10 @@ tracing-subscriber = { version = "0.3.22", features = ["env-filter"] }
 pollster = "0.4.0"
 raw-window-handle = "0.6.2"
 
-wayland-backend = { version = "0.3.12", features = ["client_system"] }
-wayland-client = { version = "0.31.12", default-features = false }
-wayland-protocols = { version = "0.32.10", features = ["client", "staging"] }
-wayland-protocols-wlr = { version = "0.3.10", features = ["client"] }
+wayland-backend = { version = "0.3.14", features = ["client_system"] }
+wayland-client = { version = "0.31.13", default-features = false }
+wayland-protocols = { version = "0.32.11", features = ["client", "staging"] }
+wayland-protocols-wlr = { version = "0.3.11", features = ["client"] }
 
 wgpu = { version = "28.0.0", default-features = false, features = [
     "parking_lot",
@@ -28,7 +28,7 @@ wgpu = { version = "28.0.0", default-features = false, features = [
 wgpu_text = { version = "28.0.1", default-features = false }
 
 time = { version = "0.3.47", features = ["serde"] }
-image = { version = "0.25.9", default-features = false, features = [
+image = { version = "0.25.10", default-features = false, features = [
     "jpeg",
     "png",
 ] }
@@ -39,7 +39,7 @@ palette = "0.7.6"
 
 serde = { version = "1.0.228", features = ["derive"] }
 serde_json = "1.0.149"
-toml = "1.0.3+spec-1.1.0"
+toml = "1.0.6+spec-1.1.0"
 
 fastrand = "2.3.0"
 parking_lot = "0.12.5"
@@ -55,7 +55,7 @@ bytemuck = { version = "1.25.0", features = ["derive"] }
 
 # Spotify
 ureq = { version = "3.2.0", default-features = false, features = ["rustls"] }
-webbrowser = { version = "1.1.0", optional = true }
+webbrowser = { version = "1.2.0", optional = true }
 
 [lints.clippy]
 pedantic = { level = "warn", priority = -1 }
