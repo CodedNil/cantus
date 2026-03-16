@@ -586,21 +586,24 @@ fn get_spotify_queue() {
     }
 
     // https://developer.spotify.com/documentation/web-api/reference/get-queue
-    let queue_data = SPOTIFY_CLIENT
+    let Some(q) = SPOTIFY_CLIENT
         .api_get("me/player/queue")
-        .map_err(|e| error!("Failed to fetch queue: {e}"))
+        .inspect_err(|e| error!("Failed to fetch queue: {e}"))
         .ok()
         .and_then(|res| {
             serde_json::from_str::<CurrentUserQueue>(&res)
-                .map_err(|e| error!("Failed to parse queue: {e}"))
+                .inspect_err(|e| error!("Failed to parse queue: {e}"))
                 .ok()
-        });
-    let Some(queue) = queue_data.and_then(|q| q.currently_playing.map(|cp| (cp, q.queue))) else {
+        })
+    else {
         return;
     };
-
-    let new_queue: Vec<Track> = std::iter::once(queue.0).chain(queue.1).collect();
-    let current_title = new_queue[0].name.clone();
+    let Some(currently_playing) = q.currently_playing else {
+        error!("Failed to get queue data: Nothing is currently playing");
+        return;
+    };
+    let current_title = currently_playing.name.clone();
+    let new_queue: Vec<Track> = std::iter::once(currently_playing).chain(q.queue).collect();
 
     let mut missing_artists = HashSet::new();
     for track in &new_queue {
@@ -609,36 +612,33 @@ fn get_spotify_queue() {
         }
         if let Some(artist_id) = track.artist.id
             && !ARTIST_DATA_CACHE.contains_key(&artist_id)
+            && missing_artists.insert(artist_id)
         {
-            missing_artists.insert(artist_id);
-        }
-    }
-    for artist_id_str in missing_artists {
-        let id = artist_id_str.to_string();
-        spawn(move || {
-            let artist: Artist = match serde_json::from_str(&match SPOTIFY_CLIENT
-                .api_get(&format!("artists/{id}"))
-            {
-                Ok(res) => res,
-                Err(e) => {
-                    error!("Failed to fetch artist {id}: {e}");
-                    return;
-                }
-            }) {
-                Ok(data) => data,
-                Err(err) => {
-                    error!("Deserialization error for artist {id}: {err:?}");
-                    return;
-                }
-            };
-            if let Some(actual_id) = artist.id {
-                ARTIST_DATA_CACHE.insert(actual_id, artist.image.clone());
+            spawn(move || {
+                let artist: Artist = match serde_json::from_str(&match SPOTIFY_CLIENT
+                    .api_get(&format!("artists/{artist_id}"))
+                {
+                    Ok(res) => res,
+                    Err(e) => {
+                        error!("Failed to fetch artist {artist_id}: {e}");
+                        return;
+                    }
+                }) {
+                    Ok(data) => data,
+                    Err(err) => {
+                        error!("Deserialization error for artist {artist_id}: {err:?}");
+                        return;
+                    }
+                };
+                if let Some(actual_id) = artist.id {
+                    ARTIST_DATA_CACHE.insert(actual_id, artist.image.clone());
 
-                if let Some(image) = artist.image.as_deref() {
-                    ensure_image_cached(image);
+                    if let Some(image) = artist.image.as_deref() {
+                        ensure_image_cached(image);
+                    }
                 }
-            }
-        });
+            });
+        }
     }
 
     let mut spotify_state = SPOTIFY_STATE.write();
