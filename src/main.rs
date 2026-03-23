@@ -16,9 +16,9 @@ use std::{
     time::Instant,
 };
 use wgpu::{
-    BindGroup, Buffer, Color, CommandEncoderDescriptor, Device, Instance, LoadOp, Operations,
-    Queue, RenderPassColorAttachment, RenderPassDescriptor, RenderPipeline, StoreOp, Surface,
-    SurfaceConfiguration, Texture, TextureViewDescriptor,
+    BindGroup, Buffer, Color, CommandEncoderDescriptor, CurrentSurfaceTexture, Device, Instance,
+    LoadOp, Operations, Queue, RenderPassColorAttachment, RenderPassDescriptor, RenderPipeline,
+    StoreOp, Surface, SurfaceConfiguration, Texture, TextureViewDescriptor,
 };
 
 mod config;
@@ -277,7 +277,8 @@ impl CantusApp {
             );
         }
 
-        let Ok(surface_texture) = gpu.surface.get_current_texture() else {
+        let CurrentSurfaceTexture::Success(surface_texture) = gpu.surface.get_current_texture()
+        else {
             gpu.surface.configure(&gpu.device, &gpu.surface_config);
             return;
         };

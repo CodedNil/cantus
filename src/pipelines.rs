@@ -129,7 +129,7 @@ impl CantusApp {
                 label: Some(label),
                 layout: Some(&device.create_pipeline_layout(&PipelineLayoutDescriptor {
                     label: Some(label),
-                    bind_group_layouts: &[layout],
+                    bind_group_layouts: &[Some(layout)],
                     ..Default::default()
                 })),
                 vertex: VertexState {

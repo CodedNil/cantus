@@ -209,9 +209,9 @@ impl LayerShellApp {
             return;
         };
         let target = SurfaceTargetUnsafe::RawHandle {
-            raw_display_handle: RawDisplayHandle::Wayland(WaylandDisplayHandle::new(
+            raw_display_handle: Some(RawDisplayHandle::Wayland(WaylandDisplayHandle::new(
                 self.display_ptr,
-            )),
+            ))),
             raw_window_handle: RawWindowHandle::Wayland(WaylandWindowHandle::new(surface_ptr)),
         };
         let surface = unsafe { self.cantus.instance.create_surface_unsafe(target) }
