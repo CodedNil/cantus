@@ -290,6 +290,7 @@ impl SpotifyClient {
 
     fn refetch_token(&self) -> ClientResult<Token> {
         let Some(refresh_token) = &self.token.read().refresh else {
+            warn!("No refresh token available");
             return Err(ClientError::InvalidToken);
         };
         let response = self
@@ -303,6 +304,7 @@ impl SpotifyClient {
             .into_body()
             .read_to_string()?;
         let mut token = serde_json::from_str::<Token>(&response)?;
+        info!("Refetched token: {}", token.expires_in);
         token.set_expiration();
         Ok(token)
     }
