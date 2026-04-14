@@ -1,6 +1,6 @@
 [package]
 name = "cantus"
-version = "0.6.4"
+version = "0.6.5"
 edition = "2024"
 
 [features]
@@ -41,7 +41,7 @@ serde = { version = "1.0.228", features = ["derive"] }
 serde_json = "1.0.149"
 toml = "1.1.2+spec-1.1.0"
 
-fastrand = "2.4.0"
+fastrand = "2.4.1"
 parking_lot = "0.12.5"
 dashmap = "6.1.0"
 arrayvec = { version = "0.7.6", features = ["serde"] }
