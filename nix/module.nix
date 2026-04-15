@@ -51,6 +51,9 @@ in
       Unit = {
         Description = "A beautiful interactive music widget for wayland";
         After = [ config.wayland.systemd.target ];
+        X-Restart-Triggers = lib.optional (
+          cfg.settings != null
+        ) config.xdg.configFile."cantus/cantus.toml".source;
       };
       Service = {
         Type = "simple";
