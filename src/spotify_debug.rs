@@ -12,8 +12,7 @@ use tracing::warn;
 fn random_arraystring() -> ArrayString<22> {
     let mut s = ArrayString::<22>::new();
     for _ in 0..22 {
-        let c = fastrand::alphanumeric();
-        let _ = s.try_push(c);
+        s.push(fastrand::alphanumeric());
     }
     s
 }
@@ -217,15 +216,10 @@ pub fn debug_playbackstate() -> PlaybackState {
     // Distribute tracks into playlists
     if !playlists.is_empty() {
         let chunk_size = queue.len().div_ceil(playlists.len());
-        for (i, playlist) in playlists.values_mut().enumerate() {
-            let start = i * chunk_size;
-            if start < queue.len() {
-                let end = (start + chunk_size).min(queue.len());
-                let track_ids: HashSet<ArrayString<22>> =
-                    queue[start..end].iter().map(|t| t.id).collect();
-                playlist.tracks_total = track_ids.len() as u32;
-                playlist.tracks = track_ids;
-            }
+        for (chunk, playlist) in queue.chunks(chunk_size).zip(playlists.values_mut()) {
+            let track_ids: HashSet<ArrayString<22>> = chunk.iter().map(|t| t.id).collect();
+            playlist.tracks_total = track_ids.len() as u32;
+            playlist.tracks = track_ids;
         }
     }
     // Load the images for each track, playlist, and artist
@@ -239,10 +233,11 @@ pub fn debug_playbackstate() -> PlaybackState {
             ensure_image_cached(image);
         }
     }
-    ARTIST_DATA_CACHE.insert(artist().id, artist().image);
-    if let Some(image) = &artist().image {
+    let artist = artist();
+    if let Some(image) = &artist.image {
         ensure_image_cached(image);
     }
+    ARTIST_DATA_CACHE.insert(artist.id, artist.image);
 
     // Return the new state
     PlaybackState {

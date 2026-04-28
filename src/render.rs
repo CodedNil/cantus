@@ -132,6 +132,15 @@ pub struct TrackRender<'a> {
     pub art_only: bool,
 }
 
+fn album_palette(track: &Track) -> [u32; NUM_SWATCHES] {
+    track
+        .album
+        .id
+        .and_then(|id| ALBUM_PALETTE_CACHE.get(&id))
+        .and_then(|r| r.as_ref().copied())
+        .unwrap_or_default()
+}
+
 /// Build the scene for rendering.
 impl CantusApp {
     pub fn create_scene(&mut self) {
@@ -147,6 +156,7 @@ impl CantusApp {
         let total_height = CONFIG.height;
         let timeline_duration_ms = CONFIG.timeline_future_minutes * 60_000.0;
         let timeline_start_ms = -CONFIG.timeline_past_minutes * 60_000.0;
+        let timeline_end_ms = timeline_start_ms + timeline_duration_ms;
 
         let px_per_ms = total_width / timeline_duration_ms;
         let playhead_x = history_width - timeline_start_ms * px_per_ms;
@@ -212,58 +222,64 @@ impl CantusApp {
         self.render_state.speed_idx = (s_idx + 1) % 8;
         let avg_speed = self.render_state.recent_speeds.iter().sum::<f32>() / 8.0;
 
-        // Iterate over the tracks within the timeline.
-        let mut track_renders = Vec::with_capacity(playback_state.queue.len());
-        let mut cur_ms = current_ms;
+        // Each past track is clipped at history_width. Historical ones are stacked
+        let compact_stride = total_height * 0.55;
+        let mut track_renders: Vec<TrackRender> = Vec::with_capacity(playback_state.queue.len());
+        let mut compact_stack: Vec<(&Track, f32, f32, f32, f32)> = Vec::new();
+        let mut transition_t = 0.0f32;
+        let mut ms = current_ms;
+
         for track in &playback_state.queue {
-            let start = cur_ms;
-            let end = start + track.duration_ms as f32;
-            cur_ms = end + TRACK_SPACING_MS;
-            if start > timeline_start_ms + timeline_duration_ms {
+            let dur = track.duration_ms as f32;
+            let end_ms = ms + dur;
+            if ms > timeline_end_ms {
                 break;
             }
+            let natural_start_x = playhead_x + ms * px_per_ms;
+            let natural_end_x = natural_start_x + dur * px_per_ms;
 
-            let v_start = start.max(timeline_start_ms) * px_per_ms;
-            let v_end = end.min(timeline_start_ms + timeline_duration_ms) * px_per_ms;
-            track_renders.push(TrackRender {
-                track,
-                is_current: start <= 0.0 && end >= 0.0,
-                seconds_until_start: (start / 1000.0).abs(),
-                start_x: (v_start - timeline_start_ms * px_per_ms) + history_width,
-                width: v_end - v_start,
-                hitbox_range: (
-                    (start - timeline_start_ms) * px_per_ms + history_width,
-                    (end - timeline_start_ms) * px_per_ms + history_width,
-                ),
-                art_only: false,
-            });
+            if natural_end_x >= history_width + total_height {
+                let start_x = natural_start_x.max(history_width);
+                let end_x = natural_end_x.min(history_width + total_width);
+                track_renders.push(TrackRender {
+                    track,
+                    is_current: ms <= 0.0 && end_ms >= 0.0,
+                    seconds_until_start: (ms / 1000.0).abs(),
+                    start_x,
+                    width: end_x - start_x,
+                    hitbox_range: (natural_start_x, natural_end_x),
+                    art_only: false,
+                });
+            } else if natural_end_x >= history_width {
+                transition_t = (history_width + total_height - natural_end_x) / total_height;
+                track_renders.push(TrackRender {
+                    track,
+                    is_current: ms <= 0.0 && end_ms >= 0.0,
+                    seconds_until_start: (ms / 1000.0).abs(),
+                    start_x: natural_end_x - total_height,
+                    width: total_height,
+                    hitbox_range: (natural_start_x, natural_end_x),
+                    art_only: true,
+                });
+            } else {
+                compact_stack.push((track, ms, end_ms, natural_start_x, natural_end_x));
+            }
+            ms = end_ms + TRACK_SPACING_MS;
         }
 
-        // Sort out past tracks so they get a fixed width and stack
-        let mut current_px = 0.0;
-        let mut first_found = false;
-        let track_spacing = TRACK_SPACING_MS * px_per_ms;
-        for track_render in track_renders.iter_mut().rev() {
-            // If the end of the track (minus album width) is before the cropping zone
-            let distance_before =
-                history_width - (track_render.start_x + track_render.width - total_height);
-            if track_render.start_x + track_render.width - total_height <= history_width {
-                track_render.width = total_height;
-                track_render.start_x = current_px;
-                track_render.art_only = true;
-                current_px -= 30.0;
-                if !first_found {
-                    first_found = true;
-                    // Smooth out the snapping
-                    current_px = history_width
-                        - total_height
-                        - track_spacing
-                        - (distance_before - (total_height - track_spacing * 2.0)).clamp(0.0, 30.0);
-                }
-            } else {
-                // Set the start of the track, this will be the closest to the left track before they start being cropped
-                current_px = track_render.start_x - total_height - track_spacing;
-            }
+        for (slot, (track, start_ms, end_ms, natural_start_x, natural_end_x)) in
+            compact_stack.iter().rev().enumerate()
+        {
+            let right = history_width - (slot as f32 + transition_t) * compact_stride;
+            track_renders.push(TrackRender {
+                track,
+                is_current: *start_ms <= 0.0 && *end_ms >= 0.0,
+                seconds_until_start: (*start_ms / 1000.0).abs(),
+                start_x: right - total_height,
+                width: total_height,
+                hitbox_range: (*natural_start_x, *natural_end_x),
+                art_only: true,
+            });
         }
 
         // Screen uniforms
@@ -291,6 +307,8 @@ impl CantusApp {
         self.global_uniforms.expansion_time = interaction_inst
             .duration_since(self.start_time)
             .as_secs_f32();
+
+        track_renders.sort_unstable_by(|a, b| a.start_x.partial_cmp(&b.start_x).unwrap());
 
         // Render the tracks
         let mut current_track = None;
@@ -334,7 +352,6 @@ impl CantusApp {
 
         // Add hitbox
         let (hit_start, hit_end) = track_render.hitbox_range;
-        let full_width = hit_end - hit_start;
         self.interaction
             .track_hitboxes
             .push((track.id, hitbox, track_render.hitbox_range));
@@ -342,7 +359,7 @@ impl CantusApp {
         if self.interaction.dragging && track_render.is_current {
             self.interaction.drag_track = Some((
                 track.id,
-                (start_x + (origin_x - start_x).max(0.0) - hit_start) / full_width,
+                (origin_x.max(start_x) - hit_start) / (hit_end - hit_start),
             ));
         }
 
@@ -362,12 +379,7 @@ impl CantusApp {
             .unwrap_or_default();
         self.background_pills.push(BackgroundPill {
             rect: [start_x, width],
-            colors: track
-                .album
-                .id
-                .and_then(|id| ALBUM_PALETTE_CACHE.get(&id))
-                .and_then(|data_ref| data_ref.as_ref().copied())
-                .unwrap_or_default(),
+            colors: album_palette(track),
             alpha: fade_alpha,
             image_index,
         });
@@ -387,7 +399,7 @@ impl CantusApp {
                 && self.interaction.mouse_pressure > 0.0
                 && self.interaction.mouse_position.x >= hitbox.x0
                 && self.interaction.mouse_position.x <= hitbox.x1;
-            self.draw_playlist_buttons(track, hovered, playlists, width, start_x);
+            self.draw_playlist_buttons(track_render, hovered, playlists);
         }
     }
 
@@ -399,15 +411,10 @@ impl CantusApp {
         avg_speed: f32,
         volume: Option<u8>,
     ) {
-        let palette = track
-            .album
-            .id
-            .and_then(|id| ALBUM_PALETTE_CACHE.get(&id))
-            .and_then(|data_ref| data_ref.as_ref().copied())
-            .unwrap_or_default();
+        let palette = album_palette(track);
 
         // Emit new particles while playing
-        let mut emit_count = if avg_speed.abs() > 0.00001 {
+        let emit_count = if avg_speed.abs() > 0.00001 {
             self.particles_accumulator += dt * SPARK_EMISSION;
             let count = self.particles_accumulator.floor() as u8;
             self.particles_accumulator -= f32::from(count);
@@ -422,25 +429,27 @@ impl CantusApp {
         let horizontal_bias = (avg_speed.abs().powf(0.2) * spawn_offset * 0.5).clamp(-3.0, 3.0);
         let time = self.global_uniforms.time;
 
-        for particle in &mut self.particles {
-            if emit_count > 0 && time > particle.end_time {
-                let y_fraction = fastrand::f32();
+        for particle in self
+            .particles
+            .iter_mut()
+            .filter(|p| time > p.end_time)
+            .take(emit_count as usize)
+        {
+            let y_fraction = fastrand::f32();
 
-                particle.spawn_pos = [
-                    playhead_x,
-                    PANEL_START + CONFIG.height * (0.1 + (y_fraction * 0.85)), // Map to 0.1..0.95 range
-                ];
-                particle.spawn_vel = [
-                    fastrand::usize(SPARK_VELOCITY_X) as f32 * horizontal_bias,
-                    (y_fraction - 0.5) * 2.0 * SPARK_VELOCITY_Y,
-                ];
-                let duration = lerpf32(fastrand::f32(), SPARK_LIFETIME.start, SPARK_LIFETIME.end);
-                let packed_duration = (duration * 100.0).min(255.0) as u8;
-                let base_color = palette[fastrand::usize(0..palette.len())];
-                particle.color = (base_color & 0x00FF_FFFF) | (u32::from(packed_duration) << 24);
-                particle.end_time = time + duration;
-                emit_count -= 1;
-            }
+            particle.spawn_pos = [
+                playhead_x,
+                PANEL_START + CONFIG.height * (0.1 + (y_fraction * 0.85)), // Map to 0.1..0.95 range
+            ];
+            particle.spawn_vel = [
+                fastrand::usize(SPARK_VELOCITY_X) as f32 * horizontal_bias,
+                (y_fraction - 0.5) * 2.0 * SPARK_VELOCITY_Y,
+            ];
+            let duration = lerpf32(fastrand::f32(), SPARK_LIFETIME.start, SPARK_LIFETIME.end);
+            let packed_duration = (duration * 100.0).min(255.0) as u8;
+            let base_color = palette[fastrand::usize(0..palette.len())];
+            particle.color = (base_color & 0x00FF_FFFF) | (u32::from(packed_duration) << 24);
+            particle.end_time = time + duration;
         }
 
         // Playhead
@@ -475,12 +484,11 @@ impl CantusApp {
             }
         } else if !interaction.playing {
             pause_active = true;
-        } else if interaction.playing && last_toggle < 1.0 {
+        } else if last_toggle < 1.0 {
             self.playhead_info.play_lerp = last_toggle; // Hard set for the "start" animation
             play_active = true;
         }
 
-        // If active, move toward 0.5. If inactive, finish the animation to 1.0 then reset to 0.0.
         for (val, is_active) in [
             (&mut self.playhead_info.play_lerp, play_active),
             (&mut self.playhead_info.pause_lerp, pause_active),
@@ -537,22 +545,28 @@ fn extract_lab_pixels(img: &RgbaImage) -> (Vec<palette::Lab>, bool) {
     }
 }
 
-fn do_kmeans(pixels: &[palette::Lab]) -> Vec<palette::Lab> {
-    kmeans_colors::get_kmeans_hamerly(NUM_SWATCHES, 20, 5.0, false, pixels, 0).centroids
+fn load_image_pixels(url: &str) -> Option<(Vec<palette::Lab>, bool)> {
+    let img = IMAGES_CACHE.get(url)?.as_ref()?.clone();
+    Some(extract_lab_pixels(&img))
 }
 
-fn convert_to_swatches(centroids: &[palette::Lab]) -> Vec<[u8; 3]> {
-    centroids
+fn lab_pixels_to_palette(pixels: &[palette::Lab]) -> [u32; NUM_SWATCHES] {
+    kmeans_colors::get_kmeans_hamerly(NUM_SWATCHES, 20, 5.0, false, pixels, 0)
+        .centroids
         .iter()
+        .take(NUM_SWATCHES)
         .map(|c: &palette::Lab| {
             let rgb: palette::Srgb = (*c).into_color();
-            [
+            u32::from_le_bytes([
                 (rgb.red * 255.0) as u8,
                 (rgb.green * 255.0) as u8,
                 (rgb.blue * 255.0) as u8,
-            ]
+                255,
+            ])
         })
-        .collect()
+        .collect::<Vec<_>>()
+        .try_into()
+        .unwrap_or([0; NUM_SWATCHES])
 }
 
 /// Gathers the 4 primary colours for each album image.
@@ -563,43 +577,32 @@ pub fn update_color_palettes() {
         if ALBUM_PALETTE_CACHE.contains_key(&album_id) {
             continue;
         }
-
-        let Some(image_ref) = track.album.image.as_ref().and_then(|p| IMAGES_CACHE.get(p)) else {
-            continue;
-        };
-        let Some(album_image) = image_ref.as_ref() else {
+        let Some((pixels, is_colourful)) = track
+            .album
+            .image
+            .as_ref()
+            .and_then(|u| load_image_pixels(u))
+        else {
             continue;
         };
         ALBUM_PALETTE_CACHE.insert(album_id, None);
 
-        let (album_pixels, album_is_colourful) = extract_lab_pixels(album_image);
-        let mut result = do_kmeans(&album_pixels);
-
-        if !album_is_colourful {
-            let artist_img = ARTIST_DATA_CACHE
+        let pixels = if is_colourful {
+            pixels
+        } else {
+            let Some(url) = ARTIST_DATA_CACHE
                 .get(&artist_id)
                 .and_then(|e| e.value().clone())
-                .and_then(|url| IMAGES_CACHE.get(&url))
-                .and_then(|img| img.as_ref().cloned());
-
-            if let Some(img) = artist_img {
-                let (artist_pixels, artist_is_colourful) = extract_lab_pixels(&img);
-                if artist_is_colourful {
-                    result = do_kmeans(&artist_pixels);
-                }
-            } else {
+            else {
                 ALBUM_PALETTE_CACHE.remove(&album_id);
                 continue;
+            };
+            match load_image_pixels(&url) {
+                Some((p, true)) => p,
+                _ => pixels,
             }
-        }
+        };
 
-        let primary_colors: [u32; 4] = convert_to_swatches(&result)
-            .iter()
-            .take(4)
-            .map(|c| u32::from_le_bytes([c[0], c[1], c[2], 255]))
-            .collect::<Vec<_>>()
-            .try_into()
-            .unwrap_or_default();
-        ALBUM_PALETTE_CACHE.insert(album_id, Some(primary_colors));
+        ALBUM_PALETTE_CACHE.insert(album_id, Some(lab_pixels_to_palette(&pixels)));
     }
 }

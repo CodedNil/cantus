@@ -227,22 +227,26 @@ impl CantusApp {
             return;
         }
 
-        self.background_pills.clear();
         self.icon_pills.clear();
 
         // Reset image usage
-        if let Some(gpu) = self.gpu_resources.as_mut() {
-            for (_, used) in gpu.url_to_image_index.values_mut() {
-                *used = false;
-            }
+        for (_, used) in self
+            .gpu_resources
+            .as_mut()
+            .unwrap()
+            .url_to_image_index
+            .values_mut()
+        {
+            *used = false;
         }
 
         self.create_scene();
 
-        // Prune unused images
-        if let Some(gpu) = self.gpu_resources.as_mut() {
-            gpu.url_to_image_index.retain(|_, (_, used)| *used);
-        }
+        self.gpu_resources
+            .as_mut()
+            .unwrap()
+            .url_to_image_index
+            .retain(|_, (_, used)| *used);
 
         // Write the buffers
         let gpu = self.gpu_resources.as_mut().unwrap();
@@ -411,5 +415,8 @@ where
     D: Deserializer<'de>,
 {
     let artists: Vec<Artist> = Vec::deserialize(deserializer)?;
-    Ok(artists.into_iter().next().unwrap())
+    artists
+        .into_iter()
+        .next()
+        .ok_or_else(|| serde::de::Error::custom("artists array is empty"))
 }

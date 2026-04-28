@@ -1,7 +1,7 @@
 use crate::{
-    CantusApp, CondensedPlaylist, PANEL_START, PLAYBACK_STATE, PlaylistId, Track, TrackId,
+    CantusApp, CondensedPlaylist, PANEL_START, PLAYBACK_STATE, PlaylistId, TrackId,
     config::CONFIG,
-    render::{IconInstance, Point, Rect, lerpf32},
+    render::{IconInstance, Point, Rect, TrackRender, lerpf32},
     update_playback_state,
 };
 use itertools::Itertools;
@@ -123,19 +123,20 @@ impl CantusApp {
         {
             // Spawn particles
             let time = self.start_time.elapsed().as_secs_f32();
-            let mut emit_count = 20;
-            for particle in &mut self.particles {
-                if emit_count > 0 && time > particle.end_time {
-                    particle.spawn_pos = [mouse_pos.x, mouse_pos.y];
-                    let angle = fastrand::f32() * 2.0 * std::f32::consts::PI;
-                    let speed = 30.0 + (fastrand::f32() * 20.0);
-                    particle.spawn_vel = [angle.cos() * speed, angle.sin() * speed];
-                    let duration = lerpf32(fastrand::f32(), 0.5, 1.5);
-                    particle.color =
-                        u32::from_le_bytes([255, 215, 50, (duration * 100.0).min(255.0) as u8]);
-                    particle.end_time = time + duration;
-                    emit_count -= 1;
-                }
+            for particle in self
+                .particles
+                .iter_mut()
+                .filter(|p| time > p.end_time)
+                .take(20)
+            {
+                particle.spawn_pos = [mouse_pos.x, mouse_pos.y];
+                let angle = fastrand::f32() * 2.0 * std::f32::consts::PI;
+                let speed = 30.0 + (fastrand::f32() * 20.0);
+                particle.spawn_vel = [angle.cos() * speed, angle.sin() * speed];
+                let duration = lerpf32(fastrand::f32(), 0.5, 1.5);
+                particle.color =
+                    u32::from_le_bytes([255, 215, 50, (duration * 100.0).min(255.0) as u8]);
+                particle.end_time = time + duration;
             }
 
             let track_id = hitbox.track_id;
@@ -239,16 +240,29 @@ enum IconEntry<'a> {
     },
 }
 
+impl IconEntry<'_> {
+    const fn is_visible(&self) -> bool {
+        !matches!(
+            self,
+            Self::Playlist {
+                contained: false,
+                ..
+            }
+        )
+    }
+}
+
 impl CantusApp {
     /// Star ratings and favourite playlists
     pub fn draw_playlist_buttons(
         &mut self,
-        track: &Track,
+        track_render: &TrackRender,
         hovered: bool,
         playlists: &HashMap<PlaylistId, CondensedPlaylist>,
-        width: f32,
-        pos_x: f32,
     ) {
+        let track = track_render.track;
+        let width = track_render.width;
+        let pos_x = track_render.start_x;
         let Some(track_id) = track.id else { return };
         let (track_rating_index, mut icon_entries) = if CONFIG.ratings_enabled {
             let index = playlists
@@ -286,13 +300,7 @@ impl CantusApp {
 
         if width < icon_size * icon_entries.len() as f32 {
             // Strip out all playlists that arent contained
-            icon_entries.retain(|entry| {
-                if let IconEntry::Playlist { contained, .. } = entry {
-                    *contained
-                } else {
-                    true
-                }
-            });
+            icon_entries.retain(IconEntry::is_visible);
         }
 
         let num_icons = icon_entries.len();
@@ -310,17 +318,7 @@ impl CantusApp {
         let center_y = PANEL_START + CONFIG.height * 0.975;
 
         // Count only the standard icons for spacing
-        let half_icons = icon_entries
-            .iter()
-            .filter(|entry| {
-                if let IconEntry::Playlist { contained, .. } = entry {
-                    *contained
-                } else {
-                    true
-                }
-            })
-            .count() as f32
-            / 2.0;
+        let half_icons = icon_entries.iter().filter(|e| e.is_visible()).count() as f32 / 2.0;
 
         let mut hover_rating_index = None;
         let mut icon_data = Vec::with_capacity(num_icons);
@@ -387,10 +385,7 @@ impl CantusApp {
                                 0.51
                             } * 65535.0) as u32
                         }
-                        IconEntry::Playlist {
-                            playlist: _playlist,
-                            contained,
-                        } => {
+                        IconEntry::Playlist { contained, .. } => {
                             if !contained && !is_hovered {
                                 (65535.0 * 0.2) as u32
                             } else {
@@ -405,7 +400,7 @@ impl CantusApp {
                                 image_url: Some(url),
                                 ..
                             },
-                        contained: _contained,
+                        ..
                     } => self.get_image_index(url),
                     _ => 0,
                 },
@@ -417,7 +412,7 @@ impl CantusApp {
 
 /// Skip to the specified track in the queue.
 fn skip_to_track(track_id: TrackId, position: f32, always_seek: bool) {
-    let (queue_index, position_in_queue, ms_lookup) = {
+    let (queue_index, position_in_queue, song_ms) = {
         let state = PLAYBACK_STATE.read();
         let queue_index = state.queue_index;
         let Some(position_in_queue) = state.queue.iter().position(|t| t.id == Some(track_id))
@@ -425,13 +420,9 @@ fn skip_to_track(track_id: TrackId, position: f32, always_seek: bool) {
             error!("Track not found in queue");
             return;
         };
-        let ms_lookup = state
-            .queue
-            .iter()
-            .map(|playlist| playlist.duration_ms)
-            .collect::<Vec<_>>();
+        let song_ms = state.queue[position_in_queue].duration_ms;
         drop(state);
-        (queue_index, position_in_queue, ms_lookup)
+        (queue_index, position_in_queue, song_ms)
     };
     // Skip or rewind to the track
     if queue_index != position_in_queue {
@@ -467,7 +458,6 @@ fn skip_to_track(track_id: TrackId, position: f32, always_seek: bool) {
     }
     // Seek to the position
     if queue_index == position_in_queue || always_seek {
-        let song_ms = ms_lookup[position_in_queue];
         let milliseconds = if position < 0.05 {
             0.0
         } else {
@@ -484,14 +474,12 @@ fn skip_to_track(track_id: TrackId, position: f32, always_seek: bool) {
         });
 
         #[cfg(feature = "spotify")]
-        {
-            // https://developer.spotify.com/documentation/web-api/reference/#/operations/seek-to-position-in-currently-playing-track
-            if let Err(err) = crate::spotify::SPOTIFY_CLIENT.api_put(&format!(
-                "me/player/seek?position_ms={}",
-                milliseconds.round()
-            )) {
-                error!("Failed to seek track: {err}");
-            }
+        // https://developer.spotify.com/documentation/web-api/reference/#/operations/seek-to-position-in-currently-playing-track
+        if let Err(err) = crate::spotify::SPOTIFY_CLIENT.api_put(&format!(
+            "me/player/seek?position_ms={}",
+            milliseconds.round()
+        )) {
+            error!("Failed to seek track: {err}");
         }
     }
 }
@@ -585,23 +573,18 @@ fn update_star_rating(track_id: &TrackId, rating_slot: u8) {
     }
 }
 
-/// Toggle Spotify playlist membership for the given track.
 fn toggle_playlist_membership(track_id: &TrackId, playlist_id: &PlaylistId) {
-    let Some((playlist_id, playlist_name, contained)) = PLAYBACK_STATE
-        .read()
-        .playlists
-        .iter()
-        .find(|(_, p)| &p.id == playlist_id)
-        .map(|(key, playlist)| {
-            (
-                *key,
-                playlist.name.clone(),
-                playlist.tracks.contains(track_id),
-            )
-        })
-    else {
-        warn!("Playlist {playlist_id} not found while toggling membership for track {track_id}");
-        return;
+    let (playlist_name, contained) = {
+        let state = PLAYBACK_STATE.read();
+        let Some(playlist) = state.playlists.get(playlist_id) else {
+            warn!(
+                "Playlist {playlist_id} not found while toggling membership for track {track_id}"
+            );
+            return;
+        };
+        let result = (playlist.name.clone(), playlist.tracks.contains(track_id));
+        drop(state);
+        result
     };
 
     info!(
@@ -611,7 +594,7 @@ fn toggle_playlist_membership(track_id: &TrackId, playlist_id: &PlaylistId) {
     );
 
     update_playback_state(|state| {
-        let playlist_tracks = &mut state.playlists.get_mut(&playlist_id).unwrap().tracks;
+        let playlist_tracks = &mut state.playlists.get_mut(playlist_id).unwrap().tracks;
         if contained {
             playlist_tracks.remove(track_id);
         } else {
@@ -672,12 +655,10 @@ fn set_volume(volume_percent: u8) {
     info!("Setting volume to {}%", volume_percent);
 
     #[cfg(feature = "spotify")]
+    // https://developer.spotify.com/documentation/web-api/reference/#/operations/set-volume-for-users-playback
+    if let Err(err) = crate::spotify::SPOTIFY_CLIENT
+        .api_put(&format!("me/player/volume?volume_percent={volume_percent}"))
     {
-        // https://developer.spotify.com/documentation/web-api/reference/#/operations/set-volume-for-users-playback
-        if let Err(err) = crate::spotify::SPOTIFY_CLIENT
-            .api_put(&format!("me/player/volume?volume_percent={volume_percent}"))
-        {
-            error!("Failed to set volume: {err}");
-        }
+        error!("Failed to set volume: {err}");
     }
 }

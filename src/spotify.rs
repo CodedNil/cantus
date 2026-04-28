@@ -18,6 +18,7 @@ use std::{
     thread::{sleep, spawn},
     time::{Duration, Instant},
 };
+use tap::{Pipe, Tap};
 use thiserror::Error;
 use time::{Duration as TimeDuration, OffsetDateTime};
 use tracing::{error, info, warn};
@@ -162,7 +163,7 @@ fn prompt_for_token(
     }
 
     let listener = TcpListener::bind((REDIRECT_HOST, REDIRECT_PORT)).unwrap();
-    let mut stream = listener.incoming().flatten().next().unwrap();
+    let (mut stream, _) = listener.accept().unwrap();
     let mut request_line = String::new();
     BufReader::new(&stream)
         .read_line(&mut request_line)
@@ -203,9 +204,9 @@ fn prompt_for_token(
         .into_body()
         .read_to_string()
         .unwrap();
-    let mut token = serde_json::from_str::<Token>(&response).unwrap();
-    token.set_expiration();
-    token
+    serde_json::from_str::<Token>(&response)
+        .unwrap()
+        .tap_mut(Token::set_expiration)
 }
 
 impl SpotifyClient {
@@ -303,10 +304,10 @@ impl SpotifyClient {
             ])?
             .into_body()
             .read_to_string()?;
-        let mut token = serde_json::from_str::<Token>(&response)?;
-        info!("Refetched token: {}", token.expires_in);
-        token.set_expiration();
-        Ok(token)
+        serde_json::from_str::<Token>(&response)?
+            .tap(|t| info!("Refetched token: {}", t.expires_in))
+            .tap_mut(Token::set_expiration)
+            .pipe(Ok)
     }
 
     pub fn new(client_id: String, scopes: &HashSet<String>, cache_path: PathBuf) -> Self {
@@ -338,9 +339,11 @@ fn get_authorize_url(
         b"abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789-._~",
     );
 
-    let mut hasher = Sha256::new();
-    hasher.update(verifier.as_bytes());
-    let challenge = URL_SAFE_NO_PAD.encode(hasher.finalize());
+    let challenge = URL_SAFE_NO_PAD.encode(
+        Sha256::new()
+            .tap_mut(|h| h.update(verifier.as_bytes()))
+            .finalize(),
+    );
 
     let parsed = Url::parse_with_params(
         "https://accounts.spotify.com/authorize",
@@ -484,7 +487,7 @@ fn load_cached_playlist_tracks() -> PlaylistCache {
         .ok()
         .and_then(|b| {
             serde_json::from_slice(&b)
-                .map_err(|e| warn!("Failed to parse playlist cache: {e}"))
+                .inspect_err(|e| warn!("Failed to parse playlist cache: {e}"))
                 .ok()
         })
         .unwrap_or_default()
@@ -495,7 +498,7 @@ fn persist_playlist_cache() {
         .read()
         .playlists
         .values()
-        .map(|p| (p.id, (p.snapshot_id, p.tracks.iter().copied().collect())))
+        .map(|p| (p.id, (p.snapshot_id, p.tracks.clone())))
         .collect();
     if !cache_payload.is_empty() {
         let path = dirs::config_dir()
@@ -533,16 +536,16 @@ fn get_spotify_playback() {
     }
 
     // https://developer.spotify.com/documentation/web-api/reference/get-information-about-the-users-current-playback
-    let current_playback_opt = SPOTIFY_CLIENT
+    let Some(current_playback) = SPOTIFY_CLIENT
         .api_get("me/player")
         .ok()
         .filter(|res| !res.is_empty())
         .and_then(|res| {
             serde_json::from_str::<CurrentPlaybackContext>(&res)
-                .map_err(|e| error!("Failed to parse playback: {e}"))
+                .inspect_err(|e| error!("Failed to parse playback: {e}"))
                 .ok()
-        });
-    let Some(current_playback) = current_playback_opt else {
+        })
+    else {
         return;
     };
 
@@ -617,20 +620,16 @@ fn get_spotify_queue() {
             && missing_artists.insert(artist_id)
         {
             spawn(move || {
-                let artist: Artist = match serde_json::from_str(&match SPOTIFY_CLIENT
+                let Ok(res) = SPOTIFY_CLIENT
                     .api_get(&format!("artists/{artist_id}"))
-                {
-                    Ok(res) => res,
-                    Err(e) => {
-                        error!("Failed to fetch artist {artist_id}: {e}");
-                        return;
-                    }
-                }) {
-                    Ok(data) => data,
-                    Err(err) => {
-                        error!("Deserialization error for artist {artist_id}: {err:?}");
-                        return;
-                    }
+                    .inspect_err(|e| error!("Failed to fetch artist {artist_id}: {e}"))
+                else {
+                    return;
+                };
+                let Ok(artist) = serde_json::from_str::<Artist>(&res).inspect_err(|err| {
+                    error!("Deserialization error for artist {artist_id}: {err:?}");
+                }) else {
+                    return;
                 };
                 if let Some(actual_id) = artist.id {
                     ARTIST_DATA_CACHE.insert(actual_id, artist.image.clone());
@@ -753,7 +752,7 @@ fn poll_playlists() {
                 let mut playlist_track_ids = HashSet::new();
                 for page in 0..num_pages {
                     // https://developer.spotify.com/documentation/web-api/reference/get-playlists-items
-                    let page_data = SPOTIFY_CLIENT
+                    let Some(page_data) = SPOTIFY_CLIENT
                         .api_get_payload(
                             &format!("playlists/{}/items", playlist.id),
                             &[
@@ -768,16 +767,14 @@ fn poll_playlists() {
                         .ok()
                         .and_then(|res| {
                             serde_json::from_str::<Page<PlaylistItem>>(&res)
-                                .map_err(|e| error!("Failed to parse playlist page: {e}"))
+                                .inspect_err(|e| error!("Failed to parse playlist page: {e}"))
                                 .ok()
-                        });
-
-                    if let Some(page) = page_data {
-                        total = page.total;
-                        playlist_track_ids.extend(page.items.iter().map(|item| item.track.id));
-                    } else {
+                        })
+                    else {
                         return;
-                    }
+                    };
+                    total = page_data.total;
+                    playlist_track_ids.extend(page_data.items.iter().map(|item| item.track.id));
                 }
 
                 update_playback_state(|state| {

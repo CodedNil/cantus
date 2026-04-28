@@ -53,19 +53,17 @@ impl TextRenderer {
                 });
             };
 
-        let song_name = track
+        let short = track
             .name
-            .split(" -")
-            .next()
-            .unwrap_or(&track.name)
-            .split('(')
-            .next()
-            .unwrap_or("")
+            .split_once(" -")
+            .map_or(track.name.as_str(), |(s, _)| s)
+            .split_once('(')
+            .map_or("", |(s, _)| s)
             .trim();
-        let song_name = if song_name.is_empty() {
+        let song_name = if short.is_empty() {
             track.name.trim()
         } else {
-            song_name
+            short
         };
 
         let top_y = PANEL_START + (CONFIG.height * 0.26).floor();
@@ -120,15 +118,10 @@ impl TextRenderer {
 
         let bottom_ratio = available_width / measured_bottom_width;
         if bottom_ratio <= 1.0 || !track_render.is_current {
-            let align = if bottom_ratio >= 1.0 {
-                HorizontalAlign::Right
+            let (x, align) = if bottom_ratio >= 1.0 {
+                (text_start_right, HorizontalAlign::Right)
             } else {
-                HorizontalAlign::Left
-            };
-            let x = if bottom_ratio >= 1.0 {
-                text_start_right
-            } else {
-                text_start_left
+                (text_start_left, HorizontalAlign::Left)
             };
             queue_text(
                 bottom_merged,
