@@ -298,13 +298,8 @@ impl CantusApp {
         let icon_size = 20.0;
         let mouse_pos = self.interaction.mouse_position;
 
-        if width < icon_size * icon_entries.len() as f32 {
-            // Strip out all playlists that arent contained
-            icon_entries.retain(IconEntry::is_visible);
-        }
-
         let num_icons = icon_entries.len();
-        let needed_width = icon_size * num_icons as f32;
+        let needed_width = icon_size * num_icons as f32 * 0.7;
         if num_icons == 0 {
             return;
         }
@@ -312,7 +307,7 @@ impl CantusApp {
         let fade_alpha = if hovered {
             1.0
         } else {
-            ((width - needed_width) / (needed_width * 0.25)).clamp(0.0, 1.0)
+            ((width - needed_width) / (needed_width * 0.5)).clamp(0.0, 1.0)
         };
         let center_x = pos_x + width * 0.5;
         let center_y = PANEL_START + CONFIG.height * 0.975;
