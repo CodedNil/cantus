@@ -459,7 +459,21 @@ pub enum ClientError {
 
 impl From<ureq::Error> for ClientError {
     fn from(err: ureq::Error) -> Self {
-        Self::Http(err.to_string())
+        match &err {
+            ureq::Error::StatusCode(code) => {
+                let hint = match *code {
+                    401 => " - check that your Spotify token is still valid",
+                    403 => " - you may not have permission for this resource",
+                    404 => {
+                        " - make sure a Spotify device is active (start playback on a client first)"
+                    }
+                    429 => " - rate limited, try again later",
+                    _ => "",
+                };
+                Self::Http(format!("Spotify API returned HTTP {code}{hint}"))
+            }
+            _ => Self::Http(err.to_string()),
+        }
     }
 }
 
@@ -665,7 +679,7 @@ fn get_spotify_queue() {
         return;
     };
     let Some(currently_playing) = q.currently_playing else {
-        error!("Failed to get queue data: Nothing is currently playing");
+        // Nothing is currently playing
         return;
     };
     let current_track_id = currently_playing.id;

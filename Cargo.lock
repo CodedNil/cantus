@@ -172,7 +172,7 @@ checksum = "1e748733b7cbc798e1434b6ac524f0c1ff2ab456fe201501e6497c8417a4fc33"
 
 [[package]]
 name = "cantus"
-version = "0.6.7"
+version = "0.6.8"
 dependencies = [
  "arrayvec",
  "base64",
