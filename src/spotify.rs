@@ -1,6 +1,6 @@
 use crate::{
-    ARTIST_DATA_CACHE, Artist, CondensedPlaylist, IMAGES_CACHE, PLAYBACK_STATE, PlaylistId, Track,
-    TrackId, config::CONFIG, deserialize_images, render::update_color_palettes,
+    ARTIST_DATA_CACHE, Artist, ArtistId, CondensedPlaylist, IMAGES_CACHE, PLAYBACK_STATE,
+    PlaylistId, Track, TrackId, config::CONFIG, deserialize_images, render::update_color_palettes,
     update_playback_state,
 };
 use arrayvec::ArrayString;
@@ -13,7 +13,7 @@ use std::{
     fs,
     io::{BufRead, BufReader, Write},
     net::TcpListener,
-    path::PathBuf,
+    path::{Path, PathBuf},
     sync::{Arc, LazyLock},
     thread::{sleep, spawn},
     time::{Duration, Instant},
@@ -24,6 +24,11 @@ use time::{Duration as TimeDuration, OffsetDateTime};
 use tracing::{error, info, warn};
 use ureq::Agent;
 use url::Url;
+
+const API_BASE: &str = "https://api.spotify.com/v1";
+const TOKEN_URL: &str = "https://accounts.spotify.com/api/token";
+const PLAYLIST_TRACKS_CACHE: &str = "cantus_playlist_tracks.json";
+const SPOTIFY_TOKEN_CACHE: &str = "spotify_cache.json";
 
 struct SpotifyState {
     current_context: Option<String>,
@@ -57,7 +62,7 @@ pub struct SpotifyClient {
 
 #[derive(Deserialize)]
 struct PartialTrack {
-    id: TrackId,
+    id: Option<TrackId>,
 }
 
 #[derive(Deserialize)]
@@ -102,7 +107,7 @@ struct Device {
     volume_percent: Option<u32>,
 }
 
-#[derive(Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 struct Token {
     #[serde(rename = "access_token")]
     access: String,
@@ -111,6 +116,7 @@ struct Token {
     #[serde(rename = "refresh_token")]
     refresh: Option<String>,
     #[serde(
+        default,
         serialize_with = "serialize_scopes",
         deserialize_with = "deserialize_scopes",
         rename = "scope"
@@ -133,28 +139,26 @@ impl Token {
 
 fn read_token_cache(
     allow_expired: bool,
-    cache_path: &PathBuf,
+    cache_path: &Path,
     scopes: &HashSet<String>,
-) -> Result<Option<Token>, std::io::Error> {
-    let token: Token = serde_json::from_str(&fs::read_to_string(cache_path)?)?;
-    if !scopes.is_subset(&token.scopes) || (!allow_expired && token.is_expired()) {
-        Ok(None)
-    } else {
-        Ok(Some(token))
-    }
+) -> ClientResult<Option<Token>> {
+    let token = match fs::read_to_string(cache_path) {
+        Ok(cache) => serde_json::from_str::<Token>(&cache)
+            .inspect_err(|err| warn!("Failed to parse Spotify token cache: {err}"))
+            .ok(),
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => None,
+        Err(err) => return Err(err.into()),
+    };
+    Ok(token.filter(|t| scopes.is_subset(&t.scopes) && (allow_expired || !t.is_expired())))
 }
 
 fn prompt_for_token(
     url: &str,
-    cache_path: &PathBuf,
-    scopes: &HashSet<String>,
     client_id: &str,
     verifier: &str,
     http: &Agent,
-) -> Token {
-    if let Ok(Some(cached)) = read_token_cache(true, cache_path, scopes) {
-        return cached;
-    }
+    expected_state: &str,
+) -> ClientResult<Token> {
     match webbrowser::open(url) {
         Ok(()) => println!("Opened {url} in your browser."),
         Err(err) => eprintln!(
@@ -162,22 +166,31 @@ fn prompt_for_token(
         ),
     }
 
-    let listener = TcpListener::bind((REDIRECT_HOST, REDIRECT_PORT)).unwrap();
-    let (mut stream, _) = listener.accept().unwrap();
+    let listener = TcpListener::bind((REDIRECT_HOST, REDIRECT_PORT))?;
+    let (mut stream, _) = listener.accept()?;
     let mut request_line = String::new();
-    BufReader::new(&stream)
-        .read_line(&mut request_line)
-        .unwrap();
+    BufReader::new(&stream).read_line(&mut request_line)?;
 
-    let code = Url::parse(&format!(
+    let auth_response = Url::parse(&format!(
         "http://{REDIRECT_HOST}:{REDIRECT_PORT}/callback{}",
-        request_line.split_whitespace().nth(1).unwrap()
-    ))
-    .unwrap()
-    .query_pairs()
-    .find(|(key, _)| key == "code")
-    .map(|(_, value)| value.into_owned())
-    .unwrap();
+        request_line
+            .split_whitespace()
+            .nth(1)
+            .ok_or(ClientError::InvalidAuthorizationResponse)?
+    ))?;
+    let code = auth_response
+        .query_pairs()
+        .find(|(key, _)| key == "code")
+        .map(|(_, value)| value.into_owned())
+        .ok_or(ClientError::InvalidAuthorizationResponse)?;
+    let actual_state = auth_response
+        .query_pairs()
+        .find(|(key, _)| key == "state")
+        .map(|(_, value)| value.into_owned())
+        .ok_or(ClientError::InvalidAuthorizationResponse)?;
+    if actual_state != expected_state {
+        return Err(ClientError::InvalidAuthorizationState);
+    }
 
     let message = "Cantus connected successfully, this tab can be closed.";
     write!(
@@ -185,11 +198,10 @@ fn prompt_for_token(
         "HTTP/1.1 200 OK\r\ncontent-length: {}\r\n\r\n{}",
         message.len(),
         message
-    )
-    .unwrap();
+    )?;
 
     let response = http
-        .post("https://accounts.spotify.com/api/token")
+        .post(TOKEN_URL)
         .send_form([
             ("grant_type", "authorization_code"),
             ("code", &code),
@@ -199,30 +211,63 @@ fn prompt_for_token(
             ),
             ("client_id", client_id),
             ("code_verifier", verifier),
-        ])
-        .unwrap()
+        ])?
         .into_body()
-        .read_to_string()
-        .unwrap();
-    serde_json::from_str::<Token>(&response)
-        .unwrap()
+        .read_to_string()?;
+    serde_json::from_str::<Token>(&response)?
         .tap_mut(Token::set_expiration)
+        .pipe(Ok)
 }
 
 impl SpotifyClient {
     fn auth_headers(&self) -> ClientResult<String> {
-        if self.token.read().is_expired() {
-            let token = self.refetch_token()?;
-            *self.token.write() = token;
-            self.write_token_cache();
+        let cached_access = {
+            let token = self.token.read();
+            (!token.is_expired()).then(|| token.access.clone())
+        };
+        if let Some(access) = cached_access {
+            return Ok(format!("Bearer {access}"));
         }
-        Ok(format!("Bearer {}", self.token.read().access))
+
+        let access = {
+            let mut token = self.token.write();
+            if token.is_expired() {
+                *token = self.refetch_token(&token)?;
+                self.write_token_cache(&token)?;
+            }
+            token.access.clone()
+        };
+        Ok(format!("Bearer {access}"))
+    }
+
+    fn api_url(path: &str) -> String {
+        format!("{API_BASE}/{path}")
+    }
+
+    fn api_json<T: DeserializeOwned>(&self, url: &str, label: &str) -> Option<T> {
+        self.api_get(url)
+            .inspect_err(|e| error!("Failed to fetch {label}: {e}"))
+            .ok()
+            .filter(|res| !res.is_empty())
+            .and_then(|res| parse_json(&res, label))
+    }
+
+    fn api_json_payload<T: DeserializeOwned>(
+        &self,
+        url: &str,
+        payload: &[(&str, &str)],
+        label: &str,
+    ) -> Option<T> {
+        self.api_get_payload(url, payload)
+            .inspect_err(|e| error!("Failed to fetch {label}: {e}"))
+            .ok()
+            .and_then(|res| parse_json(&res, label))
     }
 
     pub fn api_get(&self, url: &str) -> ClientResult<String> {
         let response = self
             .http
-            .get(format!("https://api.spotify.com/v1/{url}"))
+            .get(Self::api_url(url))
             .header("authorization", self.auth_headers()?)
             .call()?;
         Ok(response.into_body().read_to_string()?)
@@ -231,7 +276,7 @@ impl SpotifyClient {
     pub fn api_get_payload(&self, url: &str, payload: &[(&str, &str)]) -> ClientResult<String> {
         let response = self
             .http
-            .get(format!("https://api.spotify.com/v1/{url}"))
+            .get(Self::api_url(url))
             .header("authorization", self.auth_headers()?)
             .query_pairs(payload.iter().copied())
             .call()?;
@@ -248,7 +293,7 @@ impl SpotifyClient {
 
     pub fn api_post_payload(&self, url: &str, payload: &str) -> ClientResult<()> {
         self.http
-            .post(format!("https://api.spotify.com/v1/{url}"))
+            .post(Self::api_url(url))
             .header("Content-Type", "application/json; charset=utf-8")
             .header("authorization", self.auth_headers()?)
             .send(payload)?;
@@ -265,7 +310,7 @@ impl SpotifyClient {
 
     pub fn api_delete(&self, url: &str) -> ClientResult<()> {
         self.http
-            .delete(format!("https://api.spotify.com/v1/{url}"))
+            .delete(Self::api_url(url))
             .header("authorization", self.auth_headers()?)
             .call()?;
         Ok(())
@@ -273,7 +318,7 @@ impl SpotifyClient {
 
     pub fn api_delete_payload(&self, url: &str, payload: &str) -> ClientResult<()> {
         self.http
-            .delete(format!("https://api.spotify.com/v1/{url}"))
+            .delete(Self::api_url(url))
             .header("Content-Type", "application/json; charset=utf-8")
             .header("authorization", self.auth_headers()?)
             .force_send_body()
@@ -281,22 +326,22 @@ impl SpotifyClient {
         Ok(())
     }
 
-    fn write_token_cache(&self) {
-        fs::write(
-            &self.cache_path,
-            serde_json::to_string(&*self.token.read()).unwrap(),
-        )
-        .unwrap();
+    fn write_token_cache(&self, token: &Token) -> ClientResult<()> {
+        if let Some(parent) = self.cache_path.parent() {
+            fs::create_dir_all(parent)?;
+        }
+        fs::write(&self.cache_path, serde_json::to_string(token)?)?;
+        Ok(())
     }
 
-    fn refetch_token(&self) -> ClientResult<Token> {
-        let Some(refresh_token) = &self.token.read().refresh else {
+    fn refetch_token(&self, current: &Token) -> ClientResult<Token> {
+        let Some(refresh_token) = &current.refresh else {
             warn!("No refresh token available");
             return Err(ClientError::InvalidToken);
         };
         let response = self
             .http
-            .post("https://accounts.spotify.com/api/token")
+            .post(TOKEN_URL)
             .send_form([
                 ("grant_type", "refresh_token"),
                 ("refresh_token", refresh_token),
@@ -304,28 +349,42 @@ impl SpotifyClient {
             ])?
             .into_body()
             .read_to_string()?;
-        serde_json::from_str::<Token>(&response)?
+        let mut token = serde_json::from_str::<Token>(&response)?;
+        if token.refresh.is_none() {
+            token.refresh.clone_from(&current.refresh);
+        }
+        if token.scopes.is_empty() {
+            token.scopes.clone_from(&current.scopes);
+        }
+        token
             .tap(|t| info!("Refetched token: {}", t.expires_in))
             .tap_mut(Token::set_expiration)
             .pipe(Ok)
     }
 
-    pub fn new(client_id: String, scopes: &HashSet<String>, cache_path: PathBuf) -> Self {
+    pub fn new(
+        client_id: String,
+        scopes: &HashSet<String>,
+        cache_path: PathBuf,
+    ) -> ClientResult<Self> {
         let state = generate_random_string(
             16,
             b"abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789",
         );
-        let (verifier, url) = get_authorize_url(&client_id, scopes, &state).unwrap();
+        let (verifier, url) = get_authorize_url(&client_id, scopes, &state)?;
         let agent = Agent::new_with_defaults();
-        let token = prompt_for_token(&url, &cache_path, scopes, &client_id, &verifier, &agent);
+        let token = match read_token_cache(true, &cache_path, scopes)? {
+            Some(token) => token,
+            None => prompt_for_token(&url, &client_id, &verifier, &agent, &state)?,
+        };
         let spotify_client = Self {
             client_id,
             cache_path,
             token: RwLock::new(token),
             http: agent,
         };
-        spotify_client.write_token_cache();
-        spotify_client
+        spotify_client.write_token_cache(&spotify_client.token.read())?;
+        Ok(spotify_client)
     }
 }
 
@@ -388,8 +447,14 @@ pub enum ClientError {
     Http(String),
     #[error("input/output error: {0}")]
     Io(#[from] std::io::Error),
+    #[error("image decode error: {0}")]
+    Image(#[from] image::ImageError),
     #[error("Token is not valid")]
     InvalidToken,
+    #[error("Spotify authorization response was invalid")]
+    InvalidAuthorizationResponse,
+    #[error("Spotify authorization state did not match the original request")]
+    InvalidAuthorizationState,
 }
 
 impl From<ureq::Error> for ClientError {
@@ -399,6 +464,16 @@ impl From<ureq::Error> for ClientError {
 }
 
 type ClientResult<T> = Result<T, ClientError>;
+
+fn config_path(file: &str) -> PathBuf {
+    dirs::config_dir().unwrap().join("cantus").join(file)
+}
+
+fn parse_json<T: DeserializeOwned>(input: &str, label: &str) -> Option<T> {
+    serde_json::from_str(input)
+        .inspect_err(|e| error!("Failed to parse {label}: {e}"))
+        .ok()
+}
 
 fn deserialize_scopes<'de, D>(d: D) -> Result<HashSet<String>, D::Error>
 where
@@ -412,7 +487,9 @@ fn serialize_scopes<S>(scopes: &HashSet<String>, s: S) -> Result<S::Ok, S::Error
 where
     S: Serializer,
 {
-    s.serialize_str(&scopes.iter().cloned().collect::<Vec<_>>().join(" "))
+    let mut scopes = scopes.iter().map(String::as_str).collect::<Vec<_>>();
+    scopes.sort_unstable();
+    s.serialize_str(&scopes.join(" "))
 }
 
 #[derive(Deserialize)]
@@ -469,21 +546,15 @@ pub static SPOTIFY_CLIENT: LazyLock<SpotifyClient> = LazyLock::new(|| {
             "Spotify client ID not set, set it in the config file under key `spotify_client_id`.",
         ),
         &scopes,
-        dirs::config_dir()
-            .unwrap()
-            .join("cantus")
-            .join("spotify_cache.json"),
+        config_path(SPOTIFY_TOKEN_CACHE),
     )
+    .expect("Failed to initialize Spotify client")
 });
 
 type PlaylistCache = HashMap<PlaylistId, (ArrayString<32>, HashSet<TrackId>)>;
 
 fn load_cached_playlist_tracks() -> PlaylistCache {
-    let path = dirs::config_dir()
-        .unwrap()
-        .join("cantus")
-        .join("cantus_playlist_tracks.json");
-    fs::read(&path)
+    fs::read(config_path(PLAYLIST_TRACKS_CACHE))
         .ok()
         .and_then(|b| {
             serde_json::from_slice(&b)
@@ -498,21 +569,25 @@ fn persist_playlist_cache() {
         .read()
         .playlists
         .values()
-        .map(|p| (p.id, (p.snapshot_id, p.tracks.clone())))
+        .map(|p| {
+            if p.tracks.len() as u32 > p.tracks_total {
+                warn!(
+                    "Playlist {} has more cached tracks than Spotify reported",
+                    p.name
+                );
+            }
+            (p.id, (p.snapshot_id, p.tracks.clone()))
+        })
         .collect();
-    if !cache_payload.is_empty() {
-        let path = dirs::config_dir()
-            .unwrap()
-            .join("cantus")
-            .join("cantus_playlist_tracks.json");
-        if let Ok(ser) = serde_json::to_vec(&cache_payload) {
-            let _ = fs::write(path, ser);
-        }
+    if !cache_payload.is_empty()
+        && let Ok(ser) = serde_json::to_vec(&cache_payload)
+    {
+        let _ = fs::write(config_path(PLAYLIST_TRACKS_CACHE), ser);
     }
 }
 
 pub fn init() {
-    let cantus_dir = dirs::config_dir().unwrap().join("cantus");
+    let cantus_dir = config_path("");
     if !cantus_dir.exists() {
         fs::create_dir(&cantus_dir).unwrap();
     }
@@ -527,6 +602,11 @@ pub fn init() {
     });
 }
 
+fn track_index(queue: &[Track], id: Option<TrackId>, name: &str) -> Option<usize> {
+    id.and_then(|track_id| queue.iter().position(|t| t.id == Some(track_id)))
+        .or_else(|| queue.iter().position(|t| t.name == name))
+}
+
 fn get_spotify_playback() {
     let now = Instant::now();
     if now < PLAYBACK_STATE.read().last_interaction
@@ -536,15 +616,8 @@ fn get_spotify_playback() {
     }
 
     // https://developer.spotify.com/documentation/web-api/reference/get-information-about-the-users-current-playback
-    let Some(current_playback) = SPOTIFY_CLIENT
-        .api_get("me/player")
-        .ok()
-        .filter(|res| !res.is_empty())
-        .and_then(|res| {
-            serde_json::from_str::<CurrentPlaybackContext>(&res)
-                .inspect_err(|e| error!("Failed to parse playback: {e}"))
-                .ok()
-        })
+    let Some(current_playback) =
+        SPOTIFY_CLIENT.api_json::<CurrentPlaybackContext>("me/player", "playback")
     else {
         return;
     };
@@ -562,11 +635,8 @@ fn get_spotify_playback() {
         }
 
         if let Some(track) = current_playback.item {
-            state.queue_index = state
-                .queue
-                .iter()
-                .position(|t| t.name == track.name)
-                .unwrap_or_else(|| {
+            state.queue_index =
+                track_index(&state.queue, track.id, &track.name).unwrap_or_else(|| {
                     spotify_state.last_grabbed_queue = queue_deadline;
                     0
                 });
@@ -591,61 +661,23 @@ fn get_spotify_queue() {
     }
 
     // https://developer.spotify.com/documentation/web-api/reference/get-queue
-    let Some(q) = SPOTIFY_CLIENT
-        .api_get("me/player/queue")
-        .inspect_err(|e| error!("Failed to fetch queue: {e}"))
-        .ok()
-        .and_then(|res| {
-            serde_json::from_str::<CurrentUserQueue>(&res)
-                .inspect_err(|e| error!("Failed to parse queue: {e}"))
-                .ok()
-        })
-    else {
+    let Some(q) = SPOTIFY_CLIENT.api_json::<CurrentUserQueue>("me/player/queue", "queue") else {
         return;
     };
     let Some(currently_playing) = q.currently_playing else {
         error!("Failed to get queue data: Nothing is currently playing");
         return;
     };
+    let current_track_id = currently_playing.id;
     let current_title = currently_playing.name.clone();
     let new_queue: Vec<Track> = std::iter::once(currently_playing).chain(q.queue).collect();
 
-    let mut missing_artists = HashSet::new();
-    for track in &new_queue {
-        if let Some(key) = &track.album.image {
-            ensure_image_cached(key);
-        }
-        if let Some(artist_id) = track.artist.id
-            && !ARTIST_DATA_CACHE.contains_key(&artist_id)
-            && missing_artists.insert(artist_id)
-        {
-            spawn(move || {
-                let Ok(res) = SPOTIFY_CLIENT
-                    .api_get(&format!("artists/{artist_id}"))
-                    .inspect_err(|e| error!("Failed to fetch artist {artist_id}: {e}"))
-                else {
-                    return;
-                };
-                let Ok(artist) = serde_json::from_str::<Artist>(&res).inspect_err(|err| {
-                    error!("Deserialization error for artist {artist_id}: {err:?}");
-                }) else {
-                    return;
-                };
-                if let Some(actual_id) = artist.id {
-                    ARTIST_DATA_CACHE.insert(actual_id, artist.image.clone());
-
-                    if let Some(image) = artist.image.as_deref() {
-                        ensure_image_cached(image);
-                    }
-                }
-            });
-        }
-    }
+    cache_queue_images(&new_queue);
 
     let mut spotify_state = SPOTIFY_STATE.write();
     update_playback_state(|state| {
         if !spotify_state.context_updated
-            && let Some(new_index) = state.queue.iter().position(|t| t.name == current_title)
+            && let Some(new_index) = track_index(&state.queue, current_track_id, &current_title)
         {
             state.queue_index = new_index;
             state.queue.truncate(new_index);
@@ -659,6 +691,34 @@ fn get_spotify_queue() {
     });
 }
 
+fn cache_queue_images(queue: &[Track]) {
+    let mut missing_artists = HashSet::new();
+    for track in queue {
+        if let Some(key) = &track.album.image {
+            ensure_image_cached(key);
+        }
+        if let Some(artist_id) = track.artist.id
+            && !ARTIST_DATA_CACHE.contains_key(&artist_id)
+            && missing_artists.insert(artist_id)
+        {
+            spawn(move || fetch_artist_image(artist_id));
+        }
+    }
+}
+
+fn fetch_artist_image(artist_id: ArtistId) {
+    let Some(artist) = SPOTIFY_CLIENT.api_json::<Artist>(&format!("artists/{artist_id}"), "artist")
+    else {
+        return;
+    };
+    if let Some(actual_id) = artist.id {
+        ARTIST_DATA_CACHE.insert(actual_id, artist.image.clone());
+        if let Some(image) = artist.image.as_deref() {
+            ensure_image_cached(image);
+        }
+    }
+}
+
 fn ensure_image_cached(url: &str) {
     if IMAGES_CACHE.contains_key(url) {
         return;
@@ -667,17 +727,24 @@ fn ensure_image_cached(url: &str) {
 
     let url = url.to_owned();
     spawn(move || {
-        if let Ok(mut resp) = SPOTIFY_CLIENT.http.get(&url).call()
-            && let Ok(img) = image::load_from_memory(&resp.body_mut().read_to_vec().unwrap())
-        {
-            let img = if img.width() != 64 || img.height() != 64 {
-                img.resize_to_fill(64, 64, image::imageops::FilterType::Lanczos3)
-            } else {
-                img
-            };
-            IMAGES_CACHE.insert(url, Some(Arc::new(img.to_rgba8())));
-            update_color_palettes();
-        }
+        let result = SPOTIFY_CLIENT
+            .http
+            .get(&url)
+            .call()
+            .map_err(ClientError::from)
+            .and_then(|mut resp| Ok(resp.body_mut().read_to_vec()?))
+            .and_then(|bytes| Ok(image::load_from_memory(&bytes)?));
+        let Ok(img) = result.inspect_err(|err| warn!("Failed to cache image {url}: {err}")) else {
+            IMAGES_CACHE.remove(&url);
+            return;
+        };
+        let img = if img.width() != 64 || img.height() != 64 {
+            img.resize_to_fill(64, 64, image::imageops::FilterType::Lanczos3)
+        } else {
+            img
+        };
+        IMAGES_CACHE.insert(url, Some(Arc::new(img.to_rgba8())));
+        update_color_palettes();
     });
 }
 
@@ -692,114 +759,103 @@ fn poll_playlists() {
     loop {
         // https://developer.spotify.com/documentation/web-api/reference/get-a-list-of-current-users-playlists
         let playlists = SPOTIFY_CLIENT
-            .api_get_payload("me/playlists", &[("limit", "50")])
-            .ok()
-            .and_then(|res| serde_json::from_str::<Page<Playlist>>(&res).ok())
+            .api_json_payload::<Page<Playlist>>("me/playlists", &[("limit", "50")], "playlists")
             .map(|p| p.items)
             .unwrap_or_default();
 
         for playlist in playlists {
-            let is_rating =
-                CONFIG.ratings_enabled && RATING_PLAYLISTS.contains(&playlist.name.as_str());
-            if !targets.contains(playlist.name.as_str()) && !is_rating {
+            let rating_index = rating_index(&playlist.name);
+            if !targets.contains(playlist.name.as_str()) && rating_index.is_none() {
                 continue;
             }
             if let Some(image) = &playlist.image {
                 ensure_image_cached(image);
             }
 
-            let rating_index = if CONFIG.ratings_enabled {
-                RATING_PLAYLISTS
-                    .iter()
-                    .position(|&p| p == playlist.name)
-                    .map(|i| i as u8)
-            } else {
-                None
-            };
-
-            // Take from cache if exists
             if let Some((snapshot_id, tracks)) = cached.remove(&playlist.id)
                 && snapshot_id == playlist.snapshot_id
             {
-                PLAYBACK_STATE.write().playlists.insert(
-                    playlist.id,
-                    CondensedPlaylist {
-                        id: playlist.id,
-                        name: playlist.name.clone(),
-                        image_url: playlist.image.clone(),
-                        tracks,
-                        tracks_total: playlist.total_tracks,
-                        snapshot_id,
-                        rating_index,
-                    },
-                );
+                insert_playlist(&playlist, tracks, playlist.total_tracks, rating_index);
                 continue;
             }
 
-            // State mismatched, fetch new
             if Some(&playlist.snapshot_id)
                 != PLAYBACK_STATE
                     .read()
                     .playlists
                     .get(&playlist.id)
                     .map(|p| &p.snapshot_id)
+                && let Some((total, tracks)) = fetch_playlist_tracks(&playlist)
             {
-                // Fetch the fresh playlists as needed
-                let chunk_size = 50;
-                let num_pages = playlist.total_tracks.div_ceil(chunk_size);
-                info!("Fetching {num_pages} pages from playlist {}", playlist.name);
-                let mut total = 0;
-                let mut playlist_track_ids = HashSet::new();
-                for page in 0..num_pages {
-                    // https://developer.spotify.com/documentation/web-api/reference/get-playlists-items
-                    let Some(page_data) = SPOTIFY_CLIENT
-                        .api_get_payload(
-                            &format!("playlists/{}/items", playlist.id),
-                            &[
-                                (
-                                    "fields",
-                                    "href,limit,offset,total,items(is_local,track(id))",
-                                ),
-                                ("limit", &chunk_size.to_string()),
-                                ("offset", &(page * chunk_size).to_string()),
-                            ],
-                        )
-                        .ok()
-                        .and_then(|res| {
-                            serde_json::from_str::<Page<PlaylistItem>>(&res)
-                                .inspect_err(|e| error!("Failed to parse playlist page: {e}"))
-                                .ok()
-                        })
-                    else {
-                        return;
-                    };
-                    total = page_data.total;
-                    playlist_track_ids.extend(page_data.items.iter().map(|item| item.track.id));
-                }
-
-                update_playback_state(|state| {
-                    state
-                        .playlists
-                        .entry(playlist.id)
-                        .and_modify(|state_playlist| {
-                            state_playlist.tracks.clone_from(&playlist_track_ids);
-                            state_playlist.tracks_total = total;
-                            state_playlist.snapshot_id = playlist.snapshot_id;
-                        })
-                        .or_insert_with(|| CondensedPlaylist {
-                            id: playlist.id,
-                            name: playlist.name,
-                            image_url: playlist.image,
-                            tracks: playlist_track_ids,
-                            tracks_total: total,
-                            snapshot_id: playlist.snapshot_id,
-                            rating_index,
-                        });
-                });
+                insert_playlist(&playlist, tracks, total, rating_index);
                 persist_playlist_cache();
             }
         }
 
         sleep(Duration::from_secs(20));
     }
+}
+
+fn rating_index(name: &str) -> Option<u8> {
+    CONFIG.ratings_enabled.then_some(())?;
+    RATING_PLAYLISTS
+        .iter()
+        .position(|&p| p == name)
+        .map(|i| i as u8)
+}
+
+fn fetch_playlist_tracks(playlist: &Playlist) -> Option<(u32, HashSet<TrackId>)> {
+    let chunk_size = 50;
+    let num_pages = playlist.total_tracks.div_ceil(chunk_size);
+    let mut total = 0;
+    let mut tracks = HashSet::new();
+    info!("Fetching {num_pages} pages from playlist {}", playlist.name);
+
+    for page in 0..num_pages {
+        let page = fetch_playlist_page(playlist.id, chunk_size, page)?;
+        total = page.total;
+        tracks.extend(page.items.iter().filter_map(|item| item.track.id));
+    }
+    Some((total, tracks))
+}
+
+fn fetch_playlist_page(
+    playlist_id: PlaylistId,
+    chunk_size: u32,
+    page: u32,
+) -> Option<Page<PlaylistItem>> {
+    let limit = chunk_size.to_string();
+    let offset = (page * chunk_size).to_string();
+    SPOTIFY_CLIENT.api_json_payload(
+        &format!("playlists/{playlist_id}/items"),
+        &[
+            (
+                "fields",
+                "href,limit,offset,total,items(is_local,track(id))",
+            ),
+            ("limit", &limit),
+            ("offset", &offset),
+        ],
+        "playlist page",
+    )
+}
+
+fn insert_playlist(
+    playlist: &Playlist,
+    tracks: HashSet<TrackId>,
+    tracks_total: u32,
+    rating_index: Option<u8>,
+) {
+    PLAYBACK_STATE.write().playlists.insert(
+        playlist.id,
+        CondensedPlaylist {
+            id: playlist.id,
+            name: playlist.name.clone(),
+            image_url: playlist.image.clone(),
+            tracks,
+            tracks_total,
+            snapshot_id: playlist.snapshot_id,
+            rating_index,
+        },
+    );
 }
