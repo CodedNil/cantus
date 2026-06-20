@@ -4,6 +4,7 @@ use crate::{
 };
 use bytemuck::{Pod, Zeroable};
 use image::RgbaImage;
+use itertools::Itertools;
 use palette::IntoColor;
 use std::{collections::HashMap, ops::Range, time::Instant};
 
@@ -308,7 +309,7 @@ impl CantusApp {
             .duration_since(self.start_time)
             .as_secs_f32();
 
-        track_renders.sort_unstable_by(|a, b| a.start_x.partial_cmp(&b.start_x).unwrap());
+        track_renders.sort_unstable_by(|a, b| a.start_x.total_cmp(&b.start_x));
 
         // Render the tracks
         let mut current_track = None;
@@ -350,7 +351,6 @@ impl CantusApp {
             PANEL_START + CONFIG.height,
         );
 
-        // Add hitbox
         let (hit_start, hit_end) = track_render.hitbox_range;
         self.interaction
             .track_hitboxes
@@ -564,7 +564,7 @@ fn lab_pixels_to_palette(pixels: &[palette::Lab]) -> [u32; NUM_SWATCHES] {
                 255,
             ])
         })
-        .collect::<Vec<_>>()
+        .collect_vec()
         .try_into()
         .unwrap_or([0; NUM_SWATCHES])
 }

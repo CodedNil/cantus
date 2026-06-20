@@ -184,10 +184,9 @@ impl LayerShellApp {
     }
 
     fn request_frame(&mut self, qhandle: &QueueHandle<Self>) {
-        if self.frame_callback.is_some() {
-            return;
-        }
-        if let Some(surface) = &self.wl_surface {
+        if self.frame_callback.is_none()
+            && let Some(surface) = &self.wl_surface
+        {
             self.frame_callback = Some(surface.frame(qhandle, ()));
         }
     }

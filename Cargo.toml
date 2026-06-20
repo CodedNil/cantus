@@ -16,7 +16,7 @@ raw-window-handle = "0.6.2"
 
 wayland-backend = { version = "0.3.15", features = ["client_system"] }
 wayland-client = { version = "0.31.14", default-features = false }
-wayland-protocols = { version = "0.32.12", features = ["client", "staging"] }
+wayland-protocols = { version = "0.32.13", features = ["client", "staging"] }
 wayland-protocols-wlr = { version = "0.3.12", features = ["client"] }
 
 wgpu = { version = "29.0.3", default-features = false, features = [
@@ -27,7 +27,7 @@ wgpu = { version = "29.0.3", default-features = false, features = [
 ] }
 wgpu_text = { version = "29.0.3", default-features = false }
 
-time = { version = "0.3.47", features = ["serde"] }
+time = { version = "0.3.49", features = ["serde"] }
 image = { version = "0.25.10", default-features = false, features = [
     "jpeg",
     "png",
@@ -46,7 +46,7 @@ tap = "1"
 parking_lot = "0.12.5"
 dashmap = "6.2.1"
 arrayvec = { version = "0.7.6", features = ["serde"] }
-itertools = "0.14.0"
+itertools = "0.15.0"
 dirs = "6.0.0"
 thiserror = "2.0.18"
 base64 = "0.22.1"

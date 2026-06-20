@@ -240,18 +240,6 @@ enum IconEntry<'a> {
     },
 }
 
-impl IconEntry<'_> {
-    const fn is_visible(&self) -> bool {
-        !matches!(
-            self,
-            Self::Playlist {
-                contained: false,
-                ..
-            }
-        )
-    }
-}
-
 impl CantusApp {
     /// Star ratings and favourite playlists
     pub fn draw_playlist_buttons(
@@ -313,7 +301,11 @@ impl CantusApp {
         let center_y = PANEL_START + CONFIG.height * 0.975;
 
         // Count only the standard icons for spacing
-        let half_icons = icon_entries.iter().filter(|e| e.is_visible()).count() as f32 / 2.0;
+        let half_icons = icon_entries
+            .iter()
+            .filter(|e| !matches!(e, IconEntry::Playlist { contained, .. } if !contained))
+            .count() as f32
+            / 2.0;
 
         let mut hover_rating_index = None;
         let mut icon_data = Vec::with_capacity(num_icons);
@@ -425,14 +417,10 @@ fn skip_to_track(track_id: TrackId, position: f32, always_seek: bool) {
             state.queue_index = position_in_queue;
             state.progress = 0;
             state.last_progress_update = Instant::now();
-            state.last_interaction = Instant::now() + Duration::from_millis(2000);
+            state.last_interaction = Instant::now() + Duration::from_secs(2);
         });
         let forward = queue_index < position_in_queue;
-        let skips = if forward {
-            position_in_queue - queue_index
-        } else {
-            queue_index - position_in_queue
-        };
+        let skips = position_in_queue.abs_diff(queue_index);
         info!(
             "{} to track {track_id}, {skips} skips",
             if forward { "Skipping" } else { "Rewinding" }
@@ -465,7 +453,7 @@ fn skip_to_track(track_id: TrackId, position: f32, always_seek: bool) {
         update_playback_state(|state| {
             state.progress = milliseconds.round() as u32;
             state.last_progress_update = Instant::now();
-            state.last_interaction = Instant::now() + Duration::from_millis(2000);
+            state.last_interaction = Instant::now() + Duration::from_secs(2);
         });
 
         #[cfg(feature = "spotify")]
@@ -511,7 +499,6 @@ fn update_star_rating(track_id: &TrackId, rating_slot: u8) {
     #[cfg(feature = "spotify")]
     {
         let track_uri = format!("spotify:track:{track_id}");
-        // Make the changes
         for (playlist_id, playlist_name) in playlists_to_remove_from {
             info!("Removing track {track_id} from rating playlist {playlist_name}");
             // https://developer.spotify.com/documentation/web-api/reference/remove-items-playlist

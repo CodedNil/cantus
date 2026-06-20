@@ -1,19 +1,16 @@
-use crate::render::update_color_palettes;
 use crate::{
     ARTIST_DATA_CACHE, Album, Artist, CondensedPlaylist, IMAGES_CACHE, PlaybackState, Track,
+    cache_decoded_image,
 };
 use arrayvec::ArrayString;
 use std::collections::{HashMap, HashSet};
-use std::sync::Arc;
 use std::thread::spawn;
 use std::time::Instant;
 use tracing::warn;
 
 fn random_arraystring() -> ArrayString<22> {
     let mut s = ArrayString::<22>::new();
-    for _ in 0..22 {
-        s.push(fastrand::alphanumeric());
-    }
+    s.extend((0..22).map(|_| fastrand::alphanumeric()));
     s
 }
 
@@ -217,7 +214,7 @@ pub fn debug_playbackstate() -> PlaybackState {
     if !playlists.is_empty() {
         let chunk_size = queue.len().div_ceil(playlists.len());
         for (chunk, playlist) in queue.chunks(chunk_size).zip(playlists.values_mut()) {
-            let track_ids: HashSet<ArrayString<22>> = chunk.iter().map(|t| t.id).collect();
+            let track_ids = chunk.iter().filter_map(|t| t.id).collect::<HashSet<_>>();
             playlist.tracks_total = track_ids.len() as u32;
             playlist.tracks = track_ids;
         }
@@ -239,7 +236,6 @@ pub fn debug_playbackstate() -> PlaybackState {
     }
     ARTIST_DATA_CACHE.insert(artist.id, artist.image);
 
-    // Return the new state
     PlaybackState {
         playing: true,
         progress: 5213,
@@ -262,12 +258,12 @@ fn ensure_image_cached(url: &str) {
     let url = url.to_owned();
     spawn(move || {
         let agent = ureq::Agent::new_with_defaults();
-        let mut response = match agent.get(&url).call() {
-            Ok(response) => response,
-            Err(err) => {
-                warn!("Failed to cache image {url}: {err}");
-                return;
-            }
+        let Ok(mut response) = agent
+            .get(&url)
+            .call()
+            .inspect_err(|err| warn!("Failed to cache image {url}: {err}"))
+        else {
+            return;
         };
         let Ok(dynamic_image) =
             image::load_from_memory(&response.body_mut().read_to_vec().unwrap())
@@ -275,12 +271,6 @@ fn ensure_image_cached(url: &str) {
             warn!("Failed to cache image {url}: failed to read image");
             return;
         };
-        let dynamic_image = if dynamic_image.width() != 64 || dynamic_image.height() != 64 {
-            dynamic_image.resize_to_fill(64, 64, image::imageops::FilterType::Lanczos3)
-        } else {
-            dynamic_image
-        };
-        IMAGES_CACHE.insert(url, Some(Arc::new(dynamic_image.to_rgba8())));
-        update_color_palettes();
+        cache_decoded_image(url, dynamic_image);
     });
 }

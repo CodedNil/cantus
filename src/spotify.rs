@@ -1,10 +1,11 @@
 use crate::{
     ARTIST_DATA_CACHE, Artist, ArtistId, CondensedPlaylist, IMAGES_CACHE, PLAYBACK_STATE,
-    PlaylistId, Track, TrackId, config::CONFIG, deserialize_images, render::update_color_palettes,
+    PlaylistId, Track, TrackId, cache_decoded_image, config::CONFIG, deserialize_images,
     update_playback_state,
 };
 use arrayvec::ArrayString;
 use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
+use itertools::Itertools;
 use parking_lot::RwLock;
 use serde::{Deserialize, Deserializer, Serialize, Serializer, de::DeserializeOwned};
 use sha2::{Digest, Sha256};
@@ -14,7 +15,7 @@ use std::{
     io::{BufRead, BufReader, Write},
     net::TcpListener,
     path::{Path, PathBuf},
-    sync::{Arc, LazyLock},
+    sync::LazyLock,
     thread::{sleep, spawn},
     time::{Duration, Instant},
 };
@@ -38,7 +39,7 @@ struct SpotifyState {
 }
 
 static SPOTIFY_STATE: LazyLock<RwLock<SpotifyState>> = LazyLock::new(|| {
-    let one_min_ago = Instant::now().checked_sub(Duration::from_secs(60)).unwrap();
+    let one_min_ago = Instant::now().checked_sub(Duration::from_mins(1)).unwrap();
     RwLock::new(SpotifyState {
         current_context: None,
         context_updated: false,
@@ -285,7 +286,7 @@ impl SpotifyClient {
 
     pub fn api_post(&self, url: &str) -> ClientResult<()> {
         self.http
-            .post(format!("https://api.spotify.com/v1/{url}"))
+            .post(Self::api_url(url))
             .header("authorization", self.auth_headers()?)
             .send_empty()?;
         Ok(())
@@ -302,7 +303,7 @@ impl SpotifyClient {
 
     pub fn api_put(&self, url: &str) -> ClientResult<()> {
         self.http
-            .put(format!("https://api.spotify.com/v1/{url}"))
+            .put(Self::api_url(url))
             .header("authorization", self.auth_headers()?)
             .send_empty()?;
         Ok(())
@@ -404,27 +405,18 @@ fn get_authorize_url(
             .finalize(),
     );
 
+    let redirect_uri = format!("http://{REDIRECT_HOST}:{REDIRECT_PORT}/callback");
+    let scope = scopes.iter().map(String::as_str).sorted().join(" ");
     let parsed = Url::parse_with_params(
         "https://accounts.spotify.com/authorize",
         &[
             ("client_id", client_id),
             ("response_type", "code"),
-            (
-                "redirect_uri",
-                &format!("http://{REDIRECT_HOST}:{REDIRECT_PORT}/callback"),
-            ),
+            ("redirect_uri", &redirect_uri),
             ("code_challenge_method", "S256"),
             ("code_challenge", &challenge),
             ("state", state),
-            (
-                "scope",
-                scopes
-                    .iter()
-                    .map(String::as_str)
-                    .collect::<Vec<_>>()
-                    .join(" ")
-                    .as_str(),
-            ),
+            ("scope", &scope),
         ],
     )?;
     Ok((verifier, parsed.into()))
@@ -501,9 +493,7 @@ fn serialize_scopes<S>(scopes: &HashSet<String>, s: S) -> Result<S::Ok, S::Error
 where
     S: Serializer,
 {
-    let mut scopes = scopes.iter().map(String::as_str).collect::<Vec<_>>();
-    scopes.sort_unstable();
-    s.serialize_str(&scopes.join(" "))
+    s.serialize_str(&scopes.iter().map(String::as_str).sorted().join(" "))
 }
 
 #[derive(Deserialize)]
@@ -640,7 +630,7 @@ fn get_spotify_playback() {
     let mut spotify_state = SPOTIFY_STATE.write();
     update_playback_state(|state| {
         let new_context = current_playback.context.as_ref().map(|c| &c.uri);
-        let queue_deadline = now.checked_sub(Duration::from_secs(60)).unwrap();
+        let queue_deadline = now.checked_sub(Duration::from_mins(1)).unwrap();
 
         if spotify_state.current_context.as_ref() != new_context {
             spotify_state.context_updated = true;
@@ -656,7 +646,10 @@ fn get_spotify_playback() {
                 });
         }
 
-        state.volume = current_playback.device.volume_percent.map(|v| v as u8);
+        state.volume = current_playback
+            .device
+            .volume_percent
+            .map(|v| v.min(100) as u8);
         if now >= state.last_interaction {
             state.playing = current_playback.is_playing;
             state.progress = current_playback.progress_ms;
@@ -708,8 +701,8 @@ fn get_spotify_queue() {
 fn cache_queue_images(queue: &[Track]) {
     let mut missing_artists = HashSet::new();
     for track in queue {
-        if let Some(key) = &track.album.image {
-            ensure_image_cached(key);
+        if let Some(image) = &track.album.image {
+            ensure_image_cached(image);
         }
         if let Some(artist_id) = track.artist.id
             && !ARTIST_DATA_CACHE.contains_key(&artist_id)
@@ -752,13 +745,7 @@ fn ensure_image_cached(url: &str) {
             IMAGES_CACHE.remove(&url);
             return;
         };
-        let img = if img.width() != 64 || img.height() != 64 {
-            img.resize_to_fill(64, 64, image::imageops::FilterType::Lanczos3)
-        } else {
-            img
-        };
-        IMAGES_CACHE.insert(url, Some(Arc::new(img.to_rgba8())));
-        update_color_palettes();
+        cache_decoded_image(url, img);
     });
 }
 
@@ -815,13 +802,13 @@ fn rating_index(name: &str) -> Option<u8> {
     RATING_PLAYLISTS
         .iter()
         .position(|&p| p == name)
-        .map(|i| i as u8)
+        .and_then(|i| u8::try_from(i).ok())
 }
 
 fn fetch_playlist_tracks(playlist: &Playlist) -> Option<(u32, HashSet<TrackId>)> {
     let chunk_size = 50;
     let num_pages = playlist.total_tracks.div_ceil(chunk_size);
-    let mut total = 0;
+    let mut total = playlist.total_tracks;
     let mut tracks = HashSet::new();
     info!("Fetching {num_pages} pages from playlist {}", playlist.name);
 

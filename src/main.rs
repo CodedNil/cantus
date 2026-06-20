@@ -207,6 +207,20 @@ struct GpuResources {
     url_to_image_index: HashMap<String, (i32, bool)>, // (index, used_this_frame)
 }
 
+fn cache_decoded_image(url: String, image: image::DynamicImage) {
+    let image = if image.width() != IMAGE_SIZE || image.height() != IMAGE_SIZE {
+        image.resize_to_fill(
+            IMAGE_SIZE,
+            IMAGE_SIZE,
+            image::imageops::FilterType::Lanczos3,
+        )
+    } else {
+        image
+    };
+    IMAGES_CACHE.insert(url, Some(Arc::new(image.to_rgba8())));
+    render::update_color_palettes();
+}
+
 fn main() {
     tracing_subscriber::fmt()
         .with_env_filter(tracing_subscriber::EnvFilter::new(
@@ -223,33 +237,20 @@ fn main() {
 
 impl CantusApp {
     fn render(&mut self) {
-        if self.gpu_resources.is_none() {
+        let Some(gpu) = self.gpu_resources.as_mut() else {
             return;
-        }
+        };
 
         self.icon_pills.clear();
 
-        // Reset image usage
-        for (_, used) in self
-            .gpu_resources
-            .as_mut()
-            .unwrap()
-            .url_to_image_index
-            .values_mut()
-        {
+        for (_, used) in gpu.url_to_image_index.values_mut() {
             *used = false;
         }
 
         self.create_scene();
 
-        self.gpu_resources
-            .as_mut()
-            .unwrap()
-            .url_to_image_index
-            .retain(|_, (_, used)| *used);
-
-        // Write the buffers
         let gpu = self.gpu_resources.as_mut().unwrap();
+        gpu.url_to_image_index.retain(|_, (_, used)| *used);
         gpu.queue.write_buffer(
             &gpu.uniform_buffer,
             0,
@@ -403,8 +404,7 @@ fn deserialize_images<'de, D>(deserializer: D) -> Result<Option<String>, D::Erro
 where
     D: Deserializer<'de>,
 {
-    let images: Vec<Image> = Vec::deserialize(deserializer)?;
-    Ok(images
+    Ok(Vec::<Image>::deserialize(deserializer)?
         .into_iter()
         .min_by_key(|img| img.width)
         .map(|img| img.url))

@@ -1,6 +1,7 @@
 use crate::render::{BackgroundPill, GlobalUniforms, IconInstance, Particle, PlayheadUniforms};
 use crate::text_render::TextRenderer;
 use crate::{CantusApp, GpuResources};
+use itertools::Itertools;
 use std::collections::HashMap;
 use wgpu::{
     BindGroupDescriptor, BindGroupEntry, BindGroupLayout, BindGroupLayoutDescriptor,
@@ -87,7 +88,7 @@ impl CantusApp {
                         ty,
                         count: None,
                     })
-                    .collect::<Vec<_>>(),
+                    .collect_vec(),
             })
         };
 
