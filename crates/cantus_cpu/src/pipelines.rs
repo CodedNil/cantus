@@ -10,10 +10,10 @@ use wgpu::{
     DeviceDescriptor, ExperimentalFeatures, Extent3d, Features, FilterMode, FragmentState, Limits,
     MemoryHints, MultisampleState, PipelineCompilationOptions, PipelineLayoutDescriptor,
     PowerPreference, PresentMode, PrimitiveState, PrimitiveTopology, RenderPipelineDescriptor,
-    RequestAdapterOptions, SamplerBindingType, SamplerDescriptor, ShaderModule,
-    ShaderModuleDescriptor, ShaderSource, ShaderStages, Surface, SurfaceConfiguration,
-    TextureDescriptor, TextureDimension, TextureFormat, TextureSampleType, TextureUsages,
-    TextureViewDescriptor, TextureViewDimension, Trace, VertexState,
+    RequestAdapterOptions, SamplerBindingType, SamplerDescriptor, ShaderModule, ShaderStages,
+    Surface, SurfaceConfiguration, TextureDescriptor, TextureDimension, TextureFormat,
+    TextureSampleType, TextureUsages, TextureViewDescriptor, TextureViewDimension, Trace,
+    VertexState,
 };
 
 pub const MAX_TEXTURE_LAYERS: u32 = 48;
@@ -65,17 +65,10 @@ impl CantusApp {
 
         self.text_renderer = Some(TextRenderer::new(&device, format));
 
-        let create_shader = |label, source: &str| {
-            device.create_shader_module(ShaderModuleDescriptor {
-                label: Some(label),
-                source: ShaderSource::Wgsl(source.into()),
-            })
-        };
-        let playhead_shader = create_shader("Playhead", include_str!("../assets/playhead.wgsl"));
-        let particle_shader = create_shader("Particles", include_str!("../assets/particles.wgsl"));
-        let background_shader =
-            create_shader("Background", include_str!("../assets/background.wgsl"));
-        let icon_shader = create_shader("Icons", include_str!("../assets/icons.wgsl"));
+        let rust_gpu_shader = device.create_shader_module(wgpu::include_spirv!(concat!(
+            env!("OUT_DIR"),
+            "/cantus.spv"
+        )));
 
         let bgl = |label, entries: &[(u32, ShaderStages, BindingType)]| {
             device.create_bind_group_layout(&BindGroupLayoutDescriptor {
@@ -125,7 +118,11 @@ impl CantusApp {
             ],
         );
 
-        let create_pipe = |label, shader: &ShaderModule, layout: &BindGroupLayout| {
+        let create_pipe = |label,
+                           shader: &ShaderModule,
+                           layout: &BindGroupLayout,
+                           vertex_entry,
+                           fragment_entry| {
             device.create_render_pipeline(&RenderPipelineDescriptor {
                 label: Some(label),
                 layout: Some(&device.create_pipeline_layout(&PipelineLayoutDescriptor {
@@ -135,13 +132,13 @@ impl CantusApp {
                 })),
                 vertex: VertexState {
                     module: shader,
-                    entry_point: Some("vs_main"),
+                    entry_point: Some(vertex_entry),
                     buffers: &[],
                     compilation_options: PipelineCompilationOptions::default(),
                 },
                 fragment: Some(FragmentState {
                     module: shader,
-                    entry_point: Some("fs_main"),
+                    entry_point: Some(fragment_entry),
                     targets: &[Some(ColorTargetState {
                         format,
                         blend: Some(BlendState::PREMULTIPLIED_ALPHA_BLENDING),
@@ -160,10 +157,34 @@ impl CantusApp {
             })
         };
 
-        let playhead_pipeline = create_pipe("Playhead", &playhead_shader, &playhead_layout);
-        let particle_pipeline = create_pipe("Particles", &particle_shader, &particle_layout);
-        let background_pipeline = create_pipe("Background", &background_shader, &std_layout);
-        let icon_pipeline = create_pipe("Icons", &icon_shader, &std_layout);
+        let playhead_pipeline = create_pipe(
+            "Playhead",
+            &rust_gpu_shader,
+            &playhead_layout,
+            "playhead::vs_playhead",
+            "playhead::fs_playhead",
+        );
+        let particle_pipeline = create_pipe(
+            "Particles",
+            &rust_gpu_shader,
+            &particle_layout,
+            "particles::vs_particles",
+            "particles::fs_particles",
+        );
+        let background_pipeline = create_pipe(
+            "Background",
+            &rust_gpu_shader,
+            &std_layout,
+            "background::vs_background",
+            "background::fs_background",
+        );
+        let icon_pipeline = create_pipe(
+            "Icons",
+            &rust_gpu_shader,
+            &std_layout,
+            "icons::vs_icons",
+            "icons::fs_icons",
+        );
 
         let mk_buf = |l, s, u| {
             device.create_buffer(&BufferDescriptor {

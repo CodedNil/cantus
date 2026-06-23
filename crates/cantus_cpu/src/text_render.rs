@@ -20,7 +20,8 @@ pub struct TextRenderer {
 
 impl TextRenderer {
     pub fn new(device: &Device, format: wgpu::TextureFormat) -> Self {
-        let font = FontArc::try_from_slice(include_bytes!("../assets/NotoSans-Bold.ttf")).unwrap();
+        let font =
+            FontArc::try_from_slice(include_bytes!("../../../assets/NotoSans-Bold.ttf")).unwrap();
         Self {
             brush: BrushBuilder::using_font(font).build(device, 0, 0, format),
             sections: Vec::new(),

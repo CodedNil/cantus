@@ -2,7 +2,8 @@ use crate::{
     ALBUM_PALETTE_CACHE, ARTIST_DATA_CACHE, CantusApp, CondensedPlaylist, IMAGES_CACHE,
     NUM_SWATCHES, PANEL_EXTENSION, PANEL_START, PLAYBACK_STATE, PlaylistId, Track, config::CONFIG,
 };
-use bytemuck::{Pod, Zeroable};
+pub use cantus_shared::{BackgroundPill, GlobalUniforms, IconInstance, Particle, PlayheadUniforms};
+use glam::Vec2;
 use image::RgbaImage;
 use itertools::Itertools;
 use palette::IntoColor;
@@ -36,59 +37,6 @@ impl Rect {
     pub fn contains(&self, p: Point) -> bool {
         p.x >= self.x0 && p.x <= self.x1 && p.y >= self.y0 && p.y <= self.y1
     }
-}
-
-#[repr(C)]
-#[derive(Copy, Clone, Debug, Default, Pod, Zeroable)]
-pub struct GlobalUniforms {
-    screen_size: [f32; 2], // x, y, full size of the layer shell
-    bar_height: [f32; 2],  // Start y, and bars height
-    mouse_pos: [f32; 2],   // x, y
-    mouse_pressure: f32,   // 0 - 1 for hovered - 2 for mouse down
-    playhead_x: f32,       // x position where the playhead line is drawn
-    expansion_xy: [f32; 2],
-    expansion_time: f32,
-    time: f32,
-    scale_factor: f32,
-    _padding: [f32; 3],
-}
-
-#[repr(C)]
-#[derive(Copy, Clone, Debug, Default, Pod, Zeroable)]
-pub struct PlayheadUniforms {
-    volume: f32,
-    bar_lerp: f32,
-    play_lerp: f32,
-    pause_lerp: f32,
-}
-
-#[repr(C)]
-#[derive(Copy, Clone, Debug, Default, Pod, Zeroable)]
-pub struct Particle {
-    pub spawn_pos: [f32; 2], // x, y
-    pub spawn_vel: [f32; 2], // x, y
-    pub end_time: f32,       // The time the particle will be pruned
-    pub color: u32,          // r, g, b, duration
-}
-
-#[repr(C)]
-#[derive(Copy, Clone, Debug, Default, Pod, Zeroable)]
-pub struct BackgroundPill {
-    rect: [f32; 2], // pos x, width
-    colors: [u32; 4],
-    alpha: f32,
-    image_index: i32,
-}
-
-#[repr(C)]
-#[derive(Copy, Clone, Debug, Default, Pod, Zeroable)]
-pub struct IconInstance {
-    pub pos: [f32; 2],
-    // Packed 2 u16s
-    // First is alpha 0-1
-    // Second is 0 for dimmed icon 1 for bright icon, 2 for empty star, 3 for half star, 4 for filled star
-    pub data: u32,
-    pub image_index: i32,
 }
 
 /// Spacing between tracks in ms
@@ -286,16 +234,16 @@ impl CantusApp {
         // Screen uniforms
         self.global_uniforms.time = self.start_time.elapsed().as_secs_f32();
         self.global_uniforms.screen_size =
-            [CONFIG.width, CONFIG.height + PANEL_START + PANEL_EXTENSION];
-        self.global_uniforms.bar_height = [PANEL_START, CONFIG.height];
+            Vec2::new(CONFIG.width, CONFIG.height + PANEL_START + PANEL_EXTENSION);
+        self.global_uniforms.bar_height = Vec2::new(PANEL_START, CONFIG.height);
         self.global_uniforms.playhead_x = playhead_x;
         self.global_uniforms.scale_factor = self.scale_factor;
 
         // Mouse uniforms
-        self.global_uniforms.mouse_pos = [
+        self.global_uniforms.mouse_pos = Vec2::new(
             self.interaction.mouse_position.x,
             self.interaction.mouse_position.y,
-        ];
+        );
         move_towards(
             &mut self.global_uniforms.mouse_pressure,
             self.interaction.mouse_pressure,
@@ -304,7 +252,7 @@ impl CantusApp {
 
         // Get expansion animation variables
         let (interaction_inst, interaction_point) = self.interaction.last_expansion;
-        self.global_uniforms.expansion_xy = [interaction_point.x, interaction_point.y];
+        self.global_uniforms.expansion_xy = Vec2::new(interaction_point.x, interaction_point.y);
         self.global_uniforms.expansion_time = interaction_inst
             .duration_since(self.start_time)
             .as_secs_f32();
@@ -377,9 +325,13 @@ impl CantusApp {
             .as_deref()
             .map(|path| self.get_image_index(path))
             .unwrap_or_default();
+        let colors = album_palette(track);
         self.background_pills.push(BackgroundPill {
-            rect: [start_x, width],
-            colors: album_palette(track),
+            rect: Vec2::new(start_x, width),
+            color0: colors[0],
+            color1: colors[1],
+            color2: colors[2],
+            color3: colors[3],
             alpha: fade_alpha,
             image_index,
         });
@@ -437,14 +389,14 @@ impl CantusApp {
         {
             let y_fraction = fastrand::f32();
 
-            particle.spawn_pos = [
+            particle.spawn_pos = Vec2::new(
                 playhead_x,
                 PANEL_START + CONFIG.height * (0.1 + (y_fraction * 0.85)), // Map to 0.1..0.95 range
-            ];
-            particle.spawn_vel = [
+            );
+            particle.spawn_vel = Vec2::new(
                 fastrand::usize(SPARK_VELOCITY_X) as f32 * horizontal_bias,
                 (y_fraction - 0.5) * 2.0 * SPARK_VELOCITY_Y,
-            ];
+            );
             let duration = lerpf32(fastrand::f32(), SPARK_LIFETIME.start, SPARK_LIFETIME.end);
             let packed_duration = (duration * 100.0).min(255.0) as u8;
             let base_color = palette[fastrand::usize(0..palette.len())];

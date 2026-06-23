@@ -129,10 +129,10 @@ impl CantusApp {
                 .filter(|p| time > p.end_time)
                 .take(20)
             {
-                particle.spawn_pos = [mouse_pos.x, mouse_pos.y];
+                particle.spawn_pos = glam::Vec2::new(mouse_pos.x, mouse_pos.y);
                 let angle = fastrand::f32() * 2.0 * std::f32::consts::PI;
                 let speed = 30.0 + (fastrand::f32() * 20.0);
-                particle.spawn_vel = [angle.cos() * speed, angle.sin() * speed];
+                particle.spawn_vel = glam::Vec2::new(angle.cos() * speed, angle.sin() * speed);
                 let duration = lerpf32(fastrand::f32(), 0.5, 1.5);
                 particle.color =
                     u32::from_le_bytes([255, 215, 50, (duration * 100.0).min(255.0) as u8]);
@@ -360,7 +360,7 @@ impl CantusApp {
 
         for (entry, is_hovered, origin_x) in icon_data {
             let instance = IconInstance {
-                pos: [origin_x, center_y],
+                pos: glam::Vec2::new(origin_x, center_y),
                 data: (((fade_alpha * 65535.0) as u32) << 16)
                     | (match entry {
                         IconEntry::Star { index } => {

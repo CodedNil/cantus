@@ -1,0 +1,15 @@
+[package]
+name = "cantus_gpu"
+version = "0.1.0"
+edition = "2024"
+
+[lib]
+crate-type = ["dylib", "lib"]
+
+[dependencies]
+cantus_shared = { path = "../cantus_shared", features = ["gpu"] }
+glam = { workspace = true }
+spirv-std = { version = "0.10.0-alpha.1" }
+
+[lints]
+workspace = true

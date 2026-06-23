@@ -1,67 +1,25 @@
-[package]
-name = "cantus"
-version = "0.6.8"
-edition = "2024"
+[workspace]
+resolver = "2"
+members = ["crates/cantus_cpu", "crates/cantus_gpu", "crates/cantus_shared"]
+default-members = ["crates/cantus_cpu"]
 
-[features]
-default = ["spotify"]
-spotify = ["webbrowser"]
-
-[dependencies]
-tracing = "0.1.44"
-tracing-subscriber = { version = "0.3.23", features = ["env-filter"] }
-
-pollster = "0.4.0"
-raw-window-handle = "0.6.2"
-
-wayland-backend = { version = "0.3.15", features = ["client_system"] }
-wayland-client = { version = "0.31.14", default-features = false }
-wayland-protocols = { version = "0.32.13", features = ["client", "staging"] }
-wayland-protocols-wlr = { version = "0.3.12", features = ["client"] }
-
-wgpu = { version = "29.0.3", default-features = false, features = [
-    "parking_lot",
-    "std",
-    "vulkan",
-    "wgsl",
+[workspace.dependencies]
+glam = { version = "=0.32.1", default-features = false, features = [
+    "bytemuck",
+    "libm",
 ] }
-wgpu_text = { version = "29.0.3", default-features = false }
 
-time = { version = "0.3.49", features = ["serde"] }
-image = { version = "0.25.10", default-features = false, features = [
-    "jpeg",
-    "png",
+[workspace.lints.rust]
+unexpected_cfgs = { level = "allow", check-cfg = [
+    'cfg(target_arch, values("spirv"))',
 ] }
-kmeans_colors = { version = "0.7.1", default-features = false, features = [
-    "palette_color",
-] }
-palette = "0.7.6"
 
-serde = { version = "1.0.228", features = ["derive"] }
-serde_json = "1.0.150"
-toml = "1.1.2"
-
-fastrand = "2.4.1"
-tap = "1"
-parking_lot = "0.12.5"
-dashmap = "6.2.1"
-arrayvec = { version = "0.7.6", features = ["serde"] }
-itertools = "0.15.0"
-dirs = "6.0.0"
-thiserror = "2.0.18"
-base64 = "0.22.1"
-url = "2.5.8"
-sha2 = "0.11.0"
-bytemuck = { version = "1.25.0", features = ["derive"] }
-
-# Spotify
-ureq = { version = "3.3.0", default-features = false, features = ["rustls"] }
-webbrowser = { version = "1.2.1", optional = true }
-
-[lints.clippy]
+[workspace.lints.clippy]
 pedantic = { level = "warn", priority = -1 }
 nursery = { level = "warn", priority = -1 }
+must_use_candidate = "allow"
 too-many-lines = "allow"
+too-many-arguments = "allow"
 cast-possible-truncation = "allow"
 cast-precision-loss = "allow"
 cast-sign-loss = "allow"
@@ -76,10 +34,20 @@ redundant-type-annotations = "warn"
 
 [profile.release]
 opt-level = 3
-codegen-units = 1
+incremental = true
+codegen-units = 256
 lto = true
 strip = true
 panic = "abort"
 
+[profile.release.build-override]
+opt-level = 3
+incremental = true
+codegen-units = 256
+
+[profile.dev]
+opt-level = 1
+codegen-units = 1
+
 [profile.dev.package."*"]
-opt-level = 2
+opt-level = 3

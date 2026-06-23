@@ -221,7 +221,7 @@ fn cache_decoded_image(url: String, image: image::DynamicImage) {
     render::update_color_palettes();
 }
 
-fn main() {
+pub fn run() {
     tracing_subscriber::fmt()
         .with_env_filter(tracing_subscriber::EnvFilter::new(
             ["warn", "cantus=info", "wgpu_hal=error"].join(","),
