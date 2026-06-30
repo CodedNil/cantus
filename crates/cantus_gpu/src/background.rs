@@ -63,12 +63,13 @@ pub fn fs_background(
     let wave_dist = (ripple_vec.length() - anim_t * 600.0).abs();
     let wave_prof =
         (0.5 + 0.5 * ((wave_dist / 80.0).clamp(0.0, 1.0) * PI).cos()) * step(wave_dist, 80.0);
-    let ripple_str = (1.0 - anim_t).powf(2.0) * wave_prof * 0.5 * ripple_active;
+    let ripple_decay = 1.0 - anim_t;
+    let ripple_str = ripple_decay * ripple_decay * wave_prof * 0.5 * ripple_active;
 
     let mouse_vec = pixel_pos - global.mouse_pos;
     let mouse_d = mouse_vec.length();
-    let mouse_inf =
-        smoothstep(120.0 * global.scale_factor, 0.0, mouse_d).powf(2.0) * global.mouse_pressure;
+    let mouse_inf = smoothstep(120.0 * global.scale_factor, 0.0, mouse_d);
+    let mouse_inf = mouse_inf * mouse_inf * global.mouse_pressure;
     let mouse_pull = (mouse_vec + 0.001).normalize() * mouse_inf * 15.0 * global.scale_factor;
 
     let bulge = ripple_str * 22.0 * global.scale_factor + mouse_inf * 8.0;
@@ -86,7 +87,8 @@ pub fn fs_background(
 
     let seed = (pill.color0 % 1000) as f32 * 29.537;
     let t = global.time * 0.15 + seed;
-    let lens_warp = (1.0 + dist.min(0.0) / 120.0).clamp(0.0, 1.0).powf(2.0) * 0.6;
+    let lens_warp = (1.0 + dist.min(0.0) / 120.0).clamp(0.0, 1.0);
+    let lens_warp = lens_warp * lens_warp * 0.6;
     let uv = world_uv
         - (local_uv - 0.5) * lens_warp
         - (ripple_vec + 0.001).normalize() * ripple_str

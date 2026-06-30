@@ -16,7 +16,7 @@ fn sd_segment(p: Vec2, a: Vec2, b: Vec2, radius: f32) -> f32 {
 }
 
 fn sd_rounded_triangle(p: Vec2, side_len: f32, radius: f32) -> f32 {
-    let k = 3.0f32.sqrt();
+    let k = 1.732_050_8;
     let mut p_sym = p;
     p_sym.x = p_sym.x.abs();
     let h = (p_sym.x + k * p_sym.y).max(0.0);
@@ -120,9 +120,10 @@ pub fn fs_playhead(
     let mask_icon = (1.0 - smoothstep(-0.8, 0.2, dist_icon)) * icon_alpha;
     let main_mask = (mask_bar + mask_icon).clamp(0.0, 1.0);
 
-    let shadow_bar = (1.0 - (dist_bar / (4.5 * scale)).clamp(0.0, 1.0)).powf(2.0) * 0.4;
-    let shadow_icon =
-        (1.0 - (dist_icon / (4.5 * scale)).clamp(0.0, 1.0)).powf(2.0) * 0.4 * icon_alpha;
+    let shadow_bar = 1.0 - (dist_bar / (4.5 * scale)).clamp(0.0, 1.0);
+    let shadow_bar = shadow_bar * shadow_bar * 0.4;
+    let shadow_icon = 1.0 - (dist_icon / (4.5 * scale)).clamp(0.0, 1.0);
+    let shadow_icon = shadow_icon * shadow_icon * 0.4 * icon_alpha;
     let shadow_mask = shadow_bar.max(shadow_icon);
 
     if main_mask > 0.0 || shadow_mask > 0.0 {

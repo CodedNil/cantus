@@ -66,7 +66,7 @@ ureq = { version = "3.3.0", default-features = false, features = ["rustls"] }
 webbrowser = { version = "1.2.1", optional = true }
 
 [build-dependencies]
-spirv-builder = { version = "0.10.0-alpha.1" }
+spirv-builder = { git = "https://github.com/Rust-GPU/rust-gpu", rev = "bd49568baf08301107c9f698494735724980dee0" }
 
 [lints]
 workspace = true

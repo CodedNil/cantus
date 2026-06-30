@@ -1,13 +1,10 @@
 [workspace]
-resolver = "2"
+resolver = "3"
 members = ["crates/cantus_cpu", "crates/cantus_gpu", "crates/cantus_shared"]
 default-members = ["crates/cantus_cpu"]
 
 [workspace.dependencies]
-glam = { version = "=0.32.1", default-features = false, features = [
-    "bytemuck",
-    "libm",
-] }
+glam = { version = "=0.33.2", features = ["bytemuck"] }
 
 [workspace.lints.rust]
 unexpected_cfgs = { level = "allow", check-cfg = [

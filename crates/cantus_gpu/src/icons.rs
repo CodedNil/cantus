@@ -101,11 +101,14 @@ pub fn fs_icons(
     };
 
     let mask = (0.5 - dist_to_shape).clamp(0.0, 1.0);
-    let shadow = (1.0 - smoothstep(0.0, 6.0, dist_to_shape)).powf(2.0) * 0.2;
+    let shadow = 1.0 - smoothstep(0.0, 6.0, dist_to_shape);
+    let shadow = shadow * shadow * 0.2;
     if mask <= 0.0 && shadow <= 0.0 {
         kill();
     }
-    let highlighting = (1.0 - smoothstep(0.0, -5.0, dist_to_shape)).powf(4.0) * 0.04;
+    let highlighting = 1.0 - smoothstep(0.0, -5.0, dist_to_shape);
+    let highlighting2 = highlighting * highlighting;
+    let highlighting = highlighting2 * highlighting2 * 0.04;
     color += highlighting * mask;
     *out_color = vec4(
         color.x * mask * alpha,

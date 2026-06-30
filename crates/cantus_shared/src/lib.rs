@@ -1,6 +1,9 @@
 #![no_std]
 
+#[cfg(not(target_arch = "spirv"))]
 use glam::Vec2;
+#[cfg(target_arch = "spirv")]
+use spirv_std::glam::Vec2;
 
 #[repr(C)]
 #[derive(Copy, Clone, Debug, Default)]
