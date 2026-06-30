@@ -1,35 +1,12 @@
-use crate::common::{mix_f32, mix_vec3, sign_no_nan, smoothstep, step};
+use crate::common::{
+    pixel_to_ndc, quad_coord, sd_rounded_triangle, sd_vertical_segment, smoothstep,
+};
 use cantus_shared::{GlobalUniforms, PlayheadUniforms};
 use spirv_std::{
-    glam::{Vec2, Vec4, vec2, vec3, vec4},
+    arch::kill,
+    glam::{Vec2, Vec3, Vec4, vec2, vec3},
     spirv,
 };
-
-#[cfg(target_arch = "spirv")]
-use spirv_std::num_traits::Float;
-
-fn sd_segment(p: Vec2, a: Vec2, b: Vec2, radius: f32) -> f32 {
-    let ba = b - a;
-    let pa = p - a;
-    let h = (pa.dot(ba) / ba.dot(ba)).clamp(0.0, 1.0);
-    (pa - h * ba).length() - radius
-}
-
-fn sd_rounded_triangle(p: Vec2, side_len: f32, radius: f32) -> f32 {
-    let k = 1.732_050_8;
-    let mut p_sym = p;
-    p_sym.x = p_sym.x.abs();
-    let h = (p_sym.x + k * p_sym.y).max(0.0);
-    p_sym -= 0.5 * vec2(h, h * k);
-    p_sym -= vec2(
-        p_sym.x.clamp(
-            -0.5 * (side_len - radius) * k,
-            0.5 * (side_len - radius) * k,
-        ),
-        -0.5 * (side_len - radius),
-    );
-    p_sym.length() * sign_no_nan(-p_sym.y) - radius
-}
 
 #[spirv(vertex)]
 pub fn vs_playhead(
@@ -43,14 +20,13 @@ pub fn vs_playhead(
     let height = global.bar_height.y;
 
     let h_width = height * 0.4;
-    let uv = vec2((v_idx % 2) as f32, (v_idx / 2) as f32);
+    let uv = quad_coord(v_idx);
     let world_pos = vec2(
         x_coord + (uv.x * 2.0 - 1.0) * h_width,
         start_y - 5.0 + uv.y * (height + 10.0),
     );
 
-    let ndc = (world_pos / global.screen_size * 2.0 - 1.0) * vec2(1.0, -1.0);
-    *out_pos = vec4(ndc.x, ndc.y, 0.0, 1.0);
+    *out_pos = pixel_to_ndc(world_pos, global.screen_size);
     *out_world_pos = world_pos;
 }
 
@@ -61,7 +37,6 @@ pub fn fs_playhead(
     #[spirv(uniform, descriptor_set = 0, binding = 1)] state: &PlayheadUniforms,
     #[spirv(location = 0)] out_color: &mut Vec4,
 ) {
-    let pixel_pos = world_pos;
     let scale = global.scale_factor;
     let x_coord = global.playhead_x;
     let start_y = global.bar_height.x;
@@ -69,52 +44,61 @@ pub fn fs_playhead(
     let mid_y = start_y + height * 0.5;
     let line_thickness = 3.5 * scale;
 
-    let bar_len = height * mix_f32(0.5, 0.125, state.bar_lerp);
-    let dist_bar = sd_segment(
-        pixel_pos,
-        vec2(x_coord, start_y),
-        vec2(x_coord, start_y + bar_len),
+    let bar_len = height * (0.5 + (0.125 - 0.5) * state.bar_lerp);
+    let bar_center_offset = (height - bar_len) * 0.5;
+    let dist_bar = sd_vertical_segment(
+        world_pos,
+        x_coord,
+        mid_y - bar_center_offset,
+        bar_len * 0.5,
         line_thickness,
     )
-    .min(sd_segment(
-        pixel_pos,
-        vec2(x_coord, start_y + height - bar_len),
-        vec2(x_coord, start_y + height),
+    .min(sd_vertical_segment(
+        world_pos,
+        x_coord,
+        mid_y + bar_center_offset,
+        bar_len * 0.5,
         line_thickness,
     ));
 
-    let pause_gap = mix_f32(0.0, 4.0 * scale, smoothstep(0.0, 0.5, state.pause_lerp));
-    let dist_pause = sd_segment(
-        pixel_pos,
-        vec2(x_coord - pause_gap, mid_y - height * 0.1),
-        vec2(x_coord - pause_gap, mid_y + height * 0.1),
+    let pause_gap = 4.0 * scale * smoothstep(0.0, 0.5, state.pause_lerp);
+    let pause_half_height = height * 0.1;
+    let dist_pause = sd_vertical_segment(
+        world_pos,
+        x_coord - pause_gap,
+        mid_y,
+        pause_half_height,
         line_thickness,
     )
-    .min(sd_segment(
-        pixel_pos,
-        vec2(x_coord + pause_gap, mid_y - height * 0.1),
-        vec2(x_coord + pause_gap, mid_y + height * 0.1),
+    .min(sd_vertical_segment(
+        world_pos,
+        x_coord + pause_gap,
+        mid_y,
+        pause_half_height,
         line_thickness,
     ));
-    let pause_active =
-        step(0.001, state.pause_lerp) * (1.0 - smoothstep(0.5, 1.0, state.pause_lerp));
+    let pause_active = if state.pause_lerp >= 0.001 {
+        1.0 - smoothstep(0.5, 1.0, state.pause_lerp)
+    } else {
+        0.0
+    };
 
-    let p_local = pixel_pos - vec2(x_coord, mid_y);
+    let p_local = world_pos - vec2(x_coord, mid_y);
     let p_rotated = vec2(-p_local.y, p_local.x);
-    let play_scale = mix_f32(
-        0.01 * height,
-        height * 0.18,
-        (state.play_lerp * 2.0).min(1.0),
-    ) * mix_f32(1.0, 2.0, smoothstep(0.5, 1.0, state.play_lerp));
+    let play_growth = (state.play_lerp * 2.0).min(1.0);
+    let play_scale = height
+        * (0.01 + (0.18 - 0.01) * play_growth)
+        * (1.0 + smoothstep(0.5, 1.0, state.play_lerp));
     let dist_play = sd_rounded_triangle(p_rotated, play_scale, play_scale * 0.5);
-    let play_active = step(0.001, state.play_lerp) * (1.0 - smoothstep(0.5, 1.0, state.play_lerp));
+    let play_active = if state.play_lerp >= 0.001 {
+        1.0 - smoothstep(0.5, 1.0, state.play_lerp)
+    } else {
+        0.0
+    };
 
     let icon_alpha = (pause_active + play_active).clamp(0.0, 1.0);
-    let dist_icon = mix_f32(
-        dist_play,
-        dist_pause,
-        pause_active / (pause_active + play_active + 1e-6),
-    );
+    let icon_mix = pause_active / (pause_active + play_active + 1e-6);
+    let dist_icon = dist_play + (dist_pause - dist_play) * icon_mix;
 
     let mask_bar = 1.0 - smoothstep(-0.8, 0.2, dist_bar);
     let mask_icon = (1.0 - smoothstep(-0.8, 0.2, dist_icon)) * icon_alpha;
@@ -127,21 +111,16 @@ pub fn fs_playhead(
     let shadow_mask = shadow_bar.max(shadow_icon);
 
     if main_mask > 0.0 || shadow_mask > 0.0 {
-        let normalized_y = 1.0 - ((pixel_pos.y - start_y) / height).clamp(0.0, 1.0);
-        let color_state = mix_vec3(
-            vec3(0.5, 0.5, 0.5),
-            vec3(1.0, 0.878, 0.824),
-            if normalized_y <= state.volume {
-                1.0
-            } else {
-                0.0
-            },
-        );
+        let normalized_y = 1.0 - ((world_pos.y - start_y) / height).clamp(0.0, 1.0);
+        let color_state = if normalized_y <= state.volume {
+            vec3(1.0, 0.878, 0.824)
+        } else {
+            Vec3::splat(0.5)
+        };
         let border_mask = smoothstep(-2.5, -1.0, dist_bar.min(dist_icon));
-        let final_rgb = mix_vec3(color_state, vec3(0.15, 0.15, 0.15), border_mask);
-        *out_color =
-            mix_vec3(vec3(0.0, 0.0, 0.0), final_rgb, main_mask).extend(main_mask.max(shadow_mask));
+        let final_rgb = color_state.lerp(Vec3::splat(0.15), border_mask);
+        *out_color = (final_rgb * main_mask).extend(main_mask.max(shadow_mask));
     } else {
-        *out_color = Vec4::ZERO;
+        kill();
     }
 }

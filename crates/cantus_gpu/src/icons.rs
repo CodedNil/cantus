@@ -1,9 +1,9 @@
-use crate::common::{mix_vec3, sd_squircle, sign_no_nan, smoothstep, unpack2x16unorm};
+use crate::common::{pixel_to_ndc, quad_coord, sd_squircle, sd_star, smoothstep};
 use cantus_shared::{GlobalUniforms, IconInstance};
 use spirv_std::{
     Sampler,
     arch::{Derivative, kill},
-    glam::{Vec2, Vec4, vec2, vec3, vec4},
+    glam::{Vec2, Vec3, Vec4, vec2, vec3},
     image::Image2dArray,
     spirv,
 };
@@ -23,7 +23,7 @@ pub fn vs_icons(
     #[spirv(location = 2)] out_pixel_radius: &mut f32,
 ) {
     let icon = icons[i_idx as usize];
-    let unit_coord = vec2((v_idx % 2) as f32, (v_idx / 2) as f32);
+    let unit_coord = quad_coord(v_idx);
     let pressure = global.mouse_pressure.clamp(0.001, 1.0);
     let dist = icon.pos.distance(global.mouse_pos) / global.scale_factor / pressure;
     let proximity = smoothstep(30.0, 8.0, dist);
@@ -38,25 +38,10 @@ pub fn vs_icons(
         rotation.x * angle.sin() + rotation.y * angle.cos(),
     );
     let screen_pixel = offset_pos + rotated_pos;
-    let ndc_pos = (screen_pixel / global.screen_size) * 2.0 - 1.0;
-    *out_pos = vec4(ndc_pos.x, -ndc_pos.y, 0.0, 1.0);
+    *out_pos = pixel_to_ndc(screen_pixel, global.screen_size);
     *out_local_uv = unit_coord;
     *out_icon_id = i_idx;
     *out_pixel_radius = pixel_radius;
-}
-
-fn sd_star(p: Vec2, radius: f32, indent: f32) -> f32 {
-    let k1 = vec2(0.809_017, -0.587_785_25);
-    let k2 = vec2(-k1.x, k1.y);
-    let mut p_sym = vec2(p.x, -p.y);
-    p_sym.x = p_sym.x.abs();
-    p_sym -= 2.0 * k1.dot(p_sym).max(0.0) * k1;
-    p_sym -= 2.0 * k2.dot(p_sym).max(0.0) * k2;
-    p_sym.x = p_sym.x.abs();
-    p_sym.y -= radius;
-    let ba = indent * vec2(-k1.y, k1.x) - vec2(0.0, radius);
-    let h = (p_sym.dot(ba) / ba.dot(ba)).clamp(0.0, 1.0);
-    (p_sym - ba * h).length() * sign_no_nan(p_sym.y * ba.x - p_sym.x * ba.y)
 }
 
 #[spirv(fragment)]
@@ -72,9 +57,8 @@ pub fn fs_icons(
 ) {
     let icon = icons[icon_id as usize];
     let local_pixel = (local_uv - 0.5) * (pixel_radius * 2.0);
-    let data = unpack2x16unorm(icon.data);
-    let param = data.x;
-    let alpha = data.y;
+    let param = (icon.data & 0xffff) as f32 / 65535.0;
+    let alpha = (icon.data >> 16) as f32 / 65535.0;
 
     let (mut color, dist_to_shape) = if param >= 0.5 {
         let dist = sd_star(local_pixel, pixel_radius * 0.5, pixel_radius * 0.32)
@@ -83,7 +67,7 @@ pub fn fs_icons(
         let split_line = local_uv.x - star_fullness;
         let selection_mask = (split_line / split_line.fwidth() + 0.5).clamp(0.0, 1.0);
         (
-            mix_vec3(vec3(1.0, 0.85, 0.2), vec3(0.33, 0.33, 0.33), selection_mask),
+            vec3(1.0, 0.85, 0.2).lerp(vec3(0.33, 0.33, 0.33), selection_mask),
             dist,
         )
     } else {
@@ -95,7 +79,7 @@ pub fn fs_icons(
         let tex = images.sample(*sampler, local_uv.extend(icon.image_index as f32));
         let icon_saturation = if param > 0.0 { 0.7 } else { 0.0 };
         (
-            mix_vec3(tex.truncate(), vec3(0.24, 0.24, 0.24), icon_saturation),
+            tex.truncate().lerp(Vec3::splat(0.24), icon_saturation),
             dist,
         )
     };
@@ -110,10 +94,6 @@ pub fn fs_icons(
     let highlighting2 = highlighting * highlighting;
     let highlighting = highlighting2 * highlighting2 * 0.04;
     color += highlighting * mask;
-    *out_color = vec4(
-        color.x * mask * alpha,
-        color.y * mask * alpha,
-        color.z * mask * alpha,
-        mask.max(shadow) * alpha,
-    );
+    let output_alpha = mask.max(shadow) * alpha;
+    *out_color = (color * mask * alpha).extend(output_alpha);
 }

@@ -1,8 +1,8 @@
-use crate::common::{mix_vec3, smoothstep, unpack4x8unorm};
+use crate::common::{pixel_to_ndc, smoothstep, unpack4x8unorm};
 use cantus_shared::{GlobalUniforms, Particle};
 use spirv_std::{
     arch::kill,
-    glam::{Vec2, Vec4, vec2, vec3, vec4},
+    glam::{Vec2, Vec3, Vec4, vec2, vec3},
     spirv,
 };
 
@@ -47,14 +47,9 @@ pub fn vs_particles(
     };
     let world_pos = pos + (dir * uv.x * half_len) + (perp * uv.y * half_thick);
     let luma = rgb.dot(vec3(0.299, 0.587, 0.114));
-    let spark_color = mix_vec3(
-        mix_vec3(vec3(luma, luma, luma), rgb, 2.0),
-        vec3(1.0, 1.0, 1.0),
-        0.2,
-    ) * 2.0;
+    let spark_color = Vec3::splat(luma).lerp(rgb, 2.0).lerp(Vec3::ONE, 0.2) * 2.0;
 
-    let ndc = (world_pos / global.screen_size * 2.0 - 1.0) * vec2(1.0, -1.0);
-    *out_pos = vec4(ndc.x, ndc.y, 0.0, 1.0);
+    *out_pos = pixel_to_ndc(world_pos, global.screen_size);
     *out_color = spark_color.extend(p_life_inv * smoothstep(0.0, 0.15, dt) * 0.3);
     *out_uv = uv;
 }
@@ -70,5 +65,5 @@ pub fn fs_particles(
     if alpha <= 0.0 {
         kill();
     }
-    *out_color = vec4(color.x * alpha, color.y * alpha, color.z * alpha, alpha);
+    *out_color = (color.truncate() * alpha).extend(alpha);
 }

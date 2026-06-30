@@ -1,9 +1,9 @@
 #![no_std]
 
 #[cfg(not(target_arch = "spirv"))]
-use glam::Vec2;
+use glam::{Vec2, Vec4};
 #[cfg(target_arch = "spirv")]
-use spirv_std::glam::Vec2;
+use spirv_std::glam::{Vec2, Vec4};
 
 #[repr(C)]
 #[derive(Copy, Clone, Debug, Default)]
@@ -37,6 +37,8 @@ pub struct PlayheadUniforms {
 #[derive(Copy, Clone, Debug, Default)]
 #[cfg_attr(feature = "cpu", derive(bytemuck::Pod, bytemuck::Zeroable))]
 pub struct BackgroundPill {
+    /// Primary half-span, secondary half-span, secondary expansion, and primary presence.
+    pub icon_span: Vec4,
     pub rect: Vec2,
     pub color0: u32,
     pub color1: u32,

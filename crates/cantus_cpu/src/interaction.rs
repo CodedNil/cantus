@@ -4,6 +4,7 @@ use crate::{
     render::{IconInstance, Point, Rect, TrackRender, lerpf32},
     update_playback_state,
 };
+use glam::{Vec4, vec2, vec4};
 use itertools::Itertools;
 use std::{
     collections::HashMap,
@@ -27,6 +28,8 @@ pub struct InteractionState {
     pub play_hitbox: Rect,
     pub track_hitboxes: Vec<(Option<TrackId>, Rect, (f32, f32))>,
     pub icon_hitboxes: Vec<IconHitbox>,
+    pub expanded_playlist_track: Option<TrackId>,
+    pub playlist_expansion: f32,
 
     pub mouse_down: bool,
     pub dragging: bool,
@@ -48,6 +51,8 @@ impl Default for InteractionState {
             play_hitbox: Rect::default(),
             track_hitboxes: Vec::new(),
             icon_hitboxes: Vec::new(),
+            expanded_playlist_track: None,
+            playlist_expansion: 0.0,
             mouse_down: false,
             dragging: false,
             drag_origin: None,
@@ -129,10 +134,10 @@ impl CantusApp {
                 .filter(|p| time > p.end_time)
                 .take(20)
             {
-                particle.spawn_pos = glam::Vec2::new(mouse_pos.x, mouse_pos.y);
+                particle.spawn_pos = vec2(mouse_pos.x, mouse_pos.y);
                 let angle = fastrand::f32() * 2.0 * std::f32::consts::PI;
                 let speed = 30.0 + (fastrand::f32() * 20.0);
-                particle.spawn_vel = glam::Vec2::new(angle.cos() * speed, angle.sin() * speed);
+                particle.spawn_vel = vec2(angle.cos() * speed, angle.sin() * speed);
                 let duration = lerpf32(fastrand::f32(), 0.5, 1.5);
                 particle.color =
                     u32::from_le_bytes([255, 215, 50, (duration * 100.0).min(255.0) as u8]);
@@ -246,12 +251,13 @@ impl CantusApp {
         &mut self,
         track_render: &TrackRender,
         hovered: bool,
+        secondary_expansion: f32,
         playlists: &HashMap<PlaylistId, CondensedPlaylist>,
-    ) {
+    ) -> Option<Vec4> {
         let track = track_render.track;
         let width = track_render.width;
         let pos_x = track_render.start_x;
-        let Some(track_id) = track.id else { return };
+        let track_id = track.id?;
         let (track_rating_index, mut icon_entries) = if CONFIG.ratings_enabled {
             let index = playlists
                 .values()
@@ -273,7 +279,7 @@ impl CantusApp {
                 .filter(|p| p.rating_index.is_none())
                 .filter_map(|p| {
                     let contained = p.tracks.contains(&track_id);
-                    (contained || hovered).then_some((p, contained))
+                    (contained || secondary_expansion > 0.0).then_some((p, contained))
                 })
                 .sorted_by(|(a, ac), (b, bc)| bc.cmp(ac).then_with(|| a.name.cmp(&b.name)))
                 .map(|(playlist, contained)| IconEntry::Playlist {
@@ -287,10 +293,24 @@ impl CantusApp {
         let mouse_pos = self.interaction.mouse_position;
 
         let num_icons = icon_entries.len();
-        let needed_width = icon_size * num_icons as f32 * 0.7;
         if num_icons == 0 {
-            return;
+            return None;
         }
+
+        let primary_count = icon_entries
+            .iter()
+            .filter(|entry| {
+                !matches!(
+                    entry,
+                    IconEntry::Playlist {
+                        contained: false,
+                        ..
+                    }
+                )
+            })
+            .count();
+        let secondary_count = num_icons - primary_count;
+        let needed_width = icon_size * primary_count as f32 * 0.7;
 
         let fade_alpha = if hovered {
             1.0
@@ -299,25 +319,43 @@ impl CantusApp {
         };
         let center_x = pos_x + width * 0.5;
         let center_y = PANEL_START + CONFIG.height * 0.975;
-
-        // Count only the standard icons for spacing
-        let half_icons = icon_entries
-            .iter()
-            .filter(|e| !matches!(e, IconEntry::Playlist { contained, .. } if !contained))
-            .count() as f32
-            / 2.0;
+        let secondary_y = center_y + icon_size;
 
         let mut hover_rating_index = None;
         let mut icon_data = Vec::with_capacity(num_icons);
+        let mut primary_index = 0;
+        let mut secondary_index = 0;
 
-        for (i, entry) in icon_entries.into_iter().enumerate() {
-            let origin_x = center_x + (i as f32 - half_icons) * icon_size;
+        for entry in icon_entries {
+            let secondary = matches!(
+                &entry,
+                IconEntry::Playlist {
+                    contained: false,
+                    ..
+                }
+            );
+            let (row_index, row_count, origin_y) = if secondary {
+                let index = secondary_index;
+                secondary_index += 1;
+                (
+                    index,
+                    secondary_count,
+                    center_y + (secondary_y - center_y) * secondary_expansion,
+                )
+            } else {
+                let index = primary_index;
+                primary_index += 1;
+                (index, primary_count, center_y)
+            };
+            let row_center = (row_count.saturating_sub(1)) as f32 * 0.5;
+            let row_expansion = if secondary { secondary_expansion } else { 1.0 };
+            let origin_x = center_x + (row_index as f32 - row_center) * icon_size * row_expansion;
             let half_size = icon_size * 0.6; // Add slight hitbox padding
             let rect = Rect::new(
                 origin_x - half_size,
-                center_y - half_size,
+                origin_y - half_size,
                 origin_x + half_size,
-                center_y + half_size,
+                origin_y + half_size,
             );
             let is_hovered = rect.contains(mouse_pos) && self.interaction.mouse_pressure > 0.0;
 
@@ -344,13 +382,14 @@ impl CantusApp {
                     });
                 }
             }
-            icon_data.push((entry, is_hovered, origin_x));
+            icon_data.push((entry, is_hovered, vec2(origin_x, origin_y)));
         }
 
         // Sort by distance to mouse for overlap rendering
-        icon_data.sort_by(|(_, _, x1), (_, _, x2)| {
-            let d1 = (x1 - mouse_pos.x).powi(2);
-            let d2 = (x2 - mouse_pos.x).powi(2);
+        icon_data.sort_by(|(_, _, p1), (_, _, p2)| {
+            let mouse = vec2(mouse_pos.x, mouse_pos.y);
+            let d1 = p1.distance_squared(mouse);
+            let d2 = p2.distance_squared(mouse);
             d2.partial_cmp(&d1).unwrap_or(std::cmp::Ordering::Equal)
         });
 
@@ -358,10 +397,18 @@ impl CantusApp {
         let full_stars = display_rating / 2;
         let has_half = display_rating % 2 == 1;
 
-        for (entry, is_hovered, origin_x) in icon_data {
+        for (entry, is_hovered, origin) in icon_data {
+            let secondary = matches!(
+                &entry,
+                IconEntry::Playlist {
+                    contained: false,
+                    ..
+                }
+            );
+            let icon_alpha = fade_alpha * if secondary { secondary_expansion } else { 1.0 };
             let instance = IconInstance {
-                pos: glam::Vec2::new(origin_x, center_y),
-                data: (((fade_alpha * 65535.0) as u32) << 16)
+                pos: origin,
+                data: (((icon_alpha * 65535.0) as u32) << 16)
                     | (match entry {
                         IconEntry::Star { index } => {
                             (if index < full_stars {
@@ -394,6 +441,19 @@ impl CantusApp {
             };
             self.icon_pills.push(instance);
         }
+
+        let primary_half_span = primary_count.saturating_sub(1) as f32 * icon_size * 0.5;
+        let secondary_half_span = secondary_count.saturating_sub(1) as f32 * icon_size * 0.5;
+        Some(vec4(
+            primary_half_span,
+            secondary_half_span,
+            if secondary_count > 0 {
+                secondary_expansion
+            } else {
+                0.0
+            },
+            if primary_count > 0 { 1.0 } else { 0.0 },
+        ))
     }
 }
 

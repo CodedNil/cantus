@@ -259,6 +259,33 @@ impl CantusApp {
 
         track_renders.sort_unstable_by(|a, b| a.start_x.total_cmp(&b.start_x));
 
+        let hovered_track = if !self.interaction.dragging && self.interaction.mouse_pressure > 0.0 {
+            let mouse_x = self.interaction.mouse_position.x;
+            track_renders
+                .iter()
+                .rev()
+                .find(|render| {
+                    !render.art_only
+                        && mouse_x >= render.start_x
+                        && mouse_x <= render.start_x + render.width
+                })
+                .and_then(|render| render.track.id)
+        } else {
+            None
+        };
+        if hovered_track.is_some() && hovered_track != self.interaction.expanded_playlist_track {
+            self.interaction.expanded_playlist_track = hovered_track;
+            self.interaction.playlist_expansion = 0.0;
+        }
+        move_towards(
+            &mut self.interaction.playlist_expansion,
+            if hovered_track.is_some() { 1.0 } else { 0.0 },
+            dt.min(0.1) * 6.0,
+        );
+        if hovered_track.is_none() && self.interaction.playlist_expansion <= 0.0 {
+            self.interaction.expanded_playlist_track = None;
+        }
+
         // Render the tracks
         let mut current_track = None;
         for track_render in &track_renders {
@@ -328,6 +355,7 @@ impl CantusApp {
         let colors = album_palette(track);
         self.background_pills.push(BackgroundPill {
             rect: Vec2::new(start_x, width),
+            icon_span: glam::Vec4::ZERO,
             color0: colors[0],
             color1: colors[1],
             color2: colors[2],
@@ -351,7 +379,17 @@ impl CantusApp {
                 && self.interaction.mouse_pressure > 0.0
                 && self.interaction.mouse_position.x >= hitbox.x0
                 && self.interaction.mouse_position.x <= hitbox.x1;
-            self.draw_playlist_buttons(track_render, hovered, playlists);
+            let active = self.interaction.expanded_playlist_track == track.id;
+            let secondary_expansion = if active {
+                self.interaction.playlist_expansion
+            } else {
+                0.0
+            };
+            if let Some(icon_rows) =
+                self.draw_playlist_buttons(track_render, hovered, secondary_expansion, playlists)
+            {
+                self.background_pills.last_mut().unwrap().icon_span = icon_rows;
+            }
         }
     }
 
