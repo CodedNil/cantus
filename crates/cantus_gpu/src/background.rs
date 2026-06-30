@@ -1,5 +1,3 @@
-use core::f32::consts::PI;
-
 use crate::common::{
     pixel_to_ndc, quad_coord, sd_capsule_box, sd_squircle, smooth_union, smoothstep, unpack4x8unorm,
 };
@@ -19,8 +17,8 @@ const ICON_RADIUS: f32 = 7.0;
 const ICON_GROWTH: f32 = 8.0;
 const ICON_END_PADDING: f32 = 3.0;
 const ICON_ROW_GAP: f32 = 20.0;
-const PRIMARY_SMOOTHING: f32 = 5.0;
-const SECONDARY_SMOOTHING: f32 = 8.0;
+const PRIMARY_SMOOTHING: f32 = 7.0;
+const SECONDARY_SMOOTHING: f32 = 10.0;
 
 #[spirv(vertex)]
 pub fn vs_background(
@@ -29,10 +27,8 @@ pub fn vs_background(
     #[spirv(uniform, descriptor_set = 0, binding = 0)] global: &GlobalUniforms,
     #[spirv(storage_buffer, descriptor_set = 0, binding = 1)] pills: &[BackgroundPill],
     #[spirv(position)] out_pos: &mut Vec4,
-    #[spirv(location = 0)] out_local_uv: &mut Vec2,
-    #[spirv(location = 1)] out_world_uv: &mut Vec2,
-    #[spirv(location = 2, flat)] out_pill_idx: &mut u32,
-    #[spirv(location = 3)] out_pixel_pos: &mut Vec2,
+    #[spirv(location = 0)] out_pixel_pos: &mut Vec2,
+    #[spirv(location = 1, flat)] out_pill_idx: &mut u32,
 ) {
     let pill = pills[i_idx as usize];
     let margin = 16.0;
@@ -40,46 +36,42 @@ pub fn vs_background(
     let pill_size = vec2(pill.rect.y, global.bar_height.y);
     let pill_origin = vec2(pill.rect.x, global.bar_height.x);
 
-    let mut render_min = pill_origin - margin;
-    let mut render_max = pill_origin + pill_size + margin;
     let primary_fade = pill.icon_span.w.fract() * 2.0;
-    if pill.icon_span.z > 0.0 || primary_fade > 0.0 {
-        let primary_span = (pill.icon_span.x - 1.0).max(0.0);
-        let secondary_span = pill.icon_span.y * pill.icon_span.z;
-        let icon_center_x = pill_origin.x + pill_size.x * 0.5;
-        let primary_center_y = global.bar_height.x + global.bar_height.y * 0.975;
-        let lowest_center_y = primary_center_y + ICON_ROW_GAP * pill.icon_span.z;
-        let max_icon_radius = (ICON_RADIUS + ICON_GROWTH) * global.scale_factor;
-        let icon_half_width = primary_span.max(secondary_span)
-            + ICON_END_PADDING * global.scale_factor
-            + max_icon_radius;
-        let union_margin = SECONDARY_SMOOTHING * 0.25 * global.scale_factor;
-        render_min.x = render_min
-            .x
-            .min(icon_center_x - icon_half_width - union_margin);
-        render_max.x = render_max
-            .x
-            .max(icon_center_x + icon_half_width + union_margin);
-        render_max.y = render_max
-            .y
-            .max(lowest_center_y + max_icon_radius + union_margin);
-    }
+    let icon_visibility = primary_fade.max(pill.icon_span.z);
+    let icon_center_x = pill_origin.x + pill_size.x * 0.5;
+    let icon_radius = (ICON_RADIUS + ICON_GROWTH + SECONDARY_SMOOTHING * 0.25)
+        * global.scale_factor
+        * icon_visibility;
+    let icon_half_width = ((pill.icon_span.x - 1.0)
+        .max(pill.icon_span.y * pill.icon_span.z)
+        .max(0.0)
+        + ICON_END_PADDING * global.scale_factor)
+        * icon_visibility
+        + icon_radius;
+    let render_min = vec2(
+        (pill_origin.x - margin).min(icon_center_x - icon_half_width),
+        pill_origin.y - margin,
+    );
+    let render_max = vec2(
+        (pill_origin.x + pill_size.x + margin).max(icon_center_x + icon_half_width),
+        (pill_origin.y + pill_size.y + margin).max(
+            global.bar_height.x
+                + global.bar_height.y * 0.975
+                + ICON_ROW_GAP * pill.icon_span.z
+                + icon_radius,
+        ),
+    );
 
     let pixel_pos = render_min + unit_coord * (render_max - render_min);
-    let local_pixel = pixel_pos - pill_origin;
     *out_pos = pixel_to_ndc(pixel_pos, global.screen_size);
-    *out_local_uv = local_pixel / pill_size;
-    *out_world_uv = local_pixel / global.screen_size.y;
-    *out_pill_idx = i_idx;
     *out_pixel_pos = pixel_pos;
+    *out_pill_idx = i_idx;
 }
 
 #[spirv(fragment)]
 pub fn fs_background(
-    #[spirv(location = 0)] local_uv: Vec2,
-    #[spirv(location = 1)] world_uv: Vec2,
-    #[spirv(location = 2, flat)] pill_idx: u32,
-    #[spirv(location = 3)] pixel_pos: Vec2,
+    #[spirv(location = 0)] pixel_pos: Vec2,
+    #[spirv(location = 1, flat)] pill_idx: u32,
     #[spirv(uniform, descriptor_set = 0, binding = 0)] global: &GlobalUniforms,
     #[spirv(storage_buffer, descriptor_set = 0, binding = 1)] pills: &[BackgroundPill],
     #[spirv(descriptor_set = 0, binding = 2)] images: &Image2dArray,
@@ -88,30 +80,33 @@ pub fn fs_background(
 ) {
     let pill = pills[pill_idx as usize];
     let pill_size = vec2(pill.rect.y, global.bar_height.y);
-    let rounding = 22.0 * global.scale_factor;
+    let pill_origin = vec2(pill.rect.x, global.bar_height.x);
+    let local_pixel = pixel_pos - pill_origin;
+    let local_uv = local_pixel / pill_size;
+    let world_uv = local_pixel / global.screen_size.y;
+    let scale = global.scale_factor;
+    let rounding = 22.0 * scale;
 
     let anim_t = (global.time - global.expansion_time) * 1.2;
-    let ripple_started = if anim_t < 0.0 { 0.0 } else { 1.0 };
-    let ripple_unfinished = if anim_t > 1.0 { 0.0 } else { 1.0 };
-    let ripple_active = ripple_started * ripple_unfinished;
-    let ripple_vec = pixel_pos - global.expansion_xy;
-    let ripple_dir = (ripple_vec + 0.001).normalize();
-    let wave_dist = (ripple_vec.length() - anim_t * 600.0).abs();
-    let wave_prof = if wave_dist <= 80.0 {
-        0.5 + 0.5 * (wave_dist / 80.0 * PI).cos()
+    let ripple_active = if anim_t * (1.0 - anim_t) >= 0.0 {
+        1.0
     } else {
         0.0
     };
+    let ripple_vec = pixel_pos - global.expansion_xy;
+    let ripple_dir = (ripple_vec + 0.001).normalize();
+    let wave_dist = (ripple_vec.length() - anim_t * 600.0).abs();
+    let wave = smoothstep(80.0, 0.0, wave_dist);
     let ripple_decay = 1.0 - anim_t;
-    let ripple_str = ripple_decay * ripple_decay * wave_prof * 0.5 * ripple_active;
+    let ripple_str = ripple_decay * ripple_decay * wave * 0.5 * ripple_active;
 
     let mouse_vec = pixel_pos - global.mouse_pos;
     let mouse_d = mouse_vec.length();
-    let mouse_inf = smoothstep(120.0 * global.scale_factor, 0.0, mouse_d);
+    let mouse_inf = smoothstep(120.0 * scale, 0.0, mouse_d);
     let mouse_inf = mouse_inf * mouse_inf * global.mouse_pressure;
-    let mouse_pull = (mouse_vec + 0.001).normalize() * mouse_inf * 15.0 * global.scale_factor;
+    let mouse_pull = (mouse_vec + 0.001).normalize() * mouse_inf * 15.0 * scale;
 
-    let bulge = ripple_str * 22.0 * global.scale_factor + mouse_inf * 8.0;
+    let bulge = ripple_str * 22.0 * scale + mouse_inf * 8.0;
     let stretched_uv_y = (local_uv.y - 0.5) * (pill_size.y / (pill_size.y + bulge)) + 0.5;
     let pill_dist = sd_squircle(
         (local_uv - 0.5) * pill_size,
@@ -120,32 +115,36 @@ pub fn fs_background(
     );
     let icon_center_x = pill.rect.x + pill.rect.y * 0.5;
     let primary_center_y = global.bar_height.x + global.bar_height.y * 0.975;
-    let smoothing = PRIMARY_SMOOTHING * global.scale_factor;
-    let secondary_smoothing = SECONDARY_SMOOTHING * global.scale_factor;
-    let primary_center = vec2(icon_center_x, primary_center_y);
-    let local_icon_growth = mouse_inf * ICON_GROWTH * global.scale_factor;
+    let local_icon_growth = mouse_inf * ICON_GROWTH * scale;
     let primary_dist = sd_capsule_box(
-        pixel_pos - primary_center,
-        (pill.icon_span.x - 1.0).max(0.0) + ICON_END_PADDING * global.scale_factor,
-        ICON_RADIUS * global.scale_factor + local_icon_growth,
+        pixel_pos - vec2(icon_center_x, primary_center_y),
+        (pill.icon_span.x - 1.0).max(0.0) + ICON_END_PADDING * scale,
+        ICON_RADIUS * scale + local_icon_growth,
     );
     let primary_fade = pill.icon_span.w.fract() * 2.0;
-    let dist = smooth_union(pill_dist, primary_dist, smoothing, primary_fade);
+    let dist = smooth_union(
+        pill_dist,
+        primary_dist,
+        PRIMARY_SMOOTHING * scale,
+        primary_fade,
+    );
     let secondary_center = vec2(
         icon_center_x,
         primary_center_y + ICON_ROW_GAP * pill.icon_span.z,
     );
     let secondary_dist = sd_capsule_box(
         pixel_pos - secondary_center,
-        pill.icon_span.y * pill.icon_span.z + ICON_END_PADDING * global.scale_factor,
-        ICON_RADIUS * global.scale_factor + local_icon_growth,
+        pill.icon_span.y * pill.icon_span.z + ICON_END_PADDING * scale,
+        ICON_RADIUS * scale + local_icon_growth,
     );
-    let dist = smooth_union(dist, secondary_dist, secondary_smoothing, pill.icon_span.z);
+    let dist = smooth_union(
+        dist,
+        secondary_dist,
+        SECONDARY_SMOOTHING * scale,
+        pill.icon_span.z,
+    );
     let mask = (0.5 - dist).clamp(0.0, 1.0);
-    let main_shadow = (1.0 - smoothstep(0.0, 16.0, pill_dist)) * 0.2;
-    let primary_shadow = (1.0 - smoothstep(0.0, 6.0, primary_dist)) * 0.08 * primary_fade;
-    let secondary_shadow = (1.0 - smoothstep(0.0, 6.0, secondary_dist)) * 0.08 * pill.icon_span.z;
-    let shadow = main_shadow.max(primary_shadow).max(secondary_shadow);
+    let shadow = (1.0 - smoothstep(0.0, 14.0, dist)) * 0.16;
     if mask <= 0.0 && shadow <= 0.0 {
         kill();
     }
@@ -158,17 +157,14 @@ pub fn fs_background(
     let p = uv * 0.2 * vec2(1.0, global.screen_size.y / global.screen_size.x) + seed;
     let s1 = (p.x * 6.0 + t + (p.y * 4.0 + t * 0.5).sin()).sin();
     let s2 = (p.y * 5.0 - t + (p.x * 3.0 + t * 0.8).sin()).sin();
-    let mix_val = (s1 * 0.5 + s2 * 0.3 + (p.length() * 4.0 + s1 + t).sin() * 0.2) * 0.5 + 0.5;
-    let mix_val = mix_val.clamp(0.0, 1.0);
-
     let c0 = unpack4x8unorm(pill.color0).truncate();
     let c1 = unpack4x8unorm(pill.color1).truncate();
     let c2 = unpack4x8unorm(pill.color2).truncate();
     let c3 = unpack4x8unorm(pill.color3).truncate();
 
     let mut color = c0
-        .lerp(c1, mix_val)
-        .lerp(c3.lerp(c2, s2 * 0.5 + 0.5), mix_val);
+        .lerp(c1, s1 * 0.5 + 0.5)
+        .lerp(c2.lerp(c3, s2 * 0.5 + 0.5), 0.5);
     color = color.lerp((c0 + c1 + c2 + c3) * 0.25, 0.1);
     let luma = color.dot(vec3(0.2126, 0.7152, 0.0722));
     let saturation = 3.2 + (1.6 - 3.2) * smoothstep(0.1, 0.4, luma);
@@ -207,17 +203,9 @@ pub fn fs_background(
     let mouse_sheen = smoothstep(30.0, 0.0, (mouse_d - 15.0).abs()) * mouse_inf * 0.2;
     color += color.lerp(Vec3::ONE, 0.3) * (sheen + rim + mouse_sheen);
 
-    let stretched_local_uv = vec2(local_uv.x, stretched_uv_y);
-    let glint = smoothstep(60.0, 0.0, (stretched_local_uv * pill_size - 20.0).length()) * 0.1
-        + smoothstep(
-            60.0,
-            0.0,
-            (stretched_local_uv * pill_size - (pill_size - 20.0)).length(),
-        ) * 0.05;
-    color += glint * mask;
     color = color.lerp(
         color * 1.5 + 0.1,
-        (1.0 - anim_t) * smoothstep(80.0, 0.0, wave_dist) * ripple_active * 0.5,
+        (1.0 - anim_t) * wave * ripple_active * 0.5,
     );
 
     let alpha = mask.max(shadow) * pill.alpha;

@@ -78,8 +78,8 @@ pub fn smooth_union(base: f32, shape: f32, smoothing: f32, amount: f32) -> f32 {
     base + (union - base) * amount
 }
 
-pub fn unpack4x8unorm(value: u32) -> spirv_std::glam::Vec4 {
-    spirv_std::glam::vec4(
+pub fn unpack4x8unorm(value: u32) -> Vec4 {
+    vec4(
         (value & 0xff) as f32 / 255.0,
         ((value >> 8) & 0xff) as f32 / 255.0,
         ((value >> 16) & 0xff) as f32 / 255.0,
