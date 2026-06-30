@@ -7,12 +7,14 @@ use crate::text_render::TextRenderer;
 use arrayvec::ArrayString;
 use dashmap::DashMap;
 use image::RgbaImage;
-use parking_lot::RwLock;
 use serde::{Deserialize, Deserializer};
 use std::collections::HashSet;
 use std::{
     collections::HashMap,
-    sync::{Arc, LazyLock},
+    sync::{
+        Arc, OnceLock,
+        mpsc::{self, Receiver, Sender},
+    },
     time::Instant,
 };
 use wgpu::{
@@ -35,7 +37,7 @@ mod spotify;
 mod spotify_debug;
 
 const PANEL_START: f32 = 6.0;
-const PANEL_EXTENSION: f32 = 38.0;
+const PANEL_EXTENSION: f32 = 44.0;
 
 struct PlaybackState {
     playing: bool,
@@ -45,9 +47,23 @@ struct PlaybackState {
     queue_index: usize,
     playlists: HashMap<PlaylistId, CondensedPlaylist>,
 
-    interaction: bool,
     last_interaction: Instant,
     last_progress_update: Instant,
+}
+
+impl Default for PlaybackState {
+    fn default() -> Self {
+        Self {
+            playing: false,
+            progress: 0,
+            volume: None,
+            queue: Vec::new(),
+            queue_index: 0,
+            playlists: HashMap::new(),
+            last_interaction: Instant::now(),
+            last_progress_update: Instant::now(),
+        }
+    }
 }
 
 /// Number of swatches to use in colour palette generation.
@@ -66,6 +82,25 @@ struct Track {
     #[serde(deserialize_with = "deserialize_first_artist", rename = "artists")]
     artist: Artist,
     duration_ms: u32,
+    #[serde(skip)]
+    display_name: String,
+}
+
+impl Track {
+    fn prepare(&mut self) {
+        let without_suffix = self
+            .name
+            .split_once(" -")
+            .map_or(self.name.as_str(), |(s, _)| s);
+        self.display_name = without_suffix
+            .split_once('(')
+            .map_or(without_suffix, |(s, _)| s)
+            .trim()
+            .to_owned();
+        if self.display_name.is_empty() {
+            self.display_name = self.name.trim().to_owned();
+        }
+    }
 }
 
 #[derive(Deserialize)]
@@ -89,9 +124,6 @@ struct CondensedPlaylist {
     image_url: Option<String>,
     tracks: HashSet<TrackId>,
     rating_index: Option<u8>,
-    tracks_total: u32,
-    #[cfg(feature = "spotify")]
-    snapshot_id: ArrayString<32>,
 }
 
 #[derive(Deserialize)]
@@ -100,39 +132,24 @@ struct Image {
     width: Option<u32>,
 }
 
-static PLAYBACK_STATE: LazyLock<RwLock<PlaybackState>> = LazyLock::new(|| {
-    #[cfg(feature = "spotify")]
-    {
-        RwLock::new(PlaybackState {
-            playing: false,
-            progress: 0,
-            volume: None,
-            queue: Vec::new(),
-            queue_index: 0,
-            playlists: HashMap::new(),
+type PlaybackUpdate = Box<dyn FnOnce(&mut PlaybackState) + Send>;
+static PLAYBACK_UPDATES: OnceLock<Sender<PlaybackUpdate>> = OnceLock::new();
 
-            interaction: false,
-            last_interaction: Instant::now(),
-            last_progress_update: Instant::now(),
-        })
-    }
-    #[cfg(not(feature = "spotify"))]
-    RwLock::new(spotify_debug::debug_playbackstate())
-});
-
-fn update_playback_state<F>(update: F)
+fn queue_playback_update<F>(update: F)
 where
-    F: FnOnce(&mut PlaybackState),
+    F: FnOnce(&mut PlaybackState) + Send + 'static,
 {
-    let mut state = PLAYBACK_STATE.write();
-    update(&mut state);
+    if let Some(sender) = PLAYBACK_UPDATES.get() {
+        let _ = sender.send(Box::new(update));
+    }
 }
 
-static IMAGES_CACHE: LazyLock<DashMap<String, Option<Arc<RgbaImage>>>> =
-    LazyLock::new(DashMap::new);
-static ALBUM_PALETTE_CACHE: LazyLock<DashMap<AlbumId, Option<[u32; NUM_SWATCHES]>>> =
-    LazyLock::new(DashMap::new);
-static ARTIST_DATA_CACHE: LazyLock<DashMap<ArtistId, Option<String>>> = LazyLock::new(DashMap::new);
+#[derive(Default)]
+struct AppCaches {
+    images: DashMap<String, Option<Arc<RgbaImage>>>,
+    album_palettes: DashMap<AlbumId, Option<[u32; NUM_SWATCHES]>>,
+    artist_images: DashMap<ArtistId, Option<String>>,
+}
 
 struct CantusApp {
     // Core Graphics
@@ -143,6 +160,13 @@ struct CantusApp {
     start_time: Instant,
     render_state: RenderState,
     interaction: InteractionState,
+    playback_state: PlaybackState,
+    playback_updates: Receiver<PlaybackUpdate>,
+    config: config::Config,
+    #[cfg(feature = "spotify")]
+    spotify: spotify::SpotifyBackend,
+    caches: Arc<AppCaches>,
+    last_toggle_playing: Instant,
     particles: [Particle; 64],
     particles_accumulator: f32,
     scale_factor: f32,
@@ -157,6 +181,10 @@ struct CantusApp {
 
 impl Default for CantusApp {
     fn default() -> Self {
+        let (playback_tx, playback_updates) = mpsc::channel();
+        let _ = PLAYBACK_UPDATES.set(playback_tx);
+        let caches = Arc::new(AppCaches::default());
+        let config = config::load();
         Self {
             instance: Instance::default(),
             gpu_resources: None,
@@ -164,6 +192,16 @@ impl Default for CantusApp {
             start_time: Instant::now(),
             render_state: RenderState::default(),
             interaction: InteractionState::default(),
+            #[cfg(feature = "spotify")]
+            playback_state: PlaybackState::default(),
+            #[cfg(not(feature = "spotify"))]
+            playback_state: spotify_debug::debug_playbackstate(Arc::clone(&caches)),
+            playback_updates,
+            #[cfg(feature = "spotify")]
+            spotify: spotify::SpotifyBackend::new(&config, &caches),
+            config,
+            caches,
+            last_toggle_playing: Instant::now(),
             particles: [Particle::default(); 64],
             particles_accumulator: 0.0,
             scale_factor: 1.0,
@@ -207,7 +245,7 @@ struct GpuResources {
     url_to_image_index: HashMap<String, (i32, bool)>, // (index, used_this_frame)
 }
 
-fn cache_decoded_image(url: String, image: image::DynamicImage) {
+fn cache_decoded_image(caches: Arc<AppCaches>, url: String, image: image::DynamicImage) {
     let image = if image.width() != IMAGE_SIZE || image.height() != IMAGE_SIZE {
         image.resize_to_fill(
             IMAGE_SIZE,
@@ -217,8 +255,8 @@ fn cache_decoded_image(url: String, image: image::DynamicImage) {
     } else {
         image
     };
-    IMAGES_CACHE.insert(url, Some(Arc::new(image.to_rgba8())));
-    render::update_color_palettes();
+    caches.images.insert(url, Some(Arc::new(image.to_rgba8())));
+    queue_playback_update(move |state| render::update_color_palettes(&caches, &state.queue));
 }
 
 fn main() {
@@ -229,18 +267,21 @@ fn main() {
         .with_writer(std::io::stderr)
         .init();
 
-    #[cfg(feature = "spotify")]
-    spotify::init();
-
     layer_shell::run();
 }
 
 impl CantusApp {
     fn render(&mut self) {
+        #[cfg(feature = "spotify")]
+        self.spotify.tick();
+
         let Some(gpu) = self.gpu_resources.as_mut() else {
             return;
         };
 
+        while let Ok(update) = self.playback_updates.try_recv() {
+            update(&mut self.playback_state);
+        }
         self.icon_pills.clear();
 
         for (_, used) in gpu.url_to_image_index.values_mut() {
@@ -358,7 +399,7 @@ impl CantusApp {
             return entry.0;
         }
 
-        if let Some(img_ref) = IMAGES_CACHE.get(url)
+        if let Some(img_ref) = self.caches.images.get(url)
             && let Some(image) = img_ref.as_ref()
         {
             let mut used_slots = vec![false; MAX_TEXTURE_LAYERS as usize];

@@ -1,4 +1,5 @@
-use crate::{CantusApp, PANEL_EXTENSION, PANEL_START, config::CONFIG, render::Point};
+use crate::{CantusApp, PANEL_EXTENSION, PANEL_START};
+use glam::vec2;
 use itertools::Itertools;
 use raw_window_handle::{
     RawDisplayHandle, RawWindowHandle, WaylandDisplayHandle, WaylandWindowHandle,
@@ -75,7 +76,7 @@ pub fn run() {
     let layer_surface = layer_shell.get_layer_surface(
         surface,
         app.outputs.get(app.output_index).map(|info| &info.handle),
-        match CONFIG.layer.as_str() {
+        match app.cantus.config.layer.as_str() {
             "background" => LayerStyle::Background,
             "bottom" => LayerStyle::Bottom,
             "top" => LayerStyle::Top,
@@ -89,9 +90,9 @@ pub fn run() {
         &qhandle,
         (),
     );
-    let total_height = CONFIG.height + PANEL_EXTENSION + PANEL_START;
+    let total_height = app.cantus.config.height + PANEL_EXTENSION + PANEL_START;
     layer_surface.set_size(0, total_height as u32);
-    layer_surface.set_anchor(match CONFIG.layer_anchor.as_str() {
+    layer_surface.set_anchor(match app.cantus.config.layer_anchor.as_str() {
         "top" => LayerAnchor::Top | LayerAnchor::Left | LayerAnchor::Right,
         "bottom" => LayerAnchor::Bottom | LayerAnchor::Left | LayerAnchor::Right,
         other => {
@@ -149,6 +150,7 @@ pub struct LayerShellApp {
     pointer: Option<WlPointer>,
     outputs: Vec<OutputInfo>,
     output_index: usize,
+    last_hitbox_hash: u64,
 
     surface_ptr: Option<NonNull<c_void>>,
     wl_surface: Option<WlSurface>,
@@ -172,6 +174,7 @@ impl LayerShellApp {
             pointer: None,
             outputs: Vec::new(),
             output_index: 0,
+            last_hitbox_hash: 0,
             surface_ptr: None,
             wl_surface: None,
             viewport: None,
@@ -225,7 +228,9 @@ impl LayerShellApp {
             return false;
         }
 
-        self.output_index = CONFIG
+        self.output_index = self
+            .cantus
+            .config
             .monitor
             .as_ref()
             .and_then(|target| self.outputs.iter().position(|info| info.matches(target)))
@@ -235,8 +240,9 @@ impl LayerShellApp {
 
     fn try_render_frame(&mut self, qhandle: &QueueHandle<Self>) {
         let scale = self.cantus.scale_factor;
-        let buffer_width = (CONFIG.width * scale).round();
-        let buffer_height = ((CONFIG.height + PANEL_EXTENSION + PANEL_START) * scale).round();
+        let buffer_width = (self.cantus.config.width * scale).round();
+        let buffer_height =
+            ((self.cantus.config.height + PANEL_EXTENSION + PANEL_START) * scale).round();
         self.ensure_surface(buffer_width, buffer_height);
 
         self.update_input_region(qhandle);
@@ -250,7 +256,7 @@ impl LayerShellApp {
 
     fn update_scale_and_viewport(&self) {
         let scale = self.cantus.scale_factor;
-        let total_height = CONFIG.height + PANEL_EXTENSION + PANEL_START;
+        let total_height = self.cantus.config.height + PANEL_EXTENSION + PANEL_START;
         if let Some(surface) = &self.wl_surface {
             surface.set_buffer_scale(if self.viewport.is_some() {
                 1
@@ -262,10 +268,10 @@ impl LayerShellApp {
             viewport.set_source(
                 0.0,
                 0.0,
-                f64::from(CONFIG.width * scale).round(),
+                f64::from(self.cantus.config.width * scale).round(),
                 f64::from(total_height * scale).round(),
             );
-            viewport.set_destination(CONFIG.width as i32, total_height as i32);
+            viewport.set_destination(self.cantus.config.width as i32, total_height as i32);
         }
     }
 
@@ -301,7 +307,7 @@ impl LayerShellApp {
         }
         let hash = hasher.finish();
 
-        if hash != self.cantus.interaction.last_hitbox_hash {
+        if hash != self.last_hitbox_hash {
             let region = compositor.create_region(qhandle, ());
             for r in rects {
                 region.add(
@@ -312,7 +318,7 @@ impl LayerShellApp {
                 );
             }
             wl_surface.set_input_region(Some(&region));
-            self.cantus.interaction.last_hitbox_hash = hash;
+            self.last_hitbox_hash = hash;
         }
     }
 }
@@ -456,7 +462,7 @@ impl Dispatch<WlPointer, ()> for LayerShellApp {
                 surface_y,
                 ..
             } if surface_id == Some(surface.id()) => {
-                interaction.mouse_position = Point::new(surface_x as f32, surface_y as f32);
+                cantus.global_uniforms.mouse_pos = vec2(surface_x as f32, surface_y as f32);
                 interaction.mouse_pressure = 1.0;
             }
             wl_pointer::Event::Motion {
@@ -464,7 +470,7 @@ impl Dispatch<WlPointer, ()> for LayerShellApp {
                 surface_y,
                 ..
             } => {
-                interaction.mouse_position = Point::new(surface_x as f32, surface_y as f32);
+                cantus.global_uniforms.mouse_pos = vec2(surface_x as f32, surface_y as f32);
                 interaction.mouse_pressure = if interaction.mouse_down { 2.0 } else { 1.0 };
                 cantus.handle_mouse_drag();
             }
@@ -497,7 +503,7 @@ impl Dispatch<WlPointer, ()> for LayerShellApp {
                 value120: discrete,
                 ..
             } => {
-                CantusApp::handle_scroll(discrete.signum());
+                state.cantus.handle_scroll(discrete.signum());
             }
             _ => {}
         }

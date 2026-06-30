@@ -1,38 +1,42 @@
 use crate::{
-    ARTIST_DATA_CACHE, Album, Artist, CondensedPlaylist, IMAGES_CACHE, PlaybackState, Track,
-    cache_decoded_image,
+    Album, AppCaches, Artist, CondensedPlaylist, PlaybackState, Track, cache_decoded_image,
 };
 use arrayvec::ArrayString;
 use std::collections::{HashMap, HashSet};
-use std::thread::spawn;
 use std::time::Instant;
+use std::{sync::Arc, thread::spawn};
 use tracing::warn;
 
 fn random_arraystring() -> ArrayString<22> {
     let mut s = ArrayString::<22>::new();
-    s.extend((0..22).map(|_| fastrand::alphanumeric()));
+    for _ in 0..22 {
+        s.push(fastrand::alphanumeric());
+    }
     s
 }
 
 fn artist() -> Artist {
     Artist {
-        id: ArrayString::from("06HL4z0CvFAxyc27GXpf02").unwrap(),
+        id: Some(ArrayString::from("06HL4z0CvFAxyc27GXpf02").unwrap()),
         name: "Taylor Swift".into(),
         image: Some("https://i.scdn.co/image/ab6761610000f178e2e8e7ff002a4afda1c7147e".into()),
     }
 }
 
 fn track(name: &str, album_img: &str, duration: u32) -> Track {
-    Track {
-        id: random_arraystring(),
+    let mut track = Track {
+        id: Some(random_arraystring()),
         name: name.into(),
         album: Album {
-            id: random_arraystring(),
+            id: Some(random_arraystring()),
             image: Some(album_img.into()),
         },
         artist: artist(),
         duration_ms: duration,
-    }
+        display_name: String::new(),
+    };
+    track.prepare();
+    track
 }
 
 fn playlist(name: &str, url: &str, rating: Option<u8>) -> (ArrayString<22>, CondensedPlaylist) {
@@ -45,12 +49,11 @@ fn playlist(name: &str, url: &str, rating: Option<u8>) -> (ArrayString<22>, Cond
             image_url: Some(url.into()),
             tracks: HashSet::new(),
             rating_index: rating,
-            tracks_total: 0,
         },
     )
 }
 
-pub fn debug_playbackstate() -> PlaybackState {
+pub fn debug_playbackstate(caches: Arc<AppCaches>) -> PlaybackState {
     let queue = vec![
         track(
             "King Of My Heart",
@@ -215,26 +218,27 @@ pub fn debug_playbackstate() -> PlaybackState {
         let chunk_size = queue.len().div_ceil(playlists.len());
         for (chunk, playlist) in queue.chunks(chunk_size).zip(playlists.values_mut()) {
             let track_ids = chunk.iter().filter_map(|t| t.id).collect::<HashSet<_>>();
-            playlist.tracks_total = track_ids.len() as u32;
             playlist.tracks = track_ids;
         }
     }
     // Load the images for each track, playlist, and artist
     for track in &queue {
         if let Some(image) = &track.album.image {
-            ensure_image_cached(image);
+            ensure_image_cached(&caches, image);
         }
     }
     for playlist in playlists.values() {
         if let Some(image) = &playlist.image_url {
-            ensure_image_cached(image);
+            ensure_image_cached(&caches, image);
         }
     }
     let artist = artist();
     if let Some(image) = &artist.image {
-        ensure_image_cached(image);
+        ensure_image_cached(&caches, image);
     }
-    ARTIST_DATA_CACHE.insert(artist.id, artist.image);
+    if let Some(artist_id) = artist.id {
+        caches.artist_images.insert(artist_id, artist.image);
+    }
 
     PlaybackState {
         playing: true,
@@ -243,19 +247,19 @@ pub fn debug_playbackstate() -> PlaybackState {
         queue,
         queue_index: 7,
         playlists,
-        interaction: false,
         last_interaction: Instant::now(),
         last_progress_update: Instant::now(),
     }
 }
 
-fn ensure_image_cached(url: &str) {
-    if IMAGES_CACHE.contains_key(url) {
+fn ensure_image_cached(caches: &Arc<AppCaches>, url: &str) {
+    if caches.images.contains_key(url) {
         return;
     }
-    IMAGES_CACHE.insert(url.to_owned(), None);
+    caches.images.insert(url.to_owned(), None);
 
     let url = url.to_owned();
+    let caches = Arc::clone(caches);
     spawn(move || {
         let agent = ureq::Agent::new_with_defaults();
         let Ok(mut response) = agent
@@ -271,6 +275,6 @@ fn ensure_image_cached(url: &str) {
             warn!("Failed to cache image {url}: failed to read image");
             return;
         };
-        cache_decoded_image(url, dynamic_image);
+        cache_decoded_image(caches, url, dynamic_image);
     });
 }

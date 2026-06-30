@@ -1,25 +1,13 @@
 use crate::{
-    ALBUM_PALETTE_CACHE, ARTIST_DATA_CACHE, CantusApp, CondensedPlaylist, IMAGES_CACHE,
-    NUM_SWATCHES, PANEL_EXTENSION, PANEL_START, PLAYBACK_STATE, PlaylistId, Track, config::CONFIG,
+    AppCaches, CantusApp, CondensedPlaylist, NUM_SWATCHES, PANEL_EXTENSION, PANEL_START,
+    PlaylistId, Track,
 };
 pub use cantus_shared::{BackgroundPill, GlobalUniforms, IconInstance, Particle, PlayheadUniforms};
-use glam::Vec2;
+use glam::{Vec2, vec2, vec4};
 use image::RgbaImage;
 use itertools::Itertools;
 use palette::IntoColor;
 use std::{collections::HashMap, ops::Range, time::Instant};
-
-#[derive(Copy, Clone, Debug, Default, PartialEq)]
-pub struct Point {
-    pub x: f32,
-    pub y: f32,
-}
-
-impl Point {
-    pub const fn new(x: f32, y: f32) -> Self {
-        Self { x, y }
-    }
-}
 
 #[derive(Copy, Clone, Debug, Default, PartialEq)]
 pub struct Rect {
@@ -34,7 +22,7 @@ impl Rect {
         Self { x0, y0, x1, y1 }
     }
 
-    pub fn contains(&self, p: Point) -> bool {
+    pub fn contains(&self, p: Vec2) -> bool {
         p.x >= self.x0 && p.x <= self.x1 && p.y >= self.y0 && p.y <= self.y1
     }
 }
@@ -72,6 +60,7 @@ impl Default for RenderState {
 }
 
 pub struct TrackRender<'a> {
+    pub queue_index: usize,
     pub track: &'a Track,
     pub is_current: bool,
     pub seconds_until_start: f32,
@@ -81,11 +70,11 @@ pub struct TrackRender<'a> {
     pub art_only: bool,
 }
 
-fn album_palette(track: &Track) -> [u32; NUM_SWATCHES] {
+fn album_palette(caches: &AppCaches, track: &Track) -> [u32; NUM_SWATCHES] {
     track
         .album
         .id
-        .and_then(|id| ALBUM_PALETTE_CACHE.get(&id))
+        .and_then(|id| caches.album_palettes.get(&id))
         .and_then(|r| r.as_ref().copied())
         .unwrap_or_default()
 }
@@ -99,19 +88,20 @@ impl CantusApp {
             .as_secs_f32();
         self.render_state.last_update = now;
 
-        self.background_pills.clear();
-        let history_width = CONFIG.history_width;
-        let total_width = CONFIG.width - history_width - 16.0;
-        let total_height = CONFIG.height;
-        let timeline_duration_ms = CONFIG.timeline_future_minutes * 60_000.0;
-        let timeline_start_ms = -CONFIG.timeline_past_minutes * 60_000.0;
+        let history_width = self.config.history_width;
+        let total_width = self.config.width - history_width - 16.0;
+        let total_height = self.config.height;
+        let timeline_duration_ms = self.config.timeline_future_minutes * 60_000.0;
+        let timeline_start_ms = -self.config.timeline_past_minutes * 60_000.0;
         let timeline_end_ms = timeline_start_ms + timeline_duration_ms;
 
         let px_per_ms = total_width / timeline_duration_ms;
         let playhead_x = history_width - timeline_start_ms * px_per_ms;
 
-        let playback_state = PLAYBACK_STATE.read();
+        let playback_state = std::mem::take(&mut self.playback_state);
         if playback_state.queue.is_empty() {
+            self.background_pills.clear();
+            self.playback_state = playback_state;
             return;
         }
 
@@ -119,7 +109,7 @@ impl CantusApp {
         self.interaction.track_hitboxes.clear();
 
         let drag_offset_ms = if let Some(origin_pos) = self.interaction.drag_origin {
-            (self.interaction.mouse_position.x - origin_pos.x) / px_per_ms
+            (self.global_uniforms.mouse_pos.x - origin_pos.x) / px_per_ms
         } else {
             0.0
         };
@@ -127,14 +117,6 @@ impl CantusApp {
             .queue_index
             .min(playback_state.queue.len() - 1);
 
-        if playback_state.playing != self.interaction.playing {
-            self.interaction.playing = playback_state.playing;
-            self.interaction.last_expansion = (
-                Instant::now(),
-                Point::new(playhead_x, PANEL_START + CONFIG.height * 0.5),
-            );
-            self.interaction.last_toggle_playing = Instant::now();
-        }
         if self.interaction.dragging {
             self.interaction.drag_track = None;
         }
@@ -158,7 +140,7 @@ impl CantusApp {
         let mut current_ms = -playback_elapsed - past_tracks_duration + drag_offset_ms
             - TRACK_SPACING_MS * cur_idx as f32;
         let diff = current_ms - self.render_state.track_offset;
-        self.interaction.last_expansion.1.x += diff * px_per_ms * dt; // Offset the expansion so it moves with the tracks
+        self.global_uniforms.expansion_xy.x += diff * px_per_ms * dt;
         if !self.interaction.dragging && diff.abs() > 200.0 {
             current_ms = self.render_state.track_offset + diff * 3.5 * dt;
         }
@@ -174,11 +156,11 @@ impl CantusApp {
         // Each past track is clipped at history_width. Historical ones are stacked
         let compact_stride = total_height * 0.55;
         let mut track_renders: Vec<TrackRender> = Vec::with_capacity(playback_state.queue.len());
-        let mut compact_stack: Vec<(&Track, f32, f32, f32, f32)> = Vec::new();
+        let mut compact_stack: Vec<(usize, &Track, f32, f32, f32, f32)> = Vec::new();
         let mut transition_t = 0.0f32;
         let mut ms = current_ms;
 
-        for track in &playback_state.queue {
+        for (queue_index, track) in playback_state.queue.iter().enumerate() {
             let dur = track.duration_ms as f32;
             let end_ms = ms + dur;
             if ms > timeline_end_ms {
@@ -191,6 +173,7 @@ impl CantusApp {
                 let start_x = natural_start_x.max(history_width);
                 let end_x = natural_end_x.min(history_width + total_width);
                 track_renders.push(TrackRender {
+                    queue_index,
                     track,
                     is_current: ms <= 0.0 && end_ms >= 0.0,
                     seconds_until_start: (ms / 1000.0).abs(),
@@ -202,6 +185,7 @@ impl CantusApp {
             } else if natural_end_x >= history_width {
                 transition_t = (history_width + total_height - natural_end_x) / total_height;
                 track_renders.push(TrackRender {
+                    queue_index,
                     track,
                     is_current: ms <= 0.0 && end_ms >= 0.0,
                     seconds_until_start: (ms / 1000.0).abs(),
@@ -211,16 +195,24 @@ impl CantusApp {
                     art_only: true,
                 });
             } else {
-                compact_stack.push((track, ms, end_ms, natural_start_x, natural_end_x));
+                compact_stack.push((
+                    queue_index,
+                    track,
+                    ms,
+                    end_ms,
+                    natural_start_x,
+                    natural_end_x,
+                ));
             }
             ms = end_ms + TRACK_SPACING_MS;
         }
 
-        for (slot, (track, start_ms, end_ms, natural_start_x, natural_end_x)) in
+        for (slot, (queue_index, track, start_ms, end_ms, natural_start_x, natural_end_x)) in
             compact_stack.iter().rev().enumerate()
         {
             let right = history_width - (slot as f32 + transition_t) * compact_stride;
             track_renders.push(TrackRender {
+                queue_index: *queue_index,
                 track,
                 is_current: *start_ms <= 0.0 && *end_ms >= 0.0,
                 seconds_until_start: (*start_ms / 1000.0).abs(),
@@ -233,34 +225,25 @@ impl CantusApp {
 
         // Screen uniforms
         self.global_uniforms.time = self.start_time.elapsed().as_secs_f32();
-        self.global_uniforms.screen_size =
-            Vec2::new(CONFIG.width, CONFIG.height + PANEL_START + PANEL_EXTENSION);
-        self.global_uniforms.bar_height = Vec2::new(PANEL_START, CONFIG.height);
+        self.global_uniforms.screen_size = vec2(
+            self.config.width,
+            self.config.height + PANEL_START + PANEL_EXTENSION,
+        );
+        self.global_uniforms.bar_height = vec2(PANEL_START, self.config.height);
         self.global_uniforms.playhead_x = playhead_x;
         self.global_uniforms.scale_factor = self.scale_factor;
 
         // Mouse uniforms
-        self.global_uniforms.mouse_pos = Vec2::new(
-            self.interaction.mouse_position.x,
-            self.interaction.mouse_position.y,
-        );
         move_towards(
             &mut self.global_uniforms.mouse_pressure,
             self.interaction.mouse_pressure,
             5.0 * dt,
         );
 
-        // Get expansion animation variables
-        let (interaction_inst, interaction_point) = self.interaction.last_expansion;
-        self.global_uniforms.expansion_xy = Vec2::new(interaction_point.x, interaction_point.y);
-        self.global_uniforms.expansion_time = interaction_inst
-            .duration_since(self.start_time)
-            .as_secs_f32();
-
         track_renders.sort_unstable_by(|a, b| a.start_x.total_cmp(&b.start_x));
 
         let hovered_track = if !self.interaction.dragging && self.interaction.mouse_pressure > 0.0 {
-            let mouse_x = self.interaction.mouse_position.x;
+            let mouse_x = self.global_uniforms.mouse_pos.x;
             track_renders
                 .iter()
                 .rev()
@@ -269,36 +252,33 @@ impl CantusApp {
                         && mouse_x >= render.start_x
                         && mouse_x <= render.start_x + render.width
                 })
-                .and_then(|render| render.track.id)
+                .map(|render| render.queue_index)
         } else {
             None
         };
-        if hovered_track.is_some() && hovered_track != self.interaction.expanded_playlist_track {
-            self.interaction.expanded_playlist_track = hovered_track;
-            self.interaction.playlist_expansion = 0.0;
-        }
-        move_towards(
-            &mut self.interaction.playlist_expansion,
-            if hovered_track.is_some() { 1.0 } else { 0.0 },
-            dt.min(0.1) * 6.0,
-        );
-        if hovered_track.is_none() && self.interaction.playlist_expansion <= 0.0 {
-            self.interaction.expanded_playlist_track = None;
-        }
-
         // Render the tracks
         let mut current_track = None;
+        let mut background_count = 0;
         for track_render in &track_renders {
             if track_render.width <= 0.0 || track_render.start_x + track_render.width <= 0.0 {
                 continue;
             }
-            self.draw_track(track_render, playhead_x, &playback_state.playlists);
+            self.draw_track(
+                track_render,
+                playhead_x,
+                background_count,
+                hovered_track == Some(track_render.queue_index),
+                dt,
+                &playback_state.playlists,
+            );
+            background_count += 1;
             if playhead_x >= track_render.start_x
                 && playhead_x <= track_render.start_x + track_render.width
             {
                 current_track = Some(track_render.track);
             }
         }
+        self.background_pills.truncate(background_count);
 
         // Draw the particles
         self.render_playhead_particles(
@@ -307,23 +287,28 @@ impl CantusApp {
             playhead_x,
             avg_speed,
             playback_state.volume,
+            playback_state.playing,
         );
+        self.playback_state = playback_state;
     }
 
     fn draw_track(
         &mut self,
         track_render: &TrackRender,
         origin_x: f32,
+        background_index: usize,
+        hovered: bool,
+        dt: f32,
         playlists: &HashMap<PlaylistId, CondensedPlaylist>,
     ) {
-        let width = track_render.width;
         let track = track_render.track;
+        let width = track_render.width;
         let start_x = track_render.start_x;
         let hitbox = Rect::new(
             start_x,
             PANEL_START,
             start_x + width,
-            PANEL_START + CONFIG.height,
+            PANEL_START + self.config.height,
         );
 
         let (hit_start, hit_end) = track_render.hitbox_range;
@@ -339,57 +324,64 @@ impl CantusApp {
         }
 
         // --- BACKGROUND ---
-        let fade_alpha = if width < CONFIG.height {
-            ((width / CONFIG.height) - 0.9).max(0.0) * 10.0
+        let fade_alpha = if width < self.config.height {
+            ((width / self.config.height) - 0.9).max(0.0) * 10.0
         } else {
             1.0
         };
 
-        let image_index = track_render
-            .track
+        let image_index = track
             .album
             .image
             .as_deref()
             .map(|path| self.get_image_index(path))
             .unwrap_or_default();
-        let colors = album_palette(track);
-        self.background_pills.push(BackgroundPill {
-            rect: Vec2::new(start_x, width),
-            icon_span: glam::Vec4::ZERO,
-            color0: colors[0],
-            color1: colors[1],
-            color2: colors[2],
-            color3: colors[3],
-            alpha: fade_alpha,
-            image_index,
-        });
+        let colors = album_palette(&self.caches, track);
+        if background_index == self.background_pills.len() {
+            self.background_pills.push(BackgroundPill::default());
+        }
+        let key = (track_render.queue_index + 1) as f32;
+        if self.background_pills[background_index].icon_span.w as usize
+            != track_render.queue_index + 1
+        {
+            self.background_pills[background_index] = BackgroundPill::default();
+        }
+        let mut playlist_expansion = self.background_pills[background_index].icon_span.z;
+        move_towards(
+            &mut playlist_expansion,
+            if hovered && !track_render.art_only {
+                1.0
+            } else {
+                0.0
+            },
+            dt.min(0.1) * 6.0,
+        );
+        let pill = &mut self.background_pills[background_index];
+        pill.rect = vec2(start_x, width);
+        pill.icon_span = vec4(0.0, 0.0, playlist_expansion, key);
+        pill.color0 = colors[0];
+        pill.color1 = colors[1];
+        pill.color2 = colors[2];
+        pill.color3 = colors[3];
+        pill.alpha = fade_alpha;
+        pill.image_index = image_index;
 
         // --- TEXT ---
         if let Some(text_renderer) = &mut self.text_renderer
             && !track_render.art_only
             && fade_alpha >= 1.0
-            && width > CONFIG.height
+            && width > self.config.height
         {
             text_renderer.render(track_render);
         }
 
         // Expand the hitbox vertically so it includes the playlist buttons
-        if !track_render.art_only {
-            let hovered = !self.interaction.dragging
-                && self.interaction.mouse_pressure > 0.0
-                && self.interaction.mouse_position.x >= hitbox.x0
-                && self.interaction.mouse_position.x <= hitbox.x1;
-            let active = self.interaction.expanded_playlist_track == track.id;
-            let secondary_expansion = if active {
-                self.interaction.playlist_expansion
-            } else {
-                0.0
-            };
-            if let Some(icon_rows) =
-                self.draw_playlist_buttons(track_render, hovered, secondary_expansion, playlists)
-            {
-                self.background_pills.last_mut().unwrap().icon_span = icon_rows;
-            }
+        if !track_render.art_only
+            && let Some(icon_rows) =
+                self.draw_playlist_buttons(track_render, hovered, playlist_expansion, playlists)
+        {
+            self.background_pills[background_index].icon_span = icon_rows;
+            self.background_pills[background_index].icon_span.w += key;
         }
     }
 
@@ -400,8 +392,9 @@ impl CantusApp {
         playhead_x: f32,
         avg_speed: f32,
         volume: Option<u8>,
+        playing: bool,
     ) {
-        let palette = album_palette(track);
+        let palette = album_palette(&self.caches, track);
 
         // Emit new particles while playing
         let emit_count = if avg_speed.abs() > 0.00001 {
@@ -427,11 +420,11 @@ impl CantusApp {
         {
             let y_fraction = fastrand::f32();
 
-            particle.spawn_pos = Vec2::new(
+            particle.spawn_pos = vec2(
                 playhead_x,
-                PANEL_START + CONFIG.height * (0.1 + (y_fraction * 0.85)), // Map to 0.1..0.95 range
+                PANEL_START + self.config.height * (0.1 + (y_fraction * 0.85)), // Map to 0.1..0.95 range
             );
-            particle.spawn_vel = Vec2::new(
+            particle.spawn_vel = vec2(
                 fastrand::usize(SPARK_VELOCITY_X) as f32 * horizontal_bias,
                 (y_fraction - 0.5) * 2.0 * SPARK_VELOCITY_Y,
             );
@@ -445,34 +438,32 @@ impl CantusApp {
         // Playhead
         let interaction = &mut self.interaction;
         self.playhead_info.volume = f32::from(volume.unwrap_or(100)) / 100.0;
-        let playbutton_hsize = CONFIG.height * 0.25;
+        let playbutton_hsize = self.config.height * 0.25;
         let speed = 2.2 * dt;
-        interaction.play_hitbox = Rect::new(
+        let play_hitbox = Rect::new(
             playhead_x - playbutton_hsize,
             PANEL_START,
             playhead_x + playbutton_hsize,
-            PANEL_START + CONFIG.height,
+            PANEL_START + self.config.height,
         );
         // Get playhead states
-        let playhead_hovered = interaction.play_hitbox.contains(interaction.mouse_position)
+        let playhead_hovered = play_hitbox.contains(self.global_uniforms.mouse_pos)
             && interaction.mouse_pressure > 0.0;
-        let last_toggle =
-            interaction.last_toggle_playing.elapsed().as_secs_f32() / ANIMATION_DURATION;
+        let last_toggle = self.last_toggle_playing.elapsed().as_secs_f32() / ANIMATION_DURATION;
 
         // Determine the intended state for the bar
-        let bar_target =
-            u32::from(playhead_hovered || !interaction.playing || last_toggle < 1.0) as f32;
+        let bar_target = u32::from(playhead_hovered || !playing || last_toggle < 1.0) as f32;
         move_towards(&mut self.playhead_info.bar_lerp, bar_target, speed);
 
         // Determine which icon (if any) is currently active
         let (mut play_active, mut pause_active) = (false, false);
         if playhead_hovered {
-            if interaction.playing {
+            if playing {
                 pause_active = true;
             } else {
                 play_active = true;
             }
-        } else if !interaction.playing {
+        } else if !playing {
             pause_active = true;
         } else if last_toggle < 1.0 {
             self.playhead_info.play_lerp = last_toggle; // Hard set for the "start" animation
@@ -535,8 +526,8 @@ fn extract_lab_pixels(img: &RgbaImage) -> (Vec<palette::Lab>, bool) {
     }
 }
 
-fn load_image_pixels(url: &str) -> Option<(Vec<palette::Lab>, bool)> {
-    let img = IMAGES_CACHE.get(url)?.as_ref()?.clone();
+fn load_image_pixels(caches: &AppCaches, url: &str) -> Option<(Vec<palette::Lab>, bool)> {
+    let img = caches.images.get(url)?.as_ref()?.clone();
     Some(extract_lab_pixels(&img))
 }
 
@@ -560,39 +551,42 @@ fn lab_pixels_to_palette(pixels: &[palette::Lab]) -> [u32; NUM_SWATCHES] {
 }
 
 /// Gathers the 4 primary colours for each album image.
-pub fn update_color_palettes() {
-    for track in &PLAYBACK_STATE.read().queue {
+pub fn update_color_palettes(caches: &AppCaches, queue: &[Track]) {
+    for track in queue {
         let album_id = track.album.id.unwrap_or_default();
         let artist_id = track.artist.id.unwrap_or_default();
-        if ALBUM_PALETTE_CACHE.contains_key(&album_id) {
+        if caches.album_palettes.contains_key(&album_id) {
             continue;
         }
         let Some((pixels, is_colourful)) = track
             .album
             .image
             .as_ref()
-            .and_then(|u| load_image_pixels(u))
+            .and_then(|u| load_image_pixels(caches, u))
         else {
             continue;
         };
-        ALBUM_PALETTE_CACHE.insert(album_id, None);
+        caches.album_palettes.insert(album_id, None);
 
         let pixels = if is_colourful {
             pixels
         } else {
-            let Some(url) = ARTIST_DATA_CACHE
+            let Some(url) = caches
+                .artist_images
                 .get(&artist_id)
                 .and_then(|e| e.value().clone())
             else {
-                ALBUM_PALETTE_CACHE.remove(&album_id);
+                caches.album_palettes.remove(&album_id);
                 continue;
             };
-            match load_image_pixels(&url) {
+            match load_image_pixels(caches, &url) {
                 Some((p, true)) => p,
                 _ => pixels,
             }
         };
 
-        ALBUM_PALETTE_CACHE.insert(album_id, Some(lab_pixels_to_palette(&pixels)));
+        caches
+            .album_palettes
+            .insert(album_id, Some(lab_pixels_to_palette(&pixels)));
     }
 }

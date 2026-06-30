@@ -1,5 +1,4 @@
 use crate::PANEL_START;
-use crate::config::CONFIG;
 use crate::render::TrackRender;
 use wgpu::{Device, Queue, RenderPass};
 use wgpu_text::{
@@ -14,15 +13,17 @@ const FONT_SIZE: f32 = 17.0;
 const FONT_SIZE_SMALL: f32 = 14.0;
 
 pub struct TextRenderer {
+    panel_height: f32,
     brush: TextBrush<FontArc>,
     sections: Vec<OwnedSection>,
 }
 
 impl TextRenderer {
-    pub fn new(device: &Device, format: wgpu::TextureFormat) -> Self {
+    pub fn new(device: &Device, format: wgpu::TextureFormat, panel_height: f32) -> Self {
         let font =
             FontArc::try_from_slice(include_bytes!("../../../assets/NotoSans-Bold.ttf")).unwrap();
         Self {
+            panel_height,
             brush: BrushBuilder::using_font(font).build(device, 0, 0, format),
             sections: Vec::new(),
         }
@@ -31,7 +32,7 @@ impl TextRenderer {
     pub fn render(&mut self, track_render: &TrackRender) {
         let track = track_render.track;
         let text_start_left = track_render.start_x + 12.0;
-        let text_start_right = track_render.start_x + track_render.width - CONFIG.height - 8.0;
+        let text_start_right = track_render.start_x + track_render.width - self.panel_height - 8.0;
         let available_width = text_start_right - text_start_left;
 
         if available_width <= 0.0 {
@@ -54,21 +55,10 @@ impl TextRenderer {
                 });
             };
 
-        let short = track
-            .name
-            .split_once(" -")
-            .map_or(track.name.as_str(), |(s, _)| s)
-            .split_once('(')
-            .map_or("", |(s, _)| s)
-            .trim();
-        let song_name = if short.is_empty() {
-            track.name.trim()
-        } else {
-            short
-        };
+        let song_name = track.display_name.as_str();
 
-        let top_y = PANEL_START + (CONFIG.height * 0.26).floor();
-        let bottom_y = PANEL_START + (CONFIG.height * 0.57).floor();
+        let top_y = PANEL_START + (self.panel_height * 0.26).floor();
+        let bottom_y = PANEL_START + (self.panel_height * 0.57).floor();
 
         let measure_layout = Layout::SingleLine {
             line_breaker: BuiltInLineBreaker::AnyCharLineBreaker,
@@ -165,8 +155,8 @@ impl TextRenderer {
             queue,
         );
 
-        let sections = std::mem::take(&mut self.sections);
-        let refs: Vec<Section> = sections
+        let refs: Vec<Section> = self
+            .sections
             .iter()
             .map(|s| Section {
                 screen_position: (s.screen_position.0 * scale, s.screen_position.1 * scale),
@@ -189,6 +179,7 @@ impl TextRenderer {
             .collect();
 
         self.brush.queue(device, queue, refs).unwrap();
+        self.sections.clear();
         self.brush.draw(rpass);
     }
 }

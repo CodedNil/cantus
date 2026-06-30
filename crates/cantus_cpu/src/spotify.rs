@@ -1,7 +1,6 @@
 use crate::{
-    ARTIST_DATA_CACHE, Artist, ArtistId, CondensedPlaylist, IMAGES_CACHE, PLAYBACK_STATE,
-    PlaylistId, Track, TrackId, cache_decoded_image, config::CONFIG, deserialize_images,
-    update_playback_state,
+    AppCaches, Artist, ArtistId, CondensedPlaylist, PlaylistId, Track, TrackId,
+    cache_decoded_image, config::Config, deserialize_images, queue_playback_update,
 };
 use arrayvec::ArrayString;
 use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
@@ -15,8 +14,8 @@ use std::{
     io::{BufRead, BufReader, Write},
     net::TcpListener,
     path::{Path, PathBuf},
-    sync::LazyLock,
-    thread::{sleep, spawn},
+    sync::Arc,
+    thread::{JoinHandle, spawn},
     time::{Duration, Instant},
 };
 use tap::{Pipe, Tap};
@@ -38,17 +37,6 @@ struct SpotifyState {
     last_grabbed_queue: Instant,
 }
 
-static SPOTIFY_STATE: LazyLock<RwLock<SpotifyState>> = LazyLock::new(|| {
-    let one_min_ago = Instant::now().checked_sub(Duration::from_mins(1)).unwrap();
-    RwLock::new(SpotifyState {
-        current_context: None,
-        context_updated: false,
-        last_grabbed_playback: one_min_ago,
-        last_grabbed_queue: one_min_ago,
-    })
-});
-
-// --- RSPOTIFY LOGIC ---
 const VERIFIER_BYTES: usize = 43;
 const REDIRECT_HOST: &str = "127.0.0.1";
 const REDIRECT_PORT: u16 = 7474;
@@ -529,7 +517,7 @@ const RATING_PLAYLISTS: [&str; 10] = [
     "0.5", "1.0", "1.5", "2.0", "2.5", "3.0", "3.5", "4.0", "4.5", "5.0",
 ];
 
-pub static SPOTIFY_CLIENT: LazyLock<SpotifyClient> = LazyLock::new(|| {
+fn create_client(config: &Config) -> SpotifyClient {
     let scopes = [
         "user-read-playback-state",
         "user-modify-playback-state",
@@ -546,14 +534,14 @@ pub static SPOTIFY_CLIENT: LazyLock<SpotifyClient> = LazyLock::new(|| {
     .collect();
 
     SpotifyClient::new(
-        CONFIG.spotify_client_id.clone().expect(
+        config.spotify_client_id.clone().expect(
             "Spotify client ID not set, set it in the config file under key `spotify_client_id`.",
         ),
         &scopes,
         config_path(SPOTIFY_TOKEN_CACHE),
     )
     .expect("Failed to initialize Spotify client")
-});
+}
 
 type PlaylistCache = HashMap<PlaylistId, (ArrayString<32>, HashSet<TrackId>)>;
 
@@ -568,42 +556,91 @@ fn load_cached_playlist_tracks() -> PlaylistCache {
         .unwrap_or_default()
 }
 
-fn persist_playlist_cache() {
-    let cache_payload: PlaylistCache = PLAYBACK_STATE
-        .read()
-        .playlists
-        .values()
-        .map(|p| {
-            if p.tracks.len() as u32 > p.tracks_total {
-                warn!(
-                    "Playlist {} has more cached tracks than Spotify reported",
-                    p.name
-                );
-            }
-            (p.id, (p.snapshot_id, p.tracks.clone()))
-        })
-        .collect();
-    if !cache_payload.is_empty()
-        && let Ok(ser) = serde_json::to_vec(&cache_payload)
+fn persist_playlist_cache(cache: &PlaylistCache) {
+    if !cache.is_empty()
+        && let Ok(ser) = serde_json::to_vec(cache)
     {
         let _ = fs::write(config_path(PLAYLIST_TRACKS_CACHE), ser);
     }
 }
 
-pub fn init() {
-    let cantus_dir = config_path("");
-    if !cantus_dir.exists() {
-        fs::create_dir(&cantus_dir).unwrap();
-    }
-    let _ = &*SPOTIFY_CLIENT;
-    spawn(poll_playlists);
-    spawn(|| {
-        loop {
-            get_spotify_playback();
-            get_spotify_queue();
-            sleep(Duration::from_millis(500));
+pub struct SpotifyBackend {
+    pub client: Arc<SpotifyClient>,
+    caches: Arc<AppCaches>,
+    playback: PollTask<SpotifyState>,
+    playlists: PollTask<PlaylistPollState>,
+}
+
+impl SpotifyBackend {
+    pub fn new(config: &Config, caches: &Arc<AppCaches>) -> Self {
+        let cantus_dir = config_path("");
+        if !cantus_dir.exists() {
+            fs::create_dir(&cantus_dir).unwrap();
         }
-    });
+        let client = Arc::new(create_client(config));
+        let initial_poll = Instant::now().checked_sub(Duration::from_mins(1)).unwrap();
+        Self {
+            caches: Arc::clone(caches),
+            playback: PollTask::new(
+                SpotifyState {
+                    current_context: None,
+                    context_updated: false,
+                    last_grabbed_playback: initial_poll,
+                    last_grabbed_queue: initial_poll,
+                },
+                Duration::from_millis(500),
+            ),
+            playlists: PollTask::new(
+                PlaylistPollState::new(Arc::clone(&client), config, Arc::clone(caches)),
+                Duration::from_secs(20),
+            ),
+            client,
+        }
+    }
+
+    pub fn tick(&mut self) {
+        let client = Arc::clone(&self.client);
+        let caches = Arc::clone(&self.caches);
+        self.playback.run(move |state| {
+            get_spotify_playback(&client, state);
+            get_spotify_queue(&client, &caches, state);
+        });
+        self.playlists.run(PlaylistPollState::poll);
+    }
+}
+
+struct PollTask<T> {
+    state: Option<T>,
+    task: Option<JoinHandle<T>>,
+    next_poll: Instant,
+    interval: Duration,
+}
+
+impl<T: Send + 'static> PollTask<T> {
+    fn new(state: T, interval: Duration) -> Self {
+        Self {
+            state: Some(state),
+            task: None,
+            next_poll: Instant::now(),
+            interval,
+        }
+    }
+
+    fn run(&mut self, poll: impl FnOnce(&mut T) + Send + 'static) {
+        if self.task.as_ref().is_some_and(JoinHandle::is_finished) {
+            self.state = self.task.take().and_then(|task| task.join().ok());
+        }
+        let now = Instant::now();
+        if now >= self.next_poll
+            && let Some(mut state) = self.state.take()
+        {
+            self.next_poll = now + self.interval;
+            self.task = Some(spawn(move || {
+                poll(&mut state);
+                state
+            }));
+        }
+    }
 }
 
 fn track_index(queue: &[Track], id: Option<TrackId>, name: &str) -> Option<usize> {
@@ -611,39 +648,30 @@ fn track_index(queue: &[Track], id: Option<TrackId>, name: &str) -> Option<usize
         .or_else(|| queue.iter().position(|t| t.name == name))
 }
 
-fn get_spotify_playback() {
+fn get_spotify_playback(client: &SpotifyClient, spotify_state: &mut SpotifyState) {
     let now = Instant::now();
-    if now < PLAYBACK_STATE.read().last_interaction
-        || now < SPOTIFY_STATE.read().last_grabbed_playback + Duration::from_secs(1)
-    {
+    if now < spotify_state.last_grabbed_playback + Duration::from_secs(1) {
         return;
     }
 
     // https://developer.spotify.com/documentation/web-api/reference/get-information-about-the-users-current-playback
-    let Some(current_playback) =
-        SPOTIFY_CLIENT.api_json::<CurrentPlaybackContext>("me/player", "playback")
+    let Some(current_playback) = client.api_json::<CurrentPlaybackContext>("me/player", "playback")
     else {
         return;
     };
 
     let now = Instant::now();
-    let mut spotify_state = SPOTIFY_STATE.write();
-    update_playback_state(|state| {
-        let new_context = current_playback.context.as_ref().map(|c| &c.uri);
-        let queue_deadline = now.checked_sub(Duration::from_mins(1)).unwrap();
-
-        if spotify_state.current_context.as_ref() != new_context {
-            spotify_state.context_updated = true;
-            spotify_state.current_context = new_context.map(String::from);
-            spotify_state.last_grabbed_queue = queue_deadline;
-        }
-
+    let new_context = current_playback.context.as_ref().map(|c| &c.uri);
+    let queue_deadline = now.checked_sub(Duration::from_mins(1)).unwrap();
+    if spotify_state.current_context.as_ref() != new_context {
+        spotify_state.context_updated = true;
+        spotify_state.current_context = new_context.map(String::from);
+        spotify_state.last_grabbed_queue = queue_deadline;
+    }
+    spotify_state.last_grabbed_playback = now;
+    queue_playback_update(move |state| {
         if let Some(track) = current_playback.item {
-            state.queue_index =
-                track_index(&state.queue, track.id, &track.name).unwrap_or_else(|| {
-                    spotify_state.last_grabbed_queue = queue_deadline;
-                    0
-                });
+            state.queue_index = track_index(&state.queue, track.id, &track.name).unwrap_or(0);
         }
 
         state.volume = current_playback
@@ -655,20 +683,21 @@ fn get_spotify_playback() {
             state.progress = current_playback.progress_ms;
         }
         state.last_progress_update = now;
-        spotify_state.last_grabbed_playback = now;
     });
 }
 
-fn get_spotify_queue() {
+fn get_spotify_queue(
+    client: &Arc<SpotifyClient>,
+    caches: &Arc<AppCaches>,
+    spotify_state: &mut SpotifyState,
+) {
     let now = Instant::now();
-    if now < PLAYBACK_STATE.read().last_interaction
-        || now < SPOTIFY_STATE.read().last_grabbed_queue + Duration::from_secs(15)
-    {
+    if now < spotify_state.last_grabbed_queue + Duration::from_secs(15) {
         return;
     }
 
     // https://developer.spotify.com/documentation/web-api/reference/get-queue
-    let Some(q) = SPOTIFY_CLIENT.api_json::<CurrentUserQueue>("me/player/queue", "queue") else {
+    let Some(q) = client.api_json::<CurrentUserQueue>("me/player/queue", "queue") else {
         return;
     };
     let Some(currently_playing) = q.currently_playing else {
@@ -677,64 +706,68 @@ fn get_spotify_queue() {
     };
     let current_track_id = currently_playing.id;
     let current_title = currently_playing.name.clone();
-    let new_queue: Vec<Track> = std::iter::once(currently_playing).chain(q.queue).collect();
+    let mut new_queue: Vec<Track> = std::iter::once(currently_playing).chain(q.queue).collect();
+    new_queue.iter_mut().for_each(Track::prepare);
 
-    cache_queue_images(&new_queue);
+    cache_queue_images(client, caches, &new_queue);
 
-    let mut spotify_state = SPOTIFY_STATE.write();
-    update_playback_state(|state| {
-        if !spotify_state.context_updated
+    let context_updated = spotify_state.context_updated;
+    spotify_state.context_updated = false;
+    spotify_state.last_grabbed_queue = Instant::now();
+    queue_playback_update(move |state| {
+        if !context_updated
             && let Some(new_index) = track_index(&state.queue, current_track_id, &current_title)
         {
             state.queue_index = new_index;
             state.queue.truncate(new_index);
             state.queue.extend(new_queue);
         } else {
-            spotify_state.context_updated = false;
             state.queue = new_queue;
             state.queue_index = 0;
         }
-        spotify_state.last_grabbed_queue = Instant::now();
     });
 }
 
-fn cache_queue_images(queue: &[Track]) {
+fn cache_queue_images(client: &Arc<SpotifyClient>, caches: &Arc<AppCaches>, queue: &[Track]) {
     let mut missing_artists = HashSet::new();
     for track in queue {
         if let Some(image) = &track.album.image {
-            ensure_image_cached(image);
+            ensure_image_cached(client, caches, image);
         }
         if let Some(artist_id) = track.artist.id
-            && !ARTIST_DATA_CACHE.contains_key(&artist_id)
+            && !caches.artist_images.contains_key(&artist_id)
             && missing_artists.insert(artist_id)
         {
-            spawn(move || fetch_artist_image(artist_id));
+            let client = Arc::clone(client);
+            let caches = Arc::clone(caches);
+            spawn(move || fetch_artist_image(&client, &caches, artist_id));
         }
     }
 }
 
-fn fetch_artist_image(artist_id: ArtistId) {
-    let Some(artist) = SPOTIFY_CLIENT.api_json::<Artist>(&format!("artists/{artist_id}"), "artist")
-    else {
+fn fetch_artist_image(client: &Arc<SpotifyClient>, caches: &Arc<AppCaches>, artist_id: ArtistId) {
+    let Some(artist) = client.api_json::<Artist>(&format!("artists/{artist_id}"), "artist") else {
         return;
     };
     if let Some(actual_id) = artist.id {
-        ARTIST_DATA_CACHE.insert(actual_id, artist.image.clone());
+        caches.artist_images.insert(actual_id, artist.image.clone());
         if let Some(image) = artist.image.as_deref() {
-            ensure_image_cached(image);
+            ensure_image_cached(client, caches, image);
         }
     }
 }
 
-fn ensure_image_cached(url: &str) {
-    if IMAGES_CACHE.contains_key(url) {
+fn ensure_image_cached(client: &Arc<SpotifyClient>, caches: &Arc<AppCaches>, url: &str) {
+    if caches.images.contains_key(url) {
         return;
     }
-    IMAGES_CACHE.insert(url.to_owned(), None);
+    caches.images.insert(url.to_owned(), None);
 
     let url = url.to_owned();
+    let client = Arc::clone(client);
+    let caches = Arc::clone(caches);
     spawn(move || {
-        let result = SPOTIFY_CLIENT
+        let result = client
             .http
             .get(&url)
             .call()
@@ -742,70 +775,89 @@ fn ensure_image_cached(url: &str) {
             .and_then(|mut resp| Ok(resp.body_mut().read_to_vec()?))
             .and_then(|bytes| Ok(image::load_from_memory(&bytes)?));
         let Ok(img) = result.inspect_err(|err| warn!("Failed to cache image {url}: {err}")) else {
-            IMAGES_CACHE.remove(&url);
+            caches.images.remove(&url);
             return;
         };
-        cache_decoded_image(url, img);
+        cache_decoded_image(caches, url, img);
     });
 }
 
-fn poll_playlists() {
-    let targets = CONFIG
-        .playlists
-        .iter()
-        .map(String::as_str)
-        .collect::<HashSet<_>>();
-    let mut cached = load_cached_playlist_tracks();
+struct PlaylistPollState {
+    client: Arc<SpotifyClient>,
+    caches: Arc<AppCaches>,
+    targets: HashSet<String>,
+    cached: PlaylistCache,
+    persistent_cache: PlaylistCache,
+    known_snapshots: HashMap<PlaylistId, ArrayString<32>>,
+    ratings_enabled: bool,
+}
 
-    loop {
+impl PlaylistPollState {
+    fn new(client: Arc<SpotifyClient>, config: &Config, caches: Arc<AppCaches>) -> Self {
+        let playlist_cache = load_cached_playlist_tracks();
+        Self {
+            client,
+            caches,
+            targets: config.playlists.iter().cloned().collect(),
+            persistent_cache: playlist_cache.clone(),
+            cached: playlist_cache,
+            known_snapshots: HashMap::new(),
+            ratings_enabled: config.ratings_enabled,
+        }
+    }
+
+    fn poll(&mut self) {
         // https://developer.spotify.com/documentation/web-api/reference/get-a-list-of-current-users-playlists
-        let playlists = SPOTIFY_CLIENT
+        let playlists = self
+            .client
             .api_json_payload::<Page<Playlist>>("me/playlists", &[("limit", "50")], "playlists")
             .map(|p| p.items)
             .unwrap_or_default();
 
         for playlist in playlists {
-            let rating_index = rating_index(&playlist.name);
-            if !targets.contains(playlist.name.as_str()) && rating_index.is_none() {
+            let rating_index = rating_index(self.ratings_enabled, &playlist.name);
+            if !self.targets.contains(playlist.name.as_str()) && rating_index.is_none() {
                 continue;
             }
             if let Some(image) = &playlist.image {
-                ensure_image_cached(image);
+                ensure_image_cached(&self.client, &self.caches, image);
             }
 
-            if let Some((snapshot_id, tracks)) = cached.remove(&playlist.id)
+            if let Some((snapshot_id, tracks)) = self.cached.remove(&playlist.id)
                 && snapshot_id == playlist.snapshot_id
             {
-                insert_playlist(&playlist, tracks, playlist.total_tracks, rating_index);
+                self.known_snapshots
+                    .insert(playlist.id, playlist.snapshot_id);
+                insert_playlist(&playlist, tracks, rating_index);
                 continue;
             }
 
-            if Some(&playlist.snapshot_id)
-                != PLAYBACK_STATE
-                    .read()
-                    .playlists
-                    .get(&playlist.id)
-                    .map(|p| &p.snapshot_id)
-                && let Some((total, tracks)) = fetch_playlist_tracks(&playlist)
+            if self.known_snapshots.get(&playlist.id) != Some(&playlist.snapshot_id)
+                && let Some((_total, tracks)) = fetch_playlist_tracks(&self.client, &playlist)
             {
-                insert_playlist(&playlist, tracks, total, rating_index);
-                persist_playlist_cache();
+                self.known_snapshots
+                    .insert(playlist.id, playlist.snapshot_id);
+                self.persistent_cache
+                    .insert(playlist.id, (playlist.snapshot_id, tracks.clone()));
+                insert_playlist(&playlist, tracks, rating_index);
+                persist_playlist_cache(&self.persistent_cache);
             }
         }
-
-        sleep(Duration::from_secs(20));
     }
 }
 
-fn rating_index(name: &str) -> Option<u8> {
-    CONFIG.ratings_enabled.then_some(())?;
+fn rating_index(enabled: bool, name: &str) -> Option<u8> {
+    enabled.then_some(())?;
     RATING_PLAYLISTS
         .iter()
         .position(|&p| p == name)
         .and_then(|i| u8::try_from(i).ok())
 }
 
-fn fetch_playlist_tracks(playlist: &Playlist) -> Option<(u32, HashSet<TrackId>)> {
+fn fetch_playlist_tracks(
+    client: &SpotifyClient,
+    playlist: &Playlist,
+) -> Option<(u32, HashSet<TrackId>)> {
     let chunk_size = 50;
     let num_pages = playlist.total_tracks.div_ceil(chunk_size);
     let mut total = playlist.total_tracks;
@@ -813,7 +865,7 @@ fn fetch_playlist_tracks(playlist: &Playlist) -> Option<(u32, HashSet<TrackId>)>
     info!("Fetching {num_pages} pages from playlist {}", playlist.name);
 
     for page in 0..num_pages {
-        let page = fetch_playlist_page(playlist.id, chunk_size, page)?;
+        let page = fetch_playlist_page(client, playlist.id, chunk_size, page)?;
         total = page.total;
         tracks.extend(page.items.iter().filter_map(|item| item.track.id));
     }
@@ -821,13 +873,14 @@ fn fetch_playlist_tracks(playlist: &Playlist) -> Option<(u32, HashSet<TrackId>)>
 }
 
 fn fetch_playlist_page(
+    client: &SpotifyClient,
     playlist_id: PlaylistId,
     chunk_size: u32,
     page: u32,
 ) -> Option<Page<PlaylistItem>> {
     let limit = chunk_size.to_string();
     let offset = (page * chunk_size).to_string();
-    SPOTIFY_CLIENT.api_json_payload(
+    client.api_json_payload(
         &format!("playlists/{playlist_id}/items"),
         &[
             (
@@ -841,22 +894,15 @@ fn fetch_playlist_page(
     )
 }
 
-fn insert_playlist(
-    playlist: &Playlist,
-    tracks: HashSet<TrackId>,
-    tracks_total: u32,
-    rating_index: Option<u8>,
-) {
-    PLAYBACK_STATE.write().playlists.insert(
-        playlist.id,
-        CondensedPlaylist {
-            id: playlist.id,
-            name: playlist.name.clone(),
-            image_url: playlist.image.clone(),
-            tracks,
-            tracks_total,
-            snapshot_id: playlist.snapshot_id,
-            rating_index,
-        },
-    );
+fn insert_playlist(playlist: &Playlist, tracks: HashSet<TrackId>, rating_index: Option<u8>) {
+    let condensed = CondensedPlaylist {
+        id: playlist.id,
+        name: playlist.name.clone(),
+        image_url: playlist.image.clone(),
+        tracks,
+        rating_index,
+    };
+    queue_playback_update(move |state| {
+        state.playlists.insert(condensed.id, condensed);
+    });
 }

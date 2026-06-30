@@ -63,7 +63,7 @@ impl CantusApp {
         };
         surface.configure(&device, &surface_config);
 
-        self.text_renderer = Some(TextRenderer::new(&device, format));
+        self.text_renderer = Some(TextRenderer::new(&device, format, self.config.height));
 
         let rust_gpu_shader = device.create_shader_module(wgpu::include_spirv!(concat!(
             env!("OUT_DIR"),

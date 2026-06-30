@@ -37,7 +37,7 @@ pub struct PlayheadUniforms {
 #[derive(Copy, Clone, Debug, Default)]
 #[cfg_attr(feature = "cpu", derive(bytemuck::Pod, bytemuck::Zeroable))]
 pub struct BackgroundPill {
-    /// Primary half-span, secondary half-span, secondary expansion, and primary presence.
+    /// Encoded primary span, secondary span/expansion, and packed CPU key/primary fade.
     pub icon_span: Vec4,
     pub rect: Vec2,
     pub color0: u32,

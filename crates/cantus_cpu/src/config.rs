@@ -1,5 +1,5 @@
 use serde::Deserialize;
-use std::{fs, sync::LazyLock};
+use std::fs;
 use tracing::warn;
 
 #[derive(Deserialize)]
@@ -56,9 +56,7 @@ impl Default for Config {
     }
 }
 
-pub static CONFIG: LazyLock<Config> = LazyLock::new(load_config);
-
-fn load_config() -> Config {
+pub fn load() -> Config {
     let path = dirs::config_dir()
         .expect("config directory unavailable")
         .join("cantus")

@@ -42,8 +42,9 @@ pub fn vs_background(
 
     let mut render_min = pill_origin - margin;
     let mut render_max = pill_origin + pill_size + margin;
-    if pill.icon_span.z > 0.0 || pill.icon_span.w > 0.0 {
-        let primary_span = pill.icon_span.x * pill.icon_span.w;
+    let primary_fade = pill.icon_span.w.fract() * 2.0;
+    if pill.icon_span.z > 0.0 || primary_fade > 0.0 {
+        let primary_span = (pill.icon_span.x - 1.0).max(0.0);
         let secondary_span = pill.icon_span.y * pill.icon_span.z;
         let icon_center_x = pill_origin.x + pill_size.x * 0.5;
         let primary_center_y = global.bar_height.x + global.bar_height.y * 0.975;
@@ -125,10 +126,11 @@ pub fn fs_background(
     let local_icon_growth = mouse_inf * ICON_GROWTH * global.scale_factor;
     let primary_dist = sd_capsule_box(
         pixel_pos - primary_center,
-        pill.icon_span.x + ICON_END_PADDING * global.scale_factor,
+        (pill.icon_span.x - 1.0).max(0.0) + ICON_END_PADDING * global.scale_factor,
         ICON_RADIUS * global.scale_factor + local_icon_growth,
     );
-    let dist = smooth_union(pill_dist, primary_dist, smoothing, pill.icon_span.w);
+    let primary_fade = pill.icon_span.w.fract() * 2.0;
+    let dist = smooth_union(pill_dist, primary_dist, smoothing, primary_fade);
     let secondary_center = vec2(
         icon_center_x,
         primary_center_y + ICON_ROW_GAP * pill.icon_span.z,
@@ -141,7 +143,7 @@ pub fn fs_background(
     let dist = smooth_union(dist, secondary_dist, secondary_smoothing, pill.icon_span.z);
     let mask = (0.5 - dist).clamp(0.0, 1.0);
     let main_shadow = (1.0 - smoothstep(0.0, 16.0, pill_dist)) * 0.2;
-    let primary_shadow = (1.0 - smoothstep(0.0, 6.0, primary_dist)) * 0.08 * pill.icon_span.w;
+    let primary_shadow = (1.0 - smoothstep(0.0, 6.0, primary_dist)) * 0.08 * primary_fade;
     let secondary_shadow = (1.0 - smoothstep(0.0, 6.0, secondary_dist)) * 0.08 * pill.icon_span.z;
     let shadow = main_shadow.max(primary_shadow).max(secondary_shadow);
     if mask <= 0.0 && shadow <= 0.0 {
@@ -172,11 +174,12 @@ pub fn fs_background(
     let saturation = 3.2 + (1.6 - 3.2) * smoothstep(0.1, 0.4, luma);
     color = Vec3::splat(luma).lerp(color, saturation);
     color = color.clamp(Vec3::splat(0.06), Vec3::splat(0.85)) * 1.0f32.min(0.52 / luma.max(0.001));
+    // Darken anything to the left of the playhead
     color = color.lerp(
-        color * 0.45,
+        color * 0.6,
         smoothstep(
-            global.playhead_x + 1.2,
-            global.playhead_x - 1.2,
+            global.playhead_x + 3.0,
+            global.playhead_x - 3.0,
             pixel_pos.x,
         ),
     );
