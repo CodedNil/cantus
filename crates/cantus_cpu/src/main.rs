@@ -1,18 +1,18 @@
-use crate::interaction::InteractionState;
-use crate::pipelines::{IMAGE_SIZE, MAX_TEXTURE_LAYERS};
-use crate::render::{
-    BackgroundPill, GlobalUniforms, IconInstance, Particle, PlayheadUniforms, RenderState,
+use crate::{
+    cache::{AppCaches, ImageCacheState, cache_decoded_image},
+    interaction::InteractionState,
+    pipelines::{IMAGE_SIZE, MAX_TEXTURE_IMAGES},
+    render::{
+        BackgroundPill, GlobalUniforms, IconInstance, Particle, PlayheadUniforms, RenderState,
+    },
+    text_render::TextRenderer,
 };
-use crate::text_render::TextRenderer;
 use arrayvec::ArrayString;
-use dashmap::DashMap;
-use image::RgbaImage;
 use serde::{Deserialize, Deserializer};
-use std::collections::HashSet;
 use std::{
-    collections::HashMap,
+    collections::{HashMap, HashSet},
     sync::{
-        Arc, OnceLock,
+        Arc,
         mpsc::{self, Receiver, Sender},
     },
     time::Instant,
@@ -23,21 +23,88 @@ use wgpu::{
     StoreOp, Surface, SurfaceConfiguration, Texture, TextureViewDescriptor,
 };
 
+mod cache;
 mod config;
 mod interaction;
 mod layer_shell;
 mod pipelines;
 mod render;
-mod text_render;
-
-#[cfg(feature = "spotify")]
 mod spotify;
-
-#[cfg(not(feature = "spotify"))]
-mod spotify_debug;
+mod text_render;
 
 const PANEL_START: f32 = 6.0;
 const PANEL_EXTENSION: f32 = 44.0;
+const PARTICLE_COUNT: usize = 64;
+const MAX_RENDER_INSTANCES: usize = 256;
+
+struct CantusApp {
+    // Core Graphics
+    instance: Instance,
+    gpu_resources: Option<GpuResources>,
+
+    // Application State
+    start_time: Instant,
+    render_state: RenderState,
+    interaction: InteractionState,
+    playback_state: PlaybackState,
+    updater: AppUpdater,
+    app_updates: Receiver<AppUpdate>,
+    config: config::Config,
+    spotify: spotify::SpotifyBackend,
+    caches: AppCaches,
+    image_cache: ImageCacheState,
+    last_toggle_playing: Instant,
+    particles: [Particle; PARTICLE_COUNT],
+    particle_dirty_mask: u64,
+    particles_accumulator: f32,
+    /// Physical buffer pixels per logical Wayland surface pixel.
+    render_scale: f32,
+
+    // Scene & Resources
+    text_renderer: Option<TextRenderer>,
+    global_uniforms: GlobalUniforms,
+    background_pills: Vec<BackgroundPill>,
+    icon_pills: Vec<IconInstance>,
+    playhead_info: PlayheadUniforms,
+}
+
+impl Default for CantusApp {
+    fn default() -> Self {
+        let (update_tx, app_updates) = mpsc::channel();
+        let updater = AppUpdater(update_tx);
+        let config = config::load();
+        let spotify = spotify::SpotifyBackend::new(&config, updater.clone());
+        Self {
+            instance: Instance::default(),
+            gpu_resources: None,
+
+            start_time: Instant::now(),
+            render_state: RenderState::default(),
+            interaction: InteractionState::default(),
+            playback_state: PlaybackState::default(),
+            updater,
+            app_updates,
+            spotify,
+            config,
+            caches: AppCaches::default(),
+            image_cache: ImageCacheState {
+                dirty: true,
+                ..Default::default()
+            },
+            last_toggle_playing: Instant::now(),
+            particles: [Particle::default(); PARTICLE_COUNT],
+            particle_dirty_mask: u64::MAX,
+            particles_accumulator: 0.0,
+            render_scale: 1.0,
+
+            text_renderer: None,
+            global_uniforms: GlobalUniforms::default(),
+            background_pills: Vec::new(),
+            icon_pills: Vec::new(),
+            playhead_info: PlayheadUniforms::default(),
+        }
+    }
+}
 
 struct PlaybackState {
     playing: bool,
@@ -71,7 +138,6 @@ const NUM_SWATCHES: usize = 4;
 
 type TrackId = ArrayString<22>;
 type AlbumId = ArrayString<22>;
-type ArtistId = ArrayString<22>;
 type PlaylistId = ArrayString<22>;
 
 #[derive(Deserialize)]
@@ -82,25 +148,6 @@ struct Track {
     #[serde(deserialize_with = "deserialize_first_artist", rename = "artists")]
     artist: Artist,
     duration_ms: u32,
-    #[serde(skip)]
-    display_name: String,
-}
-
-impl Track {
-    fn prepare(&mut self) {
-        let without_suffix = self
-            .name
-            .split_once(" -")
-            .map_or(self.name.as_str(), |(s, _)| s);
-        self.display_name = without_suffix
-            .split_once('(')
-            .map_or(without_suffix, |(s, _)| s)
-            .trim()
-            .to_owned();
-        if self.display_name.is_empty() {
-            self.display_name = self.name.trim().to_owned();
-        }
-    }
 }
 
 #[derive(Deserialize)]
@@ -112,10 +159,7 @@ struct Album {
 
 #[derive(Deserialize)]
 struct Artist {
-    id: Option<ArtistId>,
     name: String,
-    #[serde(default, deserialize_with = "deserialize_images", rename = "images")]
-    image: Option<String>,
 }
 
 struct CondensedPlaylist {
@@ -132,87 +176,14 @@ struct Image {
     width: Option<u32>,
 }
 
-type PlaybackUpdate = Box<dyn FnOnce(&mut PlaybackState) + Send>;
-static PLAYBACK_UPDATES: OnceLock<Sender<PlaybackUpdate>> = OnceLock::new();
+type AppUpdate = Box<dyn FnOnce(&mut CantusApp) + Send>;
 
-fn queue_playback_update<F>(update: F)
-where
-    F: FnOnce(&mut PlaybackState) + Send + 'static,
-{
-    if let Some(sender) = PLAYBACK_UPDATES.get() {
-        let _ = sender.send(Box::new(update));
-    }
-}
+#[derive(Clone)]
+struct AppUpdater(Sender<AppUpdate>);
 
-#[derive(Default)]
-struct AppCaches {
-    images: DashMap<String, Option<Arc<RgbaImage>>>,
-    album_palettes: DashMap<AlbumId, Option<[u32; NUM_SWATCHES]>>,
-    artist_images: DashMap<ArtistId, Option<String>>,
-}
-
-struct CantusApp {
-    // Core Graphics
-    instance: Instance,
-    gpu_resources: Option<GpuResources>,
-
-    // Application State
-    start_time: Instant,
-    render_state: RenderState,
-    interaction: InteractionState,
-    playback_state: PlaybackState,
-    playback_updates: Receiver<PlaybackUpdate>,
-    config: config::Config,
-    #[cfg(feature = "spotify")]
-    spotify: spotify::SpotifyBackend,
-    caches: Arc<AppCaches>,
-    last_toggle_playing: Instant,
-    particles: [Particle; 64],
-    particles_accumulator: f32,
-    /// Physical buffer pixels per logical Wayland surface pixel.
-    render_scale: f32,
-
-    // Scene & Resources
-    text_renderer: Option<TextRenderer>,
-    global_uniforms: GlobalUniforms,
-    background_pills: Vec<BackgroundPill>,
-    icon_pills: Vec<IconInstance>,
-    playhead_info: PlayheadUniforms,
-}
-
-impl Default for CantusApp {
-    fn default() -> Self {
-        let (playback_tx, playback_updates) = mpsc::channel();
-        let _ = PLAYBACK_UPDATES.set(playback_tx);
-        let caches = Arc::new(AppCaches::default());
-        let config = config::load();
-        Self {
-            instance: Instance::default(),
-            gpu_resources: None,
-
-            start_time: Instant::now(),
-            render_state: RenderState::default(),
-            interaction: InteractionState::default(),
-            #[cfg(feature = "spotify")]
-            playback_state: PlaybackState::default(),
-            #[cfg(not(feature = "spotify"))]
-            playback_state: spotify_debug::debug_playbackstate(Arc::clone(&caches)),
-            playback_updates,
-            #[cfg(feature = "spotify")]
-            spotify: spotify::SpotifyBackend::new(&config, &caches),
-            config,
-            caches,
-            last_toggle_playing: Instant::now(),
-            particles: [Particle::default(); 64],
-            particles_accumulator: 0.0,
-            render_scale: 1.0,
-
-            text_renderer: None,
-            global_uniforms: GlobalUniforms::default(),
-            background_pills: Vec::new(),
-            icon_pills: Vec::new(),
-            playhead_info: PlayheadUniforms::default(),
-        }
+impl AppUpdater {
+    fn send(&self, update: impl FnOnce(&mut CantusApp) + Send + 'static) {
+        let _ = self.0.send(Box::new(update));
     }
 }
 
@@ -243,21 +214,12 @@ struct GpuResources {
 
     // Image Management
     texture_array: Texture,
-    url_to_image_index: HashMap<String, (i32, bool)>, // (index, used_this_frame)
+    image_slots: HashMap<String, ImageSlot>,
 }
 
-fn cache_decoded_image(caches: Arc<AppCaches>, url: String, image: image::DynamicImage) {
-    let image = if image.width() != IMAGE_SIZE || image.height() != IMAGE_SIZE {
-        image.resize_to_fill(
-            IMAGE_SIZE,
-            IMAGE_SIZE,
-            image::imageops::FilterType::Lanczos3,
-        )
-    } else {
-        image
-    };
-    caches.images.insert(url, Some(Arc::new(image.to_rgba8())));
-    queue_playback_update(move |state| render::update_color_palettes(&caches, &state.queue));
+struct ImageSlot {
+    layer: u32,
+    used_this_frame: bool,
 }
 
 fn main() {
@@ -288,36 +250,61 @@ impl CantusApp {
     }
 
     fn render(&mut self) {
-        #[cfg(feature = "spotify")]
         self.spotify.tick();
 
-        let Some(gpu) = self.gpu_resources.as_mut() else {
+        if self.gpu_resources.is_none() {
             return;
-        };
+        }
 
-        while let Ok(update) = self.playback_updates.try_recv() {
-            update(&mut self.playback_state);
+        while let Ok(update) = self.app_updates.try_recv() {
+            update(self);
+            self.image_cache.mark_dirty();
+        }
+        if self.image_cache.dirty {
+            let client = Arc::clone(&self.spotify.client);
+            let updater = self.updater.clone();
+            self.image_cache
+                .sync(&mut self.caches, &self.playback_state, |url| {
+                    spotify::download_image(Arc::clone(&client), updater.clone(), url);
+                });
+            self.image_cache.dirty = false;
         }
         self.icon_pills.clear();
 
-        for (_, used) in gpu.url_to_image_index.values_mut() {
-            *used = false;
+        for slot in self
+            .gpu_resources
+            .as_mut()
+            .unwrap()
+            .image_slots
+            .values_mut()
+        {
+            slot.used_this_frame = false;
         }
 
         self.create_scene();
 
         let gpu = self.gpu_resources.as_mut().unwrap();
-        gpu.url_to_image_index.retain(|_, (_, used)| *used);
+        gpu.image_slots.retain(|_, slot| slot.used_this_frame);
         gpu.queue.write_buffer(
             &gpu.uniform_buffer,
             0,
             bytemuck::bytes_of(&self.global_uniforms),
         );
-        gpu.queue.write_buffer(
-            &gpu.particles_buffer,
-            0,
-            bytemuck::cast_slice(&self.particles),
-        );
+        while self.particle_dirty_mask != 0 {
+            let start = self.particle_dirty_mask.trailing_zeros() as usize;
+            let count = (self.particle_dirty_mask >> start).trailing_ones() as usize;
+            let end = start + count;
+            gpu.queue.write_buffer(
+                &gpu.particles_buffer,
+                (start * std::mem::size_of::<Particle>()) as u64,
+                bytemuck::cast_slice(&self.particles[start..end]),
+            );
+            if count == PARTICLE_COUNT {
+                self.particle_dirty_mask = 0;
+            } else {
+                self.particle_dirty_mask &= !(((1u64 << count) - 1) << start);
+            }
+        }
         gpu.queue.write_buffer(
             &gpu.playhead_buffer,
             0,
@@ -394,7 +381,7 @@ impl CantusApp {
 
             rpass.set_pipeline(&gpu.particle_pipeline);
             rpass.set_bind_group(0, &gpu.particle_bind_group, &[]);
-            rpass.draw(0..4, 0..64);
+            rpass.draw(0..4, 0..PARTICLE_COUNT as u32);
 
             rpass.set_pipeline(&gpu.playhead_pipeline);
             rpass.set_bind_group(0, &gpu.playhead_bind_group, &[]);
@@ -410,23 +397,15 @@ impl CantusApp {
             return -1;
         };
 
-        if let Some(entry) = gpu.url_to_image_index.get_mut(url) {
-            entry.1 = true;
-            return entry.0;
+        if let Some(slot) = gpu.image_slots.get_mut(url) {
+            slot.used_this_frame = true;
+            return slot.layer as i32;
         }
 
-        if let Some(img_ref) = self.caches.images.get(url)
-            && let Some(image) = img_ref.as_ref()
-        {
-            let mut used_slots = vec![false; MAX_TEXTURE_LAYERS as usize];
-            for (idx, _) in gpu.url_to_image_index.values() {
-                used_slots[*idx as usize] = true;
-                used_slots[*idx as usize + 1] = true;
-            }
-
-            let slot = (0..MAX_TEXTURE_LAYERS as usize)
-                .step_by(2)
-                .find(|&slot| !used_slots[slot] && !used_slots[slot + 1]);
+        if let Some(image) = self.caches.images.get(url) {
+            let slot = (0..MAX_TEXTURE_IMAGES)
+                .map(|image| image * 2)
+                .find(|&layer| !gpu.image_slots.values().any(|slot| slot.layer == layer));
             if let Some(slot) = slot {
                 let blurred = image::imageops::blur(image.as_ref(), 3.0);
                 let write_layer = |layer: u32, bytes: &[u8]| {
@@ -454,11 +433,16 @@ impl CantusApp {
                         },
                     );
                 };
-                write_layer(slot as u32, image.as_raw());
-                write_layer(slot as u32 + 1, blurred.as_raw());
+                write_layer(slot, image.as_raw());
+                write_layer(slot + 1, blurred.as_raw());
 
-                gpu.url_to_image_index
-                    .insert(url.to_owned(), (slot as i32, true));
+                gpu.image_slots.insert(
+                    url.to_owned(),
+                    ImageSlot {
+                        layer: slot,
+                        used_this_frame: true,
+                    },
+                );
                 return slot as i32;
             }
         }

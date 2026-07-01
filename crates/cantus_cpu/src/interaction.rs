@@ -1,11 +1,10 @@
 use crate::{
-    CantusApp, CondensedPlaylist, PANEL_START, PlaylistId, TrackId, queue_playback_update,
+    AppUpdater, CantusApp, CondensedPlaylist, PANEL_START, PlaylistId, TrackId,
     render::{IconInstance, Rect, TrackRender, lerpf32},
 };
 use cantus_shared::ICON_SPACING;
-use glam::{Vec2, Vec4, vec2, vec4};
+use glam::{Vec2, vec2};
 use itertools::Itertools;
-#[cfg(feature = "spotify")]
 use std::sync::Arc;
 use std::{
     collections::HashMap,
@@ -21,6 +20,7 @@ pub struct IconHitbox {
     pub rating_index: Option<u8>,
 }
 
+#[derive(Default)]
 pub struct InteractionState {
     pub mouse_pressure: f32, // 0 not hovered - 1 hovered - 2 mouse down
 
@@ -31,20 +31,6 @@ pub struct InteractionState {
     pub dragging: bool,
     pub drag_origin: Option<Vec2>,
     pub drag_track: Option<(Option<TrackId>, f32)>,
-}
-
-impl Default for InteractionState {
-    fn default() -> Self {
-        Self {
-            mouse_pressure: 0.0,
-            track_hitboxes: Vec::new(),
-            icon_hitboxes: Vec::new(),
-            mouse_down: false,
-            dragging: false,
-            drag_origin: None,
-            drag_track: None,
-        }
-    }
 }
 
 impl CantusApp {
@@ -70,15 +56,8 @@ impl CantusApp {
             );
             self.global_uniforms.expansion_time = self.start_time.elapsed().as_secs_f32();
             if let Some(track_id) = track_id {
-                #[cfg(feature = "spotify")]
                 let client = Arc::clone(&self.spotify.client);
-                skip_to_track(
-                    track_id,
-                    position,
-                    false,
-                    #[cfg(feature = "spotify")]
-                    client,
-                );
+                skip_to_track(track_id, position, false, &self.updater, client);
             }
         }
         interaction.drag_origin = None;
@@ -106,12 +85,14 @@ impl CantusApp {
         {
             // Spawn particles
             let time = self.start_time.elapsed().as_secs_f32();
-            for particle in self
+            for (index, particle) in self
                 .particles
                 .iter_mut()
-                .filter(|p| time > p.end_time)
+                .enumerate()
+                .filter(|(_, particle)| time > particle.end_time)
                 .take(20)
             {
+                self.particle_dirty_mask |= 1 << index;
                 particle.spawn_pos = vec2(mouse_pos.x, mouse_pos.y);
                 let angle = fastrand::f32() * 2.0 * std::f32::consts::PI;
                 let speed = 30.0 + (fastrand::f32() * 20.0);
@@ -165,15 +146,8 @@ impl CantusApp {
                 (mouse_pos.x - track_range_a) / (track_range_b - track_range_a)
             };
             if let Some(track_id) = *track_id {
-                #[cfg(feature = "spotify")]
                 let client = Arc::clone(&self.spotify.client);
-                skip_to_track(
-                    track_id,
-                    position,
-                    false,
-                    #[cfg(feature = "spotify")]
-                    client,
-                );
+                skip_to_track(track_id, position, false, &self.updater, client);
             }
         }
     }
@@ -203,14 +177,9 @@ impl CantusApp {
                 volume.saturating_sub(5)
             };
             let volume = *volume;
-            #[cfg(feature = "spotify")]
             let client = Arc::clone(&self.spotify.client);
             spawn(move || {
-                set_volume(
-                    volume,
-                    #[cfg(feature = "spotify")]
-                    &client,
-                );
+                set_volume(volume, &client);
             });
         }
     }
@@ -233,6 +202,18 @@ enum IconEntry<'a> {
     },
 }
 
+impl IconEntry<'_> {
+    const fn is_secondary(&self) -> bool {
+        matches!(
+            self,
+            Self::Playlist {
+                contained: false,
+                ..
+            }
+        )
+    }
+}
+
 impl CantusApp {
     /// Star ratings and favourite playlists
     pub fn draw_playlist_buttons(
@@ -241,7 +222,7 @@ impl CantusApp {
         hovered: bool,
         secondary_expansion: f32,
         playlists: &HashMap<PlaylistId, CondensedPlaylist>,
-    ) -> Option<Vec4> {
+    ) -> Option<(f32, f32)> {
         let track = track_render.track;
         let width = track_render.width;
         let pos_x = track_render.start_x;
@@ -249,8 +230,11 @@ impl CantusApp {
         let (track_rating_index, mut icon_entries) = if self.config.ratings_enabled {
             let index = playlists
                 .values()
-                .find(|p| p.rating_index.is_some() && p.tracks.contains(&track_id))
-                .and_then(|p| p.rating_index.map(|r| r + 1))
+                .find_map(|p| {
+                    p.rating_index
+                        .filter(|_| p.tracks.contains(&track_id))
+                        .map(|rating| rating + 1)
+                })
                 .unwrap_or(0);
             (
                 index,
@@ -286,15 +270,7 @@ impl CantusApp {
 
         let primary_count = icon_entries
             .iter()
-            .filter(|entry| {
-                !matches!(
-                    entry,
-                    IconEntry::Playlist {
-                        contained: false,
-                        ..
-                    }
-                )
-            })
+            .filter(|entry| !entry.is_secondary())
             .count();
         let secondary_count = num_icons - primary_count;
         let needed_width = ICON_SPACING * primary_count as f32 * 0.7;
@@ -305,10 +281,8 @@ impl CantusApp {
             0.0
         };
         let fade_alpha = if hovered { 1.0 } else { width_fade };
-        let background_fade = width_fade.max(secondary_expansion);
         let center_x = pos_x + width * 0.5;
         let center_y = PANEL_START + self.config.height * 0.975;
-        let secondary_y = center_y + ICON_SPACING;
 
         let mut hover_rating_index = None;
         let mut icon_data = Vec::with_capacity(num_icons);
@@ -316,20 +290,14 @@ impl CantusApp {
         let mut secondary_index = 0;
 
         for entry in icon_entries {
-            let secondary = matches!(
-                &entry,
-                IconEntry::Playlist {
-                    contained: false,
-                    ..
-                }
-            );
+            let secondary = entry.is_secondary();
             let (row_index, row_count, origin_y) = if secondary {
                 let index = secondary_index;
                 secondary_index += 1;
                 (
                     index,
                     secondary_count,
-                    center_y + (secondary_y - center_y) * secondary_expansion,
+                    center_y + ICON_SPACING * secondary_expansion,
                 )
             } else {
                 let index = primary_index;
@@ -388,13 +356,7 @@ impl CantusApp {
         let has_half = display_rating % 2 == 1;
 
         for (entry, is_hovered, origin) in icon_data {
-            let secondary = matches!(
-                &entry,
-                IconEntry::Playlist {
-                    contained: false,
-                    ..
-                }
-            );
+            let secondary = entry.is_secondary();
             let icon_alpha = fade_alpha * if secondary { secondary_expansion } else { 1.0 };
             let instance = IconInstance {
                 pos: origin,
@@ -432,22 +394,7 @@ impl CantusApp {
             self.icon_pills.push(instance);
         }
 
-        let primary_half_span = primary_count.saturating_sub(1) as f32 * ICON_SPACING * 0.5;
-        let secondary_half_span = secondary_count.saturating_sub(1) as f32 * ICON_SPACING * 0.5;
-        Some(vec4(
-            if primary_count > 0 {
-                primary_half_span + 1.0
-            } else {
-                0.0
-            },
-            secondary_half_span,
-            if secondary_count > 0 {
-                secondary_expansion
-            } else {
-                0.0
-            },
-            background_fade * 0.5,
-        ))
+        Some((primary_count as f32, secondary_count as f32))
     }
 }
 
@@ -456,9 +403,11 @@ fn skip_to_track(
     track_id: TrackId,
     position: f32,
     always_seek: bool,
-    #[cfg(feature = "spotify")] client: Arc<crate::spotify::SpotifyClient>,
+    updater: &AppUpdater,
+    client: Arc<crate::spotify::SpotifyClient>,
 ) {
-    queue_playback_update(move |state| {
+    updater.send(move |app| {
+        let state = &mut app.playback_state;
         let queue_index = state.queue_index;
         let Some(position_in_queue) = state.queue.iter().position(|t| t.id == Some(track_id))
         else {
@@ -471,9 +420,7 @@ fn skip_to_track(
             state.progress = 0;
             state.last_progress_update = Instant::now();
             state.last_interaction = Instant::now() + Duration::from_secs(2);
-            #[cfg(feature = "spotify")]
             let skip_client = Arc::clone(&client);
-            #[cfg(feature = "spotify")]
             spawn(move || {
                 let forward = queue_index < position_in_queue;
                 let skips = position_in_queue.abs_diff(queue_index);
@@ -498,7 +445,6 @@ fn skip_to_track(
             state.progress = milliseconds.round() as u32;
             state.last_progress_update = Instant::now();
             state.last_interaction = Instant::now() + Duration::from_secs(2);
-            #[cfg(feature = "spotify")]
             spawn(move || {
                 if let Err(err) = client.api_put(&format!(
                     "me/player/seek?position_ms={}",
@@ -518,9 +464,7 @@ impl CantusApp {
             return;
         }
 
-        #[cfg(feature = "spotify")]
         let mut playlists_to_remove_from = Vec::new();
-        #[cfg(feature = "spotify")]
         let mut playlists_to_add_to = Vec::new();
 
         // Remove tracks from existing playlists, add to target playlist if not present
@@ -532,19 +476,15 @@ impl CantusApp {
                     && playlist.rating_index != Some(rating_slot)
                     && playlist.tracks.remove(&track_id)
                 {
-                    #[cfg(feature = "spotify")]
                     playlists_to_remove_from.push((playlist.id, playlist.name.clone()));
                 }
                 if playlist.rating_index == Some(rating_slot) && playlist.tracks.insert(track_id) {
-                    #[cfg(feature = "spotify")]
                     playlists_to_add_to.push((playlist.id, playlist.name.clone()));
                 }
             });
         }
 
-        #[cfg(feature = "spotify")]
         let client = Arc::clone(&self.spotify.client);
-        #[cfg(feature = "spotify")]
         spawn(move || {
             let track_uri = format!("spotify:track:{track_id}");
             for (playlist_id, playlist_name) in playlists_to_remove_from {
@@ -602,15 +542,14 @@ impl CantusApp {
     }
 
     fn toggle_playlist_membership(&mut self, track_id: TrackId, playlist_id: PlaylistId) {
-        let (playlist_name, contained) = {
-            let Some(playlist) = self.playback_state.playlists.get(&playlist_id) else {
-                warn!(
-                    "Playlist {playlist_id} not found while toggling membership for track {track_id}"
-                );
-                return;
-            };
-            (playlist.name.clone(), playlist.tracks.contains(&track_id))
+        let Some(playlist) = self.playback_state.playlists.get_mut(&playlist_id) else {
+            warn!(
+                "Playlist {playlist_id} not found while toggling membership for track {track_id}"
+            );
+            return;
         };
+        let playlist_name = playlist.name.clone();
+        let contained = playlist.tracks.contains(&track_id);
 
         info!(
             "{} track {track_id} {} playlist {playlist_name}",
@@ -618,20 +557,14 @@ impl CantusApp {
             if contained { "from" } else { "to" }
         );
 
-        {
-            let state = &mut self.playback_state;
-            let playlist_tracks = &mut state.playlists.get_mut(&playlist_id).unwrap().tracks;
-            if contained {
-                playlist_tracks.remove(&track_id);
-            } else {
-                playlist_tracks.insert(track_id);
-            }
-            state.last_interaction = Instant::now() + Duration::from_millis(500);
+        if contained {
+            playlist.tracks.remove(&track_id);
+        } else {
+            playlist.tracks.insert(track_id);
         }
+        self.playback_state.last_interaction = Instant::now() + Duration::from_millis(500);
 
-        #[cfg(feature = "spotify")]
         let client = Arc::clone(&self.spotify.client);
-        #[cfg(feature = "spotify")]
         spawn(move || {
             let track_uri = format!("spotify:track:{track_id}");
             let result = if contained {
@@ -662,9 +595,7 @@ impl CantusApp {
         info!("{} current track", if play { "Playing" } else { "Pausing" });
         self.playback_state.playing = play;
 
-        #[cfg(feature = "spotify")]
         let client = Arc::clone(&self.spotify.client);
-        #[cfg(feature = "spotify")]
         spawn(move || {
             // https://developer.spotify.com/documentation/web-api/reference/#/operations/start-a-users-playback
             // https://developer.spotify.com/documentation/web-api/reference/#/operations/pause-a-users-playback
@@ -680,13 +611,9 @@ impl CantusApp {
 }
 
 /// Set the volume of the current playback device.
-fn set_volume(
-    volume_percent: u8,
-    #[cfg(feature = "spotify")] client: &crate::spotify::SpotifyClient,
-) {
+fn set_volume(volume_percent: u8, client: &crate::spotify::SpotifyClient) {
     info!("Setting volume to {}%", volume_percent);
 
-    #[cfg(feature = "spotify")]
     // https://developer.spotify.com/documentation/web-api/reference/#/operations/set-volume-for-users-playback
     if let Err(err) = client.api_put(&format!("me/player/volume?volume_percent={volume_percent}")) {
         error!("Failed to set volume: {err}");

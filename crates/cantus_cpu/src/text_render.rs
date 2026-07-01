@@ -12,6 +12,19 @@ use wgpu_text::{
 const FONT_SIZE: f32 = 17.0;
 const FONT_SIZE_SMALL: f32 = 14.0;
 
+fn display_name(name: &str) -> &str {
+    let without_suffix = name.split_once(" -").map_or(name, |(prefix, _)| prefix);
+    let display = without_suffix
+        .split_once('(')
+        .map_or(without_suffix, |(prefix, _)| prefix)
+        .trim();
+    if display.is_empty() {
+        name.trim()
+    } else {
+        display
+    }
+}
+
 pub struct TextRenderer {
     panel_height: f32,
     brush: TextBrush<FontArc>,
@@ -55,7 +68,7 @@ impl TextRenderer {
                 });
             };
 
-        let song_name = track.display_name.as_str();
+        let song_name = display_name(&track.name);
 
         let top_y = PANEL_START + (self.panel_height * 0.26).floor();
         let bottom_y = PANEL_START + (self.panel_height * 0.57).floor();

@@ -1,6 +1,5 @@
 use crate::CantusApp;
 use glam::vec2;
-use itertools::Itertools;
 use raw_window_handle::{
     RawDisplayHandle, RawWindowHandle, WaylandDisplayHandle, WaylandWindowHandle,
 };
@@ -284,7 +283,7 @@ impl LayerShellApp {
                     .iter()
                     .map(|h| &h.rect),
             )
-            .collect_vec();
+            .collect::<Vec<_>>();
 
         // Hash every hitbox rect at low precision so it only updates input regions on substantial changes
         let mut hasher = DefaultHasher::new();
@@ -420,8 +419,10 @@ impl Dispatch<WlSeat, ()> for LayerShellApp {
         if let wl_seat::Event::Capabilities { capabilities } = event
             && let WEnum::Value(caps) = capabilities
         {
-            if caps.contains(wl_seat::Capability::Pointer) && state.pointer.is_none() {
-                state.pointer = Some(proxy.get_pointer(qhandle, ()));
+            if caps.contains(wl_seat::Capability::Pointer) {
+                if state.pointer.is_none() {
+                    state.pointer = Some(proxy.get_pointer(qhandle, ()));
+                }
             } else if let Some(pointer) = state.pointer.take() {
                 pointer.release();
             }

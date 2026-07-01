@@ -8,10 +8,6 @@ build = "build.rs"
 name = "cantus"
 path = "src/main.rs"
 
-[features]
-default = ["spotify"]
-spotify = ["webbrowser"]
-
 [dependencies]
 cantus_shared = { path = "../cantus_shared", features = ["cpu"] }
 glam = { workspace = true }
@@ -50,9 +46,7 @@ serde_json = "1.0.150"
 toml = "1.1.2"
 
 fastrand = "2.4.1"
-tap = "1"
 parking_lot = "0.12.5"
-dashmap = "6.2.1"
 arrayvec = { version = "0.7.7", features = ["serde"] }
 itertools = "0.15.0"
 dirs = "6.0.0"
@@ -61,9 +55,8 @@ base64 = "0.22.1"
 url = "2.5.8"
 sha2 = "0.11.0"
 bytemuck = { version = "1.25.0", features = ["derive"] }
-
+webbrowser = "1.2.1"
 ureq = { version = "3.3.0", default-features = false, features = ["rustls"] }
-webbrowser = { version = "1.2.1", optional = true }
 
 [build-dependencies]
 spirv-builder = { git = "https://github.com/Rust-GPU/rust-gpu", rev = "bd49568baf08301107c9f698494735724980dee0" }

@@ -1,10 +1,9 @@
 use crate::{
-    AppCaches, CantusApp, CondensedPlaylist, NUM_SWATCHES, PANEL_START, PlaylistId, Track,
+    AppCaches, CantusApp, CondensedPlaylist, NUM_SWATCHES, PANEL_START, PlaylistId, Track, TrackId,
 };
 pub use cantus_shared::{BackgroundPill, GlobalUniforms, IconInstance, Particle, PlayheadUniforms};
-use glam::{Vec2, vec2, vec4};
+use glam::{Vec2, vec2};
 use image::RgbaImage;
-use itertools::Itertools;
 use palette::IntoColor;
 use std::{collections::HashMap, ops::Range, time::Instant};
 
@@ -45,8 +44,8 @@ pub struct RenderState {
     pub track_offset: f32,
     pub recent_speeds: [f32; 8],
     pub speed_idx: usize,
+    playlist_expansions: Vec<(Option<TrackId>, f32)>,
 }
-
 impl Default for RenderState {
     fn default() -> Self {
         Self {
@@ -54,6 +53,7 @@ impl Default for RenderState {
             track_offset: 0.0,
             recent_speeds: [0.0; 8],
             speed_idx: 0,
+            playlist_expansions: Vec::new(),
         }
     }
 }
@@ -74,7 +74,7 @@ fn album_palette(caches: &AppCaches, track: &Track) -> [u32; NUM_SWATCHES] {
         .album
         .id
         .and_then(|id| caches.album_palettes.get(&id))
-        .and_then(|r| r.as_ref().copied())
+        .copied()
         .unwrap_or_default()
 }
 
@@ -88,21 +88,25 @@ impl CantusApp {
         self.render_state.last_update = now;
 
         let history_width = self.config.history_width;
-        let total_width = self.config.width - history_width - 16.0;
+        let total_width = self.config.timeline_width();
         let total_height = self.config.height;
-        let timeline_duration_ms = self.config.timeline_future_minutes * 60_000.0;
-        let timeline_start_ms = -self.config.timeline_past_minutes * 60_000.0;
+        let timeline_duration_ms = self.config.timeline_duration_ms();
+        let timeline_start_ms = self.config.timeline_start_ms();
         let timeline_end_ms = timeline_start_ms + timeline_duration_ms;
 
         let px_per_ms = total_width / timeline_duration_ms;
-        let playhead_x = history_width - timeline_start_ms * px_per_ms;
+        let playhead_x = self.config.playhead_x();
 
         let playback_state = std::mem::take(&mut self.playback_state);
         if playback_state.queue.is_empty() {
             self.background_pills.clear();
+            self.render_state.playlist_expansions.clear();
             self.playback_state = playback_state;
             return;
         }
+        self.render_state
+            .playlist_expansions
+            .resize(playback_state.queue.len(), (None, 0.0));
 
         self.interaction.icon_hitboxes.clear();
         self.interaction.track_hitboxes.clear();
@@ -330,19 +334,16 @@ impl CantusApp {
             .album
             .image
             .as_deref()
-            .map(|path| self.get_image_index(path))
-            .unwrap_or_default();
+            .map_or(-1, |path| self.get_image_index(path));
         let colors = album_palette(&self.caches, track);
         if background_index == self.background_pills.len() {
             self.background_pills.push(BackgroundPill::default());
         }
-        let key = (track_render.queue_index + 1) as f32;
-        if self.background_pills[background_index].icon_span.w as usize
-            != track_render.queue_index + 1
-        {
-            self.background_pills[background_index] = BackgroundPill::default();
+        let expansion_state = &mut self.render_state.playlist_expansions[track_render.queue_index];
+        if expansion_state.0 != track.id {
+            *expansion_state = (track.id, 0.0);
         }
-        let mut playlist_expansion = self.background_pills[background_index].icon_span.z;
+        let mut playlist_expansion = expansion_state.1;
         move_towards(
             &mut playlist_expansion,
             if hovered && !track_render.art_only {
@@ -352,9 +353,12 @@ impl CantusApp {
             },
             dt.min(0.1) * 6.0,
         );
+        expansion_state.1 = playlist_expansion;
         let pill = &mut self.background_pills[background_index];
         pill.rect = vec2(start_x, width);
-        pill.icon_span = vec4(0.0, 0.0, playlist_expansion, key);
+        pill.primary_icon_count = 0.0;
+        pill.secondary_icon_count = 0.0;
+        pill.secondary_expansion = 0.0;
         pill.color0 = colors[0];
         pill.color1 = colors[1];
         pill.color2 = colors[2];
@@ -373,11 +377,15 @@ impl CantusApp {
 
         // Expand the hitbox vertically so it includes the playlist buttons
         if !track_render.art_only
-            && let Some(icon_rows) =
+            && let Some((primary_icon_count, secondary_icon_count)) =
                 self.draw_playlist_buttons(track_render, hovered, playlist_expansion, playlists)
         {
-            self.background_pills[background_index].icon_span = icon_rows;
-            self.background_pills[background_index].icon_span.w += key;
+            let pill = &mut self.background_pills[background_index];
+            pill.primary_icon_count = primary_icon_count;
+            pill.secondary_icon_count = secondary_icon_count;
+            if secondary_icon_count > 0.0 {
+                pill.secondary_expansion = playlist_expansion;
+            }
         }
     }
 
@@ -408,12 +416,14 @@ impl CantusApp {
         let horizontal_bias = (avg_speed.abs().powf(0.2) * spawn_offset * 0.5).clamp(-3.0, 3.0);
         let time = self.global_uniforms.time;
 
-        for particle in self
+        for (index, particle) in self
             .particles
             .iter_mut()
-            .filter(|p| time > p.end_time)
+            .enumerate()
+            .filter(|(_, particle)| time > particle.end_time)
             .take(emit_count as usize)
         {
+            self.particle_dirty_mask |= 1 << index;
             let y_fraction = fastrand::f32();
 
             particle.spawn_pos = vec2(
@@ -495,7 +505,7 @@ pub fn lerpf32(t: f32, v0: f32, v1: f32) -> f32 {
     v0 + t * (v1 - v0)
 }
 
-fn extract_lab_pixels(img: &RgbaImage) -> (Vec<palette::Lab>, bool) {
+fn extract_lab_pixels(img: &RgbaImage) -> Vec<palette::Lab> {
     let saturation_threshold = 30u8;
     let srgb_to_lab = |p: &image::Rgba<u8>| {
         palette::FromColor::from_color(palette::Srgb::new(
@@ -516,45 +526,43 @@ fn extract_lab_pixels(img: &RgbaImage) -> (Vec<palette::Lab>, bool) {
         .collect();
 
     if colourful.is_empty() {
-        (img.pixels().map(srgb_to_lab).collect(), false)
+        img.pixels().map(srgb_to_lab).collect()
     } else {
-        (colourful, true)
+        colourful
     }
 }
 
-fn load_image_pixels(caches: &AppCaches, url: &str) -> Option<(Vec<palette::Lab>, bool)> {
-    let img = caches.images.get(url)?.as_ref()?.clone();
-    Some(extract_lab_pixels(&img))
+fn load_image_pixels(caches: &AppCaches, url: &str) -> Option<Vec<palette::Lab>> {
+    let img = caches.images.get(url)?;
+    Some(extract_lab_pixels(img))
 }
 
 fn lab_pixels_to_palette(pixels: &[palette::Lab]) -> [u32; NUM_SWATCHES] {
-    kmeans_colors::get_kmeans_hamerly(NUM_SWATCHES, 20, 5.0, false, pixels, 0)
-        .centroids
-        .iter()
-        .take(NUM_SWATCHES)
-        .map(|c: &palette::Lab| {
-            let rgb: palette::Srgb = (*c).into_color();
-            u32::from_le_bytes([
-                (rgb.red * 255.0) as u8,
-                (rgb.green * 255.0) as u8,
-                (rgb.blue * 255.0) as u8,
-                255,
-            ])
-        })
-        .collect_vec()
-        .try_into()
-        .unwrap_or([0; NUM_SWATCHES])
+    let centroids =
+        kmeans_colors::get_kmeans_hamerly(NUM_SWATCHES, 20, 5.0, false, pixels, 0).centroids;
+    let mut colors = [0; NUM_SWATCHES];
+    for (color, centroid) in colors.iter_mut().zip(centroids) {
+        let rgb: palette::Srgb = centroid.into_color();
+        *color = u32::from_le_bytes([
+            (rgb.red * 255.0) as u8,
+            (rgb.green * 255.0) as u8,
+            (rgb.blue * 255.0) as u8,
+            255,
+        ]);
+    }
+    colors
 }
 
 /// Gathers the 4 primary colours for each album image.
-pub fn update_color_palettes(caches: &AppCaches, queue: &[Track]) {
+pub fn update_color_palettes(caches: &mut AppCaches, queue: &[Track]) {
     for track in queue {
-        let album_id = track.album.id.unwrap_or_default();
-        let artist_id = track.artist.id.unwrap_or_default();
+        let Some(album_id) = track.album.id else {
+            continue;
+        };
         if caches.album_palettes.contains_key(&album_id) {
             continue;
         }
-        let Some((pixels, is_colourful)) = track
+        let Some(pixels) = track
             .album
             .image
             .as_ref()
@@ -562,27 +570,8 @@ pub fn update_color_palettes(caches: &AppCaches, queue: &[Track]) {
         else {
             continue;
         };
-        caches.album_palettes.insert(album_id, None);
-
-        let pixels = if is_colourful {
-            pixels
-        } else {
-            let Some(url) = caches
-                .artist_images
-                .get(&artist_id)
-                .and_then(|e| e.value().clone())
-            else {
-                caches.album_palettes.remove(&album_id);
-                continue;
-            };
-            match load_image_pixels(caches, &url) {
-                Some((p, true)) => p,
-                _ => pixels,
-            }
-        };
-
         caches
             .album_palettes
-            .insert(album_id, Some(lab_pixels_to_palette(&pixels)));
+            .insert(album_id, lab_pixels_to_palette(&pixels));
     }
 }

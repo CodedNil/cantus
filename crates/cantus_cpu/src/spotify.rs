@@ -1,6 +1,6 @@
 use crate::{
-    AppCaches, Artist, ArtistId, CondensedPlaylist, PlaylistId, Track, TrackId,
-    cache_decoded_image, config::Config, deserialize_images, queue_playback_update,
+    AppUpdater, CondensedPlaylist, PlaylistId, Track, TrackId, cache_decoded_image, config::Config,
+    deserialize_images,
 };
 use arrayvec::ArrayString;
 use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
@@ -18,7 +18,6 @@ use std::{
     thread::{JoinHandle, spawn},
     time::{Duration, Instant},
 };
-use tap::{Pipe, Tap};
 use thiserror::Error;
 use time::{Duration as TimeDuration, OffsetDateTime};
 use tracing::{error, info, warn};
@@ -203,30 +202,30 @@ fn prompt_for_token(
         ])?
         .into_body()
         .read_to_string()?;
-    serde_json::from_str::<Token>(&response)?
-        .tap_mut(Token::set_expiration)
-        .pipe(Ok)
+    let mut token = serde_json::from_str::<Token>(&response)?;
+    token.set_expiration();
+    Ok(token)
 }
 
 impl SpotifyClient {
     fn auth_headers(&self) -> ClientResult<String> {
-        let cached_access = {
+        {
             let token = self.token.read();
-            (!token.is_expired()).then(|| token.access.clone())
-        };
-        if let Some(access) = cached_access {
-            return Ok(format!("Bearer {access}"));
+            if !token.is_expired() {
+                let header = format!("Bearer {}", token.access);
+                drop(token);
+                return Ok(header);
+            }
         }
 
-        let access = {
-            let mut token = self.token.write();
-            if token.is_expired() {
-                *token = self.refetch_token(&token)?;
-                self.write_token_cache(&token)?;
-            }
-            token.access.clone()
-        };
-        Ok(format!("Bearer {access}"))
+        let mut token = self.token.write();
+        if token.is_expired() {
+            *token = self.refetch_token(&token)?;
+            self.write_token_cache(&token)?;
+        }
+        let header = format!("Bearer {}", token.access);
+        drop(token);
+        Ok(header)
     }
 
     fn api_url(path: &str) -> String {
@@ -345,10 +344,9 @@ impl SpotifyClient {
         if token.scopes.is_empty() {
             token.scopes.clone_from(&current.scopes);
         }
-        token
-            .tap(|t| info!("Refetched token: {}", t.expires_in))
-            .tap_mut(Token::set_expiration)
-            .pipe(Ok)
+        info!("Refetched token: {}", token.expires_in);
+        token.set_expiration();
+        Ok(token)
     }
 
     pub fn new(
@@ -387,11 +385,7 @@ fn get_authorize_url(
         b"abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789-._~",
     );
 
-    let challenge = URL_SAFE_NO_PAD.encode(
-        Sha256::new()
-            .tap_mut(|h| h.update(verifier.as_bytes()))
-            .finalize(),
-    );
+    let challenge = URL_SAFE_NO_PAD.encode(Sha256::digest(verifier.as_bytes()));
 
     let redirect_uri = format!("http://{REDIRECT_HOST}:{REDIRECT_PORT}/callback");
     let scope = scopes.iter().map(String::as_str).sorted().join(" ");
@@ -509,7 +503,6 @@ where
 struct Page<T: DeserializeOwned> {
     #[serde(deserialize_with = "vec_without_nulls")]
     items: Vec<T>,
-    total: u32,
 }
 
 // --- SPOTIFY LOGIC ---
@@ -566,13 +559,13 @@ fn persist_playlist_cache(cache: &PlaylistCache) {
 
 pub struct SpotifyBackend {
     pub client: Arc<SpotifyClient>,
-    caches: Arc<AppCaches>,
+    updater: AppUpdater,
     playback: PollTask<SpotifyState>,
     playlists: PollTask<PlaylistPollState>,
 }
 
 impl SpotifyBackend {
-    pub fn new(config: &Config, caches: &Arc<AppCaches>) -> Self {
+    pub fn new(config: &Config, updater: AppUpdater) -> Self {
         let cantus_dir = config_path("");
         if !cantus_dir.exists() {
             fs::create_dir(&cantus_dir).unwrap();
@@ -580,7 +573,7 @@ impl SpotifyBackend {
         let client = Arc::new(create_client(config));
         let initial_poll = Instant::now().checked_sub(Duration::from_mins(1)).unwrap();
         Self {
-            caches: Arc::clone(caches),
+            updater: updater.clone(),
             playback: PollTask::new(
                 SpotifyState {
                     current_context: None,
@@ -591,7 +584,7 @@ impl SpotifyBackend {
                 Duration::from_millis(500),
             ),
             playlists: PollTask::new(
-                PlaylistPollState::new(Arc::clone(&client), config, Arc::clone(caches)),
+                PlaylistPollState::new(Arc::clone(&client), config, updater),
                 Duration::from_secs(20),
             ),
             client,
@@ -600,10 +593,10 @@ impl SpotifyBackend {
 
     pub fn tick(&mut self) {
         let client = Arc::clone(&self.client);
-        let caches = Arc::clone(&self.caches);
+        let updater = self.updater.clone();
         self.playback.run(move |state| {
-            get_spotify_playback(&client, state);
-            get_spotify_queue(&client, &caches, state);
+            get_spotify_playback(&client, &updater, state);
+            get_spotify_queue(&client, &updater, state);
         });
         self.playlists.run(PlaylistPollState::poll);
     }
@@ -648,7 +641,11 @@ fn track_index(queue: &[Track], id: Option<TrackId>, name: &str) -> Option<usize
         .or_else(|| queue.iter().position(|t| t.name == name))
 }
 
-fn get_spotify_playback(client: &SpotifyClient, spotify_state: &mut SpotifyState) {
+fn get_spotify_playback(
+    client: &SpotifyClient,
+    updater: &AppUpdater,
+    spotify_state: &mut SpotifyState,
+) {
     let now = Instant::now();
     if now < spotify_state.last_grabbed_playback + Duration::from_secs(1) {
         return;
@@ -669,7 +666,8 @@ fn get_spotify_playback(client: &SpotifyClient, spotify_state: &mut SpotifyState
         spotify_state.last_grabbed_queue = queue_deadline;
     }
     spotify_state.last_grabbed_playback = now;
-    queue_playback_update(move |state| {
+    updater.send(move |app| {
+        let state = &mut app.playback_state;
         if let Some(track) = current_playback.item {
             state.queue_index = track_index(&state.queue, track.id, &track.name).unwrap_or(0);
         }
@@ -688,7 +686,7 @@ fn get_spotify_playback(client: &SpotifyClient, spotify_state: &mut SpotifyState
 
 fn get_spotify_queue(
     client: &Arc<SpotifyClient>,
-    caches: &Arc<AppCaches>,
+    updater: &AppUpdater,
     spotify_state: &mut SpotifyState,
 ) {
     let now = Instant::now();
@@ -705,18 +703,16 @@ fn get_spotify_queue(
         return;
     };
     let current_track_id = currently_playing.id;
-    let current_title = currently_playing.name.clone();
-    let mut new_queue: Vec<Track> = std::iter::once(currently_playing).chain(q.queue).collect();
-    new_queue.iter_mut().for_each(Track::prepare);
-
-    cache_queue_images(client, caches, &new_queue);
+    let new_queue: Vec<Track> = std::iter::once(currently_playing).chain(q.queue).collect();
 
     let context_updated = spotify_state.context_updated;
     spotify_state.context_updated = false;
     spotify_state.last_grabbed_queue = Instant::now();
-    queue_playback_update(move |state| {
+    updater.send(move |app| {
+        let state = &mut app.playback_state;
+        let current_title = &new_queue[0].name;
         if !context_updated
-            && let Some(new_index) = track_index(&state.queue, current_track_id, &current_title)
+            && let Some(new_index) = track_index(&state.queue, current_track_id, current_title)
         {
             state.queue_index = new_index;
             state.queue.truncate(new_index);
@@ -728,79 +724,46 @@ fn get_spotify_queue(
     });
 }
 
-fn cache_queue_images(client: &Arc<SpotifyClient>, caches: &Arc<AppCaches>, queue: &[Track]) {
-    let mut missing_artists = HashSet::new();
-    for track in queue {
-        if let Some(image) = &track.album.image {
-            ensure_image_cached(client, caches, image);
-        }
-        if let Some(artist_id) = track.artist.id
-            && !caches.artist_images.contains_key(&artist_id)
-            && missing_artists.insert(artist_id)
-        {
-            let client = Arc::clone(client);
-            let caches = Arc::clone(caches);
-            spawn(move || fetch_artist_image(&client, &caches, artist_id));
-        }
-    }
-}
-
-fn fetch_artist_image(client: &Arc<SpotifyClient>, caches: &Arc<AppCaches>, artist_id: ArtistId) {
-    let Some(artist) = client.api_json::<Artist>(&format!("artists/{artist_id}"), "artist") else {
-        return;
-    };
-    if let Some(actual_id) = artist.id {
-        caches.artist_images.insert(actual_id, artist.image.clone());
-        if let Some(image) = artist.image.as_deref() {
-            ensure_image_cached(client, caches, image);
-        }
-    }
-}
-
-fn ensure_image_cached(client: &Arc<SpotifyClient>, caches: &Arc<AppCaches>, url: &str) {
-    if caches.images.contains_key(url) {
-        return;
-    }
-    caches.images.insert(url.to_owned(), None);
-
-    let url = url.to_owned();
-    let client = Arc::clone(client);
-    let caches = Arc::clone(caches);
+pub fn download_image(client: Arc<SpotifyClient>, updater: AppUpdater, url: String) {
     spawn(move || {
         let result = client
             .http
             .get(&url)
             .call()
             .map_err(ClientError::from)
-            .and_then(|mut resp| Ok(resp.body_mut().read_to_vec()?))
-            .and_then(|bytes| Ok(image::load_from_memory(&bytes)?));
-        let Ok(img) = result.inspect_err(|err| warn!("Failed to cache image {url}: {err}")) else {
-            caches.images.remove(&url);
+            .and_then(|mut resp| Ok(resp.body_mut().read_to_vec()?));
+        let Ok(bytes) = result.inspect_err(|err| warn!("Failed to download image {url}: {err}"))
+        else {
+            updater.send(move |app| app.image_cache.fail(url));
             return;
         };
-        cache_decoded_image(caches, url, img);
+        let Ok(img) = image::load_from_memory(&bytes)
+            .inspect_err(|err| warn!("Failed to decode image {url}: {err}"))
+        else {
+            updater.send(move |app| app.image_cache.fail(url));
+            return;
+        };
+        updater.send(move |app| cache_decoded_image(app, url, img));
     });
 }
 
 struct PlaylistPollState {
     client: Arc<SpotifyClient>,
-    caches: Arc<AppCaches>,
+    updater: AppUpdater,
     targets: HashSet<String>,
-    cached: PlaylistCache,
     persistent_cache: PlaylistCache,
     known_snapshots: HashMap<PlaylistId, ArrayString<32>>,
     ratings_enabled: bool,
 }
 
 impl PlaylistPollState {
-    fn new(client: Arc<SpotifyClient>, config: &Config, caches: Arc<AppCaches>) -> Self {
+    fn new(client: Arc<SpotifyClient>, config: &Config, updater: AppUpdater) -> Self {
         let playlist_cache = load_cached_playlist_tracks();
         Self {
             client,
-            caches,
+            updater,
             targets: config.playlists.iter().cloned().collect(),
-            persistent_cache: playlist_cache.clone(),
-            cached: playlist_cache,
+            persistent_cache: playlist_cache,
             known_snapshots: HashMap::new(),
             ratings_enabled: config.ratings_enabled,
         }
@@ -819,27 +782,24 @@ impl PlaylistPollState {
             if !self.targets.contains(playlist.name.as_str()) && rating_index.is_none() {
                 continue;
             }
-            if let Some(image) = &playlist.image {
-                ensure_image_cached(&self.client, &self.caches, image);
-            }
-
-            if let Some((snapshot_id, tracks)) = self.cached.remove(&playlist.id)
-                && snapshot_id == playlist.snapshot_id
+            if !self.known_snapshots.contains_key(&playlist.id)
+                && let Some((snapshot_id, tracks)) = self.persistent_cache.get(&playlist.id)
+                && *snapshot_id == playlist.snapshot_id
             {
                 self.known_snapshots
                     .insert(playlist.id, playlist.snapshot_id);
-                insert_playlist(&playlist, tracks, rating_index);
+                insert_playlist(&self.updater, playlist, tracks.clone(), rating_index);
                 continue;
             }
 
             if self.known_snapshots.get(&playlist.id) != Some(&playlist.snapshot_id)
-                && let Some((_total, tracks)) = fetch_playlist_tracks(&self.client, &playlist)
+                && let Some(tracks) = fetch_playlist_tracks(&self.client, &playlist)
             {
                 self.known_snapshots
                     .insert(playlist.id, playlist.snapshot_id);
                 self.persistent_cache
                     .insert(playlist.id, (playlist.snapshot_id, tracks.clone()));
-                insert_playlist(&playlist, tracks, rating_index);
+                insert_playlist(&self.updater, playlist, tracks, rating_index);
                 persist_playlist_cache(&self.persistent_cache);
             }
         }
@@ -854,22 +814,17 @@ fn rating_index(enabled: bool, name: &str) -> Option<u8> {
         .and_then(|i| u8::try_from(i).ok())
 }
 
-fn fetch_playlist_tracks(
-    client: &SpotifyClient,
-    playlist: &Playlist,
-) -> Option<(u32, HashSet<TrackId>)> {
+fn fetch_playlist_tracks(client: &SpotifyClient, playlist: &Playlist) -> Option<HashSet<TrackId>> {
     let chunk_size = 50;
     let num_pages = playlist.total_tracks.div_ceil(chunk_size);
-    let mut total = playlist.total_tracks;
     let mut tracks = HashSet::new();
     info!("Fetching {num_pages} pages from playlist {}", playlist.name);
 
     for page in 0..num_pages {
         let page = fetch_playlist_page(client, playlist.id, chunk_size, page)?;
-        total = page.total;
         tracks.extend(page.items.iter().filter_map(|item| item.track.id));
     }
-    Some((total, tracks))
+    Some(tracks)
 }
 
 fn fetch_playlist_page(
@@ -894,15 +849,20 @@ fn fetch_playlist_page(
     )
 }
 
-fn insert_playlist(playlist: &Playlist, tracks: HashSet<TrackId>, rating_index: Option<u8>) {
+fn insert_playlist(
+    updater: &AppUpdater,
+    playlist: Playlist,
+    tracks: HashSet<TrackId>,
+    rating_index: Option<u8>,
+) {
     let condensed = CondensedPlaylist {
         id: playlist.id,
-        name: playlist.name.clone(),
-        image_url: playlist.image.clone(),
+        name: playlist.name,
+        image_url: playlist.image,
         tracks,
         rating_index,
     };
-    queue_playback_update(move |state| {
-        state.playlists.insert(condensed.id, condensed);
+    updater.send(move |app| {
+        app.playback_state.playlists.insert(condensed.id, condensed);
     });
 }

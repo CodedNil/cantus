@@ -1,9 +1,9 @@
 #![no_std]
 
 #[cfg(not(target_arch = "spirv"))]
-use glam::{Vec2, Vec4};
+use glam::Vec2;
 #[cfg(target_arch = "spirv")]
-use spirv_std::glam::{Vec2, Vec4};
+use spirv_std::glam::Vec2;
 
 /// Center-to-center spacing for playlist and rating icons, in logical pixels.
 pub const ICON_SPACING: f32 = 20.0;
@@ -36,15 +36,17 @@ pub struct PlayheadUniforms {
 #[derive(Copy, Clone, Debug, Default)]
 #[cfg_attr(feature = "cpu", derive(bytemuck::Pod, bytemuck::Zeroable))]
 pub struct BackgroundPill {
-    /// Encoded primary span, secondary span/expansion, and packed CPU key/primary fade.
-    pub icon_span: Vec4,
     pub rect: Vec2,
+    pub primary_icon_count: f32,
+    pub secondary_icon_count: f32,
+    pub secondary_expansion: f32,
     pub color0: u32,
     pub color1: u32,
     pub color2: u32,
     pub color3: u32,
     pub alpha: f32,
     pub image_index: i32,
+    _padding: u32,
 }
 
 #[repr(C)]

@@ -28,6 +28,12 @@ fn repeat_art_uv(uv: Vec2) -> Vec2 {
     )
 }
 
+fn primary_fade(pill: &BackgroundPill) -> f32 {
+    let needed_width = ICON_SPACING * pill.primary_icon_count * 0.7;
+    let width_fade = ((pill.rect.y - needed_width) / (needed_width * 0.5)).clamp(0.0, 1.0);
+    width_fade.max(pill.secondary_expansion)
+}
+
 #[spirv(vertex)]
 pub fn vs_background(
     #[spirv(vertex_index)] v_idx: u32,
@@ -44,14 +50,14 @@ pub fn vs_background(
     let pill_size = vec2(pill.rect.y, global.bar_height.y);
     let pill_origin = vec2(pill.rect.x, global.bar_height.x);
 
-    let primary_fade = pill.icon_span.w.fract() * 2.0;
-    let icon_visibility = primary_fade.max(pill.icon_span.z);
+    let primary_fade = primary_fade(&pill);
+    let icon_visibility = primary_fade.max(pill.secondary_expansion);
     let icon_center_x = pill_origin.x + pill_size.x * 0.5;
     let icon_radius =
         (BACKPLATE_RADIUS + BACKPLATE_HOVER_GROWTH + SECONDARY_SMOOTHING * 0.25) * icon_visibility;
-    let icon_half_width = ((pill.icon_span.x - 1.0)
-        .max(pill.icon_span.y * pill.icon_span.z)
-        .max(0.0)
+    let primary_half_span = (pill.primary_icon_count - 1.0).max(0.0) * ICON_SPACING * 0.5;
+    let secondary_half_span = (pill.secondary_icon_count - 1.0).max(0.0) * ICON_SPACING * 0.5;
+    let icon_half_width = (primary_half_span.max(secondary_half_span * pill.secondary_expansion)
         + BACKPLATE_END_PADDING)
         * icon_visibility
         + icon_radius;
@@ -65,7 +71,7 @@ pub fn vs_background(
             global.bar_height.x
                 + global.bar_height.y * 0.975
                 + BACKPLATE_Y_OFFSET
-                + ICON_SPACING * pill.icon_span.z
+                + ICON_SPACING * pill.secondary_expansion
                 + icon_radius,
         ),
     );
@@ -123,27 +129,36 @@ pub fn fs_background(
     let icon_center_x = pill.rect.x + pill.rect.y * 0.5;
     let primary_center_y = global.bar_height.x + global.bar_height.y * 0.975 + BACKPLATE_Y_OFFSET;
     let local_icon_growth = mouse_inf * BACKPLATE_HOVER_GROWTH;
-    let primary_fade = pill.icon_span.w.fract() * 2.0;
+    let primary_fade = primary_fade(&pill);
     let mut dist = pill_dist;
     if primary_fade > 0.0 {
         let primary_dist = sd_capsule_box(
             pixel_pos - vec2(icon_center_x, primary_center_y),
-            (pill.icon_span.x - 1.0).max(0.0) + BACKPLATE_END_PADDING,
+            (pill.primary_icon_count - 1.0).max(0.0) * ICON_SPACING * 0.5 + BACKPLATE_END_PADDING,
             BACKPLATE_RADIUS + local_icon_growth,
         );
         dist = smooth_union(dist, primary_dist, PRIMARY_SMOOTHING, primary_fade);
     }
-    if pill.icon_span.z > 0.0 {
+    if pill.secondary_expansion > 0.0 {
         let secondary_center = vec2(
             icon_center_x,
-            primary_center_y + ICON_SPACING * pill.icon_span.z,
+            primary_center_y + ICON_SPACING * pill.secondary_expansion,
         );
         let secondary_dist = sd_capsule_box(
             pixel_pos - secondary_center,
-            pill.icon_span.y * pill.icon_span.z + BACKPLATE_END_PADDING,
+            (pill.secondary_icon_count - 1.0).max(0.0)
+                * ICON_SPACING
+                * 0.5
+                * pill.secondary_expansion
+                + BACKPLATE_END_PADDING,
             BACKPLATE_RADIUS + local_icon_growth,
         );
-        dist = smooth_union(dist, secondary_dist, SECONDARY_SMOOTHING, pill.icon_span.z);
+        dist = smooth_union(
+            dist,
+            secondary_dist,
+            SECONDARY_SMOOTHING,
+            pill.secondary_expansion,
+        );
     }
     let mask = (0.5 - dist).clamp(0.0, 1.0);
     let shadow = (1.0 - smoothstep(0.0, 14.0, dist)) * 0.16;

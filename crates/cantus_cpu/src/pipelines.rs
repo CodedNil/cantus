@@ -1,7 +1,6 @@
 use crate::render::{BackgroundPill, GlobalUniforms, IconInstance, Particle, PlayheadUniforms};
 use crate::text_render::TextRenderer;
-use crate::{CantusApp, GpuResources};
-use itertools::Itertools;
+use crate::{CantusApp, GpuResources, MAX_RENDER_INSTANCES, PARTICLE_COUNT};
 use std::collections::HashMap;
 use wgpu::{
     BindGroupDescriptor, BindGroupEntry, BindGroupLayout, BindGroupLayoutDescriptor,
@@ -16,7 +15,8 @@ use wgpu::{
     VertexState,
 };
 
-pub const MAX_TEXTURE_LAYERS: u32 = 64;
+pub const MAX_TEXTURE_IMAGES: u32 = 32;
+pub const TEXTURE_LAYER_COUNT: u32 = MAX_TEXTURE_IMAGES * 2;
 pub const IMAGE_SIZE: u32 = 64;
 
 impl CantusApp {
@@ -81,7 +81,7 @@ impl CantusApp {
                         ty,
                         count: None,
                     })
-                    .collect_vec(),
+                    .collect::<Vec<_>>(),
             })
         };
 
@@ -202,7 +202,7 @@ impl CantusApp {
         );
         let particles_buffer = mk_buf(
             "Particles",
-            (std::mem::size_of::<Particle>() * 64) as u64,
+            (std::mem::size_of::<Particle>() * PARTICLE_COUNT) as u64,
             BufferUsages::STORAGE,
         );
         let playhead_buffer = mk_buf(
@@ -212,12 +212,12 @@ impl CantusApp {
         );
         let background_storage_buffer = mk_buf(
             "BG Pills",
-            (std::mem::size_of::<BackgroundPill>() * 256) as u64,
+            (std::mem::size_of::<BackgroundPill>() * MAX_RENDER_INSTANCES) as u64,
             BufferUsages::STORAGE,
         );
         let icon_storage_buffer = mk_buf(
             "Icons",
-            (std::mem::size_of::<IconInstance>() * 256) as u64,
+            (std::mem::size_of::<IconInstance>() * MAX_RENDER_INSTANCES) as u64,
             BufferUsages::STORAGE,
         );
 
@@ -226,7 +226,7 @@ impl CantusApp {
             size: Extent3d {
                 width: IMAGE_SIZE,
                 height: IMAGE_SIZE,
-                depth_or_array_layers: MAX_TEXTURE_LAYERS,
+                depth_or_array_layers: TEXTURE_LAYER_COUNT,
             },
             mip_level_count: 1,
             sample_count: 1,
@@ -346,7 +346,7 @@ impl CantusApp {
             icon_bind_group,
             particle_bind_group,
             texture_array,
-            url_to_image_index: HashMap::new(),
+            image_slots: HashMap::new(),
         });
     }
 }
