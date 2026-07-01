@@ -85,14 +85,12 @@ impl CantusApp {
         {
             // Spawn particles
             let time = self.start_time.elapsed().as_secs_f32();
-            for (index, particle) in self
+            for particle in self
                 .particles
                 .iter_mut()
-                .enumerate()
-                .filter(|(_, particle)| time > particle.end_time)
+                .filter(|particle| time > particle.end_time)
                 .take(20)
             {
-                self.particle_dirty_mask |= 1 << index;
                 particle.spawn_pos = vec2(mouse_pos.x, mouse_pos.y);
                 let angle = fastrand::f32() * 2.0 * std::f32::consts::PI;
                 let speed = 30.0 + (fastrand::f32() * 20.0);

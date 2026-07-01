@@ -6,8 +6,8 @@ use ab_glyph::{Font, FontArc, Glyph, GlyphId, PxScale, ScaleFont, point};
 use cantus_shared::{GlyphInstance, MAX_GLYPH_INSTANCES};
 use glam::vec2;
 use wgpu::{
-    Device, Extent3d, FilterMode, Queue, SamplerDescriptor, Texture, TextureDescriptor,
-    TextureDimension, TextureFormat, TextureUsages, TextureView, TextureViewDescriptor,
+    Device, Extent3d, Queue, Texture, TextureDescriptor, TextureDimension, TextureFormat,
+    TextureUsages, TextureView, TextureViewDescriptor,
 };
 
 const FONT_SIZE: f32 = 17.0;
@@ -97,14 +97,6 @@ impl TextRenderer {
         &self.atlas_view
     }
 
-    pub fn atlas_sampler(device: &Device) -> wgpu::Sampler {
-        device.create_sampler(&SamplerDescriptor {
-            mag_filter: FilterMode::Linear,
-            min_filter: FilterMode::Linear,
-            ..Default::default()
-        })
-    }
-
     fn rasterize_glyph(&mut self, queue: &Queue, key: AtlasKey) -> Option<AtlasEntry> {
         if let Some(&entry) = self.atlas_cache.get(&key) {
             return Some(entry);
@@ -136,9 +128,9 @@ impl TextRenderer {
             cy += row_h;
             cx = 0;
             row_h = 0;
-            if cy + height + ATLAS_PADDING * 2 > ATLAS_SIZE {
-                return None;
-            }
+        }
+        if cy + height + ATLAS_PADDING * 2 > ATLAS_SIZE {
+            return None;
         }
         let gx = cx + ATLAS_PADDING;
         let gy = cy + ATLAS_PADDING;
@@ -303,10 +295,12 @@ impl TextRenderer {
         }
     }
 
-    /// Build the `GlyphInstance` storage buffer data for the current frame.
-    pub fn build_instance_buffer(&mut self) -> Vec<GlyphInstance> {
-        self.glyphs.truncate(MAX_GLYPH_INSTANCES);
-        std::mem::take(&mut self.glyphs)
+    pub fn begin_frame(&mut self) {
+        self.glyphs.clear();
+    }
+
+    pub fn glyphs(&self) -> &[GlyphInstance] {
+        &self.glyphs
     }
 }
 
@@ -332,11 +326,7 @@ fn measure_text(font: &FontArc, text: &str, px_size: f32) -> f32 {
 }
 
 fn pack_color(color: [f32; 4]) -> u32 {
-    let r = (color[0] * 255.0).round() as u32;
-    let g = (color[1] * 255.0).round() as u32;
-    let b = (color[2] * 255.0).round() as u32;
-    let a = (color[3] * 255.0).round() as u32;
-    r | (g << 8) | (b << 16) | (a << 24)
+    u32::from_le_bytes(color.map(|channel| (channel * 255.0).round() as u8))
 }
 
 fn queue_glyphs(
@@ -361,24 +351,6 @@ fn queue_glyphs(
         Align::Right => origin_x - total_width,
     };
 
-    // Collect glyph layout info first to avoid borrowing conflicts during rasterization
-    let layouts: Vec<(GlyphId, f32)> = {
-        let font = renderer.font.as_scaled(px_size);
-        let mut layouts = Vec::new();
-        let mut caret = caret;
-        let mut last_glyph: Option<GlyphId> = None;
-        for c in text.chars() {
-            let glyph_id = font.glyph_id(c);
-            if let Some(prev) = last_glyph {
-                caret += font.kern(prev, glyph_id);
-            }
-            layouts.push((glyph_id, caret));
-            caret += font.h_advance(glyph_id);
-            last_glyph = Some(glyph_id);
-        }
-        layouts
-    };
-
     let scale_quarters = (raster_size * render_scale * SCALE_STEPS)
         .round()
         .max(SCALE_STEPS) as u16;
@@ -392,8 +364,23 @@ fn queue_glyphs(
     let physical_baseline_y = (origin_y + baseline_offset) * render_scale / glyph_scale;
     let (baseline_y, phase_y) = subpixel_position(physical_baseline_y);
 
-    for (glyph_id, caret) in layouts {
-        let (caret_x, phase_x) = subpixel_position(caret * render_scale / glyph_scale);
+    let font = renderer.font.clone();
+    let font = font.as_scaled(px_size);
+    let mut caret = caret;
+    let mut last_glyph = None;
+    for c in text.chars() {
+        if renderer.glyphs.len() == MAX_GLYPH_INSTANCES {
+            break;
+        }
+        let glyph_id = font.glyph_id(c);
+        if let Some(previous) = last_glyph {
+            caret += font.kern(previous, glyph_id);
+        }
+        let glyph_x = caret;
+        caret += font.h_advance(glyph_id);
+        last_glyph = Some(glyph_id);
+
+        let (caret_x, phase_x) = subpixel_position(glyph_x * render_scale / glyph_scale);
         let key = AtlasKey {
             glyph_id: glyph_id.0,
             scale_quarters,

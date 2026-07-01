@@ -367,13 +367,13 @@ impl CantusApp {
         pill.image_index = image_index;
 
         // --- TEXT ---
-        if let (Some(text_renderer), Some(gpu)) =
-            (&mut self.text_renderer, self.gpu_resources.as_ref())
-            && !track_render.art_only
+        if !track_render.art_only
             && fade_alpha >= 1.0
             && width > self.config.height
+            && let Some(gpu) = &mut self.gpu_resources
         {
-            text_renderer.render(&gpu.queue, track_render, self.render_scale);
+            gpu.text_renderer
+                .render(&gpu.queue, track_render, self.render_scale);
         }
 
         // Expand the hitbox vertically so it includes the playlist buttons
@@ -417,14 +417,12 @@ impl CantusApp {
         let horizontal_bias = (avg_speed.abs().powf(0.2) * spawn_offset * 0.5).clamp(-3.0, 3.0);
         let time = self.global_uniforms.time;
 
-        for (index, particle) in self
+        for particle in self
             .particles
             .iter_mut()
-            .enumerate()
-            .filter(|(_, particle)| time > particle.end_time)
+            .filter(|particle| time > particle.end_time)
             .take(emit_count as usize)
         {
-            self.particle_dirty_mask |= 1 << index;
             let y_fraction = fastrand::f32();
 
             particle.spawn_pos = vec2(

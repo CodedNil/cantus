@@ -8,10 +8,10 @@ use crate::{
     text_render::TextRenderer,
 };
 use arrayvec::ArrayString;
+use image::RgbaImage;
 use serde::{Deserialize, Deserializer};
 use std::{
     collections::{HashMap, HashSet},
-    mem::size_of,
     sync::{
         Arc,
         mpsc::{self, Receiver, Sender},
@@ -20,8 +20,8 @@ use std::{
 };
 use wgpu::{
     BindGroup, Buffer, Color, CommandEncoderDescriptor, CurrentSurfaceTexture, Device, Instance,
-    LoadOp, Operations, Queue, RenderPassColorAttachment, RenderPassDescriptor, RenderPipeline,
-    StoreOp, Surface, SurfaceConfiguration, Texture, TextureViewDescriptor,
+    LoadOp, Operations, Queue, RenderPass, RenderPassColorAttachment, RenderPassDescriptor,
+    RenderPipeline, StoreOp, Surface, SurfaceConfiguration, Texture, TextureViewDescriptor,
 };
 
 mod cache;
@@ -56,13 +56,13 @@ struct CantusApp {
     image_cache: ImageCacheState,
     last_toggle_playing: Instant,
     particles: [Particle; PARTICLE_COUNT],
-    particle_dirty_mask: u64,
     particles_accumulator: f32,
     /// Physical buffer pixels per logical Wayland surface pixel.
     render_scale: f32,
+    /// Logical width assigned by the layer-shell compositor.
+    surface_width: Option<f32>,
 
     // Scene & Resources
-    text_renderer: Option<TextRenderer>,
     global_uniforms: GlobalUniforms,
     background_pills: Vec<BackgroundPill>,
     icon_pills: Vec<IconInstance>,
@@ -94,11 +94,10 @@ impl Default for CantusApp {
             },
             last_toggle_playing: Instant::now(),
             particles: [Particle::default(); PARTICLE_COUNT],
-            particle_dirty_mask: u64::MAX,
             particles_accumulator: 0.0,
             render_scale: 1.0,
+            surface_width: None,
 
-            text_renderer: None,
             global_uniforms: GlobalUniforms::default(),
             background_pills: Vec::new(),
             icon_pills: Vec::new(),
@@ -194,36 +193,117 @@ struct GpuResources {
     surface: Surface<'static>,
     surface_config: SurfaceConfiguration,
 
-    // Pipelines
-    playhead_pipeline: RenderPipeline,
-    background_pipeline: RenderPipeline,
-    icon_pipeline: RenderPipeline,
-    text_pipeline: RenderPipeline,
-    particle_pipeline: RenderPipeline,
-
-    // Uniform/Storage Buffers
     uniform_buffer: Buffer,
-    particles_buffer: Buffer,
-    playhead_buffer: Buffer,
-    background_storage_buffer: Buffer,
-    icon_storage_buffer: Buffer,
-    glyph_storage_buffer: Buffer,
-
-    // Bind Groups
-    playhead_bind_group: BindGroup,
-    background_bind_group: BindGroup,
-    icon_bind_group: BindGroup,
-    text_bind_group: BindGroup,
-    particle_bind_group: BindGroup,
-
-    // Image Management
-    texture_array: Texture,
-    image_slots: HashMap<String, ImageSlot>,
+    playhead: GpuPass,
+    background: GpuPass,
+    icons: GpuPass,
+    text: GpuPass,
+    particles: GpuPass,
+    images: ImageAtlas,
+    text_renderer: TextRenderer,
 }
 
-struct ImageSlot {
-    layer: u32,
-    used_this_frame: bool,
+struct GpuPass {
+    pipeline: RenderPipeline,
+    buffer: Buffer,
+    bind_group: BindGroup,
+}
+
+impl GpuPass {
+    fn draw<'pass>(&'pass self, pass: &mut RenderPass<'pass>, instances: u32) {
+        pass.set_pipeline(&self.pipeline);
+        pass.set_bind_group(0, &self.bind_group, &[]);
+        pass.draw(0..4, 0..instances);
+    }
+
+    fn draw_data<'pass, T: bytemuck::NoUninit>(
+        &'pass self,
+        queue: &Queue,
+        pass: &mut RenderPass<'pass>,
+        data: &[T],
+    ) {
+        if !data.is_empty() {
+            queue.write_buffer(&self.buffer, 0, bytemuck::cast_slice(data));
+            self.draw(pass, data.len() as u32);
+        }
+    }
+}
+
+impl GpuResources {
+    fn configure_surface(&self) {
+        self.surface.configure(&self.device, &self.surface_config);
+    }
+
+    fn resize_surface(&mut self, width: u32, height: u32) {
+        if (self.surface_config.width, self.surface_config.height) != (width, height) {
+            self.surface_config.width = width;
+            self.surface_config.height = height;
+            self.configure_surface();
+        }
+    }
+}
+
+struct ImageAtlas {
+    texture: Texture,
+    slots: [Option<String>; MAX_TEXTURE_IMAGES as usize],
+    used: u32,
+}
+
+impl ImageAtlas {
+    const fn begin_frame(&mut self) {
+        self.used = 0;
+    }
+
+    fn image_index(&mut self, queue: &Queue, url: &str, image: Option<&RgbaImage>) -> i32 {
+        if let Some(index) = self
+            .slots
+            .iter()
+            .position(|slot| slot.as_deref() == Some(url))
+        {
+            self.used |= 1 << index;
+            return (index * 2) as i32;
+        }
+
+        let Some(image) = image else {
+            return -1;
+        };
+        let index = (!self.used).trailing_zeros();
+        if index >= MAX_TEXTURE_IMAGES {
+            return -1;
+        }
+        self.used |= 1 << index;
+        let layer = index * 2;
+
+        let blurred = image::imageops::blur(image, 3.0);
+        let mut bytes = Vec::with_capacity(image.len() + blurred.len());
+        bytes.extend_from_slice(image);
+        bytes.extend_from_slice(&blurred);
+        queue.write_texture(
+            wgpu::TexelCopyTextureInfo {
+                texture: &self.texture,
+                mip_level: 0,
+                aspect: wgpu::TextureAspect::All,
+                origin: wgpu::Origin3d {
+                    x: 0,
+                    y: 0,
+                    z: layer,
+                },
+            },
+            &bytes,
+            wgpu::TexelCopyBufferLayout {
+                offset: 0,
+                bytes_per_row: Some(4 * IMAGE_SIZE),
+                rows_per_image: Some(IMAGE_SIZE),
+            },
+            wgpu::Extent3d {
+                width: IMAGE_SIZE,
+                height: IMAGE_SIZE,
+                depth_or_array_layers: 2,
+            },
+        );
+        self.slots[index as usize] = Some(url.to_owned());
+        layer as i32
+    }
 }
 
 fn main() {
@@ -240,7 +320,7 @@ fn main() {
 impl CantusApp {
     fn logical_surface_size(&self) -> (f32, f32) {
         (
-            self.config.width,
+            self.surface_width.unwrap_or(self.config.width),
             self.config.height + PANEL_START + PANEL_EXTENSION,
         )
     }
@@ -275,64 +355,32 @@ impl CantusApp {
         }
         self.icon_pills.clear();
 
-        for slot in self
-            .gpu_resources
-            .as_mut()
-            .unwrap()
-            .image_slots
-            .values_mut()
-        {
-            slot.used_this_frame = false;
-        }
+        let gpu = self.gpu_resources.as_mut().unwrap();
+        gpu.images.begin_frame();
+        gpu.text_renderer.begin_frame();
 
         self.create_scene();
 
         let gpu = self.gpu_resources.as_mut().unwrap();
-        gpu.image_slots.retain(|_, slot| slot.used_this_frame);
         gpu.queue.write_buffer(
             &gpu.uniform_buffer,
             0,
             bytemuck::bytes_of(&self.global_uniforms),
         );
-        while self.particle_dirty_mask != 0 {
-            let start = self.particle_dirty_mask.trailing_zeros() as usize;
-            let count = (self.particle_dirty_mask >> start).trailing_ones() as usize;
-            let end = start + count;
-            gpu.queue.write_buffer(
-                &gpu.particles_buffer,
-                (start * size_of::<Particle>()) as u64,
-                bytemuck::cast_slice(&self.particles[start..end]),
-            );
-            if count == PARTICLE_COUNT {
-                self.particle_dirty_mask = 0;
-            } else {
-                self.particle_dirty_mask &= !(((1u64 << count) - 1) << start);
-            }
-        }
         gpu.queue.write_buffer(
-            &gpu.playhead_buffer,
+            &gpu.particles.buffer,
+            0,
+            bytemuck::cast_slice(&self.particles),
+        );
+        gpu.queue.write_buffer(
+            &gpu.playhead.buffer,
             0,
             bytemuck::bytes_of(&self.playhead_info),
         );
 
-        if !self.background_pills.is_empty() {
-            gpu.queue.write_buffer(
-                &gpu.background_storage_buffer,
-                0,
-                bytemuck::cast_slice(&self.background_pills),
-            );
-        }
-        if !self.icon_pills.is_empty() {
-            gpu.queue.write_buffer(
-                &gpu.icon_storage_buffer,
-                0,
-                bytemuck::cast_slice(&self.icon_pills),
-            );
-        }
-
         let CurrentSurfaceTexture::Success(surface_texture) = gpu.surface.get_current_texture()
         else {
-            gpu.surface.configure(&gpu.device, &gpu.surface_config);
+            gpu.configure_surface();
             return;
         };
         let surface_view = surface_texture
@@ -360,40 +408,18 @@ impl CantusApp {
                 multiview_mask: None,
             });
 
-            if !self.background_pills.is_empty() {
-                rpass.set_pipeline(&gpu.background_pipeline);
-                rpass.set_bind_group(0, &gpu.background_bind_group, &[]);
-                rpass.draw(0..4, 0..self.background_pills.len() as u32);
-            }
+            gpu.background
+                .draw_data(&gpu.queue, &mut rpass, &self.background_pills);
 
-            if let Some(text_renderer) = &mut self.text_renderer {
-                let instances = text_renderer.build_instance_buffer();
-                let count = instances.len() as u32;
-                if count > 0 {
-                    gpu.queue.write_buffer(
-                        &gpu.glyph_storage_buffer,
-                        0,
-                        bytemuck::cast_slice(&instances),
-                    );
-                    rpass.set_pipeline(&gpu.text_pipeline);
-                    rpass.set_bind_group(0, &gpu.text_bind_group, &[]);
-                    rpass.draw(0..4, 0..count);
-                }
-            }
+            gpu.text
+                .draw_data(&gpu.queue, &mut rpass, gpu.text_renderer.glyphs());
 
-            if !self.icon_pills.is_empty() {
-                rpass.set_pipeline(&gpu.icon_pipeline);
-                rpass.set_bind_group(0, &gpu.icon_bind_group, &[]);
-                rpass.draw(0..4, 0..self.icon_pills.len() as u32);
-            }
+            gpu.icons
+                .draw_data(&gpu.queue, &mut rpass, &self.icon_pills);
 
-            rpass.set_pipeline(&gpu.particle_pipeline);
-            rpass.set_bind_group(0, &gpu.particle_bind_group, &[]);
-            rpass.draw(0..4, 0..PARTICLE_COUNT as u32);
+            gpu.particles.draw(&mut rpass, PARTICLE_COUNT as u32);
 
-            rpass.set_pipeline(&gpu.playhead_pipeline);
-            rpass.set_bind_group(0, &gpu.playhead_bind_group, &[]);
-            rpass.draw(0..4, 0..1);
+            gpu.playhead.draw(&mut rpass, 1);
         }
 
         gpu.queue.submit([encoder.finish()]);
@@ -404,57 +430,11 @@ impl CantusApp {
         let Some(gpu) = self.gpu_resources.as_mut() else {
             return -1;
         };
-
-        if let Some(slot) = gpu.image_slots.get_mut(url) {
-            slot.used_this_frame = true;
-            return slot.layer as i32;
-        }
-
-        if let Some(image) = self.caches.images.get(url) {
-            let slot = (0..MAX_TEXTURE_IMAGES)
-                .map(|image| image * 2)
-                .find(|&layer| !gpu.image_slots.values().any(|slot| slot.layer == layer));
-            if let Some(slot) = slot {
-                let blurred = image::imageops::blur(image.as_ref(), 3.0);
-                let write_layer = |layer: u32, bytes: &[u8]| {
-                    gpu.queue.write_texture(
-                        wgpu::TexelCopyTextureInfo {
-                            texture: &gpu.texture_array,
-                            mip_level: 0,
-                            aspect: wgpu::TextureAspect::All,
-                            origin: wgpu::Origin3d {
-                                x: 0,
-                                y: 0,
-                                z: layer,
-                            },
-                        },
-                        bytes,
-                        wgpu::TexelCopyBufferLayout {
-                            offset: 0,
-                            bytes_per_row: Some(4 * IMAGE_SIZE),
-                            rows_per_image: Some(IMAGE_SIZE),
-                        },
-                        wgpu::Extent3d {
-                            width: IMAGE_SIZE,
-                            height: IMAGE_SIZE,
-                            depth_or_array_layers: 1,
-                        },
-                    );
-                };
-                write_layer(slot, image.as_raw());
-                write_layer(slot + 1, blurred.as_raw());
-
-                gpu.image_slots.insert(
-                    url.to_owned(),
-                    ImageSlot {
-                        layer: slot,
-                        used_this_frame: true,
-                    },
-                );
-                return slot as i32;
-            }
-        }
-        -1
+        gpu.images.image_index(
+            &gpu.queue,
+            url,
+            self.caches.images.get(url).map(AsRef::as_ref),
+        )
     }
 }
 

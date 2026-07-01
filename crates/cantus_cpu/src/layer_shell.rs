@@ -11,30 +11,27 @@ use std::{
 };
 use tracing::error;
 use wayland_client::{
-    Connection, Dispatch, Proxy, QueueHandle, WEnum,
+    Connection, Dispatch, Proxy, QueueHandle, WEnum, delegate_noop,
     protocol::{
         wl_callback::{self, WlCallback},
-        wl_compositor::{self, WlCompositor},
+        wl_compositor::WlCompositor,
         wl_output::{self, WlOutput},
         wl_pointer::{self, WlPointer},
-        wl_region::{self, WlRegion},
+        wl_region::WlRegion,
         wl_registry::{self, WlRegistry},
         wl_seat::{self, WlSeat},
-        wl_surface::{self, WlSurface},
+        wl_surface::WlSurface,
     },
 };
 use wayland_protocols::wp::{
     fractional_scale::v1::client::{
-        wp_fractional_scale_manager_v1::{self, WpFractionalScaleManagerV1},
+        wp_fractional_scale_manager_v1::WpFractionalScaleManagerV1,
         wp_fractional_scale_v1::{self, WpFractionalScaleV1},
     },
-    viewporter::client::{
-        wp_viewport::{self, WpViewport},
-        wp_viewporter::{self, WpViewporter},
-    },
+    viewporter::client::{wp_viewport::WpViewport, wp_viewporter::WpViewporter},
 };
 use wayland_protocols_wlr::layer_shell::v1::client::{
-    zwlr_layer_shell_v1::{self, Layer as LayerStyle, ZwlrLayerShellV1},
+    zwlr_layer_shell_v1::{Layer as LayerStyle, ZwlrLayerShellV1},
     zwlr_layer_surface_v1::{self, Anchor as LayerAnchor, ZwlrLayerSurfaceV1},
 };
 use wgpu::SurfaceTargetUnsafe;
@@ -64,7 +61,7 @@ pub fn run() {
     let surface_ptr = NonNull::new(wl_surface.id().as_ptr().cast::<c_void>())
         .expect("Failed to get surface pointer");
     app.surface_ptr = Some(surface_ptr);
-    assert!(app.try_select_output(), "Failed to select a Wayland output");
+    app.select_output();
 
     let surface = app.wl_surface.insert(wl_surface);
     if let (Some(vp), Some(fm)) = (app.viewporter.take(), app.fractional_manager.take()) {
@@ -199,11 +196,7 @@ impl LayerShellApp {
         }
 
         if let Some(gpu) = &mut self.cantus.gpu_resources {
-            if gpu.surface_config.width != width || gpu.surface_config.height != height {
-                gpu.surface_config.width = width;
-                gpu.surface_config.height = height;
-                gpu.surface.configure(&gpu.device, &gpu.surface_config);
-            }
+            gpu.resize_surface(width, height);
             return;
         }
 
@@ -222,11 +215,7 @@ impl LayerShellApp {
         self.cantus.configure_render_surface(surface, width, height);
     }
 
-    fn try_select_output(&mut self) -> bool {
-        if self.outputs.is_empty() {
-            return false;
-        }
-
+    fn select_output(&mut self) {
         self.output_index = self
             .cantus
             .config
@@ -234,7 +223,6 @@ impl LayerShellApp {
             .as_ref()
             .and_then(|target| self.outputs.iter().position(|info| info.matches(target)))
             .unwrap_or(0);
-        true
     }
 
     fn try_render_frame(&mut self, qhandle: &QueueHandle<Self>) {
@@ -324,14 +312,13 @@ impl Dispatch<ZwlrLayerSurfaceV1, ()> for LayerShellApp {
         qhandle: &QueueHandle<Self>,
     ) {
         match event {
-            zwlr_layer_surface_v1::Event::Configure { serial, .. } => {
+            zwlr_layer_surface_v1::Event::Configure { serial, width, .. } => {
                 proxy.ack_configure(serial);
-                state.update_scale_and_viewport();
-                if let Some(surface) = &state.wl_surface {
-                    surface.commit();
+                if width > 0 {
+                    state.cantus.surface_width = Some(width as f32);
                 }
                 state.is_configured = true;
-
+                state.update_scale_and_viewport();
                 state.try_render_frame(qhandle);
             }
             zwlr_layer_surface_v1::Event::Closed => {
@@ -403,7 +390,7 @@ impl Dispatch<WlOutput, ()> for LayerShellApp {
                 _ => {}
             }
         }
-        state.try_select_output();
+        state.select_output();
     }
 }
 
@@ -550,29 +537,10 @@ impl Dispatch<WlRegistry, ()> for LayerShellApp {
     }
 }
 
-macro_rules! impl_noop_dispatch {
-    ($ty:ty, $event:ty) => {
-        impl Dispatch<$ty, ()> for LayerShellApp {
-            fn event(
-                _state: &mut Self,
-                _proxy: &$ty,
-                _event: $event,
-                _data: &(),
-                _conn: &Connection,
-                _qhandle: &QueueHandle<Self>,
-            ) {
-            }
-        }
-    };
-}
-
-impl_noop_dispatch!(WlSurface, wl_surface::Event);
-impl_noop_dispatch!(ZwlrLayerShellV1, zwlr_layer_shell_v1::Event);
-impl_noop_dispatch!(
-    WpFractionalScaleManagerV1,
-    wp_fractional_scale_manager_v1::Event
-);
-impl_noop_dispatch!(WpViewporter, wp_viewporter::Event);
-impl_noop_dispatch!(WpViewport, wp_viewport::Event);
-impl_noop_dispatch!(WlCompositor, wl_compositor::Event);
-impl_noop_dispatch!(WlRegion, wl_region::Event);
+delegate_noop!(LayerShellApp: ignore WlSurface);
+delegate_noop!(LayerShellApp: ignore ZwlrLayerShellV1);
+delegate_noop!(LayerShellApp: ignore WpFractionalScaleManagerV1);
+delegate_noop!(LayerShellApp: ignore WpViewporter);
+delegate_noop!(LayerShellApp: ignore WpViewport);
+delegate_noop!(LayerShellApp: ignore WlCompositor);
+delegate_noop!(LayerShellApp: ignore WlRegion);
