@@ -3,6 +3,8 @@ rec {
 
   inputs = {
     nixpkgs.url = "github:NixOS/nixpkgs/nixos-unstable";
+    rust-overlay.url = "github:oxalica/rust-overlay";
+    rust-overlay.inputs.nixpkgs.follows = "nixpkgs";
     systems.url = "github:nix-systems/default-linux";
   };
 
@@ -10,6 +12,7 @@ rec {
     {
       self,
       nixpkgs,
+      rust-overlay,
       systems,
       ...
     }:
@@ -17,7 +20,32 @@ rec {
       inherit (nixpkgs) lib;
       pname = "cantus";
       supportedSystems = import systems;
-      forAllSystems = f: lib.genAttrs supportedSystems (system: f nixpkgs.legacyPackages.${system});
+      forAllSystems =
+        f:
+        lib.genAttrs supportedSystems (
+          system:
+          f (
+            import nixpkgs {
+              inherit system;
+              overlays = [ (import rust-overlay) ];
+            }
+          )
+        );
+      rustToolchain =
+        pkgs:
+        let
+          channel = (builtins.fromTOML (builtins.readFile ./rust-toolchain.toml)).toolchain.channel;
+          version = lib.removePrefix "nightly-" channel;
+        in
+        (pkgs.rust-bin.nightly."${version}".default.override {
+          extensions = [
+            "rust-src"
+            "rustc-dev"
+            "llvm-tools"
+            "rustfmt"
+            "clippy"
+          ];
+        });
       runtimeLibraries =
         pkgs: with pkgs; [
           wayland
@@ -29,16 +57,28 @@ rec {
       packages = forAllSystems (
         pkgs:
         let
-          cantus = pkgs.rustPlatform.buildRustPackage {
+          toolchain = rustToolchain pkgs;
+          rustPlatform = pkgs.makeRustPlatform {
+            cargo = toolchain;
+            rustc = toolchain;
+          };
+          cantus = rustPlatform.buildRustPackage {
             inherit pname;
             version = (builtins.fromTOML (builtins.readFile ./crates/cantus_cpu/Cargo.toml)).package.version;
+            CANTUS_NIX_BUILD = "1";
 
             src = lib.cleanSource ./.;
-            cargoLock.lockFile = ./Cargo.lock;
+            cargoLock = {
+              lockFile = ./Cargo.lock;
+              outputHashes = {
+                "rustc_codegen_spirv-0.10.0-alpha.1" = "sha256-pioRiIsB3lkWP3rH/p/GW2au4nJ+CKYhL4WTsLlf+zw=";
+              };
+            };
 
             nativeBuildInputs = with pkgs; [
               pkg-config
               makeWrapper
+              mold
             ];
 
             buildInputs = runtimeLibraries pkgs;
@@ -64,29 +104,17 @@ rec {
         }
       );
 
-      devShells = forAllSystems (
-        pkgs:
-        let
-          runtimeLibraryPath = pkgs.lib.makeLibraryPath (runtimeLibraries pkgs);
-        in
-        {
-          default = pkgs.mkShell {
-            name = pname;
-            inputsFrom = [ self.packages.${pkgs.stdenv.hostPlatform.system}.cantus ];
-            packages = with pkgs; [
-              rustup
-              mold
-            ];
-            shellHook = ''
-              unset CARGO
-              unset RUSTC
-              unset RUSTC_WRAPPER
-              unset RUSTUP_TOOLCHAIN
-              export LD_LIBRARY_PATH=${runtimeLibraryPath}:$LD_LIBRARY_PATH
-            '';
-          };
-        }
-      );
+      devShells = forAllSystems (pkgs: {
+        default = pkgs.mkShell {
+          name = pname;
+          inputsFrom = [ self.packages.${pkgs.stdenv.hostPlatform.system}.cantus ];
+          packages = with pkgs; [
+            (rustToolchain pkgs)
+            mold
+          ];
+          LD_LIBRARY_PATH = pkgs.lib.makeLibraryPath (runtimeLibraries pkgs);
+        };
+      });
 
       homeManagerModules = {
         default = self.homeManagerModules.cantus;
