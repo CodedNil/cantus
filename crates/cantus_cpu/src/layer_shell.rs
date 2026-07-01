@@ -1,4 +1,4 @@
-use crate::{CantusApp, PANEL_EXTENSION, PANEL_START};
+use crate::CantusApp;
 use glam::vec2;
 use itertools::Itertools;
 use raw_window_handle::{
@@ -90,7 +90,7 @@ pub fn run() {
         &qhandle,
         (),
     );
-    let total_height = app.cantus.config.height + PANEL_EXTENSION + PANEL_START;
+    let (_, total_height) = app.cantus.logical_surface_size();
     layer_surface.set_size(0, total_height as u32);
     layer_surface.set_anchor(match app.cantus.config.layer_anchor.as_str() {
         "top" => LayerAnchor::Top | LayerAnchor::Left | LayerAnchor::Right,
@@ -194,16 +194,17 @@ impl LayerShellApp {
         }
     }
 
-    fn ensure_surface(&mut self, width: f32, height: f32) {
-        if width == 0.0 || height == 0.0 || !self.is_configured {
+    fn ensure_surface(&mut self, width: u32, height: u32) {
+        if width == 0 || height == 0 || !self.is_configured {
             return;
         }
 
-        let recreate = self.cantus.gpu_resources.as_ref().is_none_or(|surface| {
-            surface.surface_config.width != width as u32
-                || surface.surface_config.height != height as u32
-        });
-        if !recreate {
+        if let Some(gpu) = &mut self.cantus.gpu_resources {
+            if gpu.surface_config.width != width || gpu.surface_config.height != height {
+                gpu.surface_config.width = width;
+                gpu.surface_config.height = height;
+                gpu.surface.configure(&gpu.device, &gpu.surface_config);
+            }
             return;
         }
 
@@ -219,8 +220,7 @@ impl LayerShellApp {
         let surface = unsafe { self.cantus.instance.create_surface_unsafe(target) }
             .expect("Failed to create surface");
 
-        self.cantus
-            .configure_render_surface(surface, width as u32, height as u32);
+        self.cantus.configure_render_surface(surface, width, height);
     }
 
     fn try_select_output(&mut self) -> bool {
@@ -239,10 +239,7 @@ impl LayerShellApp {
     }
 
     fn try_render_frame(&mut self, qhandle: &QueueHandle<Self>) {
-        let scale = self.cantus.scale_factor;
-        let buffer_width = (self.cantus.config.width * scale).round();
-        let buffer_height =
-            ((self.cantus.config.height + PANEL_EXTENSION + PANEL_START) * scale).round();
+        let (buffer_width, buffer_height) = self.cantus.buffer_size();
         self.ensure_surface(buffer_width, buffer_height);
 
         self.update_input_region(qhandle);
@@ -255,23 +252,18 @@ impl LayerShellApp {
     }
 
     fn update_scale_and_viewport(&self) {
-        let scale = self.cantus.scale_factor;
-        let total_height = self.cantus.config.height + PANEL_EXTENSION + PANEL_START;
+        let (logical_width, logical_height) = self.cantus.logical_surface_size();
+        let (buffer_width, buffer_height) = self.cantus.buffer_size();
         if let Some(surface) = &self.wl_surface {
             surface.set_buffer_scale(if self.viewport.is_some() {
                 1
             } else {
-                scale.ceil() as i32
+                self.cantus.render_scale.ceil() as i32
             });
         }
         if let Some(viewport) = &self.viewport {
-            viewport.set_source(
-                0.0,
-                0.0,
-                f64::from(self.cantus.config.width * scale).round(),
-                f64::from(total_height * scale).round(),
-            );
-            viewport.set_destination(self.cantus.config.width as i32, total_height as i32);
+            viewport.set_source(0.0, 0.0, f64::from(buffer_width), f64::from(buffer_height));
+            viewport.set_destination(logical_width as i32, logical_height as i32);
         }
     }
 
@@ -361,15 +353,10 @@ impl Dispatch<WpFractionalScaleV1, ()> for LayerShellApp {
         qhandle: &QueueHandle<Self>,
     ) {
         if let wp_fractional_scale_v1::Event::PreferredScale { scale } = event {
-            state.cantus.scale_factor = scale as f32 / 120.0;
+            state.cantus.render_scale = scale as f32 / 120.0;
 
             if state.is_configured {
                 state.update_scale_and_viewport();
-
-                if let Some(surface) = &state.wl_surface {
-                    surface.commit();
-                }
-
                 state.try_render_frame(qhandle);
             }
         }

@@ -1,4 +1,4 @@
-use crate::common::{pixel_to_ndc, smoothstep, unpack4x8unorm};
+use crate::common::{pixel_to_ndc, quad_coord, smoothstep, unpack4x8unorm};
 use cantus_shared::{GlobalUniforms, Particle};
 use spirv_std::{
     arch::kill,
@@ -32,19 +32,13 @@ pub fn vs_particles(
 
     let p_life = dt / duration;
     let p_life_inv = 1.0 - p_life;
-    let scale = global.scale_factor;
-    let pos = p.spawn_pos + p.spawn_vel * dt * scale;
-    let dir = (p.spawn_vel * scale).normalize();
+    let pos = p.spawn_pos + p.spawn_vel * dt;
+    let dir = p.spawn_vel.normalize();
     let perp = vec2(-dir.y, dir.x);
     let growth = p_life + 0.5;
-    let half_len = 5.0 * scale * growth;
-    let half_thick = 2.5 * scale * growth;
-    let uv = match v_idx {
-        0 => vec2(-1.0, -1.0),
-        1 => vec2(1.0, -1.0),
-        2 => vec2(-1.0, 1.0),
-        _ => vec2(1.0, 1.0),
-    };
+    let half_len = 5.0 * growth;
+    let half_thick = 2.5 * growth;
+    let uv = quad_coord(v_idx) * 2.0 - 1.0;
     let world_pos = pos + (dir * uv.x * half_len) + (perp * uv.y * half_thick);
     let luma = rgb.dot(vec3(0.299, 0.587, 0.114));
     let spark_color = Vec3::splat(luma).lerp(rgb, 2.0).lerp(Vec3::ONE, 0.2) * 2.0;

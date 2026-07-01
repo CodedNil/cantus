@@ -1,4 +1,4 @@
-use spirv_std::glam::{Vec2, Vec4, vec2, vec4};
+use spirv_std::glam::{Vec2, Vec3, Vec4, vec2, vec3, vec4};
 
 #[cfg(target_arch = "spirv")]
 use spirv_std::num_traits::Float;
@@ -79,10 +79,13 @@ pub fn smooth_union(base: f32, shape: f32, smoothing: f32, amount: f32) -> f32 {
 }
 
 pub fn unpack4x8unorm(value: u32) -> Vec4 {
-    vec4(
+    unpack3x8unorm(value).extend(((value >> 24) & 0xff) as f32 / 255.0)
+}
+
+pub fn unpack3x8unorm(value: u32) -> Vec3 {
+    vec3(
         (value & 0xff) as f32 / 255.0,
         ((value >> 8) & 0xff) as f32 / 255.0,
         ((value >> 16) & 0xff) as f32 / 255.0,
-        ((value >> 24) & 0xff) as f32 / 255.0,
     )
 }

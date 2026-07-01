@@ -1,6 +1,5 @@
 use crate::{
-    AppCaches, CantusApp, CondensedPlaylist, NUM_SWATCHES, PANEL_EXTENSION, PANEL_START,
-    PlaylistId, Track,
+    AppCaches, CantusApp, CondensedPlaylist, NUM_SWATCHES, PANEL_START, PlaylistId, Track,
 };
 pub use cantus_shared::{BackgroundPill, GlobalUniforms, IconInstance, Particle, PlayheadUniforms};
 use glam::{Vec2, vec2, vec4};
@@ -225,13 +224,10 @@ impl CantusApp {
 
         // Screen uniforms
         self.global_uniforms.time = self.start_time.elapsed().as_secs_f32();
-        self.global_uniforms.screen_size = vec2(
-            self.config.width,
-            self.config.height + PANEL_START + PANEL_EXTENSION,
-        );
+        let (screen_width, screen_height) = self.logical_surface_size();
+        self.global_uniforms.screen_size = vec2(screen_width, screen_height);
         self.global_uniforms.bar_height = vec2(PANEL_START, self.config.height);
         self.global_uniforms.playhead_x = playhead_x;
-        self.global_uniforms.scale_factor = self.scale_factor;
 
         // Mouse uniforms
         move_towards(

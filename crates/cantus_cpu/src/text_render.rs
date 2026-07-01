@@ -143,7 +143,7 @@ impl TextRenderer {
         rpass: &mut RenderPass<'_>,
         width: u32,
         height: u32,
-        scale: f32,
+        render_scale: f32,
     ) {
         self.brush.update_matrix(
             [
@@ -159,8 +159,11 @@ impl TextRenderer {
             .sections
             .iter()
             .map(|s| Section {
-                screen_position: (s.screen_position.0 * scale, s.screen_position.1 * scale),
-                bounds: (s.bounds.0 * scale, s.bounds.1 * scale),
+                screen_position: (
+                    s.screen_position.0 * render_scale,
+                    s.screen_position.1 * render_scale,
+                ),
+                bounds: (s.bounds.0 * render_scale, s.bounds.1 * render_scale),
                 layout: s.layout,
                 text: s
                     .text
@@ -168,8 +171,8 @@ impl TextRenderer {
                     .map(|t| Text {
                         text: &t.text,
                         scale: PxScale {
-                            x: t.scale.x * scale,
-                            y: t.scale.y * scale,
+                            x: t.scale.x * render_scale,
+                            y: t.scale.y * render_scale,
                         },
                         font_id: t.font_id,
                         extra: t.extra,

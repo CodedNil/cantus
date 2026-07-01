@@ -16,7 +16,7 @@ use wgpu::{
     VertexState,
 };
 
-pub const MAX_TEXTURE_LAYERS: u32 = 48;
+pub const MAX_TEXTURE_LAYERS: u32 = 64;
 pub const IMAGE_SIZE: u32 = 64;
 
 impl CantusApp {

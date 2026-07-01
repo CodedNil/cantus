@@ -169,7 +169,8 @@ struct CantusApp {
     last_toggle_playing: Instant,
     particles: [Particle; 64],
     particles_accumulator: f32,
-    scale_factor: f32,
+    /// Physical buffer pixels per logical Wayland surface pixel.
+    render_scale: f32,
 
     // Scene & Resources
     text_renderer: Option<TextRenderer>,
@@ -204,7 +205,7 @@ impl Default for CantusApp {
             last_toggle_playing: Instant::now(),
             particles: [Particle::default(); 64],
             particles_accumulator: 0.0,
-            scale_factor: 1.0,
+            render_scale: 1.0,
 
             text_renderer: None,
             global_uniforms: GlobalUniforms::default(),
@@ -271,6 +272,21 @@ fn main() {
 }
 
 impl CantusApp {
+    fn logical_surface_size(&self) -> (f32, f32) {
+        (
+            self.config.width,
+            self.config.height + PANEL_START + PANEL_EXTENSION,
+        )
+    }
+
+    fn buffer_size(&self) -> (u32, u32) {
+        let (width, height) = self.logical_surface_size();
+        (
+            (width * self.render_scale).round() as u32,
+            (height * self.render_scale).round() as u32,
+        )
+    }
+
     fn render(&mut self) {
         #[cfg(feature = "spotify")]
         self.spotify.tick();
@@ -366,7 +382,7 @@ impl CantusApp {
                     &mut rpass,
                     gpu.surface_config.width,
                     gpu.surface_config.height,
-                    self.scale_factor,
+                    self.render_scale,
                 );
             }
 
@@ -405,32 +421,41 @@ impl CantusApp {
             let mut used_slots = vec![false; MAX_TEXTURE_LAYERS as usize];
             for (idx, _) in gpu.url_to_image_index.values() {
                 used_slots[*idx as usize] = true;
+                used_slots[*idx as usize + 1] = true;
             }
 
-            if let Some(slot) = used_slots.iter().position(|&used| !used) {
-                gpu.queue.write_texture(
-                    wgpu::TexelCopyTextureInfo {
-                        texture: &gpu.texture_array,
-                        mip_level: 0,
-                        aspect: wgpu::TextureAspect::All,
-                        origin: wgpu::Origin3d {
-                            x: 0,
-                            y: 0,
-                            z: slot as u32,
+            let slot = (0..MAX_TEXTURE_LAYERS as usize)
+                .step_by(2)
+                .find(|&slot| !used_slots[slot] && !used_slots[slot + 1]);
+            if let Some(slot) = slot {
+                let blurred = image::imageops::blur(image.as_ref(), 3.0);
+                let write_layer = |layer: u32, bytes: &[u8]| {
+                    gpu.queue.write_texture(
+                        wgpu::TexelCopyTextureInfo {
+                            texture: &gpu.texture_array,
+                            mip_level: 0,
+                            aspect: wgpu::TextureAspect::All,
+                            origin: wgpu::Origin3d {
+                                x: 0,
+                                y: 0,
+                                z: layer,
+                            },
                         },
-                    },
-                    image.as_raw(),
-                    wgpu::TexelCopyBufferLayout {
-                        offset: 0,
-                        bytes_per_row: Some(4 * IMAGE_SIZE),
-                        rows_per_image: Some(IMAGE_SIZE),
-                    },
-                    wgpu::Extent3d {
-                        width: IMAGE_SIZE,
-                        height: IMAGE_SIZE,
-                        depth_or_array_layers: 1,
-                    },
-                );
+                        bytes,
+                        wgpu::TexelCopyBufferLayout {
+                            offset: 0,
+                            bytes_per_row: Some(4 * IMAGE_SIZE),
+                            rows_per_image: Some(IMAGE_SIZE),
+                        },
+                        wgpu::Extent3d {
+                            width: IMAGE_SIZE,
+                            height: IMAGE_SIZE,
+                            depth_or_array_layers: 1,
+                        },
+                    );
+                };
+                write_layer(slot as u32, image.as_raw());
+                write_layer(slot as u32 + 1, blurred.as_raw());
 
                 gpu.url_to_image_index
                     .insert(url.to_owned(), (slot as i32, true));

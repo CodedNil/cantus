@@ -35,7 +35,7 @@ wgpu = { version = "29.0.3", default-features = false, features = [
 ] }
 wgpu_text = { version = "29.0.3", default-features = false }
 
-time = { version = "0.3.52", features = ["serde"] }
+time = { version = "0.3.53", features = ["serde"] }
 image = { version = "0.25.10", default-features = false, features = [
     "jpeg",
     "png",

@@ -5,6 +5,9 @@ use glam::{Vec2, Vec4};
 #[cfg(target_arch = "spirv")]
 use spirv_std::glam::{Vec2, Vec4};
 
+/// Center-to-center spacing for playlist and rating icons, in logical pixels.
+pub const ICON_SPACING: f32 = 20.0;
+
 #[repr(C)]
 #[derive(Copy, Clone, Debug, Default)]
 #[cfg_attr(feature = "cpu", derive(bytemuck::Pod, bytemuck::Zeroable))]
@@ -17,10 +20,6 @@ pub struct GlobalUniforms {
     pub expansion_xy: Vec2,
     pub expansion_time: f32,
     pub time: f32,
-    pub scale_factor: f32,
-    _padding0: f32,
-    _padding1: f32,
-    _padding2: f32,
 }
 
 #[repr(C)]

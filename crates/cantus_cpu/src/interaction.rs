@@ -2,6 +2,7 @@ use crate::{
     CantusApp, CondensedPlaylist, PANEL_START, PlaylistId, TrackId, queue_playback_update,
     render::{IconInstance, Rect, TrackRender, lerpf32},
 };
+use cantus_shared::ICON_SPACING;
 use glam::{Vec2, Vec4, vec2, vec4};
 use itertools::Itertools;
 #[cfg(feature = "spotify")]
@@ -276,7 +277,6 @@ impl CantusApp {
         );
 
         // Fade out and fit based on size
-        let icon_size = 20.0;
         let mouse_pos = self.global_uniforms.mouse_pos;
 
         let num_icons = icon_entries.len();
@@ -297,7 +297,7 @@ impl CantusApp {
             })
             .count();
         let secondary_count = num_icons - primary_count;
-        let needed_width = icon_size * primary_count as f32 * 0.7;
+        let needed_width = ICON_SPACING * primary_count as f32 * 0.7;
 
         let width_fade = if primary_count > 0 {
             ((width - needed_width) / (needed_width * 0.5)).clamp(0.0, 1.0)
@@ -308,7 +308,7 @@ impl CantusApp {
         let background_fade = width_fade.max(secondary_expansion);
         let center_x = pos_x + width * 0.5;
         let center_y = PANEL_START + self.config.height * 0.975;
-        let secondary_y = center_y + icon_size;
+        let secondary_y = center_y + ICON_SPACING;
 
         let mut hover_rating_index = None;
         let mut icon_data = Vec::with_capacity(num_icons);
@@ -338,8 +338,9 @@ impl CantusApp {
             };
             let row_center = (row_count.saturating_sub(1)) as f32 * 0.5;
             let row_expansion = if secondary { secondary_expansion } else { 1.0 };
-            let origin_x = center_x + (row_index as f32 - row_center) * icon_size * row_expansion;
-            let half_size = icon_size * 0.6; // Add slight hitbox padding
+            let origin_x =
+                center_x + (row_index as f32 - row_center) * ICON_SPACING * row_expansion;
+            let half_size = ICON_SPACING * 0.6; // Add slight hitbox padding
             let rect = Rect::new(
                 origin_x - half_size,
                 origin_y - half_size,
@@ -431,8 +432,8 @@ impl CantusApp {
             self.icon_pills.push(instance);
         }
 
-        let primary_half_span = primary_count.saturating_sub(1) as f32 * icon_size * 0.5;
-        let secondary_half_span = secondary_count.saturating_sub(1) as f32 * icon_size * 0.5;
+        let primary_half_span = primary_count.saturating_sub(1) as f32 * ICON_SPACING * 0.5;
+        let secondary_half_span = secondary_count.saturating_sub(1) as f32 * ICON_SPACING * 0.5;
         Some(vec4(
             if primary_count > 0 {
                 primary_half_span + 1.0
