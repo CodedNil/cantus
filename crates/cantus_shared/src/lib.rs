@@ -67,3 +67,28 @@ pub struct IconInstance {
     pub data: u32,
     pub image_index: i32,
 }
+
+/// Maximum number of glyph instances that can be drawn in a single frame.
+pub const MAX_GLYPH_INSTANCES: usize = 2048;
+
+#[repr(C)]
+#[derive(Copy, Clone, Debug, Default)]
+#[cfg_attr(feature = "cpu", derive(bytemuck::Pod, bytemuck::Zeroable))]
+pub struct GlyphInstance {
+    /// Bottom-left corner of the glyph quad in logical pixels.
+    pub pos: Vec2,
+    /// Width and height of the glyph quad in logical pixels.
+    pub size: Vec2,
+    /// Top-left UV coordinate (normalized 0..1) into the glyph atlas.
+    pub atlas_min: Vec2,
+    /// Bottom-right UV coordinate (normalized 0..1) into the glyph atlas.
+    pub atlas_max: Vec2,
+    /// Clip rectangle (left, top) in logical pixels.
+    pub clip_min: Vec2,
+    /// Clip rectangle (right, bottom) in logical pixels.
+    pub clip_max: Vec2,
+    /// Packed RGBA colour.
+    pub color: u32,
+    /// Padding to align the struct to 8 bytes (required for GPU storage buffer arrays).
+    pub padding: u32,
+}

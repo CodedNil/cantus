@@ -29,7 +29,7 @@ wgpu = { version = "29.0.3", default-features = false, features = [
     "vulkan",
     "wgsl",
 ] }
-wgpu_text = { version = "29.0.3", default-features = false }
+ab_glyph = "0.2.32"
 
 time = { version = "0.3.53", features = ["serde"] }
 image = { version = "0.25.10", default-features = false, features = [

@@ -367,12 +367,13 @@ impl CantusApp {
         pill.image_index = image_index;
 
         // --- TEXT ---
-        if let Some(text_renderer) = &mut self.text_renderer
+        if let (Some(text_renderer), Some(gpu)) =
+            (&mut self.text_renderer, self.gpu_resources.as_ref())
             && !track_render.art_only
             && fade_alpha >= 1.0
             && width > self.config.height
         {
-            text_renderer.render(track_render);
+            text_renderer.render(&gpu.queue, track_render, self.render_scale);
         }
 
         // Expand the hitbox vertically so it includes the playlist buttons

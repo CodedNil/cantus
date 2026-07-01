@@ -1,7 +1,8 @@
 use crate::render::{BackgroundPill, GlobalUniforms, IconInstance, Particle, PlayheadUniforms};
 use crate::text_render::TextRenderer;
 use crate::{CantusApp, GpuResources, MAX_RENDER_INSTANCES, PARTICLE_COUNT};
-use std::collections::HashMap;
+use cantus_shared::{GlyphInstance, MAX_GLYPH_INSTANCES};
+use std::{collections::HashMap, mem::size_of};
 use wgpu::{
     BindGroupDescriptor, BindGroupEntry, BindGroupLayout, BindGroupLayoutDescriptor,
     BindGroupLayoutEntry, BindingResource, BindingType, BlendState, BufferBindingType,
@@ -63,7 +64,7 @@ impl CantusApp {
         };
         surface.configure(&device, &surface_config);
 
-        self.text_renderer = Some(TextRenderer::new(&device, format, self.config.height));
+        self.text_renderer = Some(TextRenderer::new(&device, self.config.height));
 
         let rust_gpu_shader = device.create_shader_module(wgpu::include_spirv!(concat!(
             env!("OUT_DIR"),
@@ -114,6 +115,16 @@ impl CantusApp {
                 (0, vf, ub),
                 (1, vf, sb),
                 (2, ShaderStages::FRAGMENT, tx(TextureViewDimension::D2Array)),
+                (3, ShaderStages::FRAGMENT, sp),
+            ],
+        );
+        // Text: uniform(buffer0) + storage(buffer1) + atlas(tex2) + sampler(3)
+        let text_layout = bgl(
+            "Text",
+            &[
+                (0, vf, ub),
+                (1, vf, sb),
+                (2, ShaderStages::FRAGMENT, tx(TextureViewDimension::D2)),
                 (3, ShaderStages::FRAGMENT, sp),
             ],
         );
@@ -185,6 +196,13 @@ impl CantusApp {
             "icons::vs_icons",
             "icons::fs_icons",
         );
+        let text_pipeline = create_pipe(
+            "Text",
+            &rust_gpu_shader,
+            &text_layout,
+            "text::vs_text",
+            "text::fs_text",
+        );
 
         let mk_buf = |l, s, u| {
             device.create_buffer(&BufferDescriptor {
@@ -197,27 +215,32 @@ impl CantusApp {
 
         let uniform_buffer = mk_buf(
             "Uniforms",
-            std::mem::size_of::<GlobalUniforms>() as u64,
+            size_of::<GlobalUniforms>() as u64,
             BufferUsages::UNIFORM,
         );
         let particles_buffer = mk_buf(
             "Particles",
-            (std::mem::size_of::<Particle>() * PARTICLE_COUNT) as u64,
+            (size_of::<Particle>() * PARTICLE_COUNT) as u64,
             BufferUsages::STORAGE,
         );
         let playhead_buffer = mk_buf(
             "Playhead",
-            std::mem::size_of::<PlayheadUniforms>() as u64,
+            size_of::<PlayheadUniforms>() as u64,
             BufferUsages::UNIFORM,
         );
         let background_storage_buffer = mk_buf(
             "BG Pills",
-            (std::mem::size_of::<BackgroundPill>() * MAX_RENDER_INSTANCES) as u64,
+            (size_of::<BackgroundPill>() * MAX_RENDER_INSTANCES) as u64,
             BufferUsages::STORAGE,
         );
         let icon_storage_buffer = mk_buf(
             "Icons",
-            (std::mem::size_of::<IconInstance>() * MAX_RENDER_INSTANCES) as u64,
+            (size_of::<IconInstance>() * MAX_RENDER_INSTANCES) as u64,
+            BufferUsages::STORAGE,
+        );
+        let glyph_storage_buffer = mk_buf(
+            "Glyphs",
+            (size_of::<GlyphInstance>() * MAX_GLYPH_INSTANCES) as u64,
             BufferUsages::STORAGE,
         );
 
@@ -326,6 +349,31 @@ impl CantusApp {
                 },
             ],
         );
+        let text_sampler = TextRenderer::atlas_sampler(&device);
+        let text_bind_group = mk_bg(
+            "Text",
+            &text_layout,
+            &[
+                BindGroupEntry {
+                    binding: 0,
+                    resource: uniform_buffer.as_entire_binding(),
+                },
+                BindGroupEntry {
+                    binding: 1,
+                    resource: glyph_storage_buffer.as_entire_binding(),
+                },
+                BindGroupEntry {
+                    binding: 2,
+                    resource: BindingResource::TextureView(
+                        self.text_renderer.as_ref().unwrap().atlas_view(),
+                    ),
+                },
+                BindGroupEntry {
+                    binding: 3,
+                    resource: BindingResource::Sampler(&text_sampler),
+                },
+            ],
+        );
 
         self.gpu_resources = Some(GpuResources {
             device,
@@ -335,15 +383,18 @@ impl CantusApp {
             playhead_pipeline,
             background_pipeline,
             icon_pipeline,
+            text_pipeline,
             particle_pipeline,
             uniform_buffer,
             particles_buffer,
             playhead_buffer,
             background_storage_buffer,
             icon_storage_buffer,
+            glyph_storage_buffer,
             playhead_bind_group,
             background_bind_group,
             icon_bind_group,
+            text_bind_group,
             particle_bind_group,
             texture_array,
             image_slots: HashMap::new(),

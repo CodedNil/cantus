@@ -442,7 +442,7 @@ impl Dispatch<WlPointer, ()> for LayerShellApp {
         let cantus = &mut state.cantus;
         let interaction = &mut cantus.interaction;
 
-        let surface_id = state.wl_surface.as_ref().map(wayland_client::Proxy::id);
+        let surface_id = state.wl_surface.as_ref().map(Proxy::id);
         match event {
             wl_pointer::Event::Enter {
                 surface,

@@ -29,6 +29,9 @@ fn repeat_art_uv(uv: Vec2) -> Vec2 {
 }
 
 fn primary_fade(pill: &BackgroundPill) -> f32 {
+    if pill.primary_icon_count <= 0.0 {
+        return pill.secondary_expansion;
+    }
     let needed_width = ICON_SPACING * pill.primary_icon_count * 0.7;
     let width_fade = ((pill.rect.y - needed_width) / (needed_width * 0.5)).clamp(0.0, 1.0);
     width_fade.max(pill.secondary_expansion)

@@ -11,6 +11,7 @@ use arrayvec::ArrayString;
 use serde::{Deserialize, Deserializer};
 use std::{
     collections::{HashMap, HashSet},
+    mem::size_of,
     sync::{
         Arc,
         mpsc::{self, Receiver, Sender},
@@ -197,6 +198,7 @@ struct GpuResources {
     playhead_pipeline: RenderPipeline,
     background_pipeline: RenderPipeline,
     icon_pipeline: RenderPipeline,
+    text_pipeline: RenderPipeline,
     particle_pipeline: RenderPipeline,
 
     // Uniform/Storage Buffers
@@ -205,11 +207,13 @@ struct GpuResources {
     playhead_buffer: Buffer,
     background_storage_buffer: Buffer,
     icon_storage_buffer: Buffer,
+    glyph_storage_buffer: Buffer,
 
     // Bind Groups
     playhead_bind_group: BindGroup,
     background_bind_group: BindGroup,
     icon_bind_group: BindGroup,
+    text_bind_group: BindGroup,
     particle_bind_group: BindGroup,
 
     // Image Management
@@ -296,7 +300,7 @@ impl CantusApp {
             let end = start + count;
             gpu.queue.write_buffer(
                 &gpu.particles_buffer,
-                (start * std::mem::size_of::<Particle>()) as u64,
+                (start * size_of::<Particle>()) as u64,
                 bytemuck::cast_slice(&self.particles[start..end]),
             );
             if count == PARTICLE_COUNT {
@@ -363,14 +367,18 @@ impl CantusApp {
             }
 
             if let Some(text_renderer) = &mut self.text_renderer {
-                text_renderer.draw(
-                    &gpu.device,
-                    &gpu.queue,
-                    &mut rpass,
-                    gpu.surface_config.width,
-                    gpu.surface_config.height,
-                    self.render_scale,
-                );
+                let instances = text_renderer.build_instance_buffer();
+                let count = instances.len() as u32;
+                if count > 0 {
+                    gpu.queue.write_buffer(
+                        &gpu.glyph_storage_buffer,
+                        0,
+                        bytemuck::cast_slice(&instances),
+                    );
+                    rpass.set_pipeline(&gpu.text_pipeline);
+                    rpass.set_bind_group(0, &gpu.text_bind_group, &[]);
+                    rpass.draw(0..4, 0..count);
+                }
             }
 
             if !self.icon_pills.is_empty() {

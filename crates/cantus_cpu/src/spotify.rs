@@ -492,8 +492,8 @@ where
 
 fn vec_without_nulls<'de, D, T>(deserializer: D) -> Result<Vec<T>, D::Error>
 where
-    T: serde::Deserialize<'de>,
-    D: serde::Deserializer<'de>,
+    T: Deserialize<'de>,
+    D: Deserializer<'de>,
 {
     let v = Vec::<Option<T>>::deserialize(deserializer)?;
     Ok(v.into_iter().flatten().collect())
@@ -523,7 +523,7 @@ fn create_client(config: &Config) -> SpotifyClient {
         "user-library-modify",
     ]
     .iter()
-    .map(std::string::ToString::to_string)
+    .map(ToString::to_string)
     .collect();
 
     SpotifyClient::new(
