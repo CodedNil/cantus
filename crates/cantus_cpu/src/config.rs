@@ -1,5 +1,5 @@
 use serde::Deserialize;
-use std::{fs, sync::LazyLock};
+use std::fs;
 use tracing::warn;
 
 #[derive(Deserialize)]
@@ -11,9 +11,9 @@ pub struct Config {
     /// The monitor to display on.
     pub monitor: Option<String>,
 
-    /// The width of the timeline in pixels.
+    /// The width of the timeline in logical pixels.
     pub width: f32,
-    /// The height of the timeline in pixels.
+    /// The height of the timeline in logical pixels.
     pub height: f32,
 
     /// The layer the app should be on.
@@ -29,7 +29,7 @@ pub struct Config {
     pub timeline_future_minutes: f32,
     /// How many minutes before the current time to display in the timeline.
     pub timeline_past_minutes: f32,
-    /// The width in pixels on the left where previous tracks are displayed.
+    /// The width in logical pixels on the left where previous tracks are displayed.
     pub history_width: f32,
 
     /// Array of favourite playlists to display as buttons.
@@ -56,9 +56,7 @@ impl Default for Config {
     }
 }
 
-pub static CONFIG: LazyLock<Config> = LazyLock::new(load_config);
-
-fn load_config() -> Config {
+pub fn load() -> Config {
     let path = dirs::config_dir()
         .expect("config directory unavailable")
         .join("cantus")
@@ -78,11 +76,20 @@ fn load_config() -> Config {
 }
 
 impl Config {
+    pub fn timeline_width(&self) -> f32 {
+        self.width - self.history_width - 16.0
+    }
+
+    pub fn timeline_duration_ms(&self) -> f32 {
+        self.timeline_future_minutes * 60_000.0
+    }
+
+    pub fn timeline_start_ms(&self) -> f32 {
+        -self.timeline_past_minutes * 60_000.0
+    }
+
     pub fn playhead_x(&self) -> f32 {
-        let history_width = self.history_width;
-        let total_width = self.width - history_width - 10.0;
-        let timeline_duration_ms = self.timeline_future_minutes * 60_000.0;
-        let timeline_start_ms = -self.timeline_past_minutes * 60_000.0;
-        history_width - timeline_start_ms * (total_width / timeline_duration_ms)
+        self.history_width
+            - self.timeline_start_ms() * (self.timeline_width() / self.timeline_duration_ms())
     }
 }

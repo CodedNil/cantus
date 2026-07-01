@@ -1,5 +1,5 @@
-use crate::{CantusApp, PANEL_EXTENSION, PANEL_START, config::CONFIG, render::Point};
-use itertools::Itertools;
+use crate::CantusApp;
+use glam::vec2;
 use raw_window_handle::{
     RawDisplayHandle, RawWindowHandle, WaylandDisplayHandle, WaylandWindowHandle,
 };
@@ -11,30 +11,27 @@ use std::{
 };
 use tracing::error;
 use wayland_client::{
-    Connection, Dispatch, Proxy, QueueHandle, WEnum,
+    Connection, Dispatch, Proxy, QueueHandle, WEnum, delegate_noop,
     protocol::{
         wl_callback::{self, WlCallback},
-        wl_compositor::{self, WlCompositor},
+        wl_compositor::WlCompositor,
         wl_output::{self, WlOutput},
         wl_pointer::{self, WlPointer},
-        wl_region::{self, WlRegion},
+        wl_region::WlRegion,
         wl_registry::{self, WlRegistry},
         wl_seat::{self, WlSeat},
-        wl_surface::{self, WlSurface},
+        wl_surface::WlSurface,
     },
 };
 use wayland_protocols::wp::{
     fractional_scale::v1::client::{
-        wp_fractional_scale_manager_v1::{self, WpFractionalScaleManagerV1},
+        wp_fractional_scale_manager_v1::WpFractionalScaleManagerV1,
         wp_fractional_scale_v1::{self, WpFractionalScaleV1},
     },
-    viewporter::client::{
-        wp_viewport::{self, WpViewport},
-        wp_viewporter::{self, WpViewporter},
-    },
+    viewporter::client::{wp_viewport::WpViewport, wp_viewporter::WpViewporter},
 };
 use wayland_protocols_wlr::layer_shell::v1::client::{
-    zwlr_layer_shell_v1::{self, Layer as LayerStyle, ZwlrLayerShellV1},
+    zwlr_layer_shell_v1::{Layer as LayerStyle, ZwlrLayerShellV1},
     zwlr_layer_surface_v1::{self, Anchor as LayerAnchor, ZwlrLayerSurfaceV1},
 };
 use wgpu::SurfaceTargetUnsafe;
@@ -64,7 +61,7 @@ pub fn run() {
     let surface_ptr = NonNull::new(wl_surface.id().as_ptr().cast::<c_void>())
         .expect("Failed to get surface pointer");
     app.surface_ptr = Some(surface_ptr);
-    assert!(app.try_select_output(), "Failed to select a Wayland output");
+    app.select_output();
 
     let surface = app.wl_surface.insert(wl_surface);
     if let (Some(vp), Some(fm)) = (app.viewporter.take(), app.fractional_manager.take()) {
@@ -75,7 +72,7 @@ pub fn run() {
     let layer_surface = layer_shell.get_layer_surface(
         surface,
         app.outputs.get(app.output_index).map(|info| &info.handle),
-        match CONFIG.layer.as_str() {
+        match app.cantus.config.layer.as_str() {
             "background" => LayerStyle::Background,
             "bottom" => LayerStyle::Bottom,
             "top" => LayerStyle::Top,
@@ -89,9 +86,9 @@ pub fn run() {
         &qhandle,
         (),
     );
-    let total_height = CONFIG.height + PANEL_EXTENSION + PANEL_START;
+    let (_, total_height) = app.cantus.logical_surface_size();
     layer_surface.set_size(0, total_height as u32);
-    layer_surface.set_anchor(match CONFIG.layer_anchor.as_str() {
+    layer_surface.set_anchor(match app.cantus.config.layer_anchor.as_str() {
         "top" => LayerAnchor::Top | LayerAnchor::Left | LayerAnchor::Right,
         "bottom" => LayerAnchor::Bottom | LayerAnchor::Left | LayerAnchor::Right,
         other => {
@@ -149,6 +146,7 @@ pub struct LayerShellApp {
     pointer: Option<WlPointer>,
     outputs: Vec<OutputInfo>,
     output_index: usize,
+    last_hitbox_hash: u64,
 
     surface_ptr: Option<NonNull<c_void>>,
     wl_surface: Option<WlSurface>,
@@ -172,6 +170,7 @@ impl LayerShellApp {
             pointer: None,
             outputs: Vec::new(),
             output_index: 0,
+            last_hitbox_hash: 0,
             surface_ptr: None,
             wl_surface: None,
             viewport: None,
@@ -191,16 +190,13 @@ impl LayerShellApp {
         }
     }
 
-    fn ensure_surface(&mut self, width: f32, height: f32) {
-        if width == 0.0 || height == 0.0 || !self.is_configured {
+    fn ensure_surface(&mut self, width: u32, height: u32) {
+        if width == 0 || height == 0 || !self.is_configured {
             return;
         }
 
-        let recreate = self.cantus.gpu_resources.as_ref().is_none_or(|surface| {
-            surface.surface_config.width != width as u32
-                || surface.surface_config.height != height as u32
-        });
-        if !recreate {
+        if let Some(gpu) = &mut self.cantus.gpu_resources {
+            gpu.resize_surface(width, height);
             return;
         }
 
@@ -216,27 +212,21 @@ impl LayerShellApp {
         let surface = unsafe { self.cantus.instance.create_surface_unsafe(target) }
             .expect("Failed to create surface");
 
-        self.cantus
-            .configure_render_surface(surface, width as u32, height as u32);
+        self.cantus.configure_render_surface(surface, width, height);
     }
 
-    fn try_select_output(&mut self) -> bool {
-        if self.outputs.is_empty() {
-            return false;
-        }
-
-        self.output_index = CONFIG
+    fn select_output(&mut self) {
+        self.output_index = self
+            .cantus
+            .config
             .monitor
             .as_ref()
             .and_then(|target| self.outputs.iter().position(|info| info.matches(target)))
             .unwrap_or(0);
-        true
     }
 
     fn try_render_frame(&mut self, qhandle: &QueueHandle<Self>) {
-        let scale = self.cantus.scale_factor;
-        let buffer_width = (CONFIG.width * scale).round();
-        let buffer_height = ((CONFIG.height + PANEL_EXTENSION + PANEL_START) * scale).round();
+        let (buffer_width, buffer_height) = self.cantus.buffer_size();
         self.ensure_surface(buffer_width, buffer_height);
 
         self.update_input_region(qhandle);
@@ -249,23 +239,18 @@ impl LayerShellApp {
     }
 
     fn update_scale_and_viewport(&self) {
-        let scale = self.cantus.scale_factor;
-        let total_height = CONFIG.height + PANEL_EXTENSION + PANEL_START;
+        let (logical_width, logical_height) = self.cantus.logical_surface_size();
+        let (buffer_width, buffer_height) = self.cantus.buffer_size();
         if let Some(surface) = &self.wl_surface {
             surface.set_buffer_scale(if self.viewport.is_some() {
                 1
             } else {
-                scale.ceil() as i32
+                self.cantus.render_scale.ceil() as i32
             });
         }
         if let Some(viewport) = &self.viewport {
-            viewport.set_source(
-                0.0,
-                0.0,
-                f64::from(CONFIG.width * scale).round(),
-                f64::from(total_height * scale).round(),
-            );
-            viewport.set_destination(CONFIG.width as i32, total_height as i32);
+            viewport.set_source(0.0, 0.0, f64::from(buffer_width), f64::from(buffer_height));
+            viewport.set_destination(logical_width as i32, logical_height as i32);
         }
     }
 
@@ -286,7 +271,7 @@ impl LayerShellApp {
                     .iter()
                     .map(|h| &h.rect),
             )
-            .collect_vec();
+            .collect::<Vec<_>>();
 
         // Hash every hitbox rect at low precision so it only updates input regions on substantial changes
         let mut hasher = DefaultHasher::new();
@@ -301,7 +286,7 @@ impl LayerShellApp {
         }
         let hash = hasher.finish();
 
-        if hash != self.cantus.interaction.last_hitbox_hash {
+        if hash != self.last_hitbox_hash {
             let region = compositor.create_region(qhandle, ());
             for r in rects {
                 region.add(
@@ -312,7 +297,7 @@ impl LayerShellApp {
                 );
             }
             wl_surface.set_input_region(Some(&region));
-            self.cantus.interaction.last_hitbox_hash = hash;
+            self.last_hitbox_hash = hash;
         }
     }
 }
@@ -327,14 +312,13 @@ impl Dispatch<ZwlrLayerSurfaceV1, ()> for LayerShellApp {
         qhandle: &QueueHandle<Self>,
     ) {
         match event {
-            zwlr_layer_surface_v1::Event::Configure { serial, .. } => {
+            zwlr_layer_surface_v1::Event::Configure { serial, width, .. } => {
                 proxy.ack_configure(serial);
-                state.update_scale_and_viewport();
-                if let Some(surface) = &state.wl_surface {
-                    surface.commit();
+                if width > 0 {
+                    state.cantus.surface_width = Some(width as f32);
                 }
                 state.is_configured = true;
-
+                state.update_scale_and_viewport();
                 state.try_render_frame(qhandle);
             }
             zwlr_layer_surface_v1::Event::Closed => {
@@ -355,15 +339,10 @@ impl Dispatch<WpFractionalScaleV1, ()> for LayerShellApp {
         qhandle: &QueueHandle<Self>,
     ) {
         if let wp_fractional_scale_v1::Event::PreferredScale { scale } = event {
-            state.cantus.scale_factor = scale as f32 / 120.0;
+            state.cantus.render_scale = scale as f32 / 120.0;
 
             if state.is_configured {
                 state.update_scale_and_viewport();
-
-                if let Some(surface) = &state.wl_surface {
-                    surface.commit();
-                }
-
                 state.try_render_frame(qhandle);
             }
         }
@@ -411,7 +390,7 @@ impl Dispatch<WlOutput, ()> for LayerShellApp {
                 _ => {}
             }
         }
-        state.try_select_output();
+        state.select_output();
     }
 }
 
@@ -427,8 +406,10 @@ impl Dispatch<WlSeat, ()> for LayerShellApp {
         if let wl_seat::Event::Capabilities { capabilities } = event
             && let WEnum::Value(caps) = capabilities
         {
-            if caps.contains(wl_seat::Capability::Pointer) && state.pointer.is_none() {
-                state.pointer = Some(proxy.get_pointer(qhandle, ()));
+            if caps.contains(wl_seat::Capability::Pointer) {
+                if state.pointer.is_none() {
+                    state.pointer = Some(proxy.get_pointer(qhandle, ()));
+                }
             } else if let Some(pointer) = state.pointer.take() {
                 pointer.release();
             }
@@ -448,7 +429,7 @@ impl Dispatch<WlPointer, ()> for LayerShellApp {
         let cantus = &mut state.cantus;
         let interaction = &mut cantus.interaction;
 
-        let surface_id = state.wl_surface.as_ref().map(wayland_client::Proxy::id);
+        let surface_id = state.wl_surface.as_ref().map(Proxy::id);
         match event {
             wl_pointer::Event::Enter {
                 surface,
@@ -456,7 +437,7 @@ impl Dispatch<WlPointer, ()> for LayerShellApp {
                 surface_y,
                 ..
             } if surface_id == Some(surface.id()) => {
-                interaction.mouse_position = Point::new(surface_x as f32, surface_y as f32);
+                cantus.global_uniforms.mouse_pos = vec2(surface_x as f32, surface_y as f32);
                 interaction.mouse_pressure = 1.0;
             }
             wl_pointer::Event::Motion {
@@ -464,7 +445,7 @@ impl Dispatch<WlPointer, ()> for LayerShellApp {
                 surface_y,
                 ..
             } => {
-                interaction.mouse_position = Point::new(surface_x as f32, surface_y as f32);
+                cantus.global_uniforms.mouse_pos = vec2(surface_x as f32, surface_y as f32);
                 interaction.mouse_pressure = if interaction.mouse_down { 2.0 } else { 1.0 };
                 cantus.handle_mouse_drag();
             }
@@ -497,7 +478,7 @@ impl Dispatch<WlPointer, ()> for LayerShellApp {
                 value120: discrete,
                 ..
             } => {
-                CantusApp::handle_scroll(discrete.signum());
+                state.cantus.handle_scroll(discrete.signum());
             }
             _ => {}
         }
@@ -556,29 +537,10 @@ impl Dispatch<WlRegistry, ()> for LayerShellApp {
     }
 }
 
-macro_rules! impl_noop_dispatch {
-    ($ty:ty, $event:ty) => {
-        impl Dispatch<$ty, ()> for LayerShellApp {
-            fn event(
-                _state: &mut Self,
-                _proxy: &$ty,
-                _event: $event,
-                _data: &(),
-                _conn: &Connection,
-                _qhandle: &QueueHandle<Self>,
-            ) {
-            }
-        }
-    };
-}
-
-impl_noop_dispatch!(WlSurface, wl_surface::Event);
-impl_noop_dispatch!(ZwlrLayerShellV1, zwlr_layer_shell_v1::Event);
-impl_noop_dispatch!(
-    WpFractionalScaleManagerV1,
-    wp_fractional_scale_manager_v1::Event
-);
-impl_noop_dispatch!(WpViewporter, wp_viewporter::Event);
-impl_noop_dispatch!(WpViewport, wp_viewport::Event);
-impl_noop_dispatch!(WlCompositor, wl_compositor::Event);
-impl_noop_dispatch!(WlRegion, wl_region::Event);
+delegate_noop!(LayerShellApp: ignore WlSurface);
+delegate_noop!(LayerShellApp: ignore ZwlrLayerShellV1);
+delegate_noop!(LayerShellApp: ignore WpFractionalScaleManagerV1);
+delegate_noop!(LayerShellApp: ignore WpViewporter);
+delegate_noop!(LayerShellApp: ignore WpViewport);
+delegate_noop!(LayerShellApp: ignore WlCompositor);
+delegate_noop!(LayerShellApp: ignore WlRegion);
