@@ -333,11 +333,12 @@ impl CantusApp {
         )
     }
 
-    fn render(&mut self) {
+    /// Renders a frame and reports whether the surface must be recreated.
+    fn render(&mut self) -> bool {
         self.spotify.tick();
 
         if self.gpu_resources.is_none() {
-            return;
+            return false;
         }
 
         while let Ok(update) = self.app_updates.try_recv() {
@@ -353,6 +354,22 @@ impl CantusApp {
                 });
             self.image_cache.dirty = false;
         }
+        let gpu = self.gpu_resources.as_mut().unwrap();
+        let (surface_texture, reconfigure_after_present) = match gpu.surface.get_current_texture() {
+            CurrentSurfaceTexture::Success(texture) => (texture, false),
+            CurrentSurfaceTexture::Suboptimal(texture) => (texture, true),
+            CurrentSurfaceTexture::Timeout | CurrentSurfaceTexture::Occluded => return false,
+            CurrentSurfaceTexture::Outdated => {
+                gpu.configure_surface();
+                return false;
+            }
+            CurrentSurfaceTexture::Lost => return true,
+            CurrentSurfaceTexture::Validation => {
+                tracing::error!("surface texture acquisition failed validation");
+                return false;
+            }
+        };
+
         self.icon_pills.clear();
 
         let gpu = self.gpu_resources.as_mut().unwrap();
@@ -377,12 +394,6 @@ impl CantusApp {
             0,
             bytemuck::bytes_of(&self.playhead_info),
         );
-
-        let CurrentSurfaceTexture::Success(surface_texture) = gpu.surface.get_current_texture()
-        else {
-            gpu.configure_surface();
-            return;
-        };
         let surface_view = surface_texture
             .texture
             .create_view(&TextureViewDescriptor::default());
@@ -423,7 +434,11 @@ impl CantusApp {
         }
 
         gpu.queue.submit([encoder.finish()]);
-        surface_texture.present();
+        gpu.queue.present(surface_texture);
+        if reconfigure_after_present {
+            gpu.configure_surface();
+        }
+        false
     }
 
     fn get_image_index(&mut self, url: &str) -> i32 {

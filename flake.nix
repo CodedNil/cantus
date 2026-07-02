@@ -32,20 +32,12 @@ rec {
           )
         );
       rustToolchain =
-        pkgs:
+        pkgs: extensions:
         let
           channel = (builtins.fromTOML (builtins.readFile ./rust-toolchain.toml)).toolchain.channel;
           version = lib.removePrefix "nightly-" channel;
         in
-        (pkgs.rust-bin.nightly."${version}".default.override {
-          extensions = [
-            "rust-src"
-            "rustc-dev"
-            "llvm-tools"
-            "rustfmt"
-            "clippy"
-          ];
-        });
+        pkgs.rust-bin.nightly."${version}".minimal.override { inherit extensions; };
       runtimeLibraries =
         pkgs: with pkgs; [
           wayland
@@ -57,7 +49,11 @@ rec {
       packages = forAllSystems (
         pkgs:
         let
-          toolchain = rustToolchain pkgs;
+          toolchain = rustToolchain pkgs [
+            "rust-src"
+            "rustc-dev"
+            "llvm-tools"
+          ];
           rustPlatform = pkgs.makeRustPlatform {
             cargo = toolchain;
             rustc = toolchain;
@@ -66,6 +62,7 @@ rec {
             inherit pname;
             version = (builtins.fromTOML (builtins.readFile ./crates/cantus_cpu/Cargo.toml)).package.version;
             CANTUS_NIX_BUILD = "1";
+            RUSTFLAGS = "--remap-path-prefix=${toolchain}=/rust-toolchain";
 
             src = lib.cleanSource ./.;
             cargoLock = {
@@ -107,14 +104,23 @@ rec {
       devShells = forAllSystems (pkgs: {
         default = pkgs.mkShell {
           name = pname;
-          inputsFrom = [ self.packages.${pkgs.stdenv.hostPlatform.system}.cantus ];
           packages = with pkgs; [
-            (rustToolchain pkgs)
+            (rustToolchain pkgs [
+              "rust-src"
+              "rustc-dev"
+              "llvm-tools"
+              "rustfmt"
+              "clippy"
+            ])
             mold
+            pkg-config
           ];
+          buildInputs = runtimeLibraries pkgs;
           LD_LIBRARY_PATH = pkgs.lib.makeLibraryPath (runtimeLibraries pkgs);
         };
       });
+
+      formatter = forAllSystems (pkgs: pkgs.nixfmt);
 
       homeManagerModules = {
         default = self.homeManagerModules.cantus;

@@ -231,7 +231,11 @@ impl LayerShellApp {
 
         self.update_input_region(qhandle);
 
-        self.cantus.render();
+        if self.cantus.render() {
+            tracing::warn!("wgpu surface was lost; recreating it");
+            self.cantus.gpu_resources = None;
+            self.ensure_surface(buffer_width, buffer_height);
+        }
         self.request_frame(qhandle);
         if let Some(surface) = &self.wl_surface {
             surface.commit();

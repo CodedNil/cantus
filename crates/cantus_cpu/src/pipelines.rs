@@ -8,11 +8,11 @@ use wgpu::{
     BindGroupLayoutEntry, BindingResource, BindingType, BlendState, BufferBindingType,
     BufferDescriptor, BufferUsages, ColorTargetState, ColorWrites, CompositeAlphaMode, Device,
     DeviceDescriptor, Extent3d, FilterMode, FragmentState, Limits, MemoryHints, MultisampleState,
-    PipelineCompilationOptions, PipelineLayoutDescriptor, PowerPreference, PresentMode,
-    PrimitiveState, PrimitiveTopology, RenderPipeline, RenderPipelineDescriptor,
-    RequestAdapterOptions, SamplerBindingType, SamplerDescriptor, ShaderStages, Surface,
-    SurfaceConfiguration, TextureDescriptor, TextureDimension, TextureFormat, TextureSampleType,
-    TextureUsages, TextureViewDescriptor, TextureViewDimension, VertexState,
+    PipelineCompilationOptions, PipelineLayoutDescriptor, PowerPreference, PrimitiveState,
+    PrimitiveTopology, RenderPipeline, RenderPipelineDescriptor, RequestAdapterOptions,
+    SamplerBindingType, SamplerDescriptor, ShaderStages, Surface, TextureDescriptor,
+    TextureDimension, TextureFormat, TextureSampleType, TextureUsages, TextureViewDescriptor,
+    TextureViewDimension, VertexState,
 };
 
 pub const MAX_TEXTURE_IMAGES: u32 = 32;
@@ -29,8 +29,9 @@ fn gpu_pass<const N: usize>(
     usage: BufferUsages,
     extra_resources: [BindingResource<'_>; N],
 ) -> GpuPass {
+    let buffer_label = format!("{label} Data");
     let buffer = device.create_buffer(&BufferDescriptor {
-        label: Some(label),
+        label: Some(&buffer_label),
         size,
         usage: usage | BufferUsages::COPY_DST,
         mapped_at_creation: false,
@@ -47,8 +48,9 @@ fn gpu_pass<const N: usize>(
         resource,
     })
     .collect::<Vec<_>>();
+    let bind_group_label = format!("{label} Bind Group");
     let bind_group = device.create_bind_group(&BindGroupDescriptor {
-        label: Some(label),
+        label: Some(&bind_group_label),
         layout,
         entries: &entries,
     });
@@ -62,7 +64,7 @@ fn gpu_pass<const N: usize>(
 impl CantusApp {
     pub fn configure_render_surface(&mut self, surface: Surface<'static>, width: u32, height: u32) {
         let adapter = pollster::block_on(self.instance.request_adapter(&RequestAdapterOptions {
-            power_preference: PowerPreference::HighPerformance,
+            power_preference: PowerPreference::LowPower,
             compatible_surface: Some(&surface),
             ..Default::default()
         }))
@@ -78,6 +80,9 @@ impl CantusApp {
             ..Default::default()
         }))
         .expect("No device");
+        device.on_uncaptured_error(std::sync::Arc::new(|error| {
+            tracing::error!(%error, "uncaptured wgpu error");
+        }));
 
         let capabilities = surface.get_capabilities(&adapter);
         let alpha_mode = [
@@ -88,17 +93,15 @@ impl CantusApp {
         .find(|m| capabilities.alpha_modes.contains(m))
         .unwrap_or(CompositeAlphaMode::Auto);
 
-        let format = TextureFormat::Rgba8Unorm;
-        let surface_config = SurfaceConfiguration {
-            usage: TextureUsages::RENDER_ATTACHMENT,
-            format,
-            width,
-            height,
-            present_mode: PresentMode::AutoVsync,
-            desired_maximum_frame_latency: 1,
-            alpha_mode,
-            view_formats: vec![],
-        };
+        let format = [TextureFormat::Rgba8Unorm, TextureFormat::Bgra8Unorm]
+            .into_iter()
+            .find(|format| capabilities.formats.contains(format))
+            .unwrap_or(capabilities.formats[0]);
+        let mut surface_config = surface
+            .get_default_config(&adapter, width, height)
+            .expect("Surface is unsupported by the selected adapter");
+        surface_config.format = format;
+        surface_config.alpha_mode = alpha_mode;
         surface.configure(&device, &surface_config);
 
         let text_renderer = TextRenderer::new(&device, self.config.height);
