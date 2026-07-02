@@ -65,7 +65,8 @@ impl CantusApp {
         let now = Instant::now();
         let dt = now
             .duration_since(self.render_state.last_update)
-            .as_secs_f32();
+            .as_secs_f32()
+            .min(0.1);
         self.render_state.last_update = now;
 
         let history_width = self.config.history_width;
@@ -116,6 +117,9 @@ impl CantusApp {
             + drag_offset_ms;
         let diff = current_ms - self.render_state.track_offset;
         self.global_uniforms.expansion_xy.x += diff * px_per_ms * dt;
+        if !self.global_uniforms.expansion_xy.x.is_finite() {
+            self.global_uniforms.expansion_xy.x = playhead_x;
+        }
         if !self.interaction.dragging && diff.abs() > 200.0 {
             current_ms = self.render_state.track_offset + diff * 3.5 * dt;
         }

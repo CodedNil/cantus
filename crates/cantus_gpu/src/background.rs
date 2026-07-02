@@ -112,11 +112,15 @@ pub fn fs_background(
         0.0
     };
     let ripple_vec = pixel_pos - global.expansion_xy;
-    let ripple_dir = (ripple_vec + 0.001).normalize();
-    let wave_dist = (ripple_vec.length() - anim_t * 600.0).abs();
-    let wave = smoothstep(80.0, 0.0, wave_dist);
-    let ripple_decay = 1.0 - anim_t;
-    let ripple_str = ripple_decay * ripple_decay * wave * 0.5 * ripple_active;
+    let (ripple_dir, wave, ripple_str) = if ripple_active > 0.0 {
+        let direction = (ripple_vec + 0.001).normalize();
+        let wave_dist = (ripple_vec.length() - anim_t * 600.0).abs();
+        let wave = smoothstep(80.0, 0.0, wave_dist);
+        let ripple_decay = 1.0 - anim_t;
+        (direction, wave, ripple_decay * ripple_decay * wave * 0.5)
+    } else {
+        (Vec2::ZERO, 0.0, 0.0)
+    };
 
     let mouse_vec = pixel_pos - global.mouse_pos;
     let mouse_d = mouse_vec.length();
