@@ -88,8 +88,11 @@ impl Config {
         -self.timeline_past_minutes * 60_000.0
     }
 
+    pub fn px_per_ms(&self) -> f32 {
+        self.timeline_width() / self.timeline_duration_ms()
+    }
+
     pub fn playhead_x(&self) -> f32 {
-        self.history_width
-            - self.timeline_start_ms() * (self.timeline_width() / self.timeline_duration_ms())
+        self.history_width - self.timeline_start_ms() * self.px_per_ms()
     }
 }

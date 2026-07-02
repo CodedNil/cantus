@@ -1,3 +1,5 @@
+use core::f32::consts::PI;
+
 use crate::common::{
     pixel_to_ndc, quad_coord, sd_capsule_box, sd_squircle, smooth_union, smoothstep, unpack3x8unorm,
 };
@@ -169,7 +171,7 @@ pub fn fs_background(
         kill();
     }
 
-    let seed = (pill.color0 % 1000) as f32 * 29.537;
+    let seed = (pill.colors[0] % 1000) as f32 * 29.537;
     let t = global.time * 0.15 + seed;
     let lens_warp = (1.0 + dist.min(0.0) / 120.0).clamp(0.0, 1.0);
     let lens_warp = lens_warp * lens_warp * 0.6;
@@ -178,10 +180,10 @@ pub fn fs_background(
     let p = uv * 0.2 * vec2(1.0, global.screen_size.y / global.screen_size.x) + seed;
     let s1 = (p.x * 6.0 + t + (p.y * 4.0 + t * 0.5).sin()).sin();
     let s2 = (p.y * 5.0 - t + (p.x * 3.0 + t * 0.8).sin()).sin();
-    let c0 = unpack3x8unorm(pill.color0);
-    let c1 = unpack3x8unorm(pill.color1);
-    let c2 = unpack3x8unorm(pill.color2);
-    let c3 = unpack3x8unorm(pill.color3);
+    let c0 = unpack3x8unorm(pill.colors[0]);
+    let c1 = unpack3x8unorm(pill.colors[1]);
+    let c2 = unpack3x8unorm(pill.colors[2]);
+    let c3 = unpack3x8unorm(pill.colors[3]);
 
     let mut color = c0
         .lerp(c1, s1 * 0.5 + 0.5)
@@ -195,7 +197,7 @@ pub fn fs_background(
         let art_aspect = vec2(pill_size.y / pill_size.x, 1.0);
         let flow_pos = (art_uv - 0.5) / art_aspect;
         let flow_time = global.time * 0.55 + seed;
-        let edge_fade = (stretched_uv_y * core::f32::consts::PI).sin().max(0.0);
+        let edge_fade = (stretched_uv_y * PI).sin().max(0.0);
         let flow = vec2(
             (flow_pos.y * 4.0 + flow_time + (flow_pos.x * 0.7 - flow_time * 0.6).sin()).sin()
                 * 0.18,

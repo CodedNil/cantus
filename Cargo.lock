@@ -260,6 +260,7 @@ dependencies = [
  "serde_json",
  "sha2",
  "shlex",
+ "smallvec",
  "spirv-builder",
  "thiserror",
  "time",

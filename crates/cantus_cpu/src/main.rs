@@ -1,5 +1,5 @@
 use crate::{
-    cache::{AppCaches, ImageCacheState, cache_decoded_image},
+    art::{AlbumArt, ArtState},
     interaction::InteractionState,
     pipelines::{IMAGE_SIZE, MAX_TEXTURE_IMAGES},
     render::{
@@ -8,14 +8,12 @@ use crate::{
     text_render::TextRenderer,
 };
 use arrayvec::ArrayString;
-use image::RgbaImage;
-use serde::{Deserialize, Deserializer};
+use serde::{Deserialize, Deserializer, de};
 use std::{
-    collections::{HashMap, HashSet},
-    sync::{
-        Arc,
-        mpsc::{self, Receiver, Sender},
-    },
+    collections::HashSet,
+    io,
+    sync::Arc,
+    sync::mpsc::{self, Receiver, Sender},
     time::Instant,
 };
 use wgpu::{
@@ -24,7 +22,7 @@ use wgpu::{
     RenderPipeline, StoreOp, Surface, SurfaceConfiguration, Texture, TextureViewDescriptor,
 };
 
-mod cache;
+mod art;
 mod config;
 mod interaction;
 mod layer_shell;
@@ -37,6 +35,8 @@ const PANEL_START: f32 = 6.0;
 const PANEL_EXTENSION: f32 = 44.0;
 const PARTICLE_COUNT: usize = 64;
 const MAX_RENDER_INSTANCES: usize = 256;
+const MAX_HISTORY_TRACKS: usize = 6;
+const TRACK_SPACING_MS: f32 = 4000.0;
 
 struct CantusApp {
     // Core Graphics
@@ -52,8 +52,6 @@ struct CantusApp {
     app_updates: Receiver<AppUpdate>,
     config: config::Config,
     spotify: spotify::SpotifyBackend,
-    caches: AppCaches,
-    image_cache: ImageCacheState,
     last_toggle_playing: Instant,
     particles: [Particle; PARTICLE_COUNT],
     particles_accumulator: f32,
@@ -87,11 +85,6 @@ impl Default for CantusApp {
             app_updates,
             spotify,
             config,
-            caches: AppCaches::default(),
-            image_cache: ImageCacheState {
-                dirty: true,
-                ..Default::default()
-            },
             last_toggle_playing: Instant::now(),
             particles: [Particle::default(); PARTICLE_COUNT],
             particles_accumulator: 0.0,
@@ -112,7 +105,7 @@ struct PlaybackState {
     volume: Option<u8>,
     queue: Vec<Track>,
     queue_index: usize,
-    playlists: HashMap<PlaylistId, CondensedPlaylist>,
+    playlists: Vec<CondensedPlaylist>,
 
     last_interaction: Instant,
     last_progress_update: Instant,
@@ -126,7 +119,7 @@ impl Default for PlaybackState {
             volume: None,
             queue: Vec::new(),
             queue_index: 0,
-            playlists: HashMap::new(),
+            playlists: Vec::new(),
             last_interaction: Instant::now(),
             last_progress_update: Instant::now(),
         }
@@ -137,7 +130,6 @@ impl Default for PlaybackState {
 const NUM_SWATCHES: usize = 4;
 
 type TrackId = ArrayString<22>;
-type AlbumId = ArrayString<22>;
 type PlaylistId = ArrayString<22>;
 
 #[derive(Deserialize)]
@@ -148,11 +140,45 @@ struct Track {
     #[serde(deserialize_with = "deserialize_first_artist", rename = "artists")]
     artist: Artist,
     duration_ms: u32,
+    #[serde(skip)]
+    art: ArtState,
+    #[serde(skip)]
+    runtime: TrackRuntime,
+}
+
+#[derive(Default)]
+struct TrackRuntime {
+    queue_offset_ms: f32,
+    playlist_expansion: f32,
+    start_ms: f32,
+    start_x: f32,
+    width: f32,
+    art_only: bool,
+    icon_hitboxes: Vec<interaction::IconHitbox>,
+}
+
+impl Track {
+    fn natural_x_range(&self, playhead_x: f32, px_per_ms: f32) -> (f32, f32) {
+        let start = playhead_x + self.runtime.start_ms * px_per_ms;
+        (start, start + self.duration_ms as f32 * px_per_ms)
+    }
+}
+
+impl TrackRuntime {
+    fn rect(&self, height: f32) -> Option<render::Rect> {
+        (self.width > 0.0 && self.start_x + self.width > 0.0).then(|| {
+            render::Rect::new(
+                self.start_x,
+                PANEL_START,
+                self.start_x + self.width,
+                PANEL_START + height,
+            )
+        })
+    }
 }
 
 #[derive(Deserialize)]
 struct Album {
-    id: Option<AlbumId>,
     #[serde(default, deserialize_with = "deserialize_images", rename = "images")]
     image: Option<String>,
 }
@@ -168,6 +194,7 @@ struct CondensedPlaylist {
     image_url: Option<String>,
     tracks: HashSet<TrackId>,
     rating_index: Option<u8>,
+    art: ArtState,
 }
 
 #[derive(Deserialize)]
@@ -245,7 +272,7 @@ impl GpuResources {
 
 struct ImageAtlas {
     texture: Texture,
-    slots: [Option<String>; MAX_TEXTURE_IMAGES as usize],
+    slots: [Option<Arc<AlbumArt>>; MAX_TEXTURE_IMAGES as usize],
     used: u32,
 }
 
@@ -254,19 +281,19 @@ impl ImageAtlas {
         self.used = 0;
     }
 
-    fn image_index(&mut self, queue: &Queue, url: &str, image: Option<&RgbaImage>) -> i32 {
+    fn image_index(&mut self, queue: &Queue, art: Option<&Arc<AlbumArt>>) -> i32 {
+        let Some(art) = art else {
+            return -1;
+        };
         if let Some(index) = self
             .slots
             .iter()
-            .position(|slot| slot.as_deref() == Some(url))
+            .position(|slot| slot.as_ref().is_some_and(|slot| Arc::ptr_eq(slot, art)))
         {
             self.used |= 1 << index;
             return (index * 2) as i32;
         }
 
-        let Some(image) = image else {
-            return -1;
-        };
         let index = (!self.used).trailing_zeros();
         if index >= MAX_TEXTURE_IMAGES {
             return -1;
@@ -274,10 +301,6 @@ impl ImageAtlas {
         self.used |= 1 << index;
         let layer = index * 2;
 
-        let blurred = image::imageops::blur(image, 3.0);
-        let mut bytes = Vec::with_capacity(image.len() + blurred.len());
-        bytes.extend_from_slice(image);
-        bytes.extend_from_slice(&blurred);
         queue.write_texture(
             wgpu::TexelCopyTextureInfo {
                 texture: &self.texture,
@@ -289,7 +312,7 @@ impl ImageAtlas {
                     z: layer,
                 },
             },
-            &bytes,
+            &art.pixels,
             wgpu::TexelCopyBufferLayout {
                 offset: 0,
                 bytes_per_row: Some(4 * IMAGE_SIZE),
@@ -301,7 +324,7 @@ impl ImageAtlas {
                 depth_or_array_layers: 2,
             },
         );
-        self.slots[index as usize] = Some(url.to_owned());
+        self.slots[index as usize] = Some(Arc::clone(art));
         layer as i32
     }
 }
@@ -311,7 +334,7 @@ fn main() {
         .with_env_filter(tracing_subscriber::EnvFilter::new(
             ["warn", "cantus=info", "wgpu_hal=error"].join(","),
         ))
-        .with_writer(std::io::stderr)
+        .with_writer(io::stderr)
         .init();
 
     layer_shell::run();
@@ -343,17 +366,8 @@ impl CantusApp {
 
         while let Ok(update) = self.app_updates.try_recv() {
             update(self);
-            self.image_cache.mark_dirty();
         }
-        if self.image_cache.dirty {
-            let client = Arc::clone(&self.spotify.client);
-            let updater = self.updater.clone();
-            self.image_cache
-                .sync(&mut self.caches, &self.playback_state, |url| {
-                    spotify::download_image(Arc::clone(&client), updater.clone(), url);
-                });
-            self.image_cache.dirty = false;
-        }
+        self.start_missing_art_downloads();
         let gpu = self.gpu_resources.as_mut().unwrap();
         let (surface_texture, reconfigure_after_present) = match gpu.surface.get_current_texture() {
             CurrentSurfaceTexture::Success(texture) => (texture, false),
@@ -441,15 +455,15 @@ impl CantusApp {
         false
     }
 
-    fn get_image_index(&mut self, url: &str) -> i32 {
+    fn get_image_index(&mut self, art: &ArtState) -> i32 {
         let Some(gpu) = self.gpu_resources.as_mut() else {
             return -1;
         };
-        gpu.images.image_index(
-            &gpu.queue,
-            url,
-            self.caches.images.get(url).map(AsRef::as_ref),
-        )
+        let art = match art {
+            ArtState::Ready(art) => Some(art),
+            _ => None,
+        };
+        gpu.images.image_index(&gpu.queue, art)
     }
 }
 
@@ -471,5 +485,5 @@ where
     artists
         .into_iter()
         .next()
-        .ok_or_else(|| serde::de::Error::custom("artists array is empty"))
+        .ok_or_else(|| de::Error::custom("artists array is empty"))
 }

@@ -1,10 +1,8 @@
-use std::collections::HashMap;
-
-use crate::PANEL_START;
-use crate::render::TrackRender;
+use crate::{PANEL_START, Track};
 use ab_glyph::{Font, FontArc, Glyph, GlyphId, PxScale, ScaleFont, point};
 use cantus_shared::{GlyphInstance, MAX_GLYPH_INSTANCES};
 use glam::vec2;
+use std::collections::HashMap;
 use wgpu::{
     Device, Extent3d, Queue, Texture, TextureDescriptor, TextureDimension, TextureFormat,
     TextureUsages, TextureView, TextureViewDescriptor,
@@ -171,10 +169,10 @@ impl TextRenderer {
         Some(entry)
     }
 
-    pub fn render(&mut self, queue: &Queue, track_render: &TrackRender, render_scale: f32) {
-        let track = track_render.track;
-        let text_start_left = track_render.start_x + 12.0;
-        let text_start_right = track_render.start_x + track_render.width - self.panel_height - 8.0;
+    pub fn render(&mut self, queue: &Queue, track: &Track, render_scale: f32) {
+        let text_start_left = track.runtime.start_x + 12.0;
+        let text_start_right =
+            track.runtime.start_x + track.runtime.width - self.panel_height - 8.0;
         let available_width = text_start_right - text_start_left;
 
         if available_width <= 0.0 {
@@ -225,14 +223,15 @@ impl TextRenderer {
         );
 
         // --- Bottom line: time + artist ---
-        let time_text = if track_render.seconds_until_start >= 60.0 {
+        let seconds_until_start = (track.runtime.start_ms / 1000.0).abs();
+        let time_text = if seconds_until_start >= 60.0 {
             format!(
                 "{}m{}s",
-                (track_render.seconds_until_start / 60.0).floor(),
-                (track_render.seconds_until_start % 60.0).floor()
+                (seconds_until_start / 60.0).floor(),
+                (seconds_until_start % 60.0).floor()
             )
         } else {
-            format!("{}s", track_render.seconds_until_start.round())
+            format!("{}s", seconds_until_start.round())
         };
 
         let bottom_merged = format!("{time_text}\u{2004}•\u{2004}{}", track.artist.name);
@@ -246,7 +245,9 @@ impl TextRenderer {
             bottom_y + FONT_SIZE_SMALL,
         ];
 
-        if bottom_ratio <= 1.0 || !track_render.is_current {
+        let is_current = track.runtime.start_ms <= 0.0
+            && track.runtime.start_ms + track.duration_ms as f32 >= 0.0;
+        if bottom_ratio <= 1.0 || !is_current {
             let (x, align) = if bottom_ratio >= 1.0 {
                 (text_start_right, Align::Right)
             } else {

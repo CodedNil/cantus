@@ -15,6 +15,7 @@ unused_qualifications = "warn"
 [workspace.lints.clippy]
 pedantic = { level = "warn", priority = -1 }
 nursery = { level = "warn", priority = -1 }
+absolute-paths = "warn"
 must_use_candidate = "allow"
 too-many-lines = "allow"
 too-many-arguments = "allow"

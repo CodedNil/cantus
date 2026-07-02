@@ -1,5 +1,8 @@
 use crate::{
-    AppUpdater, CondensedPlaylist, PlaylistId, Track, TrackId, cache_decoded_image, config::Config,
+    AppUpdater, CondensedPlaylist, MAX_HISTORY_TRACKS, PlaylistId, TRACK_SPACING_MS, Track,
+    TrackId,
+    art::{self, ArtState},
+    config::Config,
     deserialize_images,
 };
 use arrayvec::ArrayString;
@@ -11,7 +14,8 @@ use sha2::{Digest, Sha256};
 use std::{
     collections::{HashMap, HashSet},
     fs,
-    io::{BufRead, BufReader, Write},
+    io::{self, BufRead, BufReader, Write},
+    iter, mem,
     net::TcpListener,
     path::{Path, PathBuf},
     sync::Arc,
@@ -134,7 +138,7 @@ fn read_token_cache(
         Ok(cache) => serde_json::from_str::<Token>(&cache)
             .inspect_err(|err| warn!("Failed to parse Spotify token cache: {err}"))
             .ok(),
-        Err(err) if err.kind() == std::io::ErrorKind::NotFound => None,
+        Err(err) if err.kind() == io::ErrorKind::NotFound => None,
         Err(err) => return Err(err.into()),
     };
     Ok(token.filter(|t| scopes.is_subset(&t.scopes) && (allow_expired || !t.is_expired())))
@@ -420,7 +424,7 @@ pub enum ClientError {
     #[error("http error: {0}")]
     Http(String),
     #[error("input/output error: {0}")]
-    Io(#[from] std::io::Error),
+    Io(#[from] io::Error),
     #[error("image decode error: {0}")]
     Image(#[from] image::ImageError),
     #[error("Token is not valid")]
@@ -703,7 +707,7 @@ fn get_spotify_queue(
         return;
     };
     let current_track_id = currently_playing.id;
-    let new_queue: Vec<Track> = std::iter::once(currently_playing).chain(q.queue).collect();
+    let new_queue: Vec<Track> = iter::once(currently_playing).chain(q.queue).collect();
 
     let context_updated = spotify_state.context_updated;
     spotify_state.context_updated = false;
@@ -711,15 +715,46 @@ fn get_spotify_queue(
     updater.send(move |app| {
         let state = &mut app.playback_state;
         let current_title = &new_queue[0].name;
-        if !context_updated
-            && let Some(new_index) = track_index(&state.queue, current_track_id, current_title)
-        {
-            state.queue_index = new_index;
-            state.queue.truncate(new_index);
-            state.queue.extend(new_queue);
+        let art_by_url: HashMap<_, _> = state
+            .queue
+            .iter()
+            .filter_map(|track| match (&track.album.image, &track.art) {
+                (Some(url), ArtState::Ready(art)) => {
+                    Some((url.clone(), ArtState::Ready(Arc::clone(art))))
+                }
+                _ => None,
+            })
+            .collect();
+        let mut old_queue = mem::take(&mut state.queue);
+        let history_len = if context_updated {
+            0
         } else {
-            state.queue = new_queue;
-            state.queue_index = 0;
+            track_index(&old_queue, current_track_id, current_title).unwrap_or(0)
+        };
+        let history_start = history_len.saturating_sub(MAX_HISTORY_TRACKS);
+        let mut reconciled: Vec<Track> = old_queue.drain(history_start..history_len).collect();
+        let retained_history_len = reconciled.len();
+        for mut track in new_queue {
+            if let Some(index) = old_queue.iter().position(|old| old.id == track.id) {
+                let old = old_queue.remove(index);
+                track.art = old.art;
+                track.runtime = old.runtime;
+            } else if let Some(art) = track
+                .album
+                .image
+                .as_ref()
+                .and_then(|url| art_by_url.get(url))
+            {
+                track.art = art.clone();
+            }
+            reconciled.push(track);
+        }
+        state.queue = reconciled;
+        state.queue_index = retained_history_len;
+        let mut offset = 0.0;
+        for track in &mut state.queue {
+            track.runtime.queue_offset_ms = offset;
+            offset += track.duration_ms as f32 + TRACK_SPACING_MS;
         }
     });
 }
@@ -734,16 +769,27 @@ pub fn download_image(client: Arc<SpotifyClient>, updater: AppUpdater, url: Stri
             .and_then(|mut resp| Ok(resp.body_mut().read_to_vec()?));
         let Ok(bytes) = result.inspect_err(|err| warn!("Failed to download image {url}: {err}"))
         else {
-            updater.send(move |app| app.image_cache.fail(url));
+            updater.send(move |app| {
+                app.set_art_state(
+                    &url,
+                    &ArtState::RetryAt(Instant::now() + Duration::from_secs(30)),
+                );
+            });
             return;
         };
         let Ok(img) = image::load_from_memory(&bytes)
             .inspect_err(|err| warn!("Failed to decode image {url}: {err}"))
         else {
-            updater.send(move |app| app.image_cache.fail(url));
+            updater.send(move |app| {
+                app.set_art_state(
+                    &url,
+                    &ArtState::RetryAt(Instant::now() + Duration::from_secs(30)),
+                );
+            });
             return;
         };
-        updater.send(move |app| cache_decoded_image(app, url, img));
+        let art = Arc::new(art::prepare(&img));
+        updater.send(move |app| app.set_art_state(&url, &ArtState::Ready(art)));
     });
 }
 
@@ -861,8 +907,24 @@ fn insert_playlist(
         image_url: playlist.image,
         tracks,
         rating_index,
+        art: ArtState::Missing,
     };
     updater.send(move |app| {
-        app.playback_state.playlists.insert(condensed.id, condensed);
+        let mut condensed = condensed;
+        if let Some(index) = app
+            .playback_state
+            .playlists
+            .iter()
+            .position(|playlist| playlist.id == condensed.id)
+        {
+            let previous = app.playback_state.playlists.remove(index);
+            if previous.image_url == condensed.image_url {
+                condensed.art = previous.art;
+            }
+        }
+        app.playback_state.playlists.push(condensed);
+        app.playback_state
+            .playlists
+            .sort_by(|a, b| a.name.cmp(&b.name));
     });
 }

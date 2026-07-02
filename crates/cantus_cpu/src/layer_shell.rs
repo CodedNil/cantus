@@ -1,4 +1,4 @@
-use crate::CantusApp;
+use crate::{CantusApp, render::Rect};
 use glam::vec2;
 use raw_window_handle::{
     RawDisplayHandle, RawWindowHandle, WaylandDisplayHandle, WaylandWindowHandle,
@@ -229,13 +229,12 @@ impl LayerShellApp {
         let (buffer_width, buffer_height) = self.cantus.buffer_size();
         self.ensure_surface(buffer_width, buffer_height);
 
-        self.update_input_region(qhandle);
-
         if self.cantus.render() {
             tracing::warn!("wgpu surface was lost; recreating it");
             self.cantus.gpu_resources = None;
             self.ensure_surface(buffer_width, buffer_height);
         }
+        self.update_input_region(qhandle);
         self.request_frame(qhandle);
         if let Some(surface) = &self.wl_surface {
             surface.commit();
@@ -262,24 +261,9 @@ impl LayerShellApp {
         let (Some(wl_surface), Some(compositor)) = (&self.wl_surface, &self.compositor) else {
             return;
         };
-        let rects = self
-            .cantus
-            .interaction
-            .track_hitboxes
-            .iter()
-            .map(|(_, r, _)| r)
-            .chain(
-                self.cantus
-                    .interaction
-                    .icon_hitboxes
-                    .iter()
-                    .map(|h| &h.rect),
-            )
-            .collect::<Vec<_>>();
-
         // Hash every hitbox rect at low precision so it only updates input regions on substantial changes
         let mut hasher = DefaultHasher::new();
-        for r in &rects {
+        for r in self.cantus.input_rects() {
             (
                 (r.x0 * 0.01).round() as u16,
                 (r.y0 * 0.01).round() as u16,
@@ -292,7 +276,7 @@ impl LayerShellApp {
 
         if hash != self.last_hitbox_hash {
             let region = compositor.create_region(qhandle, ());
-            for r in rects {
+            for r in self.cantus.input_rects() {
                 region.add(
                     r.x0.round() as i32,
                     r.y0.round() as i32,
@@ -303,6 +287,21 @@ impl LayerShellApp {
             wl_surface.set_input_region(Some(&region));
             self.last_hitbox_hash = hash;
         }
+    }
+}
+
+impl CantusApp {
+    fn input_rects(&self) -> impl Iterator<Item = Rect> + '_ {
+        self.playback_state
+            .queue
+            .iter()
+            .filter_map(|track| track.runtime.rect(self.config.height))
+            .chain(
+                self.playback_state
+                    .queue
+                    .iter()
+                    .flat_map(|track| track.runtime.icon_hitboxes.iter().map(|hitbox| hitbox.rect)),
+            )
     }
 }
 

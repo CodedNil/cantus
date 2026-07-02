@@ -2,7 +2,9 @@ use crate::render::{BackgroundPill, GlobalUniforms, IconInstance, Particle, Play
 use crate::text_render::TextRenderer;
 use crate::{CantusApp, GpuPass, GpuResources, ImageAtlas, MAX_RENDER_INSTANCES, PARTICLE_COUNT};
 use cantus_shared::{GlyphInstance, MAX_GLYPH_INSTANCES};
+use std::array;
 use std::mem::size_of;
+use std::sync::Arc;
 use wgpu::{
     BindGroupDescriptor, BindGroupEntry, BindGroupLayout, BindGroupLayoutDescriptor,
     BindGroupLayoutEntry, BindingResource, BindingType, BlendState, BufferBindingType,
@@ -80,7 +82,7 @@ impl CantusApp {
             ..Default::default()
         }))
         .expect("No device");
-        device.on_uncaptured_error(std::sync::Arc::new(|error| {
+        device.on_uncaptured_error(Arc::new(|error| {
             tracing::error!(%error, "uncaptured wgpu error");
         }));
 
@@ -331,7 +333,7 @@ impl CantusApp {
             particles,
             images: ImageAtlas {
                 texture: texture_array,
-                slots: std::array::from_fn(|_| None),
+                slots: array::from_fn(|_| None),
                 used: 0,
             },
             text_renderer,
