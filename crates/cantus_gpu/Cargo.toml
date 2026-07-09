@@ -8,9 +8,7 @@ crate-type = ["dylib", "lib"]
 
 [dependencies]
 cantus_shared = { path = "../cantus_shared", features = ["gpu"] }
-spirv-std = { git = "https://github.com/Rust-GPU/rust-gpu", rev = "bd49568baf08301107c9f698494735724980dee0", features = [
-    "glam_0_33",
-] }
+spirv-std = { workspace = true }
 
 [lints]
 workspace = true

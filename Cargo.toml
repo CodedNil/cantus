@@ -4,7 +4,13 @@ members = ["crates/cantus_cpu", "crates/cantus_gpu", "crates/cantus_shared"]
 default-members = ["crates/cantus_cpu"]
 
 [workspace.dependencies]
+bytemuck = { version = "1.25.0", features = ["derive"] }
 glam = { version = "=0.33.2", features = ["bytemuck"] }
+spirv-builder = { git = "https://github.com/Rust-GPU/rust-gpu", rev = "c1acf6e4b2d338b0f822457350ea91db21757f1a" }
+spirv-std = { git = "https://github.com/Rust-GPU/rust-gpu", rev = "c1acf6e4b2d338b0f822457350ea91db21757f1a", features = [
+    "glam_0_33",
+] }
+toml = "1.1.2"
 
 [workspace.lints.rust]
 unexpected_cfgs = { level = "allow", check-cfg = [
@@ -15,7 +21,6 @@ unused_qualifications = "warn"
 [workspace.lints.clippy]
 pedantic = { level = "warn", priority = -1 }
 nursery = { level = "warn", priority = -1 }
-absolute-paths = "warn"
 must_use_candidate = "allow"
 too-many-lines = "allow"
 too-many-arguments = "allow"
@@ -25,6 +30,7 @@ cast-sign-loss = "allow"
 cast-possible-wrap = "allow"
 suboptimal_flops = "allow"
 
+absolute-paths = "warn"
 separated_literal_suffix = "warn"
 renamed_function_params = "warn"
 str_to_string = "warn"
@@ -33,15 +39,13 @@ redundant-type-annotations = "warn"
 
 [profile.release]
 opt-level = 3
-incremental = true
-codegen-units = 256
-lto = true
+codegen-units = 1
+lto = "fat"
 strip = true
 panic = "abort"
 
 [profile.release.build-override]
-opt-level = 3
-incremental = true
+opt-level = 0
 codegen-units = 256
 
 [profile.dev]

@@ -3,23 +3,26 @@ rec {
 
   inputs = {
     nixpkgs.url = "github:NixOS/nixpkgs/nixos-unstable";
+    crane.url = "github:ipetkov/crane";
     rust-overlay.url = "github:oxalica/rust-overlay";
     rust-overlay.inputs.nixpkgs.follows = "nixpkgs";
-    systems.url = "github:nix-systems/default-linux";
   };
 
   outputs =
     {
       self,
+      crane,
       nixpkgs,
       rust-overlay,
-      systems,
       ...
     }:
     let
       inherit (nixpkgs) lib;
       pname = "cantus";
-      supportedSystems = import systems;
+      supportedSystems = [
+        "x86_64-linux"
+        "aarch64-linux"
+      ];
       forAllSystems =
         f:
         lib.genAttrs supportedSystems (
@@ -31,13 +34,6 @@ rec {
             }
           )
         );
-      rustToolchain =
-        pkgs: extensions:
-        let
-          channel = (builtins.fromTOML (builtins.readFile ./rust-toolchain.toml)).toolchain.channel;
-          version = lib.removePrefix "nightly-" channel;
-        in
-        pkgs.rust-bin.nightly."${version}".minimal.override { inherit extensions; };
       runtimeLibraries =
         pkgs: with pkgs; [
           wayland
@@ -49,27 +45,18 @@ rec {
       packages = forAllSystems (
         pkgs:
         let
-          toolchain = rustToolchain pkgs [
-            "rust-src"
-            "rustc-dev"
-            "llvm-tools"
-          ];
-          rustPlatform = pkgs.makeRustPlatform {
-            cargo = toolchain;
-            rustc = toolchain;
-          };
-          cantus = rustPlatform.buildRustPackage {
+          toolchain = pkgs.rust-bin.fromRustupToolchainFile ./rust-toolchain.toml;
+          craneLib = (crane.mkLib pkgs).overrideToolchain (_: toolchain);
+          cantus = craneLib.buildPackage {
             inherit pname;
-            version = (builtins.fromTOML (builtins.readFile ./crates/cantus_cpu/Cargo.toml)).package.version;
-            CANTUS_NIX_BUILD = "1";
-            RUSTFLAGS = "--remap-path-prefix=${toolchain}=/rust-toolchain";
+            version = (lib.importTOML ./crates/cantus_cpu/Cargo.toml).package.version;
 
             src = lib.cleanSource ./.;
-            cargoLock = {
-              lockFile = ./Cargo.lock;
-              outputHashes = {
-                "rustc_codegen_spirv-0.10.0-alpha.1" = "sha256-pioRiIsB3lkWP3rH/p/GW2au4nJ+CKYhL4WTsLlf+zw=";
-              };
+            cargoVendorDir = craneLib.vendorMultipleCargoDeps {
+              cargoLockList = [
+                ./Cargo.lock
+                "${toolchain.passthru.availableComponents.rust-src}/lib/rustlib/src/rust/library/Cargo.lock"
+              ];
             };
 
             nativeBuildInputs = with pkgs; [
@@ -81,8 +68,7 @@ rec {
             buildInputs = runtimeLibraries pkgs;
 
             postInstall = ''
-              wrapProgram $out/bin/${pname} \
-                --set LD_LIBRARY_PATH ${lib.makeLibraryPath (runtimeLibraries pkgs)}
+              wrapProgram "$out/bin/${pname}" --set LD_LIBRARY_PATH "${lib.makeLibraryPath (runtimeLibraries pkgs)}"
             '';
 
             meta = {
@@ -105,13 +91,7 @@ rec {
         default = pkgs.mkShell {
           name = pname;
           packages = with pkgs; [
-            (rustToolchain pkgs [
-              "rust-src"
-              "rustc-dev"
-              "llvm-tools"
-              "rustfmt"
-              "clippy"
-            ])
+            (rust-bin.fromRustupToolchainFile ./rust-toolchain.toml)
             mold
             pkg-config
           ];
