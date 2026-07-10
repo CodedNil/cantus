@@ -5,12 +5,7 @@ edition = "2024"
 
 [dependencies]
 bytemuck = { workspace = true, optional = true }
-
-[target.'cfg(not(target_arch = "spirv"))'.dependencies]
 glam = { workspace = true }
-
-[target.'cfg(target_arch = "spirv")'.dependencies]
-spirv-std = { workspace = true }
 
 [features]
 default = []

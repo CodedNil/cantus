@@ -3,12 +3,31 @@ name = "cantus_gpu"
 version = "0.1.0"
 edition = "2024"
 
+[workspace.dependencies]
+spirv-builder = { git = "https://github.com/Rust-GPU/rust-gpu", rev = "c1acf6e4b2d338b0f822457350ea91db21757f1a" }
+spirv-std = { git = "https://github.com/Rust-GPU/rust-gpu", rev = "c1acf6e4b2d338b0f822457350ea91db21757f1a", features = [
+    "glam_0_33",
+] }
+
 [lib]
 crate-type = ["dylib", "lib"]
 
+[[bin]]
+name = "build-shader"
+path = "src/build-shader.rs"
+required-features = ["build-shader"]
+
 [dependencies]
 cantus_shared = { path = "../cantus_shared", features = ["gpu"] }
+spirv-builder = { workspace = true, optional = true }
 spirv-std = { workspace = true }
 
-[lints]
-workspace = true
+[features]
+default = []
+build-shader = ["dep:spirv-builder"]
+
+[lints.rust]
+unexpected_cfgs = { level = "allow", check-cfg = [
+    'cfg(target_arch, values("spirv"))',
+] }
+unused_qualifications = "warn"

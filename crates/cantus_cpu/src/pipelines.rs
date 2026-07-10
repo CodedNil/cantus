@@ -108,10 +108,8 @@ impl CantusApp {
 
         let text_renderer = TextRenderer::new(&device, self.config.height);
 
-        let rust_gpu_shader = device.create_shader_module(wgpu::include_spirv!(concat!(
-            env!("OUT_DIR"),
-            "/cantus.spv"
-        )));
+        let rust_gpu_shader =
+            device.create_shader_module(wgpu::include_spirv!("../../../assets/cantus.spv"));
 
         let bgl = |label, entries: &[(ShaderStages, BindingType)]| {
             device.create_bind_group_layout(&BindGroupLayoutDescriptor {

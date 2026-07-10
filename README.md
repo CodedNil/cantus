@@ -65,5 +65,11 @@ Then, from the root of the repository, run:
 
 ```cargo build --release```
 
+The CPU-side application builds with stable Rust and embeds the precompiled
+Rust-GPU shader checked in at `assets/cantus.spv`. Rebuild that shader only
+after changing `crates/cantus_gpu` or GPU-facing structs in `crates/cantus_shared`:
+
+```just shader```
+
 ### To install it system-wide
 ```sudo cp target/release/cantus /usr/bin```

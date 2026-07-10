@@ -1,9 +1,6 @@
 #![no_std]
 
-#[cfg(not(target_arch = "spirv"))]
 use glam::Vec2;
-#[cfg(target_arch = "spirv")]
-use spirv_std::glam::Vec2;
 
 /// Center-to-center spacing for playlist and rating icons, in logical pixels.
 pub const ICON_SPACING: f32 = 20.0;

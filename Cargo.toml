@@ -1,14 +1,13 @@
 [workspace]
 resolver = "3"
-members = ["crates/cantus_cpu", "crates/cantus_gpu", "crates/cantus_shared"]
+members = ["crates/cantus_cpu", "crates/cantus_shared"]
 default-members = ["crates/cantus_cpu"]
 
 [workspace.dependencies]
 bytemuck = { version = "1.25.0", features = ["derive"] }
-glam = { version = "=0.33.2", features = ["bytemuck"] }
-spirv-builder = { git = "https://github.com/Rust-GPU/rust-gpu", rev = "c1acf6e4b2d338b0f822457350ea91db21757f1a" }
-spirv-std = { git = "https://github.com/Rust-GPU/rust-gpu", rev = "c1acf6e4b2d338b0f822457350ea91db21757f1a", features = [
-    "glam_0_33",
+glam = { version = "=0.33.2", default-features = false, features = [
+    "bytemuck",
+    "libm",
 ] }
 toml = "1.1.2"
 
