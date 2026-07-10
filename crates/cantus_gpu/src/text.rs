@@ -8,7 +8,7 @@ use spirv_std::{
     spirv,
 };
 
-/// Width of the fade-out band at the edges of the clip rect, in logical pixels.
+/// Width of the fade-out band at the right clip edge, in logical pixels.
 const FADE_BAND: f32 = 8.0;
 
 #[spirv(vertex)]
@@ -20,8 +20,8 @@ pub fn vs_text(
          MAX_GLYPH_INSTANCES],
     #[spirv(position)] out_pos: &mut Vec4,
     #[spirv(location = 0)] out_uv: &mut Vec2,
-    #[spirv(location = 1, flat)] out_color: &mut Vec4,
-    #[spirv(location = 2)] out_clip_local: &mut Vec4,
+    #[spirv(location = 1)] out_pixel_pos: &mut Vec2,
+    #[spirv(location = 2, flat)] out_glyph_idx: &mut u32,
 ) {
     let glyph = glyphs[i_idx as usize];
     let unit = quad_coord(v_idx);
@@ -29,32 +29,24 @@ pub fn vs_text(
 
     *out_pos = pixel_to_ndc(pixel_pos, global.screen_size);
     *out_uv = glyph.atlas_min + unit * (glyph.atlas_max - glyph.atlas_min);
-    *out_color = unpack4x8unorm(glyph.color);
-
-    // Pass clip rect in local pixel space so the fragment shader can compute fade.
-    // All values are positive when the pixel is inside the clip rect.
-    *out_clip_local = Vec4::new(
-        pixel_pos.x - glyph.clip_min.x,
-        pixel_pos.y - glyph.clip_min.y,
-        glyph.clip_max.x - pixel_pos.x,
-        glyph.clip_max.y - pixel_pos.y,
-    );
+    *out_pixel_pos = pixel_pos;
+    *out_glyph_idx = i_idx;
 }
 
 #[spirv(fragment)]
 pub fn fs_text(
     #[spirv(location = 0)] uv: Vec2,
-    #[spirv(location = 1, flat)] color: Vec4,
-    #[spirv(location = 2)] clip_local: Vec4,
+    #[spirv(location = 1)] pixel_pos: Vec2,
+    #[spirv(location = 2, flat)] glyph_idx: u32,
+    #[spirv(storage_buffer, descriptor_set = 0, binding = 1)] glyphs: &[GlyphInstance;
+         MAX_GLYPH_INSTANCES],
     #[spirv(descriptor_set = 0, binding = 2)] atlas: &Image2d,
     #[spirv(descriptor_set = 0, binding = 3)] sampler: &Sampler,
     #[spirv(location = 0)] out_color: &mut Vec4,
 ) {
-    // Horizontal boundaries are set to +/- MAX when that side is not clipped,
-    // so only a genuinely overflowing edge receives a fade.
-    let clip_fade_left = smoothstep(0.0, FADE_BAND, clip_local.x);
-    let clip_fade_right = smoothstep(0.0, FADE_BAND, clip_local.z);
-    let clip_fade = clip_fade_left * clip_fade_right;
+    let glyph = glyphs[glyph_idx as usize];
+    let color = unpack4x8unorm(glyph.color);
+    let clip_fade = smoothstep(0.0, FADE_BAND, glyph.clip_right - pixel_pos.x);
 
     if clip_fade <= 0.0 {
         kill();

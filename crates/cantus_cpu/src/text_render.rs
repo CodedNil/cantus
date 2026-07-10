@@ -201,13 +201,6 @@ impl TextRenderer {
             Align::Right
         };
 
-        let clip = [
-            text_start_left,
-            top_y - FONT_SIZE,
-            text_start_right,
-            top_y + FONT_SIZE,
-        ];
-
         queue_glyphs(
             self,
             queue,
@@ -218,7 +211,7 @@ impl TextRenderer {
             FONT_SIZE,
             align,
             color_packed,
-            clip,
+            text_start_right,
             render_scale,
         );
 
@@ -238,12 +231,6 @@ impl TextRenderer {
         let measured_bottom_width = measure_text(&self.font, &bottom_merged, FONT_SIZE_SMALL);
 
         let bottom_ratio = available_width / measured_bottom_width;
-        let bottom_clip = [
-            text_start_left,
-            bottom_y - FONT_SIZE_SMALL,
-            text_start_right,
-            bottom_y + FONT_SIZE_SMALL,
-        ];
 
         let is_current = track.runtime.start_ms <= 0.0
             && track.runtime.start_ms + track.duration_ms as f32 >= 0.0;
@@ -263,7 +250,7 @@ impl TextRenderer {
                 FONT_SIZE_SMALL,
                 align,
                 color_packed,
-                bottom_clip,
+                text_start_right,
                 render_scale,
             );
         } else {
@@ -277,7 +264,7 @@ impl TextRenderer {
                 FONT_SIZE_SMALL,
                 Align::Left,
                 color_packed,
-                bottom_clip,
+                text_start_right,
                 render_scale,
             );
             queue_glyphs(
@@ -290,7 +277,7 @@ impl TextRenderer {
                 FONT_SIZE_SMALL,
                 Align::Right,
                 color_packed,
-                bottom_clip,
+                text_start_right,
                 render_scale,
             );
         }
@@ -340,7 +327,7 @@ fn queue_glyphs(
     raster_size: f32,
     align: Align,
     color: u32,
-    clip: [f32; 4],
+    clip_right: f32,
     render_scale: f32,
 ) {
     let total_width = measure_text(&renderer.font, text, px_size);
@@ -356,11 +343,9 @@ fn queue_glyphs(
         .round()
         .max(SCALE_STEPS) as u16;
     let glyph_scale = px_size / raster_size;
-    let available_width = clip[2] - clip[0];
-    let overflow = total_width - available_width > 0.5 / render_scale;
-    let (clip_left, clip_right) = match align {
-        Align::Left => (false, overflow),
-        Align::Right => (overflow, false),
+    let clip_right = match align {
+        Align::Left if total_width - (clip_right - origin_x) > 0.5 / render_scale => clip_right,
+        _ => f32::MAX,
     };
     let physical_baseline_y = (origin_y + baseline_offset) * render_scale / glyph_scale;
     let (baseline_y, phase_y) = subpixel_position(physical_baseline_y);
@@ -409,10 +394,8 @@ fn queue_glyphs(
                 (glyph.pos[0] + glyph.size[0]) as f32 / atlas_size,
                 (glyph.pos[1] + glyph.size[1]) as f32 / atlas_size,
             ),
+            clip_right,
             color,
-            clip_min: vec2(if clip_left { clip[0] } else { -f32::MAX }, clip[1]),
-            clip_max: vec2(if clip_right { clip[2] } else { f32::MAX }, clip[3]),
-            padding: 0,
         });
     }
 }

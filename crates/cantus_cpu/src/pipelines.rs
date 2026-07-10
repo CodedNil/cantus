@@ -150,26 +150,19 @@ impl CantusApp {
             "Particles",
             &[(ShaderStages::VERTEX, ub), (ShaderStages::VERTEX, sb)],
         );
-        let std_layout = bgl(
-            "Standard",
-            &[
-                (vf, ub),
-                (vf, sb),
-                (ShaderStages::FRAGMENT, tx(TextureViewDimension::D2Array)),
-                (ShaderStages::FRAGMENT, sp),
-            ],
-        );
-        // Text: uniform(buffer0) + storage(buffer1) + atlas(tex2) + sampler(3)
-        let text_layout = bgl(
-            "Text",
-            &[
-                (vf, ub),
-                (vf, sb),
-                (ShaderStages::FRAGMENT, tx(TextureViewDimension::D2)),
-                (ShaderStages::FRAGMENT, sp),
-            ],
-        );
-
+        let textured_layout = |label, view_dimension| {
+            bgl(
+                label,
+                &[
+                    (vf, ub),
+                    (vf, sb),
+                    (ShaderStages::FRAGMENT, tx(view_dimension)),
+                    (ShaderStages::FRAGMENT, sp),
+                ],
+            )
+        };
+        let std_layout = textured_layout("Standard", TextureViewDimension::D2Array);
+        let text_layout = textured_layout("Text", TextureViewDimension::D2);
         let create_pipe = |label, layout: &BindGroupLayout, vertex_entry, fragment_entry| {
             device.create_render_pipeline(&RenderPipelineDescriptor {
                 label: Some(label),

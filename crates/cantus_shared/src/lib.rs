@@ -77,12 +77,8 @@ pub struct GlyphInstance {
     pub atlas_min: Vec2,
     /// Bottom-right UV coordinate (normalized 0..1) into the glyph atlas.
     pub atlas_max: Vec2,
-    /// Clip rectangle (left, top) in logical pixels.
-    pub clip_min: Vec2,
-    /// Clip rectangle (right, bottom) in logical pixels.
-    pub clip_max: Vec2,
+    /// Right clip edge in logical pixels.
+    pub clip_right: f32,
     /// Packed RGBA colour.
     pub color: u32,
-    /// Padding to align the struct to 8 bytes (required for GPU storage buffer arrays).
-    pub padding: u32,
 }
