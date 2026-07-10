@@ -681,6 +681,9 @@ fn get_spotify_playback(
             .volume_percent
             .map(|v| v.min(100) as u8);
         if now >= state.last_interaction {
+            if current_playback.is_playing && !state.playing {
+                app.last_toggle_playing = now;
+            }
             state.playing = current_playback.is_playing;
             state.progress = current_playback.progress_ms;
         }

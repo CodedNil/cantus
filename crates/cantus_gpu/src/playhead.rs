@@ -4,7 +4,7 @@ use crate::common::{
 use cantus_shared::{GlobalUniforms, PlayheadUniforms};
 use spirv_std::{
     arch::kill,
-    glam::{Vec2, Vec3, Vec4, vec2, vec3},
+    glam::{vec2, vec3, Vec2, Vec3, Vec4},
     spirv,
 };
 
@@ -42,8 +42,9 @@ pub fn fs_playhead(
     let height = global.bar_height.y;
     let mid_y = start_y + height * 0.5;
     let line_thickness = 4.5;
+    let icon_thickness = 3.5;
 
-    let bar_len = height * (0.5 + (0.125 - 0.5) * state.bar_lerp);
+    let bar_len = height * (0.5 - 0.375 * state.bar_split);
     let bar_center_offset = (height - bar_len) * 0.5;
     let dist_bar = sd_vertical_segment(
         world_pos,
@@ -60,67 +61,51 @@ pub fn fs_playhead(
         line_thickness,
     ));
 
-    let (dist_pause, pause_active) = if state.pause_lerp >= 0.001 {
-        let pause_gap = 4.0 * smoothstep(0.0, 0.5, state.pause_lerp);
-        let pause_half_height = height * 0.1;
-        let dist = sd_vertical_segment(
-            world_pos,
-            x_coord - pause_gap,
-            mid_y,
-            pause_half_height,
-            line_thickness,
-        )
-        .min(sd_vertical_segment(
-            world_pos,
-            x_coord + pause_gap,
-            mid_y,
-            pause_half_height,
-            line_thickness,
-        ));
-        (dist, 1.0 - smoothstep(0.5, 1.0, state.pause_lerp))
-    } else {
-        (1e6, 0.0)
-    };
+    let icon_alpha = state.icon_presence.clamp(0.0, 1.0);
+    let pause_gap = 4.0 * state.bar_split.clamp(0.0, 1.0);
+    let pause_half_height = height * 0.1;
+    let dist_pause = sd_vertical_segment(
+        world_pos,
+        x_coord - pause_gap,
+        mid_y,
+        pause_half_height,
+        icon_thickness,
+    )
+    .min(sd_vertical_segment(
+        world_pos,
+        x_coord + pause_gap,
+        mid_y,
+        pause_half_height,
+        icon_thickness,
+    ));
 
-    let (dist_play, play_active) = if state.play_lerp >= 0.001 {
-        let p_local = world_pos - vec2(x_coord, mid_y);
-        let p_rotated = vec2(-p_local.y, p_local.x);
-        let play_growth = (state.play_lerp * 2.0).min(1.0);
-        let play_scale = height
-            * (0.01 + (0.18 - 0.01) * play_growth)
-            * (1.0 + smoothstep(0.5, 1.0, state.play_lerp));
-        (
-            sd_rounded_triangle(p_rotated, play_scale, play_scale * 0.5),
-            1.0 - smoothstep(0.5, 1.0, state.play_lerp),
-        )
-    } else {
-        (1e6, 0.0)
-    };
+    let play_local = world_pos - vec2(x_coord, mid_y);
+    let play_rotated = vec2(-play_local.y, play_local.x);
+    let play_scale = height * 0.18 * state.icon_scale.max(0.0);
+    let dist_play = sd_rounded_triangle(play_rotated, play_scale, play_scale * 0.5);
 
-    let icon_alpha = (pause_active + play_active).clamp(0.0, 1.0);
-    let icon_mix = pause_active / (pause_active + play_active + 1e-6);
-    let dist_icon = dist_play + (dist_pause - dist_play) * icon_mix;
+    let dist_icon = if icon_alpha > 0.0 {
+        dist_pause + (dist_play - dist_pause) * state.icon_morph.clamp(0.0, 1.0)
+    } else {
+        1e6
+    };
 
     let mask_bar = 1.0 - smoothstep(-0.8, 0.2, dist_bar);
     let mask_icon = (1.0 - smoothstep(-0.8, 0.2, dist_icon)) * icon_alpha;
-    let main_mask = (mask_bar + mask_icon).clamp(0.0, 1.0);
+    let main_mask = mask_icon + mask_bar * (1.0 - mask_icon);
 
-    let shadow_bar = 1.0 - (dist_bar / 4.5).clamp(0.0, 1.0);
-    let shadow_bar = shadow_bar * shadow_bar * 0.4;
-    let shadow_icon = 1.0 - (dist_icon / 4.5).clamp(0.0, 1.0);
-    let shadow_icon = shadow_icon * shadow_icon * 0.4 * icon_alpha;
-    let shadow_mask = shadow_bar.max(shadow_icon);
+    let shadow =
+        Vec2::ONE - (vec2(dist_bar, dist_icon) / line_thickness).clamp(Vec2::ZERO, Vec2::ONE);
+    let shadow = shadow.powf(2.0) * vec2(0.4, 0.4 * icon_alpha);
+    let shadow_mask = shadow.x.max(shadow.y);
 
     if main_mask > 0.0 || shadow_mask > 0.0 {
-        let normalized_y = 1.0 - ((world_pos.y - start_y) / height).clamp(0.0, 1.0);
-        let color_state = if normalized_y <= state.volume {
-            vec3(1.0, 0.878, 0.824)
-        } else {
-            Vec3::splat(0.5)
-        };
-        let border_mask = smoothstep(-2.5, -1.0, dist_bar.min(dist_icon));
-        let final_rgb = color_state.lerp(Vec3::splat(0.15), border_mask);
-        *out_color = (final_rgb * main_mask).extend(main_mask.max(shadow_mask));
+        let fill = vec3(1.0, 0.878, 0.824);
+        let border = Vec3::splat(0.15);
+        let bar_rgb = fill.lerp(border, smoothstep(-2.5, -1.0, dist_bar));
+        let icon_rgb = fill.lerp(border, smoothstep(-2.5, -1.0, dist_icon));
+        let rgb = icon_rgb * mask_icon + bar_rgb * mask_bar * (1.0 - mask_icon);
+        *out_color = rgb.extend(main_mask.max(shadow_mask));
     } else {
         kill();
     }

@@ -23,10 +23,10 @@ pub struct GlobalUniforms {
 #[derive(Copy, Clone, Debug, Default)]
 #[cfg_attr(feature = "cpu", derive(bytemuck::Pod, bytemuck::Zeroable))]
 pub struct PlayheadUniforms {
-    pub volume: f32,
-    pub bar_lerp: f32,
-    pub play_lerp: f32,
-    pub pause_lerp: f32,
+    pub bar_split: f32,
+    pub icon_presence: f32,
+    pub icon_morph: f32,
+    pub icon_scale: f32,
 }
 
 #[repr(C)]

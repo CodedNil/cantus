@@ -32,8 +32,8 @@ const SPARK_VELOCITY_Y: f32 = 5.0;
 /// Lifetime range for individual particles, in seconds.
 const SPARK_LIFETIME: Range<f32> = 1.2..1.5;
 
-/// Duration for animation events
-const ANIMATION_DURATION: f32 = 2.0;
+const PLAYHEAD_START_DURATION: f32 = 0.7;
+const PLAYHEAD_TRANSITION_SPEED: f32 = 5.5;
 
 pub struct RenderState {
     pub last_update: Instant,
@@ -232,7 +232,6 @@ impl CantusApp {
             &playback_state.queue[current_track.unwrap_or(cur_idx)],
             playhead_x,
             avg_speed,
-            playback_state.volume,
             playback_state.playing,
         );
         self.playback_state = playback_state;
@@ -320,7 +319,6 @@ impl CantusApp {
         track: &Track,
         playhead_x: f32,
         avg_speed: f32,
-        volume: Option<u8>,
         playing: bool,
     ) {
         let palette = album_palette(track);
@@ -366,9 +364,8 @@ impl CantusApp {
 
         // Playhead
         let interaction = &mut self.interaction;
-        self.playhead_info.volume = f32::from(volume.unwrap_or(100)) / 100.0;
         let playbutton_hsize = self.config.height * 0.25;
-        let speed = 2.2 * dt;
+        let speed = PLAYHEAD_TRANSITION_SPEED * dt;
         let play_hitbox = Rect::new(
             playhead_x - playbutton_hsize,
             PANEL_START,
@@ -378,39 +375,26 @@ impl CantusApp {
         // Get playhead states
         let playhead_hovered = play_hitbox.contains(self.global_uniforms.mouse_pos)
             && interaction.mouse_pressure > 0.0;
-        let last_toggle = self.last_toggle_playing.elapsed().as_secs_f32() / ANIMATION_DURATION;
+        let last_toggle =
+            self.last_toggle_playing.elapsed().as_secs_f32() / PLAYHEAD_START_DURATION;
 
-        // Determine the intended state for the bar
-        let bar_target = u32::from(playhead_hovered || !playing || last_toggle < 1.0) as f32;
-        move_towards(&mut self.playhead_info.bar_lerp, bar_target, speed);
-
-        // Determine which icon (if any) is currently active
-        let (mut play_active, mut pause_active) = (false, false);
-        if playhead_hovered {
-            if playing {
-                pause_active = true;
+        let play_intro_active = !playhead_hovered && playing && last_toggle < 1.0;
+        if play_intro_active {
+            self.playhead_info.bar_split = 1.0 - last_toggle;
+            self.playhead_info.icon_presence = 1.0 - last_toggle;
+            move_towards(&mut self.playhead_info.icon_morph, 1.0, speed * 1.5);
+            self.playhead_info.icon_scale = 1.0 + last_toggle;
+        } else {
+            let show_icon = u32::from(playhead_hovered || !playing) as f32;
+            let play_icon = u32::from(playhead_hovered && !playing) as f32;
+            move_towards(&mut self.playhead_info.bar_split, show_icon, speed);
+            if show_icon > self.playhead_info.icon_presence {
+                self.playhead_info.icon_presence = show_icon;
             } else {
-                play_active = true;
+                move_towards(&mut self.playhead_info.icon_presence, show_icon, speed);
             }
-        } else if !playing {
-            pause_active = true;
-        } else if last_toggle < 1.0 {
-            self.playhead_info.play_lerp = last_toggle; // Hard set for the "start" animation
-            play_active = true;
-        }
-
-        for (val, is_active) in [
-            (&mut self.playhead_info.play_lerp, play_active),
-            (&mut self.playhead_info.pause_lerp, pause_active),
-        ] {
-            if is_active {
-                move_towards(val, 0.5, speed);
-            } else if *val > 0.0 {
-                move_towards(val, 1.0, speed);
-                if *val >= 1.0 {
-                    *val = 0.0;
-                }
-            }
+            move_towards(&mut self.playhead_info.icon_morph, play_icon, speed);
+            move_towards(&mut self.playhead_info.icon_scale, 1.0, speed);
         }
     }
 }
