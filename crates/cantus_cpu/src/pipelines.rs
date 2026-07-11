@@ -1,10 +1,11 @@
-use crate::render::{BackgroundPill, GlobalUniforms, IconInstance, Particle, PlayheadUniforms};
-use crate::text_render::TextRenderer;
-use crate::{CantusApp, GpuPass, GpuResources, ImageAtlas, MAX_RENDER_INSTANCES, PARTICLE_COUNT};
-use cantus_shared::{GlyphInstance, MAX_GLYPH_INSTANCES};
-use std::array;
-use std::mem::size_of;
-use std::sync::Arc;
+use crate::{
+    CantusApp, GpuPass, GpuResources, ImageAtlas, MAX_RENDER_INSTANCES, PARTICLE_COUNT,
+    text_render::TextRenderer,
+};
+use cantus_shared::{
+    BackgroundPill, GlobalUniforms, GlyphInstance, MAX_GLYPH_INSTANCES, Particle, PlayheadUniforms,
+};
+use std::{array, mem::size_of, sync::Arc};
 use wgpu::{
     BindGroupDescriptor, BindGroupEntry, BindGroupLayout, BindGroupLayoutDescriptor,
     BindGroupLayoutEntry, BindingResource, BindingType, BlendState, BufferBindingType,
@@ -216,7 +217,6 @@ impl CantusApp {
             "background::vs_background",
             "background::fs_background",
         );
-        let icon_pipeline = create_pipe("Icons", &std_layout, "icons::vs_icons", "icons::fs_icons");
         let text_pipeline = create_pipe("Text", &text_layout, "text::vs_text", "text::fs_text");
 
         let uniform_buffer = device.create_buffer(&BufferDescriptor {
@@ -284,19 +284,6 @@ impl CantusApp {
                 BindingResource::Sampler(&sampler),
             ],
         );
-        let icons = gpu_pass(
-            &device,
-            "Icons",
-            &std_layout,
-            icon_pipeline,
-            &uniform_buffer,
-            (size_of::<IconInstance>() * MAX_RENDER_INSTANCES) as u64,
-            BufferUsages::STORAGE,
-            [
-                BindingResource::TextureView(&image_view),
-                BindingResource::Sampler(&sampler),
-            ],
-        );
         let text = gpu_pass(
             &device,
             "Text",
@@ -319,7 +306,6 @@ impl CantusApp {
             uniform_buffer,
             playhead,
             background,
-            icons,
             text,
             particles,
             images: ImageAtlas {

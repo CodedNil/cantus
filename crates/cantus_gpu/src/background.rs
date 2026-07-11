@@ -1,12 +1,15 @@
-use core::f32::consts::PI;
-
 use crate::common::{
-    pixel_to_ndc, quad_coord, sd_capsule_box, sd_squircle, smooth_union, smoothstep, unpack3x8unorm,
+    pixel_to_ndc, quad_coord, sd_capsule_box, sd_squircle, sd_star, smooth_union, smoothstep,
+    unpack3x8unorm,
 };
-use cantus_shared::{BackgroundPill, GlobalUniforms, ICON_SPACING};
+use cantus_shared::{
+    BACKPLATE_HOVER_GROWTH, BACKPLATE_RADIUS, BackgroundPill, GlobalUniforms,
+    ICON_HITBOX_HALF_SIZE, ICON_SPACING, MAX_PILL_PLAYLIST_ICONS, pill_icon_primary_center_y,
+};
+use core::f32::consts::PI;
 use spirv_std::{
     Sampler,
-    arch::kill,
+    arch::{Derivative, kill},
     glam::{Vec2, Vec3, Vec4, vec2, vec3},
     image::Image2dArray,
     spirv,
@@ -15,13 +18,10 @@ use spirv_std::{
 #[cfg(target_arch = "spirv")]
 use spirv_std::num_traits::Float;
 
-const BACKPLATE_RADIUS: f32 = 10.0;
-const BACKPLATE_HOVER_GROWTH: f32 = 8.0;
-const BACKPLATE_END_PADDING: f32 = 3.0;
-const BACKPLATE_Y_OFFSET: f32 = -6.0;
-const PRIMARY_SMOOTHING: f32 = 9.0;
-const SECONDARY_SMOOTHING: f32 = 12.0;
 const ART_SHARED_WARP: f32 = 0.4;
+const ICON_QUAD_RADIUS: f32 = 12.6;
+const ICON_HOVER_SCALE: f32 = 0.6;
+const PRIMARY_SMOOTHING: f32 = 30.0;
 
 fn repeat_art_uv(uv: Vec2) -> Vec2 {
     vec2(
@@ -31,12 +31,66 @@ fn repeat_art_uv(uv: Vec2) -> Vec2 {
 }
 
 fn primary_fade(pill: &BackgroundPill) -> f32 {
-    if pill.primary_icon_count <= 0.0 {
+    let primary_icon_count = pill.primary_icon_count();
+    if primary_icon_count <= 0.0 {
         return pill.secondary_expansion;
     }
-    let needed_width = ICON_SPACING * pill.primary_icon_count * 0.7;
-    let width_fade = ((pill.rect.y - needed_width) / (needed_width * 0.5)).clamp(0.0, 1.0);
+    let needed_width = ICON_SPACING * primary_icon_count * 0.7;
+    let width_fade = ((pill.width - needed_width) / (needed_width * 0.5)).clamp(0.0, 1.0);
     width_fade.max(pill.secondary_expansion)
+}
+
+fn icon_local(pixel_pos: Vec2, center: Vec2, global: &GlobalUniforms) -> (Vec2, Vec2, f32) {
+    let pressure = global.mouse_pressure.clamp(0.001, 1.0);
+    let proximity = smoothstep(30.0, 8.0, center.distance(global.mouse_pos) / pressure);
+    let pixel_radius = ICON_QUAD_RADIUS * (1.0 + ICON_HOVER_SCALE * proximity);
+    let x_push = (center.x - global.mouse_pos.x) * proximity * 0.5;
+    let local = pixel_pos - (center + vec2(x_push, 0.0));
+    let local = if proximity > 0.0 {
+        let angle = -x_push * 0.01;
+        let sin = angle.sin();
+        let cos = angle.cos();
+        vec2(local.x * cos - local.y * sin, local.x * sin + local.y * cos)
+    } else {
+        local
+    };
+    (local / (pixel_radius * 2.0) + 0.5, local, pixel_radius)
+}
+
+fn star_overlay(
+    pixel_pos: Vec2,
+    center: Vec2,
+    fill: f32,
+    tint: Vec3,
+    alpha: f32,
+    global: &GlobalUniforms,
+) -> Vec4 {
+    let (local_uv, local_pixel, pixel_radius) = icon_local(pixel_pos, center, global);
+    let dist = sd_star(local_pixel, pixel_radius * 0.5, pixel_radius * 0.32) - pixel_radius * 0.1;
+    let split_line = local_uv.x - fill;
+    let selection_mask = (split_line / split_line.fwidth() + 0.5).clamp(0.0, 1.0);
+    let color = vec3(1.0, 0.85, 0.2)
+        .lerp(vec3(0.33, 0.33, 0.33), selection_mask)
+        .lerp(tint, 0.16);
+    icon_overlay(color, dist, alpha)
+}
+
+fn icon_overlay(color: Vec3, dist: f32, alpha: f32) -> Vec4 {
+    let mask = (0.5 - dist).clamp(0.0, 1.0);
+    let shadow = 1.0 - smoothstep(0.0, 6.0, dist);
+    let shadow = shadow * shadow * 0.2;
+    if mask <= 0.0 && shadow <= 0.0 {
+        return Vec4::ZERO;
+    }
+    let highlighting = 1.0 - smoothstep(0.0, -5.0, dist);
+    let highlighting2 = highlighting * highlighting;
+    let highlighting = highlighting2 * highlighting2 * 0.04;
+    ((color + highlighting) * mask * alpha).extend(mask.max(shadow) * alpha)
+}
+
+fn over_premul(base: Vec4, overlay: Vec4, alpha: f32) -> Vec4 {
+    let overlay = (overlay.truncate() * alpha).extend(overlay.w * alpha);
+    base * (1.0 - overlay.w) + overlay
 }
 
 #[spirv(vertex)]
@@ -52,33 +106,26 @@ pub fn vs_background(
     let pill = pills[i_idx as usize];
     let margin = 16.0;
     let unit_coord = quad_coord(v_idx);
-    let pill_size = vec2(pill.rect.y, global.bar_height.y);
-    let pill_origin = vec2(pill.rect.x, global.bar_height.x);
+    let pill_size = vec2(pill.width, global.bar_height.y);
+    let pill_origin = vec2(pill.x, global.bar_height.x);
 
-    let primary_fade = primary_fade(&pill);
-    let icon_visibility = primary_fade.max(pill.secondary_expansion);
-    let icon_center_x = pill_origin.x + pill_size.x * 0.5;
-    let icon_radius =
-        (BACKPLATE_RADIUS + BACKPLATE_HOVER_GROWTH + SECONDARY_SMOOTHING * 0.25) * icon_visibility;
-    let primary_half_span = (pill.primary_icon_count - 1.0).max(0.0) * ICON_SPACING * 0.5;
-    let secondary_half_span = (pill.secondary_icon_count - 1.0).max(0.0) * ICON_SPACING * 0.5;
-    let icon_half_width = (primary_half_span.max(secondary_half_span * pill.secondary_expansion)
-        + BACKPLATE_END_PADDING)
-        * icon_visibility
-        + icon_radius;
+    let icon_radius = BACKPLATE_RADIUS + BACKPLATE_HOVER_GROWTH + ICON_HITBOX_HALF_SIZE * 0.25;
+    let (primary_row, secondary_row) = pill.icon_rows(pill_icon_primary_center_y(
+        global.bar_height.x,
+        global.bar_height.y,
+    ));
+    let icon_half_size = primary_row
+        .half_size(icon_radius)
+        .max(secondary_row.half_size(icon_radius))
+        * primary_fade(&pill);
     let render_min = vec2(
-        (pill_origin.x - margin).min(icon_center_x - icon_half_width),
+        (pill_origin.x - margin).min(primary_row.center.x - icon_half_size.x),
         pill_origin.y - margin,
     );
     let render_max = vec2(
-        (pill_origin.x + pill_size.x + margin).max(icon_center_x + icon_half_width),
-        (pill_origin.y + pill_size.y + margin).max(
-            global.bar_height.x
-                + global.bar_height.y * 0.975
-                + BACKPLATE_Y_OFFSET
-                + ICON_SPACING * pill.secondary_expansion
-                + icon_radius,
-        ),
+        (pill_origin.x + pill_size.x + margin).max(primary_row.center.x + icon_half_size.x),
+        (pill_origin.y + pill_size.y + margin)
+            .max(secondary_row.backplate_center().y + icon_half_size.y),
     );
 
     let pixel_pos = render_min + unit_coord * (render_max - render_min);
@@ -98,12 +145,11 @@ pub fn fs_background(
     #[spirv(location = 0)] out_color: &mut Vec4,
 ) {
     let pill = pills[pill_idx as usize];
-    let pill_size = vec2(pill.rect.y, global.bar_height.y);
-    let pill_origin = vec2(pill.rect.x, global.bar_height.x);
+    let pill_size = vec2(pill.width, global.bar_height.y);
+    let pill_origin = vec2(pill.x, global.bar_height.x);
     let local_pixel = pixel_pos - pill_origin;
     let local_uv = local_pixel / pill_size;
     let world_uv = local_pixel / global.screen_size.y;
-    let rounding = 22.0;
 
     let anim_t = (global.time - global.expansion_time) * 1.2;
     let ripple_active = if anim_t * (1.0 - anim_t) >= 0.0 {
@@ -130,50 +176,39 @@ pub fn fs_background(
 
     let bulge = ripple_str * 22.0 + mouse_inf * 8.0;
     let stretched_uv_y = (local_uv.y - 0.5) * (pill_size.y / (pill_size.y + bulge)) + 0.5;
+    let icon_center_y = pill_icon_primary_center_y(global.bar_height.x, global.bar_height.y);
+    let local_icon_growth = mouse_inf * BACKPLATE_HOVER_GROWTH;
+    let primary_fade = primary_fade(&pill);
+    let (primary_row, secondary_row) = pill.icon_rows(icon_center_y);
     let pill_dist = sd_squircle(
         (local_uv - 0.5) * pill_size,
         (pill_size + vec2(0.0, bulge)) * 0.5,
-        rounding,
+        BACKPLATE_RADIUS + ICON_HITBOX_HALF_SIZE,
     );
-    let icon_center_x = pill.rect.x + pill.rect.y * 0.5;
-    let primary_center_y = global.bar_height.x + global.bar_height.y * 0.975 + BACKPLATE_Y_OFFSET;
-    let local_icon_growth = mouse_inf * BACKPLATE_HOVER_GROWTH;
-    let primary_fade = primary_fade(&pill);
     let mut dist = pill_dist;
     if primary_fade > 0.0 {
         let primary_dist = sd_capsule_box(
-            pixel_pos - vec2(icon_center_x, primary_center_y),
-            (pill.primary_icon_count - 1.0).max(0.0) * ICON_SPACING * 0.5 + BACKPLATE_END_PADDING,
+            pixel_pos - primary_row.backplate_center(),
+            primary_row.padded_half_span(),
             BACKPLATE_RADIUS + local_icon_growth,
         );
         dist = smooth_union(dist, primary_dist, PRIMARY_SMOOTHING, primary_fade);
     }
     if pill.secondary_expansion > 0.0 {
-        let secondary_center = vec2(
-            icon_center_x,
-            primary_center_y + ICON_SPACING * pill.secondary_expansion,
-        );
         let secondary_dist = sd_capsule_box(
-            pixel_pos - secondary_center,
-            (pill.secondary_icon_count - 1.0).max(0.0)
-                * ICON_SPACING
-                * 0.5
-                * pill.secondary_expansion
-                + BACKPLATE_END_PADDING,
+            pixel_pos - secondary_row.backplate_center(),
+            secondary_row.padded_half_span(),
             BACKPLATE_RADIUS + local_icon_growth,
         );
         dist = smooth_union(
             dist,
             secondary_dist,
-            SECONDARY_SMOOTHING,
+            ICON_HITBOX_HALF_SIZE,
             pill.secondary_expansion,
         );
     }
     let mask = (0.5 - dist).clamp(0.0, 1.0);
     let shadow = (1.0 - smoothstep(0.0, 14.0, dist)) * 0.16;
-    if mask <= 0.0 && shadow <= 0.0 {
-        kill();
-    }
 
     let seed = (pill.colors[0] % 1000) as f32 * 29.537;
     let t = global.time * 0.15 + seed;
@@ -253,7 +288,7 @@ pub fn fs_background(
                 sd_squircle(
                     (uv_img - 0.5) * pill_size.y,
                     vec2(pill_size.y * 0.5, pill_size.y * 0.5),
-                    rounding,
+                    BACKPLATE_RADIUS + ICON_HITBOX_HALF_SIZE,
                 ),
             );
         color = color.lerp(tex.truncate(), img_mask * tex.w);
@@ -271,5 +306,78 @@ pub fn fs_background(
 
     let alpha = mask.max(shadow) * pill.alpha;
     // Keep shadows black while premultiplying the visible pill color.
-    *out_color = (color * mask * pill.alpha).extend(alpha);
+    let mut output = (color * mask * pill.alpha).extend(alpha);
+
+    let stars = pill.star_count();
+    if pill.rating >= 0 && primary_row.count > 0.0 {
+        let mut rating = pill.rating as f32;
+        if global.mouse_pressure > 0.0 {
+            for index in 0..5 {
+                if let Some(center) = primary_row.hit_icon(index as f32, global.mouse_pos) {
+                    rating = index as f32 * 2.0
+                        + 1.0
+                        + if global.mouse_pos.x >= center.x {
+                            1.0
+                        } else {
+                            0.0
+                        };
+                }
+            }
+        }
+        for index in 0..5 {
+            let fill = ((rating - index as f32 * 2.0) * 0.5).clamp(0.0, 1.0);
+            let center = primary_row.icon_center(index as f32);
+            output = over_premul(
+                output,
+                star_overlay(pixel_pos, center, fill, color, primary_fade, global),
+                pill.alpha,
+            );
+        }
+    }
+
+    let primary_playlists = pill.primary_playlist_count as usize;
+    let playlist_count =
+        (primary_playlists + pill.secondary_playlist_count as usize).min(MAX_PILL_PLAYLIST_ICONS);
+    for index in 0..playlist_count {
+        let image_index = pill.playlist_images[index];
+        if image_index < 0 {
+            continue;
+        }
+
+        let (row_start, row, alpha, icon_offset) = if index < primary_playlists {
+            (0, primary_row, primary_fade, stars)
+        } else {
+            (
+                primary_playlists,
+                secondary_row,
+                pill.secondary_expansion,
+                0.0,
+            )
+        };
+        let icon_index = (index - row_start) as f32 + icon_offset;
+        let center = row.icon_center(icon_index);
+        let desaturation = if index < primary_playlists
+            || (global.mouse_pressure > 0.0
+                && center.distance(global.mouse_pos) <= ICON_HITBOX_HALF_SIZE)
+        {
+            0.0
+        } else {
+            0.2
+        };
+
+        let (local_uv, local_pixel, pixel_radius) = icon_local(pixel_pos, center, global);
+        let dist = sd_squircle(
+            local_pixel,
+            vec2(pixel_radius * 0.6, pixel_radius * 0.6),
+            6.0,
+        );
+        let tex = images.sample(*sampler, local_uv.extend(image_index as f32));
+        let color = tex.truncate().lerp(Vec3::splat(0.24), desaturation);
+        output = over_premul(output, icon_overlay(color, dist, alpha), pill.alpha);
+    }
+
+    if output.w <= 0.0 {
+        kill();
+    }
+    *out_color = output;
 }

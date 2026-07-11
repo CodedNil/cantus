@@ -300,7 +300,8 @@ impl CantusApp {
                 self.playback_state
                     .queue
                     .iter()
-                    .flat_map(|track| track.runtime.icon_hitboxes.iter().map(|hitbox| hitbox.rect)),
+                    .flat_map(|track| self.icon_row_rects(track, &self.playback_state.playlists))
+                    .flatten(),
             )
     }
 }

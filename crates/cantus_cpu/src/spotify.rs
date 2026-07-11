@@ -44,7 +44,6 @@ const VERIFIER_BYTES: usize = 43;
 const REDIRECT_HOST: &str = "127.0.0.1";
 const REDIRECT_PORT: u16 = 7474;
 
-#[derive(Debug)]
 pub struct SpotifyClient {
     client_id: String,
     cache_path: PathBuf,
@@ -99,7 +98,7 @@ struct Device {
     volume_percent: Option<u32>,
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Serialize, Deserialize)]
 struct Token {
     #[serde(rename = "access_token")]
     access: String,

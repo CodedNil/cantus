@@ -1,26 +1,21 @@
 use crate::{
     AppUpdater, CantusApp, CondensedPlaylist, PANEL_START, PlaylistId, Track, TrackId,
-    render::{IconInstance, Rect, lerpf32},
+    render::{Rect, lerpf32},
     spotify,
 };
-use cantus_shared::ICON_SPACING;
+use cantus_shared::{
+    BACKPLATE_HOVER_GROWTH, BACKPLATE_RADIUS, BackgroundPill, MAX_PILL_PLAYLIST_ICONS, PillIconRow,
+    pill_icon_primary_center_y, pill_icon_rows,
+};
 use glam::{Vec2, vec2};
-use smallvec::SmallVec;
+use std::{f32::consts::PI, sync::Arc};
 use std::{
-    cmp::Ordering,
     thread::spawn,
     time::{Duration, Instant},
 };
-use std::{f32::consts::PI, sync::Arc};
 use tracing::{error, info, warn};
 
-pub struct IconHitbox {
-    pub rect: Rect,
-    pub action: IconAction,
-}
-
-#[derive(Clone, Copy)]
-pub enum IconAction {
+enum IconAction {
     Rate(u8),
     TogglePlaylist(PlaylistId),
 }
@@ -28,7 +23,6 @@ pub enum IconAction {
 #[derive(Default)]
 pub struct InteractionState {
     pub mouse_pressure: f32, // 0 not hovered - 1 hovered - 2 mouse down
-
     pub mouse_down: bool,
     pub dragging: bool,
     pub drag_origin: Option<Vec2>,
@@ -79,14 +73,28 @@ impl CantusApp {
         let playing = self.playback_state.playing;
 
         // Click on rating/playlist icons
-        if let Some((track_id, rect, action)) = self.playback_state.queue.iter().find_map(|track| {
-            let hitbox = track
-                .runtime
-                .icon_hitboxes
-                .iter()
-                .find(|hitbox| hitbox.rect.contains(mouse_pos))?;
-            Some((track.id?, hitbox.rect, hitbox.action))
-        }) {
+        let icon_click = |app: &Self, track: &Track| {
+            app.icon_at(
+                track,
+                track.runtime.playlist_expansion,
+                &app.playback_state.playlists,
+            )
+        };
+
+        if let Some((track_id, action)) = self
+            .render_state
+            .hovered_track
+            .and_then(|index| self.playback_state.queue.get(index))
+            .and_then(|track| icon_click(self, track))
+            .or_else(|| {
+                self.playback_state
+                    .queue
+                    .iter()
+                    .enumerate()
+                    .filter(|(index, _)| Some(*index) != self.render_state.hovered_track)
+                    .find_map(|(_, track)| icon_click(self, track))
+            })
+        {
             // Spawn particles
             let time = self.start_time.elapsed().as_secs_f32();
             for particle in self
@@ -106,10 +114,8 @@ impl CantusApp {
             }
 
             match action {
-                IconAction::Rate(index) if self.config.ratings_enabled => {
-                    let center_x = (rect.x0 + rect.x1) * 0.5;
-                    let rating_slot = index * 2 + u8::from(mouse_pos.x >= center_x);
-                    self.update_star_rating(track_id, rating_slot);
+                IconAction::Rate(rating) if self.config.ratings_enabled => {
+                    self.update_star_rating(track_id, rating);
                 }
                 IconAction::TogglePlaylist(playlist_id) => {
                     self.toggle_playlist_membership(track_id, playlist_id);
@@ -197,197 +203,161 @@ impl CantusApp {
     }
 }
 
-enum IconEntry<'a> {
-    Star {
-        index: u8,
-    },
-    Playlist {
-        playlist: &'a CondensedPlaylist,
-        contained: bool,
-    },
-}
-
-impl IconEntry<'_> {
-    const fn is_secondary(&self) -> bool {
-        matches!(
-            self,
-            Self::Playlist {
-                contained: false,
-                ..
-            }
-        )
-    }
-}
-
 impl CantusApp {
-    /// Star ratings and favourite playlists
-    pub fn draw_playlist_buttons(
-        &mut self,
-        track: &mut Track,
-        hovered: bool,
+    fn playlist_icons(
+        track_id: TrackId,
+        playlists: &[CondensedPlaylist],
+        contains_track: bool,
+    ) -> impl Iterator<Item = &CondensedPlaylist> {
+        playlists.iter().filter(move |p| {
+            p.rating_index.is_none() && p.tracks.contains(&track_id) == contains_track
+        })
+    }
+
+    fn icon_layout(
+        &self,
+        track: &Track,
         secondary_expansion: f32,
         playlists: &[CondensedPlaylist],
-    ) -> Option<(f32, f32)> {
-        let width = track.runtime.width;
-        let pos_x = track.runtime.start_x;
+    ) -> Option<(TrackId, usize, usize, PillIconRow, PillIconRow)> {
         let track_id = track.id?;
-        let mut entries = SmallVec::<[IconEntry; 10]>::new();
-        let track_rating_index = if self.config.ratings_enabled {
-            let rating = playlists
-                .iter()
-                .find_map(|p| {
-                    p.rating_index
-                        .filter(|_| p.tracks.contains(&track_id))
-                        .map(|rating| rating + 1)
-                })
-                .unwrap_or(0);
-            entries.extend((0..5).map(|index| IconEntry::Star { index }));
-            rating
+        let primary = Self::playlist_icons(track_id, playlists, true)
+            .take(MAX_PILL_PLAYLIST_ICONS)
+            .count();
+        let secondary = if secondary_expansion > 0.0 {
+            Self::playlist_icons(track_id, playlists, false)
+                .take(MAX_PILL_PLAYLIST_ICONS - primary)
+                .count()
         } else {
             0
         };
-
-        entries.extend(
-            playlists
-                .iter()
-                .filter(|p| p.rating_index.is_none() && p.tracks.contains(&track_id))
-                .map(|playlist| IconEntry::Playlist {
-                    playlist,
-                    contained: true,
-                }),
+        let stars = usize::from(self.config.ratings_enabled) * 5;
+        let (primary_row, secondary_row) = pill_icon_rows(
+            track.runtime.start_x + track.runtime.width * 0.5,
+            pill_icon_primary_center_y(PANEL_START, self.config.height),
+            (stars + primary) as f32,
+            secondary as f32,
+            secondary_expansion,
         );
+        Some((track_id, stars, primary, primary_row, secondary_row))
+    }
+
+    pub fn icon_row_rects(
+        &self,
+        track: &Track,
+        playlists: &[CondensedPlaylist],
+    ) -> [Option<Rect>; 2] {
+        let Some((_, _, _, primary_row, secondary_row)) =
+            self.icon_layout(track, track.runtime.playlist_expansion, playlists)
+        else {
+            return [None, None];
+        };
+        let radius = BACKPLATE_RADIUS + BACKPLATE_HOVER_GROWTH;
+        let rect = |row: PillIconRow| {
+            let half_size = row.half_size(radius);
+            Rect::new(
+                row.center.x - half_size.x,
+                row.center.y - half_size.y,
+                row.center.x + half_size.x,
+                row.center.y + half_size.y,
+            )
+        };
+        [
+            (primary_row.count > 0.0).then(|| rect(primary_row)),
+            (secondary_row.count > 0.0 && secondary_row.expansion > 0.0)
+                .then(|| rect(secondary_row)),
+        ]
+    }
+
+    fn icon_at(
+        &self,
+        track: &Track,
+        secondary_expansion: f32,
+        playlists: &[CondensedPlaylist],
+    ) -> Option<(TrackId, IconAction)> {
+        let mouse_pos = self.global_uniforms.mouse_pos;
+        let (track_id, stars, primary_playlists, primary_row, secondary_row) =
+            self.icon_layout(track, secondary_expansion, playlists)?;
+
+        for index in 0..stars {
+            if let Some(center) = primary_row.hit_icon(index as f32, mouse_pos) {
+                let rating = index as u8 * 2 + u8::from(mouse_pos.x >= center.x);
+                return Some((track_id, IconAction::Rate(rating)));
+            }
+        }
+
+        for (index, playlist) in Self::playlist_icons(track_id, playlists, true)
+            .take(primary_playlists)
+            .enumerate()
+        {
+            if primary_row
+                .hit_icon((stars + index) as f32, mouse_pos)
+                .is_some()
+            {
+                return Some((track_id, IconAction::TogglePlaylist(playlist.id)));
+            }
+        }
+
+        for (index, playlist) in Self::playlist_icons(track_id, playlists, false)
+            .take(secondary_row.count as usize)
+            .enumerate()
+        {
+            if secondary_row.hit_icon(index as f32, mouse_pos).is_some() {
+                return Some((track_id, IconAction::TogglePlaylist(playlist.id)));
+            }
+        }
+
+        None
+    }
+
+    /// Star ratings and favourite playlists
+    pub fn draw_playlist_buttons(
+        &mut self,
+        track: &Track,
+        secondary_expansion: f32,
+        playlists: &[CondensedPlaylist],
+        pill: &mut BackgroundPill,
+    ) -> bool {
+        let Some(track_id) = track.id else {
+            return false;
+        };
+        let mut primary_playlist_count = 0usize;
+        let mut secondary_playlist_count = 0usize;
+
+        for playlist in
+            Self::playlist_icons(track_id, playlists, true).take(MAX_PILL_PLAYLIST_ICONS)
+        {
+            pill.playlist_images[primary_playlist_count] = self.get_image_index(&playlist.art);
+            primary_playlist_count += 1;
+        }
+
         if secondary_expansion > 0.0 {
-            entries.extend(
+            for playlist in Self::playlist_icons(track_id, playlists, false)
+                .take(MAX_PILL_PLAYLIST_ICONS - primary_playlist_count)
+            {
+                pill.playlist_images[primary_playlist_count + secondary_playlist_count] =
+                    self.get_image_index(&playlist.art);
+                secondary_playlist_count += 1;
+            }
+        }
+
+        pill.rating = if self.config.ratings_enabled {
+            i32::from(
                 playlists
                     .iter()
-                    .filter(|p| p.rating_index.is_none() && !p.tracks.contains(&track_id))
-                    .map(|playlist| IconEntry::Playlist {
-                        playlist,
-                        contained: false,
-                    }),
-            );
-        }
-
-        // Fade out and fit based on size
-        let mouse_pos = self.global_uniforms.mouse_pos;
-
-        if entries.is_empty() {
-            return None;
-        }
-        let primary_count = entries.iter().filter(|entry| !entry.is_secondary()).count();
-        let secondary_count = entries.len() - primary_count;
-
-        let needed_width = ICON_SPACING * primary_count as f32 * 0.7;
-
-        let width_fade = if primary_count > 0 {
-            ((width - needed_width) / (needed_width * 0.5)).clamp(0.0, 1.0)
+                    .find_map(|p| {
+                        p.rating_index
+                            .filter(|_| p.tracks.contains(&track_id))
+                            .map(|rating| rating + 1)
+                    })
+                    .unwrap_or(0),
+            )
         } else {
-            0.0
+            -1
         };
-        let fade_alpha = if hovered { 1.0 } else { width_fade };
-        let center_x = pos_x + width * 0.5;
-        let center_y = PANEL_START + self.config.height * 0.975;
-
-        let mut hover_rating_index = None;
-        let mut icon_data = SmallVec::<[(IconEntry, bool, Vec2); 10]>::new();
-        let mut primary_index = 0;
-        let mut secondary_index = 0;
-
-        for entry in entries {
-            let secondary = entry.is_secondary();
-            let (row_index, row_count, origin_y) = if secondary {
-                let index = secondary_index;
-                secondary_index += 1;
-                (
-                    index,
-                    secondary_count,
-                    center_y + ICON_SPACING * secondary_expansion,
-                )
-            } else {
-                let index = primary_index;
-                primary_index += 1;
-                (index, primary_count, center_y)
-            };
-            let row_center = (row_count.saturating_sub(1)) as f32 * 0.5;
-            let row_expansion = if secondary { secondary_expansion } else { 1.0 };
-            let origin_x =
-                center_x + (row_index as f32 - row_center) * ICON_SPACING * row_expansion;
-            let half_size = ICON_SPACING * 0.6; // Add slight hitbox padding
-            let rect = Rect::new(
-                origin_x - half_size,
-                origin_y - half_size,
-                origin_x + half_size,
-                origin_y + half_size,
-            );
-            let is_hovered = rect.contains(mouse_pos) && self.interaction.mouse_pressure > 0.0;
-
-            match &entry {
-                IconEntry::Star { index } => {
-                    if is_hovered {
-                        hover_rating_index = Some(
-                            index * 2 + 1 + u8::from(mouse_pos.x >= (rect.x0 + rect.x1) * 0.5),
-                        );
-                    }
-                    track.runtime.icon_hitboxes.push(IconHitbox {
-                        rect,
-                        action: IconAction::Rate(*index),
-                    });
-                }
-                IconEntry::Playlist { playlist, .. } => {
-                    track.runtime.icon_hitboxes.push(IconHitbox {
-                        rect,
-                        action: IconAction::TogglePlaylist(playlist.id),
-                    });
-                }
-            }
-            icon_data.push((entry, is_hovered, vec2(origin_x, origin_y)));
-        }
-
-        // Sort by distance to mouse for overlap rendering
-        icon_data.sort_by(|(_, _, p1), (_, _, p2)| {
-            let mouse = vec2(mouse_pos.x, mouse_pos.y);
-            let d1 = p1.distance_squared(mouse);
-            let d2 = p2.distance_squared(mouse);
-            d2.partial_cmp(&d1).unwrap_or(Ordering::Equal)
-        });
-
-        let display_rating = hover_rating_index.unwrap_or(track_rating_index);
-        let full_stars = display_rating / 2;
-        let has_half = display_rating % 2 == 1;
-
-        for (entry, is_hovered, origin) in icon_data {
-            let secondary = entry.is_secondary();
-            let icon_alpha = fade_alpha * if secondary { secondary_expansion } else { 1.0 };
-            let instance = IconInstance {
-                pos: origin,
-                data: (((icon_alpha * 65535.0) as u32) << 16)
-                    | (match entry {
-                        IconEntry::Star { index } => {
-                            (if index < full_stars {
-                                1.0
-                            } else if index == full_stars && has_half {
-                                0.75
-                            } else {
-                                0.51
-                            } * 65535.0) as u32
-                        }
-                        IconEntry::Playlist { contained, .. } => {
-                            if !contained && !is_hovered {
-                                (65535.0 * 0.2) as u32
-                            } else {
-                                0
-                            }
-                        }
-                    }),
-                image_index: match entry {
-                    IconEntry::Playlist { playlist, .. } => self.get_image_index(&playlist.art),
-                    IconEntry::Star { .. } => 0,
-                },
-            };
-            self.icon_pills.push(instance);
-        }
-
-        Some((primary_count as f32, secondary_count as f32))
+        pill.primary_playlist_count = primary_playlist_count as u32;
+        pill.secondary_playlist_count = secondary_playlist_count as u32;
+        self.config.ratings_enabled || primary_playlist_count > 0 || secondary_playlist_count > 0
     }
 }
 

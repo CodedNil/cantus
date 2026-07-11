@@ -4,7 +4,7 @@ use crate::common::{
 use cantus_shared::{GlobalUniforms, PlayheadUniforms};
 use spirv_std::{
     arch::kill,
-    glam::{vec2, vec3, Vec2, Vec3, Vec4},
+    glam::{Vec2, Vec3, Vec4, vec2, vec3},
     spirv,
 };
 

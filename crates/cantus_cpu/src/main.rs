@@ -2,12 +2,11 @@ use crate::{
     art::{AlbumArt, ArtState},
     interaction::InteractionState,
     pipelines::{IMAGE_SIZE, MAX_TEXTURE_IMAGES},
-    render::{
-        BackgroundPill, GlobalUniforms, IconInstance, Particle, PlayheadUniforms, RenderState,
-    },
+    render::RenderState,
     text_render::TextRenderer,
 };
 use arrayvec::ArrayString;
+use cantus_shared::{BackgroundPill, GlobalUniforms, Particle, PlayheadUniforms};
 use serde::{Deserialize, Deserializer, de};
 use std::{
     collections::HashSet,
@@ -63,7 +62,6 @@ struct CantusApp {
     // Scene & Resources
     global_uniforms: GlobalUniforms,
     background_pills: Vec<BackgroundPill>,
-    icon_pills: Vec<IconInstance>,
     playhead_info: PlayheadUniforms,
 }
 
@@ -93,7 +91,6 @@ impl Default for CantusApp {
 
             global_uniforms: GlobalUniforms::default(),
             background_pills: Vec::new(),
-            icon_pills: Vec::new(),
             playhead_info: PlayheadUniforms::default(),
         }
     }
@@ -154,7 +151,6 @@ struct TrackRuntime {
     start_x: f32,
     width: f32,
     art_only: bool,
-    icon_hitboxes: Vec<interaction::IconHitbox>,
 }
 
 impl Track {
@@ -223,7 +219,6 @@ struct GpuResources {
     uniform_buffer: Buffer,
     playhead: GpuPass,
     background: GpuPass,
-    icons: GpuPass,
     text: GpuPass,
     particles: GpuPass,
     images: ImageAtlas,
@@ -384,8 +379,6 @@ impl CantusApp {
             }
         };
 
-        self.icon_pills.clear();
-
         let gpu = self.gpu_resources.as_mut().unwrap();
         gpu.images.begin_frame();
         gpu.text_renderer.begin_frame();
@@ -438,9 +431,6 @@ impl CantusApp {
 
             gpu.text
                 .draw_data(&gpu.queue, &mut rpass, gpu.text_renderer.glyphs());
-
-            gpu.icons
-                .draw_data(&gpu.queue, &mut rpass, &self.icon_pills);
 
             gpu.particles.draw(&mut rpass, PARTICLE_COUNT as u32);
 

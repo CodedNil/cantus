@@ -30,7 +30,7 @@ fn display_name(name: &str) -> &str {
     }
 }
 
-#[derive(Clone, Copy, Hash, Eq, PartialEq)]
+#[derive(Hash, Eq, PartialEq)]
 struct AtlasKey {
     glyph_id: u16,
     scale_quarters: u16,

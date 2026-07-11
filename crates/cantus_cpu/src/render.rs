@@ -1,11 +1,10 @@
 use crate::{
     CantusApp, CondensedPlaylist, NUM_SWATCHES, PANEL_START, TRACK_SPACING_MS, Track, art::ArtState,
 };
-pub use cantus_shared::{BackgroundPill, GlobalUniforms, IconInstance, Particle, PlayheadUniforms};
+use cantus_shared::{BackgroundPill, MAX_PILL_PLAYLIST_ICONS};
 use glam::{Vec2, vec2};
 use std::{mem, ops::Range, time::Instant};
 
-#[derive(Copy, Clone, Debug, Default, PartialEq)]
 pub struct Rect {
     pub x0: f32,
     pub y0: f32,
@@ -38,6 +37,7 @@ const PLAYHEAD_TRANSITION_SPEED: f32 = 5.5;
 pub struct RenderState {
     pub last_update: Instant,
     pub track_offset: f32,
+    pub hovered_track: Option<usize>,
     pub recent_speeds: [f32; 8],
     pub speed_idx: usize,
 }
@@ -46,6 +46,7 @@ impl Default for RenderState {
         Self {
             last_update: Instant::now(),
             track_offset: 0.0,
+            hovered_track: None,
             recent_speeds: [0.0; 8],
             speed_idx: 0,
         }
@@ -88,7 +89,6 @@ impl CantusApp {
 
         for track in &mut playback_state.queue {
             track.runtime.width = 0.0;
-            track.runtime.icon_hitboxes.clear();
         }
 
         let drag_offset_ms = if let Some(origin_pos) = self.interaction.drag_origin {
@@ -186,46 +186,38 @@ impl CantusApp {
         );
 
         let hovered_track = if !self.interaction.dragging && self.interaction.mouse_pressure > 0.0 {
-            let mouse_x = self.global_uniforms.mouse_pos.x;
-            playback_state
-                .queue
-                .iter()
-                .enumerate()
-                .rev()
-                .find(|(_, track)| {
-                    let runtime = &track.runtime;
-                    runtime.width > 0.0
-                        && !runtime.art_only
-                        && mouse_x >= runtime.start_x
-                        && mouse_x <= runtime.start_x + runtime.width
-                })
-                .map(|(index, _)| index)
+            self.hovered_track(&playback_state.queue, &playback_state.playlists)
         } else {
             None
         };
+        self.render_state.hovered_track = hovered_track;
+
         // Render the tracks
         self.background_pills.clear();
-        let mut current_track = None;
+        let current_track = playback_state.queue.iter().position(|track| {
+            playhead_x >= track.runtime.start_x
+                && playhead_x <= track.runtime.start_x + track.runtime.width
+        });
         let playlists = &playback_state.playlists;
+
         for (queue_index, track) in playback_state.queue.iter_mut().enumerate() {
+            if hovered_track == Some(queue_index) {
+                continue;
+            }
             let runtime = &track.runtime;
             if runtime.width <= 0.0 || runtime.start_x + runtime.width <= 0.0 {
                 continue;
             }
-            self.draw_track(
-                track,
-                playhead_x,
-                hovered_track == Some(queue_index),
-                dt,
-                px_per_ms,
-                playlists,
-            );
-            if playhead_x >= track.runtime.start_x
-                && playhead_x <= track.runtime.start_x + track.runtime.width
-            {
-                current_track = Some(queue_index);
+            self.draw_track(track, playhead_x, false, dt, px_per_ms, playlists);
+        }
+
+        if let Some(queue_index) = hovered_track {
+            let track = &mut playback_state.queue[queue_index];
+            if track.runtime.width > 0.0 && track.runtime.start_x + track.runtime.width > 0.0 {
+                self.draw_track(track, playhead_x, true, dt, px_per_ms, playlists);
             }
         }
+
         // Draw the particles
         self.render_playhead_particles(
             dt,
@@ -235,6 +227,34 @@ impl CantusApp {
             playback_state.playing,
         );
         self.playback_state = playback_state;
+    }
+
+    fn hovered_track(&self, queue: &[Track], playlists: &[CondensedPlaylist]) -> Option<usize> {
+        let mouse_pos = self.global_uniforms.mouse_pos;
+        let in_track = |track: &Track| {
+            track
+                .runtime
+                .rect(self.config.height)
+                .is_some_and(|rect| rect.contains(mouse_pos))
+                || self
+                    .icon_row_rects(track, playlists)
+                    .into_iter()
+                    .flatten()
+                    .any(|rect| rect.contains(mouse_pos))
+        };
+
+        if let Some(index) = self.render_state.hovered_track
+            && queue.get(index).is_some_and(in_track)
+        {
+            return Some(index);
+        }
+
+        queue
+            .iter()
+            .enumerate()
+            .rev()
+            .find(|(_, track)| in_track(track))
+            .map(|(index, _)| index)
     }
 
     fn draw_track(
@@ -248,12 +268,12 @@ impl CantusApp {
     ) {
         let width = track.runtime.width;
         let start_x = track.runtime.start_x;
-        let (hit_start, hit_end) = track.natural_x_range(origin_x, px_per_ms);
         // If dragging, set the drag target to this track, and the position within the track
         if self.interaction.dragging
             && track.runtime.start_ms <= 0.0
             && track.runtime.start_ms + track.duration_ms as f32 >= 0.0
         {
+            let (hit_start, hit_end) = track.natural_x_range(origin_x, px_per_ms);
             self.interaction.drag_track = Some((
                 track.id,
                 (origin_x.max(start_x) - hit_start) / (hit_end - hit_start),
@@ -269,28 +289,29 @@ impl CantusApp {
 
         let image_index = self.get_image_index(&track.art);
         let colors = album_palette(track);
+        let show_details = !track.runtime.art_only;
         let mut playlist_expansion = track.runtime.playlist_expansion;
         move_towards(
             &mut playlist_expansion,
-            if hovered && !track.runtime.art_only {
-                1.0
-            } else {
-                0.0
-            },
+            if hovered && show_details { 1.0 } else { 0.0 },
             dt.min(0.1) * 6.0,
         );
         track.runtime.playlist_expansion = playlist_expansion;
-        let mut pill = BackgroundPill::default();
-        pill.rect = vec2(start_x, width);
-        pill.primary_icon_count = 0.0;
-        pill.secondary_icon_count = 0.0;
-        pill.secondary_expansion = 0.0;
-        pill.colors = colors;
-        pill.alpha = fade_alpha;
-        pill.image_index = image_index;
+        let mut pill = BackgroundPill {
+            x: start_x,
+            width,
+            colors,
+            alpha: fade_alpha,
+            image_index,
+            rating: -1,
+            primary_playlist_count: 0,
+            secondary_playlist_count: 0,
+            secondary_expansion: 0.0,
+            playlist_images: [-1; MAX_PILL_PLAYLIST_ICONS],
+        };
 
         // --- TEXT ---
-        if !track.runtime.art_only
+        if show_details
             && fade_alpha >= 1.0
             && width > self.config.height
             && let Some(gpu) = &mut self.gpu_resources
@@ -300,15 +321,11 @@ impl CantusApp {
         }
 
         // Expand the hitbox vertically so it includes the playlist buttons
-        if !track.runtime.art_only
-            && let Some((primary_icon_count, secondary_icon_count)) =
-                self.draw_playlist_buttons(track, hovered, playlist_expansion, playlists)
+        if show_details
+            && self.draw_playlist_buttons(track, playlist_expansion, playlists, &mut pill)
+            && pill.secondary_playlist_count > 0
         {
-            pill.primary_icon_count = primary_icon_count;
-            pill.secondary_icon_count = secondary_icon_count;
-            if secondary_icon_count > 0.0 {
-                pill.secondary_expansion = playlist_expansion;
-            }
+            pill.secondary_expansion = playlist_expansion;
         }
         self.background_pills.push(pill);
     }
