@@ -8,34 +8,18 @@ use wgpu::{
     TextureUsages, TextureView, TextureViewDescriptor,
 };
 
-const FONT_SIZE: f32 = 17.0;
+const FONT_SIZE: f32 = 16.0;
 const FONT_SIZE_SMALL: f32 = 14.0;
 
 /// Size of the glyph atlas texture (square, in pixels).
 const ATLAS_SIZE: u32 = 2048;
 const ATLAS_PADDING: u32 = 1;
-const POSITION_STEPS: f32 = 10.0;
 const SCALE_STEPS: f32 = 4.0;
-
-fn display_name(name: &str) -> &str {
-    let without_suffix = name.split_once(" -").map_or(name, |(prefix, _)| prefix);
-    let display = without_suffix
-        .split_once('(')
-        .map_or(without_suffix, |(prefix, _)| prefix)
-        .trim();
-    if display.is_empty() {
-        name.trim()
-    } else {
-        display
-    }
-}
 
 #[derive(Hash, Eq, PartialEq)]
 struct AtlasKey {
     glyph_id: u16,
     scale_quarters: u16,
-    phase_x: u8,
-    phase_y: u8,
 }
 
 #[derive(Clone, Copy)]
@@ -104,10 +88,7 @@ impl TextRenderer {
         let glyph = Glyph {
             id: GlyphId(key.glyph_id),
             scale,
-            position: point(
-                f32::from(key.phase_x) / POSITION_STEPS,
-                f32::from(key.phase_y) / POSITION_STEPS,
-            ),
+            position: point(0.0, 0.0),
         };
         let outlined = self.font.as_scaled(scale).outline_glyph(glyph)?;
         let bounds = outlined.px_bounds();
@@ -169,7 +150,7 @@ impl TextRenderer {
         Some(entry)
     }
 
-    pub fn render(&mut self, queue: &Queue, track: &Track, render_scale: f32) {
+    pub fn render(&mut self, queue: &Queue, track: &Track, alpha: f32, render_scale: f32) {
         let text_start_left = track.runtime.start_x + 12.0;
         let text_start_right =
             track.runtime.start_x + track.runtime.width - self.panel_height - 8.0;
@@ -179,10 +160,21 @@ impl TextRenderer {
             return;
         }
 
-        let text_color: [f32; 4] = [0.94, 0.94, 0.94, (available_width / 100.0).min(1.0)];
-        let color_packed = pack_color(text_color);
+        let alpha = alpha.clamp(0.0, 1.0);
 
-        let song_name = display_name(&track.name);
+        let without_suffix = track
+            .name
+            .split_once(" -")
+            .map_or(track.name.as_str(), |(prefix, _)| prefix);
+        let song_name = without_suffix
+            .split_once('(')
+            .map_or(without_suffix, |(prefix, _)| prefix)
+            .trim();
+        let song_name = if song_name.is_empty() {
+            track.name.trim()
+        } else {
+            song_name
+        };
         let top_y = PANEL_START + (self.panel_height * 0.26).floor();
         let bottom_y = PANEL_START + (self.panel_height * 0.57).floor();
 
@@ -208,9 +200,8 @@ impl TextRenderer {
             x,
             top_y,
             size,
-            FONT_SIZE,
             align,
-            color_packed,
+            alpha,
             text_start_right,
             render_scale,
         );
@@ -247,9 +238,8 @@ impl TextRenderer {
                 x,
                 bottom_y,
                 FONT_SIZE_SMALL * bottom_ratio.clamp(0.8, 1.0),
-                FONT_SIZE_SMALL,
                 align,
-                color_packed,
+                alpha,
                 text_start_right,
                 render_scale,
             );
@@ -261,9 +251,8 @@ impl TextRenderer {
                 text_start_left,
                 bottom_y,
                 FONT_SIZE_SMALL,
-                FONT_SIZE_SMALL,
                 Align::Left,
-                color_packed,
+                alpha,
                 text_start_right,
                 render_scale,
             );
@@ -274,9 +263,8 @@ impl TextRenderer {
                 text_start_right,
                 bottom_y,
                 FONT_SIZE_SMALL,
-                FONT_SIZE_SMALL,
                 Align::Right,
-                color_packed,
+                alpha,
                 text_start_right,
                 render_scale,
             );
@@ -313,10 +301,6 @@ fn measure_text(font: &FontArc, text: &str, px_size: f32) -> f32 {
     caret
 }
 
-fn pack_color(color: [f32; 4]) -> u32 {
-    u32::from_le_bytes(color.map(|channel| (channel * 255.0).round() as u8))
-}
-
 fn queue_glyphs(
     renderer: &mut TextRenderer,
     queue: &Queue,
@@ -324,9 +308,8 @@ fn queue_glyphs(
     origin_x: f32,
     origin_y: f32,
     px_size: f32,
-    raster_size: f32,
     align: Align,
-    color: u32,
+    alpha: f32,
     clip_right: f32,
     render_scale: f32,
 ) {
@@ -339,16 +322,15 @@ fn queue_glyphs(
         Align::Right => origin_x - total_width,
     };
 
-    let scale_quarters = (raster_size * render_scale * SCALE_STEPS)
+    let scale_quarters = (FONT_SIZE * render_scale * SCALE_STEPS)
         .round()
         .max(SCALE_STEPS) as u16;
-    let glyph_scale = px_size / raster_size;
+    let glyph_scale = px_size / FONT_SIZE;
     let clip_right = match align {
         Align::Left if total_width - (clip_right - origin_x) > 0.5 / render_scale => clip_right,
         _ => f32::MAX,
     };
-    let physical_baseline_y = (origin_y + baseline_offset) * render_scale / glyph_scale;
-    let (baseline_y, phase_y) = subpixel_position(physical_baseline_y);
+    let baseline_y = origin_y + baseline_offset;
 
     let font = renderer.font.clone();
     let font = font.as_scaled(px_size);
@@ -366,12 +348,9 @@ fn queue_glyphs(
         caret += font.h_advance(glyph_id);
         last_glyph = Some(glyph_id);
 
-        let (caret_x, phase_x) = subpixel_position(glyph_x * render_scale / glyph_scale);
         let key = AtlasKey {
             glyph_id: glyph_id.0,
             scale_quarters,
-            phase_x,
-            phase_y,
         };
         let Some(glyph) = renderer.rasterize_glyph(queue, key) else {
             continue;
@@ -379,8 +358,8 @@ fn queue_glyphs(
         let atlas_size = ATLAS_SIZE as f32;
         renderer.glyphs.push(GlyphInstance {
             pos: vec2(
-                (caret_x + glyph.bearing[0] as f32) * glyph_scale / render_scale,
-                (baseline_y + glyph.bearing[1] as f32) * glyph_scale / render_scale,
+                glyph_x + glyph.bearing[0] as f32 * glyph_scale / render_scale,
+                baseline_y + glyph.bearing[1] as f32 * glyph_scale / render_scale,
             ),
             size: vec2(
                 glyph.size[0] as f32 * glyph_scale / render_scale,
@@ -395,17 +374,7 @@ fn queue_glyphs(
                 (glyph.pos[1] + glyph.size[1]) as f32 / atlas_size,
             ),
             clip_right,
-            color,
+            alpha,
         });
-    }
-}
-
-fn subpixel_position(position: f32) -> (f32, u8) {
-    let base = position.floor();
-    let phase = ((position - base) * POSITION_STEPS).round() as u8;
-    if phase == POSITION_STEPS as u8 {
-        (base + 1.0, 0)
-    } else {
-        (base, phase)
     }
 }

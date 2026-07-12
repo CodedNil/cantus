@@ -147,10 +147,13 @@ struct Track {
 struct TrackRuntime {
     queue_offset_ms: f32,
     playlist_expansion: f32,
+    detail_alpha: f32,
+    primary_icon_alpha: f32,
+    primary_playlist_count: u8,
+    secondary_playlist_count: u8,
     start_ms: f32,
     start_x: f32,
     width: f32,
-    art_only: bool,
 }
 
 impl Track {
@@ -161,9 +164,9 @@ impl Track {
 }
 
 impl TrackRuntime {
-    fn rect(&self, height: f32) -> Option<render::Rect> {
+    fn rect(&self, height: f32) -> Option<Rect> {
         (self.width > 0.0 && self.start_x + self.width > 0.0).then(|| {
-            render::Rect::new(
+            Rect::new(
                 self.start_x,
                 PANEL_START,
                 self.start_x + self.width,
@@ -223,6 +226,24 @@ struct GpuResources {
     particles: GpuPass,
     images: ImageAtlas,
     text_renderer: TextRenderer,
+}
+
+#[derive(Copy, Clone, Default)]
+struct Rect {
+    x0: f32,
+    y0: f32,
+    x1: f32,
+    y1: f32,
+}
+
+impl Rect {
+    const fn new(x0: f32, y0: f32, x1: f32, y1: f32) -> Self {
+        Self { x0, y0, x1, y1 }
+    }
+
+    fn contains(self, p: glam::Vec2) -> bool {
+        p.x >= self.x0 && p.x <= self.x1 && p.y >= self.y0 && p.y <= self.y1
+    }
 }
 
 struct GpuPass {

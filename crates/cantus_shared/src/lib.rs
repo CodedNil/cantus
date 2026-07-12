@@ -38,6 +38,7 @@ pub struct BackgroundPill {
     pub rating: i32,
     pub primary_playlist_count: u32,
     pub secondary_playlist_count: u32,
+    pub primary_alpha: f32,
     pub secondary_expansion: f32,
     pub playlist_images: [i32; MAX_PILL_PLAYLIST_ICONS],
 }
@@ -69,32 +70,31 @@ pub struct GlyphInstance {
     pub atlas_max: Vec2,
     /// Right clip edge in logical pixels.
     pub clip_right: f32,
-    /// Packed RGBA colour.
-    pub color: u32,
+    pub alpha: f32,
 }
 
-pub const ICON_SPACING: f32 = 20.0;
+/// Maximum number of playlist artwork icons carried by one pill instance.
 pub const MAX_PILL_PLAYLIST_ICONS: usize = 8;
-pub const ICON_HITBOX_HALF_SIZE: f32 = ICON_SPACING * 0.6;
+
+/// Visual width, in pixels, of rating and playlist icons before hover growth.
+pub const ICON_WIDTH: f32 = 24.0;
+
+/// Center-to-center icon spacing for rating stars and playlist artwork.
+pub const ICON_SPACING: f32 = 20.0;
+
+/// Corner radius, in pixels, for pill bodies and icon backplates.
 pub const BACKPLATE_RADIUS: f32 = 10.0;
-pub const BACKPLATE_HOVER_GROWTH: f32 = ICON_SPACING * 0.4;
-pub const BACKPLATE_END_PADDING: f32 = ICON_SPACING * 0.15;
-pub const BACKPLATE_Y_OFFSET: f32 = -ICON_HITBOX_HALF_SIZE * 0.5;
 
 impl BackgroundPill {
     pub const fn star_count(&self) -> f32 {
         if self.rating >= 0 { 5.0 } else { 0.0 }
     }
 
-    pub const fn primary_icon_count(&self) -> f32 {
-        self.star_count() + self.primary_playlist_count as f32
-    }
-
     pub fn icon_rows(&self, primary_center_y: f32) -> (PillIconRow, PillIconRow) {
         pill_icon_rows(
             self.x + self.width * 0.5,
             primary_center_y,
-            self.primary_icon_count(),
+            self.star_count() + self.primary_playlist_count as f32,
             self.secondary_playlist_count as f32,
             self.secondary_expansion,
         )
@@ -114,7 +114,8 @@ pub struct PillIconRow {
 
 impl PillIconRow {
     pub fn padded_half_span(self) -> f32 {
-        ((self.count - 1.0).max(0.0) * ICON_SPACING * self.expansion * 0.5) + BACKPLATE_END_PADDING
+        let icon_span = (self.count - 1.0).max(0.0) * ICON_SPACING * self.expansion;
+        icon_span * 0.5 + ICON_SPACING * 0.15
     }
 
     pub fn half_size(self, radius: f32) -> Vec2 {
@@ -122,7 +123,7 @@ impl PillIconRow {
     }
 
     pub fn backplate_center(self) -> Vec2 {
-        self.center + Vec2::new(0.0, BACKPLATE_Y_OFFSET)
+        self.center + Vec2::new(0.0, -ICON_WIDTH * 0.25)
     }
 
     pub fn icon_center(self, index: f32) -> Vec2 {
@@ -131,12 +132,6 @@ impl PillIconRow {
             self.center.x + (index - row_center) * ICON_SPACING * self.expansion,
             self.center.y,
         )
-    }
-
-    pub fn hit_icon(self, index: f32, point: Vec2) -> Option<Vec2> {
-        let center = self.icon_center(index);
-        let delta = (point - center).abs();
-        (delta.x <= ICON_HITBOX_HALF_SIZE && delta.y <= ICON_HITBOX_HALF_SIZE).then_some(center)
     }
 }
 
@@ -147,17 +142,29 @@ pub fn pill_icon_rows(
     secondary_count: f32,
     secondary_expansion: f32,
 ) -> (PillIconRow, PillIconRow) {
-    let row = |center_y, count, expansion| PillIconRow {
-        center: Vec2::new(center_x, center_y),
-        count,
-        expansion,
-    };
     (
-        row(primary_center_y, primary_count, 1.0),
-        row(
-            primary_center_y + ICON_SPACING * secondary_expansion,
-            secondary_count,
-            secondary_expansion,
-        ),
+        PillIconRow {
+            center: Vec2::new(center_x, primary_center_y),
+            count: primary_count,
+            expansion: 1.0,
+        },
+        PillIconRow {
+            center: Vec2::new(
+                center_x,
+                primary_center_y + ICON_SPACING * secondary_expansion,
+            ),
+            count: secondary_count,
+            expansion: secondary_expansion,
+        },
     )
+}
+
+pub fn smoothstep(edge0: f32, edge1: f32, x: f32) -> f32 {
+    let t = ((x - edge0) / (edge1 - edge0)).clamp(0.0, 1.0);
+    t * t * (3.0 - 2.0 * t)
+}
+
+pub fn approach(current: &mut f32, target: f32, speed: f32) {
+    let step = speed.abs();
+    *current += (target - *current).clamp(-step, step);
 }

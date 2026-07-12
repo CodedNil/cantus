@@ -1,5 +1,5 @@
-use crate::common::{pixel_to_ndc, quad_coord, smoothstep, unpack4x8unorm};
-use cantus_shared::{GlobalUniforms, Particle};
+use crate::common::{pixel_to_ndc, quad_coord, unpack4x8unorm};
+use cantus_shared::{GlobalUniforms, Particle, smoothstep};
 use spirv_std::{
     arch::kill,
     glam::{Vec2, Vec3, Vec4, vec2, vec3},
@@ -34,7 +34,7 @@ pub fn vs_particles(
     let p_life_inv = 1.0 - p_life;
     let pos = p.spawn_pos + p.spawn_vel * dt;
     let dir = p.spawn_vel.normalize();
-    let perp = vec2(-dir.y, dir.x);
+    let perp = dir.perp();
     let growth = p_life + 0.5;
     let half_len = 5.0 * growth;
     let half_thick = 2.5 * growth;

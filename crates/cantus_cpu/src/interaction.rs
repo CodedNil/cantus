@@ -1,13 +1,12 @@
 use crate::{
-    AppUpdater, CantusApp, CondensedPlaylist, PANEL_START, PlaylistId, Track, TrackId,
-    render::{Rect, lerpf32},
+    AppUpdater, CantusApp, CondensedPlaylist, PANEL_START, PlaylistId, Rect, Track, TrackId,
     spotify,
 };
 use cantus_shared::{
-    BACKPLATE_HOVER_GROWTH, BACKPLATE_RADIUS, BackgroundPill, MAX_PILL_PLAYLIST_ICONS, PillIconRow,
-    pill_icon_primary_center_y, pill_icon_rows,
+    BACKPLATE_RADIUS, BackgroundPill, ICON_SPACING, ICON_WIDTH, MAX_PILL_PLAYLIST_ICONS,
+    PillIconRow, pill_icon_primary_center_y, pill_icon_rows,
 };
-use glam::{Vec2, vec2};
+use glam::{FloatExt, Vec2, vec2};
 use std::{f32::consts::PI, sync::Arc};
 use std::{
     thread::spawn,
@@ -18,6 +17,30 @@ use tracing::{error, info, warn};
 enum IconAction {
     Rate(u8),
     TogglePlaylist(PlaylistId),
+}
+
+fn hit_icon(row: PillIconRow, point: Vec2) -> Option<(usize, bool)> {
+    (row.expansion > 0.0).then_some(())?;
+    let index = (point.x - row.center.x) / (ICON_SPACING * row.expansion)
+        + (row.count - 1.0).max(0.0) * 0.5
+        + 0.5;
+    (0.0..row.count).contains(&index).then_some(())?;
+    let index = index as usize;
+    let center = row.icon_center(index as f32);
+    let delta = (point - center).abs();
+    (delta.x <= ICON_WIDTH * 0.5 && delta.y <= ICON_WIDTH * 0.5)
+        .then_some((index, point.x >= center.x))
+}
+
+fn row_rect(row: PillIconRow) -> Rect {
+    let radius = BACKPLATE_RADIUS + ICON_WIDTH / 3.0;
+    let half_size = row.half_size(radius);
+    Rect::new(
+        row.center.x - half_size.x,
+        row.center.y - half_size.y,
+        row.center.x + half_size.x,
+        row.center.y + half_size.y,
+    )
 }
 
 #[derive(Default)]
@@ -43,23 +66,17 @@ impl CantusApp {
         if !self.interaction.dragging && self.interaction.mouse_down {
             self.handle_click();
         }
-        let interaction = &mut self.interaction;
-        if let Some((track_id, position)) = interaction.drag_track.take() {
+        if let Some((track_id, position)) = self.interaction.drag_track.take() {
             // Get the x position of the playhead, run an expansion animation there
-            self.global_uniforms.expansion_xy = vec2(
-                self.config.playhead_x(),
-                PANEL_START + self.config.height * 0.5,
-            );
-            self.global_uniforms.expansion_time = self.start_time.elapsed().as_secs_f32();
+            self.pulse_at_playhead();
             if let Some(track_id) = track_id {
                 let client = Arc::clone(&self.spotify.client);
                 skip_to_track(track_id, position, false, &self.updater, client);
             }
         }
-        interaction.drag_origin = None;
-        interaction.dragging = false;
-        interaction.mouse_down = false;
-        interaction.mouse_pressure = 1.0;
+        self.cancel_drag();
+        self.interaction.mouse_down = false;
+        self.interaction.mouse_pressure = 1.0;
     }
 
     pub const fn right_click(&mut self) {
@@ -72,27 +89,21 @@ impl CantusApp {
         let mouse_pos = self.global_uniforms.mouse_pos;
         let playing = self.playback_state.playing;
 
-        // Click on rating/playlist icons
-        let icon_click = |app: &Self, track: &Track| {
-            app.icon_at(
-                track,
-                track.runtime.playlist_expansion,
-                &app.playback_state.playlists,
-            )
-        };
+        let playlists = &self.playback_state.playlists;
+        let icon_click = |track: &Track| self.icon_at(track, playlists);
 
         if let Some((track_id, action)) = self
             .render_state
             .hovered_track
             .and_then(|index| self.playback_state.queue.get(index))
-            .and_then(|track| icon_click(self, track))
+            .and_then(icon_click)
             .or_else(|| {
                 self.playback_state
                     .queue
                     .iter()
                     .enumerate()
                     .filter(|(index, _)| Some(*index) != self.render_state.hovered_track)
-                    .find_map(|(_, track)| icon_click(self, track))
+                    .find_map(|(_, track)| icon_click(track))
             })
         {
             // Spawn particles
@@ -103,11 +114,11 @@ impl CantusApp {
                 .filter(|particle| time > particle.end_time)
                 .take(20)
             {
-                particle.spawn_pos = vec2(mouse_pos.x, mouse_pos.y);
+                particle.spawn_pos = mouse_pos;
                 let angle = fastrand::f32() * 2.0 * PI;
                 let speed = 30.0 + (fastrand::f32() * 20.0);
-                particle.spawn_vel = vec2(angle.cos() * speed, angle.sin() * speed);
-                let duration = lerpf32(fastrand::f32(), 0.5, 1.5);
+                particle.spawn_vel = Vec2::from_angle(angle) * speed;
+                let duration = 0.5.lerp(1.5, fastrand::f32());
                 particle.color =
                     u32::from_le_bytes([255, 215, 50, (duration * 100.0).min(255.0) as u8]);
                 particle.end_time = time + duration;
@@ -131,11 +142,7 @@ impl CantusApp {
         .contains(mouse_pos)
         {
             // Play/pause
-            self.global_uniforms.expansion_xy = vec2(
-                self.config.playhead_x(),
-                PANEL_START + self.config.height * 0.5,
-            );
-            self.global_uniforms.expansion_time = self.start_time.elapsed().as_secs_f32();
+            self.pulse_at_playhead();
             self.last_toggle_playing = Instant::now();
             self.toggle_playing(!playing);
         } else if let Some((track_id, (track_range_a, track_range_b))) =
@@ -147,8 +154,7 @@ impl CantusApp {
             })
         {
             // Seek track
-            self.global_uniforms.expansion_xy = mouse_pos;
-            self.global_uniforms.expansion_time = self.start_time.elapsed().as_secs_f32();
+            self.pulse_at(mouse_pos);
 
             // If click is near the very left, reset to the start of the song, else seek to clicked position
             let position = if mouse_pos.x < self.config.history_width + 40.0 {
@@ -163,13 +169,24 @@ impl CantusApp {
         }
     }
 
+    fn pulse_at(&mut self, pos: Vec2) {
+        self.global_uniforms.expansion_xy = pos;
+        self.global_uniforms.expansion_time = self.start_time.elapsed().as_secs_f32();
+    }
+
+    fn pulse_at_playhead(&mut self) {
+        self.pulse_at(vec2(
+            self.config.playhead_x(),
+            PANEL_START + self.config.height * 0.5,
+        ));
+    }
+
     /// Drag across the progress bar to seek.
     pub fn handle_mouse_drag(&mut self) {
         let interaction = &mut self.interaction;
         if let Some(origin_pos) = interaction.drag_origin {
-            let delta_x = self.global_uniforms.mouse_pos.x - origin_pos.x;
-            let delta_y = self.global_uniforms.mouse_pos.y - origin_pos.y;
-            if !interaction.dragging && (delta_x.abs() >= 2.0 || delta_y.abs() >= 2.0) {
+            let delta = self.global_uniforms.mouse_pos - origin_pos;
+            if !interaction.dragging && (delta.x.abs() >= 2.0 || delta.y.abs() >= 2.0) {
                 interaction.dragging = true;
             }
         }
@@ -189,9 +206,7 @@ impl CantusApp {
             };
             let volume = *volume;
             let client = Arc::clone(&self.spotify.client);
-            spawn(move || {
-                set_volume(volume, &client);
-            });
+            spawn(move || set_volume(volume, &client));
         }
     }
 
@@ -214,97 +229,58 @@ impl CantusApp {
         })
     }
 
-    fn icon_layout(
-        &self,
-        track: &Track,
-        secondary_expansion: f32,
-        playlists: &[CondensedPlaylist],
-    ) -> Option<(TrackId, usize, usize, PillIconRow, PillIconRow)> {
+    fn icon_layout(&self, track: &Track) -> Option<(TrackId, usize, PillIconRow, PillIconRow)> {
         let track_id = track.id?;
-        let primary = Self::playlist_icons(track_id, playlists, true)
-            .take(MAX_PILL_PLAYLIST_ICONS)
-            .count();
-        let secondary = if secondary_expansion > 0.0 {
-            Self::playlist_icons(track_id, playlists, false)
-                .take(MAX_PILL_PLAYLIST_ICONS - primary)
-                .count()
-        } else {
-            0
-        };
         let stars = usize::from(self.config.ratings_enabled) * 5;
         let (primary_row, secondary_row) = pill_icon_rows(
             track.runtime.start_x + track.runtime.width * 0.5,
             pill_icon_primary_center_y(PANEL_START, self.config.height),
-            (stars + primary) as f32,
-            secondary as f32,
-            secondary_expansion,
+            (stars + track.runtime.primary_playlist_count as usize) as f32,
+            f32::from(track.runtime.secondary_playlist_count),
+            track.runtime.playlist_expansion,
         );
-        Some((track_id, stars, primary, primary_row, secondary_row))
+        Some((track_id, stars, primary_row, secondary_row))
     }
 
-    pub fn icon_row_rects(
-        &self,
-        track: &Track,
-        playlists: &[CondensedPlaylist],
-    ) -> [Option<Rect>; 2] {
-        let Some((_, _, _, primary_row, secondary_row)) =
-            self.icon_layout(track, track.runtime.playlist_expansion, playlists)
-        else {
+    pub fn icon_row_rects(&self, track: &Track) -> [Option<Rect>; 2] {
+        let Some((_, _, primary_row, secondary_row)) = self.icon_layout(track) else {
             return [None, None];
         };
-        let radius = BACKPLATE_RADIUS + BACKPLATE_HOVER_GROWTH;
-        let rect = |row: PillIconRow| {
-            let half_size = row.half_size(radius);
-            Rect::new(
-                row.center.x - half_size.x,
-                row.center.y - half_size.y,
-                row.center.x + half_size.x,
-                row.center.y + half_size.y,
-            )
-        };
         [
-            (primary_row.count > 0.0).then(|| rect(primary_row)),
+            (primary_row.count > 0.0 && track.runtime.primary_icon_alpha > 0.0)
+                .then(|| row_rect(primary_row)),
             (secondary_row.count > 0.0 && secondary_row.expansion > 0.0)
-                .then(|| rect(secondary_row)),
+                .then(|| row_rect(secondary_row)),
         ]
     }
 
     fn icon_at(
         &self,
         track: &Track,
-        secondary_expansion: f32,
         playlists: &[CondensedPlaylist],
     ) -> Option<(TrackId, IconAction)> {
         let mouse_pos = self.global_uniforms.mouse_pos;
-        let (track_id, stars, primary_playlists, primary_row, secondary_row) =
-            self.icon_layout(track, secondary_expansion, playlists)?;
+        let (track_id, stars, primary_row, secondary_row) = self.icon_layout(track)?;
 
-        for index in 0..stars {
-            if let Some(center) = primary_row.hit_icon(index as f32, mouse_pos) {
-                let rating = index as u8 * 2 + u8::from(mouse_pos.x >= center.x);
-                return Some((track_id, IconAction::Rate(rating)));
-            }
+        if track.runtime.primary_icon_alpha > 0.0
+            && let Some((index, right_half)) = hit_icon(primary_row, mouse_pos)
+        {
+            return if index < stars {
+                Some((
+                    track_id,
+                    IconAction::Rate(index as u8 * 2 + u8::from(right_half)),
+                ))
+            } else {
+                Self::playlist_icons(track_id, playlists, true)
+                    .nth(index - stars)
+                    .map(|playlist| (track_id, IconAction::TogglePlaylist(playlist.id)))
+            };
         }
 
-        for (index, playlist) in Self::playlist_icons(track_id, playlists, true)
-            .take(primary_playlists)
-            .enumerate()
-        {
-            if primary_row
-                .hit_icon((stars + index) as f32, mouse_pos)
-                .is_some()
-            {
-                return Some((track_id, IconAction::TogglePlaylist(playlist.id)));
-            }
-        }
-
-        for (index, playlist) in Self::playlist_icons(track_id, playlists, false)
-            .take(secondary_row.count as usize)
-            .enumerate()
-        {
-            if secondary_row.hit_icon(index as f32, mouse_pos).is_some() {
-                return Some((track_id, IconAction::TogglePlaylist(playlist.id)));
-            }
+        if let Some((index, _)) = hit_icon(secondary_row, mouse_pos) {
+            return Self::playlist_icons(track_id, playlists, false)
+                .nth(index)
+                .map(|playlist| (track_id, IconAction::TogglePlaylist(playlist.id)));
         }
 
         None
@@ -317,47 +293,36 @@ impl CantusApp {
         secondary_expansion: f32,
         playlists: &[CondensedPlaylist],
         pill: &mut BackgroundPill,
-    ) -> bool {
+    ) {
         let Some(track_id) = track.id else {
-            return false;
+            return;
         };
-        let mut primary_playlist_count = 0usize;
-        let mut secondary_playlist_count = 0usize;
-
-        for playlist in
-            Self::playlist_icons(track_id, playlists, true).take(MAX_PILL_PLAYLIST_ICONS)
-        {
-            pill.playlist_images[primary_playlist_count] = self.get_image_index(&playlist.art);
-            primary_playlist_count += 1;
-        }
-
-        if secondary_expansion > 0.0 {
-            for playlist in Self::playlist_icons(track_id, playlists, false)
-                .take(MAX_PILL_PLAYLIST_ICONS - primary_playlist_count)
-            {
-                pill.playlist_images[primary_playlist_count + secondary_playlist_count] =
-                    self.get_image_index(&playlist.art);
-                secondary_playlist_count += 1;
-            }
+        let primary_playlist_count = Self::playlist_icons(track_id, playlists, true)
+            .take(MAX_PILL_PLAYLIST_ICONS)
+            .count();
+        let secondary_playlist_count = Self::playlist_icons(track_id, playlists, false)
+            .take(MAX_PILL_PLAYLIST_ICONS - primary_playlist_count)
+            .count()
+            * usize::from(secondary_expansion > 0.0);
+        let icons = Self::playlist_icons(track_id, playlists, true)
+            .take(primary_playlist_count)
+            .chain(Self::playlist_icons(track_id, playlists, false).take(secondary_playlist_count));
+        for (slot, playlist) in pill.playlist_images.iter_mut().zip(icons) {
+            *slot = self.get_image_index(&playlist.art);
         }
 
         pill.rating = if self.config.ratings_enabled {
             i32::from(
                 playlists
                     .iter()
-                    .find_map(|p| {
-                        p.rating_index
-                            .filter(|_| p.tracks.contains(&track_id))
-                            .map(|rating| rating + 1)
-                    })
-                    .unwrap_or(0),
+                    .find_map(|p| p.rating_index.filter(|_| p.tracks.contains(&track_id)))
+                    .map_or(0, |rating| rating + 1),
             )
         } else {
             -1
         };
         pill.primary_playlist_count = primary_playlist_count as u32;
         pill.secondary_playlist_count = secondary_playlist_count as u32;
-        self.config.ratings_enabled || primary_playlist_count > 0 || secondary_playlist_count > 0
     }
 }
 
@@ -463,13 +428,12 @@ impl CantusApp {
             .playlists
             .iter_mut()
             .filter_map(|playlist| {
-                let add = playlist.rating_index == Some(rating_slot);
-                let changed = playlist.rating_index.is_some()
-                    && if add {
-                        playlist.tracks.insert(track_id)
-                    } else {
-                        playlist.tracks.remove(&track_id)
-                    };
+                let add = playlist.rating_index? == rating_slot;
+                let changed = if add {
+                    playlist.tracks.insert(track_id)
+                } else {
+                    playlist.tracks.remove(&track_id)
+                };
                 changed.then(|| (playlist.id, playlist.name.clone(), add))
             })
             .collect::<Vec<_>>();
@@ -532,10 +496,8 @@ impl CantusApp {
             return;
         };
         let playlist_name = playlist.name.clone();
-        let add = !playlist.tracks.contains(&track_id);
-        if add {
-            playlist.tracks.insert(track_id);
-        } else {
+        let add = playlist.tracks.insert(track_id);
+        if !add {
             playlist.tracks.remove(&track_id);
         }
         self.playback_state.last_interaction = Instant::now() + Duration::from_millis(500);
@@ -563,12 +525,9 @@ impl CantusApp {
         spawn(move || {
             // https://developer.spotify.com/documentation/web-api/reference/#/operations/start-a-users-playback
             // https://developer.spotify.com/documentation/web-api/reference/#/operations/pause-a-users-playback
-            if play {
-                if let Err(err) = client.api_put("me/player/play") {
-                    error!("Failed to play playback: {err}");
-                }
-            } else if let Err(err) = client.api_put("me/player/pause") {
-                error!("Failed to pause playback: {err}");
+            let action = if play { "play" } else { "pause" };
+            if let Err(err) = client.api_put(&format!("me/player/{action}")) {
+                error!("Failed to {action} playback: {err}");
             }
         });
     }

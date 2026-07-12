@@ -1,7 +1,5 @@
-use crate::common::{
-    pixel_to_ndc, quad_coord, sd_rounded_triangle, sd_vertical_segment, smoothstep,
-};
-use cantus_shared::{GlobalUniforms, PlayheadUniforms};
+use crate::common::{pixel_to_ndc, quad_coord, sd_rounded_triangle, sd_vertical_segment};
+use cantus_shared::{GlobalUniforms, PlayheadUniforms, smoothstep};
 use spirv_std::{
     arch::kill,
     glam::{Vec2, Vec3, Vec4, vec2, vec3},

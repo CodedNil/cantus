@@ -1,4 +1,4 @@
-use crate::{CantusApp, render::Rect};
+use crate::{CantusApp, Rect};
 use glam::vec2;
 use raw_window_handle::{
     RawDisplayHandle, RawWindowHandle, WaylandDisplayHandle, WaylandWindowHandle,
@@ -96,7 +96,6 @@ pub fn run() {
             LayerAnchor::Top | LayerAnchor::Left | LayerAnchor::Right
         }
     });
-    layer_surface.set_margin(0, 0, 0, 0);
     layer_surface.set_exclusive_zone(-1);
 
     surface.commit();
@@ -261,22 +260,18 @@ impl LayerShellApp {
         let (Some(wl_surface), Some(compositor)) = (&self.wl_surface, &self.compositor) else {
             return;
         };
-        // Hash every hitbox rect at low precision so it only updates input regions on substantial changes
+        let rects: Vec<_> = self.cantus.input_rects().collect();
         let mut hasher = DefaultHasher::new();
-        for r in self.cantus.input_rects() {
-            (
-                (r.x0 * 0.01).round() as u16,
-                (r.y0 * 0.01).round() as u16,
-                (r.x1 * 0.01).round() as u16,
-                (r.y1 * 0.01).round() as u16,
-            )
+        for r in &rects {
+            [r.x0, r.y0, r.x1, r.y1]
+                .map(|value| value.round() as i32)
                 .hash(&mut hasher);
         }
         let hash = hasher.finish();
 
         if hash != self.last_hitbox_hash {
             let region = compositor.create_region(qhandle, ());
-            for r in self.cantus.input_rects() {
+            for r in rects {
                 region.add(
                     r.x0.round() as i32,
                     r.y0.round() as i32,
@@ -292,17 +287,13 @@ impl LayerShellApp {
 
 impl CantusApp {
     fn input_rects(&self) -> impl Iterator<Item = Rect> + '_ {
-        self.playback_state
-            .queue
-            .iter()
-            .filter_map(|track| track.runtime.rect(self.config.height))
-            .chain(
-                self.playback_state
-                    .queue
-                    .iter()
-                    .flat_map(|track| self.icon_row_rects(track, &self.playback_state.playlists))
-                    .flatten(),
-            )
+        self.playback_state.queue.iter().flat_map(|track| {
+            track
+                .runtime
+                .rect(self.config.height)
+                .into_iter()
+                .chain(self.icon_row_rects(track).into_iter().flatten())
+        })
     }
 }
 

@@ -3,8 +3,6 @@ use image::{DynamicImage, RgbaImage, imageops};
 use palette::IntoColor;
 use std::{array, sync::Arc, time::Instant};
 
-const LAYER_BYTES: usize = (IMAGE_SIZE * IMAGE_SIZE * 4) as usize;
-
 #[derive(Clone, Default)]
 pub enum ArtState {
     #[default]
@@ -25,9 +23,8 @@ pub fn prepare(image: &DynamicImage) -> AlbumArt {
     let image = image.to_rgba8();
     let palette = image_palette(&image);
     let blurred = imageops::blur(&image, 3.0);
-    let mut pixels = Vec::with_capacity(LAYER_BYTES * 2);
-    pixels.extend_from_slice(&image);
-    pixels.extend_from_slice(&blurred);
+    let mut pixels = image.into_raw();
+    pixels.extend(blurred.into_raw());
     AlbumArt {
         pixels: pixels.into_boxed_slice(),
         palette,
@@ -77,11 +74,12 @@ fn art_request(state: &ArtState, url: Option<&str>, now: Instant) -> Option<Stri
 
 fn image_palette(image: &RgbaImage) -> [u32; NUM_SWATCHES] {
     let srgb_to_lab = |pixel: &image::Rgba<u8>| {
-        palette::FromColor::from_color(palette::Srgb::new(
+        palette::Srgb::new(
             f32::from(pixel[0]) / 255.0,
             f32::from(pixel[1]) / 255.0,
             f32::from(pixel[2]) / 255.0,
-        ))
+        )
+        .into_color()
     };
     let mut pixels: Vec<palette::Lab> = image
         .pixels()

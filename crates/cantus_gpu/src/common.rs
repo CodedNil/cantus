@@ -3,11 +3,6 @@ use spirv_std::glam::{Vec2, Vec3, Vec4, vec2, vec3, vec4};
 #[cfg(target_arch = "spirv")]
 use spirv_std::num_traits::Float;
 
-pub fn smoothstep(edge0: f32, edge1: f32, x: f32) -> f32 {
-    let t = ((x - edge0) / (edge1 - edge0)).clamp(0.0, 1.0);
-    t * t * (3.0 - 2.0 * t)
-}
-
 pub const fn quad_coord(vertex_index: u32) -> Vec2 {
     vec2((vertex_index & 1) as f32, (vertex_index >> 1) as f32)
 }
@@ -69,7 +64,7 @@ pub fn sd_vertical_segment(
         (point.x - x).abs(),
         (point.y - center_y).abs() - half_height,
     );
-    vec2(offset.x, offset.y.max(0.0)).length() - radius
+    offset.max(Vec2::ZERO).length() - radius
 }
 
 pub fn smooth_union(base: f32, shape: f32, smoothing: f32, amount: f32) -> f32 {
