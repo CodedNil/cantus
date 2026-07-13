@@ -1,13 +1,12 @@
 use crate::{
-    AppUpdater, CondensedPlaylist, MAX_HISTORY_TRACKS, PlaylistId, TRACK_SPACING_MS, Track,
-    TrackId,
+    AppUpdater, CondensedPlaylist, MAX_HISTORY_TRACKS, PlaylistId, Track, TrackId,
     art::{self, ArtState},
     config::Config,
     deserialize_images,
 };
-use arrayvec::ArrayString;
+use arrayvec::{ArrayString, ArrayVec};
 use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
-use itertools::Itertools;
+use cantus_shared::MAX_PILL_PLAYLIST_ICONS;
 use parking_lot::RwLock;
 use serde::{Deserialize, Deserializer, Serialize, Serializer, de::DeserializeOwned};
 use sha2::{Digest, Sha256};
@@ -15,7 +14,7 @@ use std::{
     collections::{HashMap, HashSet},
     fs,
     io::{self, BufRead, BufReader, Write},
-    iter, mem,
+    mem,
     net::TcpListener,
     path::{Path, PathBuf},
     sync::Arc,
@@ -25,7 +24,10 @@ use std::{
 use thiserror::Error;
 use time::{Duration as TimeDuration, OffsetDateTime};
 use tracing::{error, info, warn};
-use ureq::Agent;
+use ureq::{
+    Agent,
+    http::{Error as HttpRequestError, Method, Request, request::Builder as RequestBuilder},
+};
 use url::Url;
 
 const API_BASE: &str = "https://api.spotify.com/v1";
@@ -36,13 +38,13 @@ const SPOTIFY_TOKEN_CACHE: &str = "spotify_cache.json";
 struct SpotifyState {
     current_context: Option<String>,
     context_updated: bool,
-    last_grabbed_playback: Instant,
     last_grabbed_queue: Instant,
 }
 
 const VERIFIER_BYTES: usize = 43;
 const REDIRECT_HOST: &str = "127.0.0.1";
 const REDIRECT_PORT: u16 = 7474;
+const REDIRECT_URI: &str = "http://127.0.0.1:7474/callback";
 
 pub struct SpotifyClient {
     client_id: String,
@@ -63,13 +65,12 @@ struct Playlist {
     #[serde(default, deserialize_with = "deserialize_images", rename = "images")]
     image: Option<String>,
     snapshot_id: ArrayString<32>,
-    #[serde(deserialize_with = "deserialize_tracks_total", rename = "tracks")]
-    total_tracks: u32,
+    tracks: TracksRef,
 }
 
 #[derive(Deserialize)]
 struct PlaylistItem {
-    track: PartialTrack,
+    track: Option<PartialTrack>,
 }
 
 #[derive(Deserialize)]
@@ -95,7 +96,7 @@ struct CurrentUserQueue {
 
 #[derive(Deserialize)]
 struct Device {
-    volume_percent: Option<u32>,
+    volume_percent: Option<u8>,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -128,11 +129,7 @@ impl Token {
     }
 }
 
-fn read_token_cache(
-    allow_expired: bool,
-    cache_path: &Path,
-    scopes: &HashSet<String>,
-) -> ClientResult<Option<Token>> {
+fn read_token_cache(cache_path: &Path, scopes: &HashSet<String>) -> ClientResult<Option<Token>> {
     let token = match fs::read_to_string(cache_path) {
         Ok(cache) => serde_json::from_str::<Token>(&cache)
             .inspect_err(|err| warn!("Failed to parse Spotify token cache: {err}"))
@@ -140,7 +137,7 @@ fn read_token_cache(
         Err(err) if err.kind() == io::ErrorKind::NotFound => None,
         Err(err) => return Err(err.into()),
     };
-    Ok(token.filter(|t| scopes.is_subset(&t.scopes) && (allow_expired || !t.is_expired())))
+    Ok(token.filter(|t| scopes.is_subset(&t.scopes)))
 }
 
 fn prompt_for_token(
@@ -162,12 +159,12 @@ fn prompt_for_token(
     let mut request_line = String::new();
     BufReader::new(&stream).read_line(&mut request_line)?;
 
+    let request_target = request_line
+        .split_whitespace()
+        .nth(1)
+        .ok_or(ClientError::InvalidAuthorizationResponse)?;
     let auth_response = Url::parse(&format!(
-        "http://{REDIRECT_HOST}:{REDIRECT_PORT}/callback{}",
-        request_line
-            .split_whitespace()
-            .nth(1)
-            .ok_or(ClientError::InvalidAuthorizationResponse)?
+        "http://{REDIRECT_HOST}:{REDIRECT_PORT}{request_target}"
     ))?;
     let code = auth_response
         .query_pairs()
@@ -196,10 +193,7 @@ fn prompt_for_token(
         .send_form([
             ("grant_type", "authorization_code"),
             ("code", &code),
-            (
-                "redirect_uri",
-                &format!("http://{REDIRECT_HOST}:{REDIRECT_PORT}/callback"),
-            ),
+            ("redirect_uri", REDIRECT_URI),
             ("client_id", client_id),
             ("code_verifier", verifier),
         ])?
@@ -235,12 +229,15 @@ impl SpotifyClient {
         format!("{API_BASE}/{path}")
     }
 
-    fn api_json<T: DeserializeOwned>(&self, url: &str, label: &str) -> Option<T> {
-        self.api_get(url)
-            .inspect_err(|e| error!("Failed to fetch {label}: {e}"))
-            .ok()
-            .filter(|res| !res.is_empty())
-            .and_then(|res| parse_json(&res, label))
+    fn request(&self, method: Method, path: &str) -> ClientResult<RequestBuilder> {
+        Ok(Request::builder()
+            .method(method)
+            .uri(Self::api_url(path))
+            .header("authorization", self.auth_headers()?))
+    }
+
+    pub fn api_json<T: DeserializeOwned>(&self, url: &str, label: &str) -> Option<T> {
+        self.api_json_payload(url, &[], label)
     }
 
     fn api_json_payload<T: DeserializeOwned>(
@@ -249,71 +246,32 @@ impl SpotifyClient {
         payload: &[(&str, &str)],
         label: &str,
     ) -> Option<T> {
-        self.api_get_payload(url, payload)
+        self.auth_headers()
+            .and_then(|authorization| {
+                self.http
+                    .get(Self::api_url(url))
+                    .header("authorization", authorization)
+                    .query_pairs(payload.iter().copied())
+                    .call()
+                    .map_err(Into::into)
+                    .and_then(|mut response| {
+                        serde_json::from_reader(response.body_mut().as_reader()).map_err(Into::into)
+                    })
+            })
             .inspect_err(|e| error!("Failed to fetch {label}: {e}"))
             .ok()
-            .and_then(|res| parse_json(&res, label))
     }
 
-    pub fn api_get(&self, url: &str) -> ClientResult<String> {
-        let response = self
-            .http
-            .get(Self::api_url(url))
-            .header("authorization", self.auth_headers()?)
-            .call()?;
-        Ok(response.into_body().read_to_string()?)
-    }
-
-    pub fn api_get_payload(&self, url: &str, payload: &[(&str, &str)]) -> ClientResult<String> {
-        let response = self
-            .http
-            .get(Self::api_url(url))
-            .header("authorization", self.auth_headers()?)
-            .query_pairs(payload.iter().copied())
-            .call()?;
-        Ok(response.into_body().read_to_string()?)
-    }
-
-    pub fn api_post(&self, url: &str) -> ClientResult<()> {
-        self.http
-            .post(Self::api_url(url))
-            .header("authorization", self.auth_headers()?)
-            .send_empty()?;
-        Ok(())
-    }
-
-    pub fn api_post_payload(&self, url: &str, payload: &str) -> ClientResult<()> {
-        self.http
-            .post(Self::api_url(url))
-            .header("Content-Type", "application/json; charset=utf-8")
-            .header("authorization", self.auth_headers()?)
-            .send(payload)?;
-        Ok(())
-    }
-
-    pub fn api_put(&self, url: &str) -> ClientResult<()> {
-        self.http
-            .put(Self::api_url(url))
-            .header("authorization", self.auth_headers()?)
-            .send_empty()?;
-        Ok(())
-    }
-
-    pub fn api_delete(&self, url: &str) -> ClientResult<()> {
-        self.http
-            .delete(Self::api_url(url))
-            .header("authorization", self.auth_headers()?)
-            .call()?;
-        Ok(())
-    }
-
-    pub fn api_delete_payload(&self, url: &str, payload: &str) -> ClientResult<()> {
-        self.http
-            .delete(Self::api_url(url))
-            .header("Content-Type", "application/json; charset=utf-8")
-            .header("authorization", self.auth_headers()?)
-            .force_send_body()
-            .send(payload)?;
+    pub fn api_request(&self, method: Method, path: &str, json: Option<&str>) -> ClientResult<()> {
+        let request = self.request(method, path)?;
+        let request = if let Some(json) = json {
+            request
+                .header("content-type", "application/json; charset=utf-8")
+                .body(json)?
+        } else {
+            request.body("")?
+        };
+        self.http.run(request)?;
         Ok(())
     }
 
@@ -363,7 +321,7 @@ impl SpotifyClient {
         );
         let (verifier, url) = get_authorize_url(&client_id, scopes, &state)?;
         let agent = Agent::new_with_defaults();
-        let token = match read_token_cache(true, &cache_path, scopes)? {
+        let token = match read_token_cache(&cache_path, scopes)? {
             Some(token) => token,
             None => prompt_for_token(&url, &client_id, &verifier, &agent, &state)?,
         };
@@ -390,14 +348,13 @@ fn get_authorize_url(
 
     let challenge = URL_SAFE_NO_PAD.encode(Sha256::digest(verifier.as_bytes()));
 
-    let redirect_uri = format!("http://{REDIRECT_HOST}:{REDIRECT_PORT}/callback");
-    let scope = scopes.iter().map(String::as_str).sorted().join(" ");
+    let scope = sorted_scopes(scopes);
     let parsed = Url::parse_with_params(
         "https://accounts.spotify.com/authorize",
         &[
             ("client_id", client_id),
             ("response_type", "code"),
-            ("redirect_uri", &redirect_uri),
+            ("redirect_uri", REDIRECT_URI),
             ("code_challenge_method", "S256"),
             ("code_challenge", &challenge),
             ("state", state),
@@ -408,10 +365,15 @@ fn get_authorize_url(
 }
 
 fn generate_random_string(length: usize, alphabet: &[u8]) -> String {
-    let range = alphabet.len();
     (0..length)
-        .map(|_| alphabet[fastrand::usize(..range)] as char)
+        .map(|_| alphabet[fastrand::usize(..alphabet.len())] as char)
         .collect()
+}
+
+fn sorted_scopes(scopes: &HashSet<String>) -> String {
+    let mut scopes = scopes.iter().map(String::as_str).collect::<Vec<_>>();
+    scopes.sort_unstable();
+    scopes.join(" ")
 }
 
 #[derive(Debug, Error)]
@@ -422,6 +384,8 @@ pub enum ClientError {
     ParseUrl(#[from] url::ParseError),
     #[error("http error: {0}")]
     Http(String),
+    #[error("invalid HTTP request: {0}")]
+    BuildRequest(#[from] HttpRequestError),
     #[error("input/output error: {0}")]
     Io(#[from] io::Error),
     #[error("image decode error: {0}")]
@@ -460,12 +424,6 @@ fn config_path(file: &str) -> PathBuf {
     dirs::config_dir().unwrap().join("cantus").join(file)
 }
 
-fn parse_json<T: DeserializeOwned>(input: &str, label: &str) -> Option<T> {
-    serde_json::from_str(input)
-        .inspect_err(|e| error!("Failed to parse {label}: {e}"))
-        .ok()
-}
-
 fn deserialize_scopes<'de, D>(d: D) -> Result<HashSet<String>, D::Error>
 where
     D: Deserializer<'de>,
@@ -478,7 +436,7 @@ fn serialize_scopes<S>(scopes: &HashSet<String>, s: S) -> Result<S::Ok, S::Error
 where
     S: Serializer,
 {
-    s.serialize_str(&scopes.iter().map(String::as_str).sorted().join(" "))
+    s.serialize_str(&sorted_scopes(scopes))
 }
 
 #[derive(Deserialize)]
@@ -486,26 +444,9 @@ struct TracksRef {
     total: u32,
 }
 
-fn deserialize_tracks_total<'de, D>(deserializer: D) -> Result<u32, D::Error>
-where
-    D: Deserializer<'de>,
-{
-    Ok(TracksRef::deserialize(deserializer)?.total)
-}
-
-fn vec_without_nulls<'de, D, T>(deserializer: D) -> Result<Vec<T>, D::Error>
-where
-    T: Deserialize<'de>,
-    D: Deserializer<'de>,
-{
-    let v = Vec::<Option<T>>::deserialize(deserializer)?;
-    Ok(v.into_iter().flatten().collect())
-}
-
 #[derive(Deserialize)]
-struct Page<T: DeserializeOwned> {
-    #[serde(deserialize_with = "vec_without_nulls")]
-    items: Vec<T>,
+struct Page<T> {
+    items: Vec<Option<T>>,
 }
 
 // --- SPOTIFY LOGIC ---
@@ -570,9 +511,7 @@ pub struct SpotifyBackend {
 impl SpotifyBackend {
     pub fn new(config: &Config, updater: AppUpdater) -> Self {
         let cantus_dir = config_path("");
-        if !cantus_dir.exists() {
-            fs::create_dir(&cantus_dir).unwrap();
-        }
+        fs::create_dir_all(cantus_dir).expect("Failed to create Cantus config directory");
         let client = Arc::new(create_client(config));
         let initial_poll = Instant::now().checked_sub(Duration::from_mins(1)).unwrap();
         Self {
@@ -581,10 +520,9 @@ impl SpotifyBackend {
                 SpotifyState {
                     current_context: None,
                     context_updated: false,
-                    last_grabbed_playback: initial_poll,
                     last_grabbed_queue: initial_poll,
                 },
-                Duration::from_millis(500),
+                Duration::from_secs(1),
             ),
             playlists: PollTask::new(
                 PlaylistPollState::new(Arc::clone(&client), config, updater),
@@ -649,11 +587,6 @@ fn get_spotify_playback(
     updater: &AppUpdater,
     spotify_state: &mut SpotifyState,
 ) {
-    let now = Instant::now();
-    if now < spotify_state.last_grabbed_playback + Duration::from_secs(1) {
-        return;
-    }
-
     // https://developer.spotify.com/documentation/web-api/reference/get-information-about-the-users-current-playback
     let Some(current_playback) = client.api_json::<CurrentPlaybackContext>("me/player", "playback")
     else {
@@ -668,17 +601,13 @@ fn get_spotify_playback(
         spotify_state.current_context = new_context.map(String::from);
         spotify_state.last_grabbed_queue = queue_deadline;
     }
-    spotify_state.last_grabbed_playback = now;
     updater.send(move |app| {
         let state = &mut app.playback_state;
         if let Some(track) = current_playback.item {
             state.queue_index = track_index(&state.queue, track.id, &track.name).unwrap_or(0);
         }
 
-        state.volume = current_playback
-            .device
-            .volume_percent
-            .map(|v| v.min(100) as u8);
+        state.volume = current_playback.device.volume_percent;
         if now >= state.last_interaction {
             if current_playback.is_playing && !state.playing {
                 app.last_toggle_playing = now;
@@ -709,7 +638,8 @@ fn get_spotify_queue(
         return;
     };
     let current_track_id = currently_playing.id;
-    let new_queue: Vec<Track> = iter::once(currently_playing).chain(q.queue).collect();
+    let mut new_queue = q.queue;
+    new_queue.insert(0, currently_playing);
 
     let context_updated = spotify_state.context_updated;
     spotify_state.context_updated = false;
@@ -721,9 +651,7 @@ fn get_spotify_queue(
             .queue
             .iter()
             .filter_map(|track| match (&track.album.image, &track.art) {
-                (Some(url), ArtState::Ready(art)) => {
-                    Some((url.clone(), ArtState::Ready(Arc::clone(art))))
-                }
+                (Some(url), ArtState::Ready(art)) => Some((url.clone(), Arc::clone(art))),
                 _ => None,
             })
             .collect();
@@ -734,11 +662,12 @@ fn get_spotify_queue(
             track_index(&old_queue, current_track_id, current_title).unwrap_or(0)
         };
         let history_start = history_len.saturating_sub(MAX_HISTORY_TRACKS);
-        let mut reconciled: Vec<Track> = old_queue.drain(history_start..history_len).collect();
+        let mut remaining = old_queue.split_off(history_len);
+        let mut reconciled = old_queue.split_off(history_start);
         let retained_history_len = reconciled.len();
         for mut track in new_queue {
-            if let Some(index) = old_queue.iter().position(|old| old.id == track.id) {
-                let old = old_queue.remove(index);
+            if let Some(index) = remaining.iter().position(|old| old.id == track.id) {
+                let old = remaining.remove(index);
                 track.art = old.art;
                 track.runtime = old.runtime;
             } else if let Some(art) = track
@@ -747,17 +676,12 @@ fn get_spotify_queue(
                 .as_ref()
                 .and_then(|url| art_by_url.get(url))
             {
-                track.art = art.clone();
+                track.art = ArtState::Ready(Arc::clone(art));
             }
             reconciled.push(track);
         }
         state.queue = reconciled;
         state.queue_index = retained_history_len;
-        let mut offset = 0.0;
-        for track in &mut state.queue {
-            track.runtime.queue_offset_ms = offset;
-            offset += track.duration_ms as f32 + TRACK_SPACING_MS;
-        }
     });
 }
 
@@ -768,37 +692,28 @@ pub fn download_image(client: Arc<SpotifyClient>, updater: AppUpdater, url: Stri
             .get(&url)
             .call()
             .map_err(ClientError::from)
-            .and_then(|mut resp| Ok(resp.body_mut().read_to_vec()?));
-        let Ok(bytes) = result.inspect_err(|err| warn!("Failed to download image {url}: {err}"))
-        else {
-            updater.send(move |app| {
-                app.set_art_state(
-                    &url,
-                    &ArtState::RetryAt(Instant::now() + Duration::from_secs(30)),
-                );
-            });
-            return;
-        };
-        let Ok(img) = image::load_from_memory(&bytes)
-            .inspect_err(|err| warn!("Failed to decode image {url}: {err}"))
-        else {
-            updater.send(move |app| {
-                app.set_art_state(
-                    &url,
-                    &ArtState::RetryAt(Instant::now() + Duration::from_secs(30)),
-                );
-            });
-            return;
-        };
-        let art = Arc::new(art::prepare(&img));
-        updater.send(move |app| app.set_art_state(&url, &ArtState::Ready(art)));
+            .and_then(|mut response| Ok(response.body_mut().read_to_vec()?))
+            .and_then(|bytes| image::load_from_memory(&bytes).map_err(Into::into))
+            .map(|image| Arc::new(art::prepare(&image)));
+        match result {
+            Ok(art) => updater.send(move |app| app.set_art_state(&url, &ArtState::Ready(art))),
+            Err(err) => {
+                warn!("Failed to load image {url}: {err}");
+                updater.send(move |app| {
+                    app.set_art_state(
+                        &url,
+                        &ArtState::RetryAt(Instant::now() + Duration::from_secs(30)),
+                    );
+                });
+            }
+        }
     });
 }
 
 struct PlaylistPollState {
     client: Arc<SpotifyClient>,
     updater: AppUpdater,
-    targets: HashSet<String>,
+    targets: ArrayVec<String, MAX_PILL_PLAYLIST_ICONS>,
     persistent_cache: PlaylistCache,
     known_snapshots: HashMap<PlaylistId, ArrayString<32>>,
     ratings_enabled: bool,
@@ -810,7 +725,7 @@ impl PlaylistPollState {
         Self {
             client,
             updater,
-            targets: config.playlists.iter().cloned().collect(),
+            targets: config.playlists.clone(),
             persistent_cache: playlist_cache,
             known_snapshots: HashMap::new(),
             ratings_enabled: config.ratings_enabled,
@@ -819,15 +734,19 @@ impl PlaylistPollState {
 
     fn poll(&mut self) {
         // https://developer.spotify.com/documentation/web-api/reference/get-a-list-of-current-users-playlists
-        let playlists = self
-            .client
-            .api_json_payload::<Page<Playlist>>("me/playlists", &[("limit", "50")], "playlists")
-            .map(|p| p.items)
-            .unwrap_or_default();
+        let Some(playlists) = self.client.api_json_payload::<Page<Playlist>>(
+            "me/playlists",
+            &[("limit", "50")],
+            "playlists",
+        ) else {
+            return;
+        };
 
-        for playlist in playlists {
+        let mut cache_changed = false;
+        let mut updates = Vec::new();
+        for playlist in playlists.items.into_iter().flatten() {
             let rating_index = rating_index(self.ratings_enabled, &playlist.name);
-            if !self.targets.contains(playlist.name.as_str()) && rating_index.is_none() {
+            if !self.targets.contains(&playlist.name) && rating_index.is_none() {
                 continue;
             }
             if !self.known_snapshots.contains_key(&playlist.id)
@@ -836,7 +755,7 @@ impl PlaylistPollState {
             {
                 self.known_snapshots
                     .insert(playlist.id, playlist.snapshot_id);
-                insert_playlist(&self.updater, playlist, tracks.clone(), rating_index);
+                queue_playlist(&mut updates, playlist, tracks.clone(), rating_index);
                 continue;
             }
 
@@ -847,10 +766,14 @@ impl PlaylistPollState {
                     .insert(playlist.id, playlist.snapshot_id);
                 self.persistent_cache
                     .insert(playlist.id, (playlist.snapshot_id, tracks.clone()));
-                insert_playlist(&self.updater, playlist, tracks, rating_index);
-                persist_playlist_cache(&self.persistent_cache);
+                queue_playlist(&mut updates, playlist, tracks, rating_index);
+                cache_changed = true;
             }
         }
+        if cache_changed {
+            persist_playlist_cache(&self.persistent_cache);
+        }
+        apply_playlist_updates(&self.updater, updates);
     }
 }
 
@@ -858,19 +781,24 @@ fn rating_index(enabled: bool, name: &str) -> Option<u8> {
     enabled.then_some(())?;
     RATING_PLAYLISTS
         .iter()
-        .position(|&p| p == name)
-        .and_then(|i| u8::try_from(i).ok())
+        .position(|&playlist| playlist == name)
+        .map(|index| index as u8)
 }
 
 fn fetch_playlist_tracks(client: &SpotifyClient, playlist: &Playlist) -> Option<HashSet<TrackId>> {
     let chunk_size = 50;
-    let num_pages = playlist.total_tracks.div_ceil(chunk_size);
+    let num_pages = playlist.tracks.total.div_ceil(chunk_size);
     let mut tracks = HashSet::new();
     info!("Fetching {num_pages} pages from playlist {}", playlist.name);
 
     for page in 0..num_pages {
         let page = fetch_playlist_page(client, playlist.id, chunk_size, page)?;
-        tracks.extend(page.items.iter().filter_map(|item| item.track.id));
+        tracks.extend(
+            page.items
+                .into_iter()
+                .flatten()
+                .filter_map(|item| item.track?.id),
+        );
     }
     Some(tracks)
 }
@@ -897,36 +825,41 @@ fn fetch_playlist_page(
     )
 }
 
-fn insert_playlist(
-    updater: &AppUpdater,
+fn queue_playlist(
+    updates: &mut Vec<CondensedPlaylist>,
     playlist: Playlist,
     tracks: HashSet<TrackId>,
     rating_index: Option<u8>,
 ) {
-    let condensed = CondensedPlaylist {
+    updates.push(CondensedPlaylist {
         id: playlist.id,
         name: playlist.name,
         image_url: playlist.image,
         tracks,
         rating_index,
         art: ArtState::Missing,
-    };
+    });
+}
+
+fn apply_playlist_updates(updater: &AppUpdater, changed: Vec<CondensedPlaylist>) {
+    if changed.is_empty() {
+        return;
+    }
     updater.send(move |app| {
-        let mut condensed = condensed;
-        if let Some(index) = app
-            .playback_state
-            .playlists
-            .iter()
-            .position(|playlist| playlist.id == condensed.id)
-        {
-            let previous = app.playback_state.playlists.remove(index);
-            if previous.image_url == condensed.image_url {
-                condensed.art = previous.art;
+        let playlists = &mut app.playback_state.playlists;
+        for mut update in changed {
+            if let Some(previous) = playlists
+                .iter_mut()
+                .find(|playlist| playlist.id == update.id)
+            {
+                if previous.image_url == update.image_url {
+                    update.art = mem::take(&mut previous.art);
+                }
+                *previous = update;
+            } else {
+                playlists.push(update);
             }
         }
-        app.playback_state.playlists.push(condensed);
-        app.playback_state
-            .playlists
-            .sort_by(|a, b| a.name.cmp(&b.name));
+        playlists.sort_unstable_by(|a, b| a.name.cmp(&b.name));
     });
 }

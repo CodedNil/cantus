@@ -53,28 +53,10 @@ pub fn sd_rounded_triangle(point: Vec2, side_len: f32, radius: f32) -> f32 {
     point.length() * if point.y > 0.0 { -1.0 } else { 1.0 } - radius
 }
 
-pub fn sd_vertical_segment(
-    point: Vec2,
-    x: f32,
-    center_y: f32,
-    half_height: f32,
-    radius: f32,
-) -> f32 {
-    let offset = vec2(
-        (point.x - x).abs(),
-        (point.y - center_y).abs() - half_height,
-    );
-    offset.max(Vec2::ZERO).length() - radius
-}
-
 pub fn smooth_union(base: f32, shape: f32, smoothing: f32, amount: f32) -> f32 {
     let blend = (0.5 + 0.5 * (shape - base) / smoothing).clamp(0.0, 1.0);
     let union = shape + (base - shape) * blend - smoothing * blend * (1.0 - blend);
     base + (union - base) * amount
-}
-
-pub fn unpack4x8unorm(value: u32) -> Vec4 {
-    unpack3x8unorm(value).extend(((value >> 24) & 0xff) as f32 / 255.0)
 }
 
 pub fn unpack3x8unorm(value: u32) -> Vec3 {

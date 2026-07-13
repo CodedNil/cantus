@@ -2,39 +2,28 @@ use crate::{
     AppUpdater, CantusApp, CondensedPlaylist, PANEL_START, PlaylistId, Rect, Track, TrackId,
     spotify,
 };
+use arrayvec::ArrayVec;
 use cantus_shared::{
-    BACKPLATE_RADIUS, BackgroundPill, ICON_SPACING, ICON_WIDTH, MAX_PILL_PLAYLIST_ICONS,
-    PillIconRow, pill_icon_primary_center_y, pill_icon_rows,
+    BACKPLATE_RADIUS, BackgroundPill, ICON_WIDTH, MAX_PILL_PLAYLIST_ICONS, PillIconRow,
+    pill_icon_primary_center_y, pill_icon_rows,
 };
 use glam::{FloatExt, Vec2, vec2};
-use std::{f32::consts::PI, sync::Arc};
 use std::{
+    f32::consts::PI,
+    sync::Arc,
     thread::spawn,
     time::{Duration, Instant},
 };
 use tracing::{error, info, warn};
+use ureq::http::Method;
 
 enum IconAction {
     Rate(u8),
     TogglePlaylist(PlaylistId),
 }
 
-fn hit_icon(row: PillIconRow, point: Vec2) -> Option<(usize, bool)> {
-    (row.expansion > 0.0).then_some(())?;
-    let index = (point.x - row.center.x) / (ICON_SPACING * row.expansion)
-        + (row.count - 1.0).max(0.0) * 0.5
-        + 0.5;
-    (0.0..row.count).contains(&index).then_some(())?;
-    let index = index as usize;
-    let center = row.icon_center(index as f32);
-    let delta = (point - center).abs();
-    (delta.x <= ICON_WIDTH * 0.5 && delta.y <= ICON_WIDTH * 0.5)
-        .then_some((index, point.x >= center.x))
-}
-
 fn row_rect(row: PillIconRow) -> Rect {
-    let radius = BACKPLATE_RADIUS + ICON_WIDTH / 3.0;
-    let half_size = row.half_size(radius);
+    let half_size = row.half_size(BACKPLATE_RADIUS + ICON_WIDTH / 3.0);
     Rect::new(
         row.center.x - half_size.x,
         row.center.y - half_size.y,
@@ -46,7 +35,6 @@ fn row_rect(row: PillIconRow) -> Rect {
 #[derive(Default)]
 pub struct InteractionState {
     pub mouse_pressure: f32, // 0 not hovered - 1 hovered - 2 mouse down
-    pub mouse_down: bool,
     pub dragging: bool,
     pub drag_origin: Option<Vec2>,
     pub drag_track: Option<(Option<TrackId>, f32)>,
@@ -55,7 +43,6 @@ pub struct InteractionState {
 impl CantusApp {
     pub const fn left_click(&mut self) {
         let interaction = &mut self.interaction;
-        interaction.mouse_down = true;
         interaction.mouse_pressure = 2.0;
         interaction.drag_origin = Some(self.global_uniforms.mouse_pos);
         interaction.drag_track = None;
@@ -63,7 +50,7 @@ impl CantusApp {
     }
 
     pub fn left_click_released(&mut self) {
-        if !self.interaction.dragging && self.interaction.mouse_down {
+        if !self.interaction.dragging && self.interaction.drag_origin.is_some() {
             self.handle_click();
         }
         if let Some((track_id, position)) = self.interaction.drag_track.take() {
@@ -71,24 +58,21 @@ impl CantusApp {
             self.pulse_at_playhead();
             if let Some(track_id) = track_id {
                 let client = Arc::clone(&self.spotify.client);
-                skip_to_track(track_id, position, false, &self.updater, client);
+                skip_to_track(track_id, position, &self.updater, client);
             }
         }
         self.cancel_drag();
-        self.interaction.mouse_down = false;
         self.interaction.mouse_pressure = 1.0;
     }
 
     pub const fn right_click(&mut self) {
         self.cancel_drag();
-        self.interaction.mouse_down = false;
+        self.interaction.mouse_pressure = 1.0;
     }
 
     /// Handle click events.
     fn handle_click(&mut self) {
         let mouse_pos = self.global_uniforms.mouse_pos;
-        let playing = self.playback_state.playing;
-
         let playlists = &self.playback_state.playlists;
         let icon_click = |track: &Track| self.icon_at(track, playlists);
 
@@ -125,26 +109,16 @@ impl CantusApp {
             }
 
             match action {
-                IconAction::Rate(rating) if self.config.ratings_enabled => {
-                    self.update_star_rating(track_id, rating);
-                }
+                IconAction::Rate(rating) => self.update_star_rating(track_id, rating),
                 IconAction::TogglePlaylist(playlist_id) => {
                     self.toggle_playlist_membership(track_id, playlist_id);
                 }
-                IconAction::Rate(_) => {}
             }
-        } else if Rect::new(
-            self.config.playhead_x() - self.config.height * 0.25,
-            PANEL_START,
-            self.config.playhead_x() + self.config.height * 0.25,
-            PANEL_START + self.config.height,
-        )
-        .contains(mouse_pos)
-        {
+        } else if self.playhead_rect().contains(mouse_pos) {
             // Play/pause
             self.pulse_at_playhead();
             self.last_toggle_playing = Instant::now();
-            self.toggle_playing(!playing);
+            self.toggle_playing(!self.playback_state.playing);
         } else if let Some((track_id, (track_range_a, track_range_b))) =
             self.playback_state.queue.iter().rev().find_map(|track| {
                 let rect = track.runtime.rect(self.config.height)?;
@@ -164,7 +138,7 @@ impl CantusApp {
             };
             if let Some(track_id) = track_id {
                 let client = Arc::clone(&self.spotify.client);
-                skip_to_track(track_id, position, false, &self.updater, client);
+                skip_to_track(track_id, position, &self.updater, client);
             }
         }
     }
@@ -184,12 +158,11 @@ impl CantusApp {
     /// Drag across the progress bar to seek.
     pub fn handle_mouse_drag(&mut self) {
         let interaction = &mut self.interaction;
-        if let Some(origin_pos) = interaction.drag_origin {
-            let delta = self.global_uniforms.mouse_pos - origin_pos;
-            if !interaction.dragging && (delta.x.abs() >= 2.0 || delta.y.abs() >= 2.0) {
-                interaction.dragging = true;
-            }
-        }
+        let Some(origin) = interaction.drag_origin else {
+            return;
+        };
+        let delta = (self.global_uniforms.mouse_pos - origin).abs();
+        interaction.dragging |= delta.x >= 2.0 || delta.y >= 2.0;
     }
 
     /// Handle scrolling events to adjust volume.
@@ -206,7 +179,16 @@ impl CantusApp {
             };
             let volume = *volume;
             let client = Arc::clone(&self.spotify.client);
-            spawn(move || set_volume(volume, &client));
+            spawn(move || {
+                info!("Setting volume to {volume}%");
+                if let Err(err) = client.api_request(
+                    Method::PUT,
+                    &format!("me/player/volume?volume_percent={volume}"),
+                    None,
+                ) {
+                    error!("Failed to set volume: {err}");
+                }
+            });
         }
     }
 
@@ -262,9 +244,9 @@ impl CantusApp {
         let mouse_pos = self.global_uniforms.mouse_pos;
         let (track_id, stars, primary_row, secondary_row) = self.icon_layout(track)?;
 
-        if track.runtime.primary_icon_alpha > 0.0
-            && let Some((index, right_half)) = hit_icon(primary_row, mouse_pos)
-        {
+        let (index, right_half) = primary_row.hit(mouse_pos);
+        if track.runtime.primary_icon_alpha > 0.0 && index >= 0 {
+            let index = index as usize;
             return if index < stars {
                 Some((
                     track_id,
@@ -277,13 +259,11 @@ impl CantusApp {
             };
         }
 
-        if let Some((index, _)) = hit_icon(secondary_row, mouse_pos) {
-            return Self::playlist_icons(track_id, playlists, false)
-                .nth(index)
-                .map(|playlist| (track_id, IconAction::TogglePlaylist(playlist.id)));
-        }
-
-        None
+        let (index, _) = secondary_row.hit(mouse_pos);
+        (index >= 0)
+            .then(|| Self::playlist_icons(track_id, playlists, false).nth(index as usize))
+            .flatten()
+            .map(|playlist| (track_id, IconAction::TogglePlaylist(playlist.id)))
     }
 
     /// Star ratings and favourite playlists
@@ -297,17 +277,17 @@ impl CantusApp {
         let Some(track_id) = track.id else {
             return;
         };
-        let primary_playlist_count = Self::playlist_icons(track_id, playlists, true)
-            .take(MAX_PILL_PLAYLIST_ICONS)
-            .count();
-        let secondary_playlist_count = Self::playlist_icons(track_id, playlists, false)
-            .take(MAX_PILL_PLAYLIST_ICONS - primary_playlist_count)
-            .count()
-            * usize::from(secondary_expansion > 0.0);
         let icons = Self::playlist_icons(track_id, playlists, true)
-            .take(primary_playlist_count)
-            .chain(Self::playlist_icons(track_id, playlists, false).take(secondary_playlist_count));
-        for (slot, playlist) in pill.playlist_images.iter_mut().zip(icons) {
+            .chain(Self::playlist_icons(track_id, playlists, false))
+            .take(MAX_PILL_PLAYLIST_ICONS)
+            .collect::<ArrayVec<_, MAX_PILL_PLAYLIST_ICONS>>();
+        let primary_count = icons.partition_point(|playlist| playlist.tracks.contains(&track_id));
+        let visible_count = if secondary_expansion > 0.0 {
+            icons.len()
+        } else {
+            primary_count
+        };
+        for (slot, playlist) in pill.playlist_images.iter_mut().zip(&icons[..visible_count]) {
             *slot = self.get_image_index(&playlist.art);
         }
 
@@ -321,8 +301,8 @@ impl CantusApp {
         } else {
             -1
         };
-        pill.primary_playlist_count = primary_playlist_count as u32;
-        pill.secondary_playlist_count = secondary_playlist_count as u32;
+        pill.primary_playlist_count = primary_count as u32;
+        pill.secondary_playlist_count = (visible_count - primary_count) as u32;
     }
 }
 
@@ -330,7 +310,6 @@ impl CantusApp {
 fn skip_to_track(
     track_id: TrackId,
     position: f32,
-    always_seek: bool,
     updater: &AppUpdater,
     client: Arc<spotify::SpotifyClient>,
 ) {
@@ -358,13 +337,13 @@ fn skip_to_track(
                     } else {
                         "me/player/previous"
                     };
-                    if let Err(err) = skip_client.api_post(path) {
+                    if let Err(err) = skip_client.api_request(Method::POST, path, None) {
                         error!("Failed to skip track: {err}");
                     }
                 }
             });
         }
-        if queue_index == position_in_queue || always_seek {
+        if queue_index == position_in_queue {
             let milliseconds = if position < 0.05 {
                 0.0
             } else {
@@ -374,10 +353,11 @@ fn skip_to_track(
             state.last_progress_update = Instant::now();
             state.last_interaction = Instant::now() + Duration::from_secs(2);
             spawn(move || {
-                if let Err(err) = client.api_put(&format!(
-                    "me/player/seek?position_ms={}",
-                    milliseconds.round()
-                )) {
+                if let Err(err) = client.api_request(
+                    Method::PUT,
+                    &format!("me/player/seek?position_ms={}", milliseconds.round()),
+                    None,
+                ) {
                     error!("Failed to seek track: {err}");
                 }
             });
@@ -401,11 +381,16 @@ fn set_playlist_membership(
     info!("{action} track {track_id} {preposition} playlist {playlist_name}");
     let path = format!("playlists/{playlist_id}/items");
     let result = if add {
-        client.api_post_payload(&path, &format!(r#"{{"uris": ["{track_uri}"]}}"#))
-    } else {
-        client.api_delete_payload(
+        client.api_request(
+            Method::POST,
             &path,
-            &format!(r#"{{"items": [{{"uri": "{track_uri}"}}]}}"#),
+            Some(&format!(r#"{{"uris": ["{track_uri}"]}}"#)),
+        )
+    } else {
+        client.api_request(
+            Method::DELETE,
+            &path,
+            Some(&format!(r#"{{"items": [{{"uri": "{track_uri}"}}]}}"#)),
         )
     };
     if let Err(err) = result {
@@ -418,10 +403,6 @@ fn set_playlist_membership(
 /// Update Spotify rating playlists for the given track.
 impl CantusApp {
     fn update_star_rating(&mut self, track_id: TrackId, rating_slot: u8) {
-        if !self.config.ratings_enabled {
-            return;
-        }
-
         self.playback_state.last_interaction = Instant::now() + Duration::from_millis(500);
         let changes = self
             .playback_state
@@ -454,8 +435,11 @@ impl CantusApp {
 
             let library_path = format!("me/library/?uris={track_uri}");
             let should_like = rating_slot >= 5;
-            match client.api_get(&format!("me/library/contains/?uris={track_uri}")) {
-                Ok(liked) if (liked == "[true]") != should_like => {
+            match client.api_json::<[bool; 1]>(
+                &format!("me/library/contains/?uris={track_uri}"),
+                "liked state",
+            ) {
+                Some([liked]) if liked != should_like => {
                     let (action, error_action) = if should_like {
                         ("Adding", "add")
                     } else {
@@ -466,9 +450,9 @@ impl CantusApp {
                         if should_like { "to" } else { "from" }
                     );
                     let result = if should_like {
-                        client.api_put(&library_path)
+                        client.api_request(Method::PUT, &library_path, None)
                     } else {
-                        client.api_delete(&library_path)
+                        client.api_request(Method::DELETE, &library_path, None)
                     };
                     if let Err(err) = result {
                         error!(
@@ -477,7 +461,6 @@ impl CantusApp {
                         );
                     }
                 }
-                Err(err) => error!("Failed to check if track {track_id} is already liked: {err}"),
                 _ => {}
             }
         });
@@ -526,19 +509,10 @@ impl CantusApp {
             // https://developer.spotify.com/documentation/web-api/reference/#/operations/start-a-users-playback
             // https://developer.spotify.com/documentation/web-api/reference/#/operations/pause-a-users-playback
             let action = if play { "play" } else { "pause" };
-            if let Err(err) = client.api_put(&format!("me/player/{action}")) {
+            if let Err(err) = client.api_request(Method::PUT, &format!("me/player/{action}"), None)
+            {
                 error!("Failed to {action} playback: {err}");
             }
         });
-    }
-}
-
-/// Set the volume of the current playback device.
-fn set_volume(volume_percent: u8, client: &spotify::SpotifyClient) {
-    info!("Setting volume to {}%", volume_percent);
-
-    // https://developer.spotify.com/documentation/web-api/reference/#/operations/set-volume-for-users-playback
-    if let Err(err) = client.api_put(&format!("me/player/volume?volume_percent={volume_percent}")) {
-        error!("Failed to set volume: {err}");
     }
 }

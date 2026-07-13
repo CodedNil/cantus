@@ -108,18 +108,16 @@ struct OutputInfo {
     handle: WlOutput,
     name: Option<String>,
     description: Option<String>,
-    make: Option<String>,
-    model: Option<String>,
+    make_model: Option<String>,
 }
 
 impl OutputInfo {
     fn matches(&self, target: &str) -> bool {
         self.name.as_ref().is_some_and(|name| name.contains(target))
             || self
-                .make
+                .make_model
                 .as_ref()
-                .zip(self.model.as_ref())
-                .is_some_and(|(make, model)| format!("{make} {model}").contains(target))
+                .is_some_and(|make_model| make_model.contains(target))
             || self
                 .description
                 .as_ref()
@@ -238,11 +236,11 @@ impl LayerShellApp {
         let (logical_width, logical_height) = self.cantus.logical_surface_size();
         let (buffer_width, buffer_height) = self.cantus.buffer_size();
         if let Some(surface) = &self.wl_surface {
-            surface.set_buffer_scale(if self.viewport.is_some() {
-                1
-            } else {
-                self.cantus.render_scale.ceil() as i32
-            });
+            surface.set_buffer_scale(
+                self.viewport
+                    .as_ref()
+                    .map_or_else(|| self.cantus.render_scale.ceil() as i32, |_| 1),
+            );
         }
         if let Some(viewport) = &self.viewport {
             viewport.set_source(0.0, 0.0, f64::from(buffer_width), f64::from(buffer_height));
@@ -254,9 +252,8 @@ impl LayerShellApp {
         let (Some(wl_surface), Some(compositor)) = (&self.wl_surface, &self.compositor) else {
             return;
         };
-        let rects: Vec<_> = self.cantus.input_rects().collect();
         let mut hasher = DefaultHasher::new();
-        for r in &rects {
+        for r in self.cantus.input_rects() {
             [r.x0, r.y0, r.x1, r.y1]
                 .map(|value| value.round() as i32)
                 .hash(&mut hasher);
@@ -265,7 +262,7 @@ impl LayerShellApp {
 
         if hash != self.last_hitbox_hash {
             let region = compositor.create_region(qhandle, ());
-            for r in rects {
+            for r in self.cantus.input_rects() {
                 region.add(
                     r.x0.round() as i32,
                     r.y0.round() as i32,
@@ -310,9 +307,7 @@ impl Dispatch<ZwlrLayerSurfaceV1, ()> for LayerShellApp {
                 state.update_scale_and_viewport();
                 state.try_render_frame(qhandle);
             }
-            zwlr_layer_surface_v1::Event::Closed => {
-                state.should_exit = true;
-            }
+            zwlr_layer_surface_v1::Event::Closed => state.should_exit = true,
             _ => {}
         }
     }
@@ -367,19 +362,15 @@ impl Dispatch<WlOutput, ()> for LayerShellApp {
         if let Some(info) = state.outputs.iter_mut().find(|info| info.handle.id() == id) {
             match event {
                 wl_output::Event::Geometry { make, model, .. } => {
-                    info.make = Some(make);
-                    info.model = Some(model);
+                    info.make_model = Some(format!("{make} {model}"));
                 }
-                wl_output::Event::Name { name } => {
-                    info.name = Some(name);
-                }
+                wl_output::Event::Name { name } => info.name = Some(name),
                 wl_output::Event::Description { description } => {
                     info.description = Some(description);
                 }
                 _ => {}
             }
         }
-        state.select_output();
     }
 }
 
@@ -435,12 +426,10 @@ impl Dispatch<WlPointer, ()> for LayerShellApp {
                 ..
             } => {
                 cantus.global_uniforms.mouse_pos = vec2(surface_x as f32, surface_y as f32);
-                interaction.mouse_pressure = if interaction.mouse_down { 2.0 } else { 1.0 };
                 cantus.handle_mouse_drag();
             }
             wl_pointer::Event::Leave { .. } => {
                 interaction.mouse_pressure = 0.0;
-                interaction.mouse_down = false;
                 cantus.cancel_drag();
             }
             wl_pointer::Event::Button {
@@ -466,9 +455,7 @@ impl Dispatch<WlPointer, ()> for LayerShellApp {
                 axis: WEnum::Value(wl_pointer::Axis::VerticalScroll),
                 value120: discrete,
                 ..
-            } => {
-                state.cantus.handle_scroll(discrete.signum());
-            }
+            } => state.cantus.handle_scroll(discrete.signum()),
             _ => {}
         }
     }
@@ -516,8 +503,7 @@ impl Dispatch<WlRegistry, ()> for LayerShellApp {
                         handle: proxy.bind::<WlOutput, (), Self>(name, version.min(4), qhandle, ()),
                         name: None,
                         description: None,
-                        make: None,
-                        model: None,
+                        make_model: None,
                     });
                 }
                 _ => {}

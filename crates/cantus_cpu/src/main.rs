@@ -110,6 +110,7 @@ struct PlaybackState {
 
 impl Default for PlaybackState {
     fn default() -> Self {
+        let now = Instant::now();
         Self {
             playing: false,
             progress: 0,
@@ -117,8 +118,8 @@ impl Default for PlaybackState {
             queue: Vec::new(),
             queue_index: 0,
             playlists: Vec::new(),
-            last_interaction: Instant::now(),
-            last_progress_update: Instant::now(),
+            last_interaction: now,
+            last_progress_update: now,
         }
     }
 }
@@ -145,7 +146,6 @@ struct Track {
 
 #[derive(Default)]
 struct TrackRuntime {
-    queue_offset_ms: f32,
     playlist_expansion: f32,
     detail_alpha: f32,
     primary_icon_alpha: f32,
@@ -157,6 +157,21 @@ struct TrackRuntime {
 }
 
 impl Track {
+    fn queue_span_ms(&self) -> f32 {
+        self.duration_ms as f32 + TRACK_SPACING_MS
+    }
+
+    fn is_current(&self) -> bool {
+        self.runtime.start_ms <= 0.0 && self.runtime.start_ms + self.duration_ms as f32 >= 0.0
+    }
+
+    fn palette(&self) -> [u32; NUM_SWATCHES] {
+        match &self.art {
+            ArtState::Ready(art) => art.palette,
+            _ => [0; NUM_SWATCHES],
+        }
+    }
+
     fn natural_x_range(&self, playhead_x: f32, px_per_ms: f32) -> (f32, f32) {
         let start = playhead_x + self.runtime.start_ms * px_per_ms;
         (start, start + self.duration_ms as f32 * px_per_ms)
@@ -164,15 +179,21 @@ impl Track {
 }
 
 impl TrackRuntime {
+    fn end_x(&self) -> f32 {
+        self.start_x + self.width
+    }
+
+    fn is_visible(&self) -> bool {
+        self.width > 0.0 && self.end_x() > 0.0
+    }
+
     fn rect(&self, height: f32) -> Option<Rect> {
-        (self.width > 0.0 && self.start_x + self.width > 0.0).then(|| {
-            Rect::new(
-                self.start_x,
-                PANEL_START,
-                self.start_x + self.width,
-                PANEL_START + height,
-            )
-        })
+        self.is_visible().then_some(Rect::new(
+            self.start_x,
+            PANEL_START,
+            self.end_x(),
+            PANEL_START + height,
+        ))
     }
 }
 
@@ -297,10 +318,7 @@ impl ImageAtlas {
         self.used = 0;
     }
 
-    fn image_index(&mut self, queue: &Queue, art: Option<&Arc<AlbumArt>>) -> i32 {
-        let Some(art) = art else {
-            return -1;
-        };
+    fn image_index(&mut self, queue: &Queue, art: &Arc<AlbumArt>) -> i32 {
         if let Some(index) = self
             .slots
             .iter()
@@ -347,9 +365,7 @@ impl ImageAtlas {
 
 fn main() {
     tracing_subscriber::fmt()
-        .with_env_filter(tracing_subscriber::EnvFilter::new(
-            ["warn", "cantus=info", "wgpu_hal=error"].join(","),
-        ))
+        .with_env_filter("warn,cantus=info,wgpu_hal=error")
         .with_writer(io::stderr)
         .init();
 
@@ -357,6 +373,17 @@ fn main() {
 }
 
 impl CantusApp {
+    fn playhead_rect(&self) -> Rect {
+        let x = self.config.playhead_x();
+        let radius = self.config.height * 0.25;
+        Rect::new(
+            x - radius,
+            PANEL_START,
+            x + radius,
+            PANEL_START + self.config.height,
+        )
+    }
+
     fn logical_surface_size(&self) -> (f32, f32) {
         (
             self.surface_width.unwrap_or(self.config.width),
@@ -400,7 +427,6 @@ impl CantusApp {
             }
         };
 
-        let gpu = self.gpu_resources.as_mut().unwrap();
         gpu.images.begin_frame();
         gpu.text_renderer.begin_frame();
 
@@ -467,12 +493,8 @@ impl CantusApp {
     }
 
     fn get_image_index(&mut self, art: &ArtState) -> i32 {
-        let Some(gpu) = self.gpu_resources.as_mut() else {
+        let (Some(gpu), ArtState::Ready(art)) = (self.gpu_resources.as_mut(), art) else {
             return -1;
-        };
-        let art = match art {
-            ArtState::Ready(art) => Some(art),
-            _ => None,
         };
         gpu.images.image_index(&gpu.queue, art)
     }
@@ -492,8 +514,7 @@ fn deserialize_first_artist<'de, D>(deserializer: D) -> Result<Artist, D::Error>
 where
     D: Deserializer<'de>,
 {
-    let artists: Vec<Artist> = Vec::deserialize(deserializer)?;
-    artists
+    Vec::<Artist>::deserialize(deserializer)?
         .into_iter()
         .next()
         .ok_or_else(|| de::Error::custom("artists array is empty"))

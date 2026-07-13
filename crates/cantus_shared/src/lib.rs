@@ -23,11 +23,10 @@ pub struct PlayheadUniforms {
     pub bar_split: f32,
     pub icon_presence: f32,
     pub icon_morph: f32,
-    pub icon_scale: f32,
 }
 
 #[repr(C)]
-#[derive(Copy, Clone)]
+#[derive(Copy, Clone, Default)]
 #[cfg_attr(feature = "cpu", derive(bytemuck::Pod, bytemuck::Zeroable))]
 pub struct BackgroundPill {
     pub x: f32,
@@ -90,10 +89,10 @@ impl BackgroundPill {
         if self.rating >= 0 { 5.0 } else { 0.0 }
     }
 
-    pub fn icon_rows(&self, primary_center_y: f32) -> (PillIconRow, PillIconRow) {
+    pub fn icon_rows(&self, bar_start_y: f32, bar_height: f32) -> (PillIconRow, PillIconRow) {
         pill_icon_rows(
             self.x + self.width * 0.5,
-            primary_center_y,
+            pill_icon_primary_center_y(bar_start_y, bar_height),
             self.star_count() + self.primary_playlist_count as f32,
             self.secondary_playlist_count as f32,
             self.secondary_expansion,
@@ -113,6 +112,26 @@ pub struct PillIconRow {
 }
 
 impl PillIconRow {
+    pub fn hit(self, point: Vec2) -> (i32, bool) {
+        if self.expansion <= 0.0 {
+            return (-1, false);
+        }
+        let index = (point.x - self.center.x) / (ICON_SPACING * self.expansion)
+            + (self.count - 1.0).max(0.0) * 0.5
+            + 0.5;
+        if !(0.0..self.count).contains(&index) {
+            return (-1, false);
+        }
+        let index = index as i32;
+        let center = self.icon_center(index as f32);
+        let delta = (point - center).abs();
+        if delta.x <= ICON_WIDTH * 0.5 && delta.y <= ICON_WIDTH * 0.5 {
+            (index, point.x >= center.x)
+        } else {
+            (-1, false)
+        }
+    }
+
     pub fn padded_half_span(self) -> f32 {
         let icon_span = (self.count - 1.0).max(0.0) * ICON_SPACING * self.expansion;
         icon_span * 0.5 + ICON_SPACING * 0.15
@@ -165,6 +184,5 @@ pub fn smoothstep(edge0: f32, edge1: f32, x: f32) -> f32 {
 }
 
 pub fn approach(current: &mut f32, target: f32, speed: f32) {
-    let step = speed.abs();
-    *current += (target - *current).clamp(-step, step);
+    *current += (target - *current).clamp(-speed, speed);
 }

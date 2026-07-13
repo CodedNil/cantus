@@ -1,7 +1,7 @@
 use crate::{PANEL_START, Track};
 use ab_glyph::{Font, FontArc, Glyph, GlyphId, PxScale, ScaleFont, point};
 use cantus_shared::{GlyphInstance, MAX_GLYPH_INSTANCES};
-use glam::vec2;
+use glam::{Vec2, vec2};
 use std::collections::HashMap;
 use wgpu::{
     Device, Extent3d, Queue, Texture, TextureDescriptor, TextureDimension, TextureFormat,
@@ -16,12 +16,6 @@ const ATLAS_SIZE: u32 = 2048;
 const ATLAS_PADDING: u32 = 1;
 const SCALE_STEPS: f32 = 4.0;
 
-#[derive(Hash, Eq, PartialEq)]
-struct AtlasKey {
-    glyph_id: u16,
-    scale_quarters: u16,
-}
-
 #[derive(Clone, Copy)]
 struct AtlasEntry {
     pos: [u32; 2],
@@ -34,9 +28,8 @@ pub struct TextRenderer {
     font: FontArc,
     /// Glyph atlas texture.
     atlas: Texture,
-    atlas_view: TextureView,
     /// Packed glyph data keyed by glyph ID, size, and subpixel phase.
-    atlas_cache: HashMap<AtlasKey, AtlasEntry>,
+    atlas_cache: HashMap<(GlyphId, u16), AtlasEntry>,
     /// Current write cursor in the atlas (x, y, `row_height`).
     atlas_cursor: (u32, u32, u32),
     /// Queued glyph instances for the current frame.
@@ -62,31 +55,28 @@ impl TextRenderer {
             usage: TextureUsages::TEXTURE_BINDING | TextureUsages::COPY_DST,
             view_formats: &[],
         });
-        let atlas_view = atlas.create_view(&TextureViewDescriptor::default());
-
         Self {
             panel_height,
             font,
             atlas,
-            atlas_view,
             atlas_cache: HashMap::new(),
             atlas_cursor: (0, 0, 0),
             glyphs: Vec::new(),
         }
     }
 
-    pub const fn atlas_view(&self) -> &TextureView {
-        &self.atlas_view
+    pub fn atlas_view(&self) -> TextureView {
+        self.atlas.create_view(&TextureViewDescriptor::default())
     }
 
-    fn rasterize_glyph(&mut self, queue: &Queue, key: AtlasKey) -> Option<AtlasEntry> {
+    fn rasterize_glyph(&mut self, queue: &Queue, key: (GlyphId, u16)) -> Option<AtlasEntry> {
         if let Some(&entry) = self.atlas_cache.get(&key) {
             return Some(entry);
         }
 
-        let scale = PxScale::from(f32::from(key.scale_quarters) / SCALE_STEPS);
+        let scale = PxScale::from(f32::from(key.1) / SCALE_STEPS);
         let glyph = Glyph {
-            id: GlyphId(key.glyph_id),
+            id: key.0,
             scale,
             position: point(0.0, 0.0),
         };
@@ -152,8 +142,7 @@ impl TextRenderer {
 
     pub fn render(&mut self, queue: &Queue, track: &Track, alpha: f32, render_scale: f32) {
         let text_start_left = track.runtime.start_x + 12.0;
-        let text_start_right =
-            track.runtime.start_x + track.runtime.width - self.panel_height - 8.0;
+        let text_start_right = track.runtime.end_x() - self.panel_height - 8.0;
         let available_width = text_start_right - text_start_left;
 
         if available_width <= 0.0 {
@@ -178,35 +167,19 @@ impl TextRenderer {
         let top_y = PANEL_START + (self.panel_height * 0.26).floor();
         let bottom_y = PANEL_START + (self.panel_height * 0.57).floor();
 
-        // --- Top line: song name ---
         let measured_width = measure_text(&self.font, song_name, FONT_SIZE);
 
         let width_ratio = available_width / measured_width;
-        let (x, size) = if width_ratio <= 1.0 {
-            (text_start_left, FONT_SIZE * width_ratio.max(0.8))
+        let (x, size, align) = if width_ratio <= 1.0 {
+            (
+                text_start_left,
+                FONT_SIZE * width_ratio.max(0.8),
+                Align::Left,
+            )
         } else {
-            (text_start_right, FONT_SIZE)
-        };
-        let align = if width_ratio <= 1.0 {
-            Align::Left
-        } else {
-            Align::Right
+            (text_start_right, FONT_SIZE, Align::Right)
         };
 
-        queue_glyphs(
-            self,
-            queue,
-            song_name,
-            x,
-            top_y,
-            size,
-            align,
-            alpha,
-            text_start_right,
-            render_scale,
-        );
-
-        // --- Bottom line: time + artist ---
         let seconds_until_start = (track.runtime.start_ms / 1000.0).abs();
         let time_text = if seconds_until_start >= 60.0 {
             format!(
@@ -220,53 +193,63 @@ impl TextRenderer {
 
         let bottom_merged = format!("{time_text}\u{2004}•\u{2004}{}", track.artist.name);
         let measured_bottom_width = measure_text(&self.font, &bottom_merged, FONT_SIZE_SMALL);
-
         let bottom_ratio = available_width / measured_bottom_width;
+        let split_widths = (bottom_ratio > 1.0 && track.is_current()).then(|| {
+            (
+                measure_text(&self.font, &time_text, FONT_SIZE_SMALL),
+                measure_text(&self.font, &track.artist.name, FONT_SIZE_SMALL),
+            )
+        });
 
-        let is_current = track.runtime.start_ms <= 0.0
-            && track.runtime.start_ms + track.duration_ms as f32 >= 0.0;
-        if bottom_ratio <= 1.0 || !is_current {
-            let (x, align) = if bottom_ratio >= 1.0 {
-                (text_start_right, Align::Right)
-            } else {
-                (text_start_left, Align::Left)
-            };
-            queue_glyphs(
-                self,
+        let mut queue_text = |text, width, origin, size, align| {
+            self.queue_glyphs(
                 queue,
-                &bottom_merged,
-                x,
-                bottom_y,
-                FONT_SIZE_SMALL * bottom_ratio.clamp(0.8, 1.0),
+                text,
+                width,
+                origin,
+                size,
                 align,
                 alpha,
                 text_start_right,
                 render_scale,
             );
-        } else {
-            queue_glyphs(
-                self,
-                queue,
+        };
+        queue_text(
+            song_name,
+            measured_width * size / FONT_SIZE,
+            vec2(x, top_y),
+            size,
+            align,
+        );
+
+        if let Some((time_width, artist_width)) = split_widths {
+            queue_text(
                 &time_text,
-                text_start_left,
-                bottom_y,
+                time_width,
+                vec2(text_start_left, bottom_y),
                 FONT_SIZE_SMALL,
                 Align::Left,
-                alpha,
-                text_start_right,
-                render_scale,
             );
-            queue_glyphs(
-                self,
-                queue,
+            queue_text(
                 &track.artist.name,
-                text_start_right,
-                bottom_y,
+                artist_width,
+                vec2(text_start_right, bottom_y),
                 FONT_SIZE_SMALL,
                 Align::Right,
-                alpha,
-                text_start_right,
-                render_scale,
+            );
+        } else {
+            let (x, align) = if bottom_ratio >= 1.0 {
+                (text_start_right, Align::Right)
+            } else {
+                (text_start_left, Align::Left)
+            };
+            let size = FONT_SIZE_SMALL * bottom_ratio.clamp(0.8, 1.0);
+            queue_text(
+                &bottom_merged,
+                measured_bottom_width * size / FONT_SIZE_SMALL,
+                vec2(x, bottom_y),
+                size,
+                align,
             );
         }
     }
@@ -277,6 +260,77 @@ impl TextRenderer {
 
     pub fn glyphs(&self) -> &[GlyphInstance] {
         &self.glyphs
+    }
+
+    fn queue_glyphs(
+        &mut self,
+        queue: &Queue,
+        text: &str,
+        total_width: f32,
+        origin: Vec2,
+        px_size: f32,
+        align: Align,
+        alpha: f32,
+        clip_right: f32,
+        render_scale: f32,
+    ) {
+        let scaled_font = self.font.as_scaled(px_size);
+        let baseline_offset = (scaled_font.ascent() + scaled_font.descent()) * 0.5;
+
+        let caret = match align {
+            Align::Left => origin.x,
+            Align::Right => origin.x - total_width,
+        };
+
+        let scale_quarters = (FONT_SIZE * render_scale * SCALE_STEPS)
+            .round()
+            .max(SCALE_STEPS) as u16;
+        let glyph_scale = px_size / (FONT_SIZE * render_scale);
+        let atlas_scale = 1.0 / ATLAS_SIZE as f32;
+        let clip_right = match align {
+            Align::Left if total_width - (clip_right - origin.x) > 0.5 / render_scale => clip_right,
+            _ => f32::MAX,
+        };
+        let baseline_y = origin.y + baseline_offset;
+
+        let font = self.font.clone();
+        let font = font.as_scaled(px_size);
+        let mut caret = caret;
+        let mut last_glyph = None;
+        for c in text.chars() {
+            if self.glyphs.len() == MAX_GLYPH_INSTANCES {
+                break;
+            }
+            let glyph_id = font.glyph_id(c);
+            if let Some(previous) = last_glyph {
+                caret += font.kern(previous, glyph_id);
+            }
+            let glyph_x = caret;
+            caret += font.h_advance(glyph_id);
+            last_glyph = Some(glyph_id);
+
+            let key = (glyph_id, scale_quarters);
+            let Some(glyph) = self.rasterize_glyph(queue, key) else {
+                continue;
+            };
+            self.glyphs.push(GlyphInstance {
+                pos: vec2(
+                    glyph_x + glyph.bearing[0] as f32 * glyph_scale,
+                    baseline_y + glyph.bearing[1] as f32 * glyph_scale,
+                ),
+                size: vec2(
+                    glyph.size[0] as f32 * glyph_scale,
+                    glyph.size[1] as f32 * glyph_scale,
+                ),
+                atlas_min: vec2(glyph.pos[0] as f32, glyph.pos[1] as f32) * atlas_scale,
+                atlas_max: vec2(
+                    (glyph.pos[0] + glyph.size[0]) as f32,
+                    (glyph.pos[1] + glyph.size[1]) as f32,
+                ) * atlas_scale,
+                clip_right,
+                alpha,
+            });
+        }
     }
 }
 
@@ -299,82 +353,4 @@ fn measure_text(font: &FontArc, text: &str, px_size: f32) -> f32 {
         last_glyph = Some(glyph_id);
     }
     caret
-}
-
-fn queue_glyphs(
-    renderer: &mut TextRenderer,
-    queue: &Queue,
-    text: &str,
-    origin_x: f32,
-    origin_y: f32,
-    px_size: f32,
-    align: Align,
-    alpha: f32,
-    clip_right: f32,
-    render_scale: f32,
-) {
-    let total_width = measure_text(&renderer.font, text, px_size);
-    let scaled_font = renderer.font.as_scaled(px_size);
-    let baseline_offset = (scaled_font.ascent() + scaled_font.descent()) * 0.5;
-
-    let caret = match align {
-        Align::Left => origin_x,
-        Align::Right => origin_x - total_width,
-    };
-
-    let scale_quarters = (FONT_SIZE * render_scale * SCALE_STEPS)
-        .round()
-        .max(SCALE_STEPS) as u16;
-    let glyph_scale = px_size / FONT_SIZE;
-    let clip_right = match align {
-        Align::Left if total_width - (clip_right - origin_x) > 0.5 / render_scale => clip_right,
-        _ => f32::MAX,
-    };
-    let baseline_y = origin_y + baseline_offset;
-
-    let font = renderer.font.clone();
-    let font = font.as_scaled(px_size);
-    let mut caret = caret;
-    let mut last_glyph = None;
-    for c in text.chars() {
-        if renderer.glyphs.len() == MAX_GLYPH_INSTANCES {
-            break;
-        }
-        let glyph_id = font.glyph_id(c);
-        if let Some(previous) = last_glyph {
-            caret += font.kern(previous, glyph_id);
-        }
-        let glyph_x = caret;
-        caret += font.h_advance(glyph_id);
-        last_glyph = Some(glyph_id);
-
-        let key = AtlasKey {
-            glyph_id: glyph_id.0,
-            scale_quarters,
-        };
-        let Some(glyph) = renderer.rasterize_glyph(queue, key) else {
-            continue;
-        };
-        let atlas_size = ATLAS_SIZE as f32;
-        renderer.glyphs.push(GlyphInstance {
-            pos: vec2(
-                glyph_x + glyph.bearing[0] as f32 * glyph_scale / render_scale,
-                baseline_y + glyph.bearing[1] as f32 * glyph_scale / render_scale,
-            ),
-            size: vec2(
-                glyph.size[0] as f32 * glyph_scale / render_scale,
-                glyph.size[1] as f32 * glyph_scale / render_scale,
-            ),
-            atlas_min: vec2(
-                glyph.pos[0] as f32 / atlas_size,
-                glyph.pos[1] as f32 / atlas_size,
-            ),
-            atlas_max: vec2(
-                (glyph.pos[0] + glyph.size[0]) as f32 / atlas_size,
-                (glyph.pos[1] + glyph.size[1]) as f32 / atlas_size,
-            ),
-            clip_right,
-            alpha,
-        });
-    }
 }

@@ -5,16 +5,14 @@ use crate::{
 use cantus_shared::{
     BackgroundPill, GlobalUniforms, GlyphInstance, MAX_GLYPH_INSTANCES, Particle, PlayheadUniforms,
 };
-use std::{array, mem::size_of, sync::Arc};
+use std::{mem::size_of, sync::Arc};
 use wgpu::{
-    BindGroupDescriptor, BindGroupEntry, BindGroupLayout, BindGroupLayoutDescriptor,
-    BindGroupLayoutEntry, BindingResource, BindingType, BlendState, BufferBindingType,
-    BufferDescriptor, BufferUsages, ColorTargetState, ColorWrites, CompositeAlphaMode, Device,
-    DeviceDescriptor, Extent3d, FilterMode, FragmentState, Limits, MemoryHints, MultisampleState,
-    PipelineCompilationOptions, PipelineLayoutDescriptor, PowerPreference, PrimitiveState,
-    PrimitiveTopology, RenderPipeline, RenderPipelineDescriptor, RequestAdapterOptions,
-    SamplerBindingType, SamplerDescriptor, ShaderStages, Surface, TextureDescriptor,
-    TextureDimension, TextureFormat, TextureSampleType, TextureUsages, TextureViewDescriptor,
+    BindGroupDescriptor, BindGroupEntry, BindingResource, BlendState, BufferDescriptor,
+    BufferUsages, ColorTargetState, ColorWrites, CompositeAlphaMode, Device, DeviceDescriptor,
+    Extent3d, FilterMode, FragmentState, Limits, MemoryHints, MultisampleState,
+    PipelineCompilationOptions, PowerPreference, PrimitiveState, PrimitiveTopology, RenderPipeline,
+    RenderPipelineDescriptor, RequestAdapterOptions, SamplerDescriptor, ShaderModule, Surface,
+    TextureDescriptor, TextureDimension, TextureFormat, TextureUsages, TextureViewDescriptor,
     TextureViewDimension, VertexState,
 };
 
@@ -22,16 +20,56 @@ pub const MAX_TEXTURE_IMAGES: u32 = 32;
 pub const TEXTURE_LAYER_COUNT: u32 = MAX_TEXTURE_IMAGES * 2;
 pub const IMAGE_SIZE: u32 = 64;
 
-fn gpu_pass<const N: usize>(
+fn render_pipeline(
     device: &Device,
+    shader: &ShaderModule,
+    format: TextureFormat,
     label: &str,
-    layout: &BindGroupLayout,
-    pipeline: RenderPipeline,
+) -> RenderPipeline {
+    let name = label.to_ascii_lowercase();
+    let vertex_entry = format!("{name}::vs_{name}");
+    let fragment_entry = format!("{name}::fs_{name}");
+    device.create_render_pipeline(&RenderPipelineDescriptor {
+        label: Some(label),
+        layout: None,
+        vertex: VertexState {
+            module: shader,
+            entry_point: Some(&vertex_entry),
+            buffers: &[],
+            compilation_options: PipelineCompilationOptions::default(),
+        },
+        fragment: Some(FragmentState {
+            module: shader,
+            entry_point: Some(&fragment_entry),
+            targets: &[Some(ColorTargetState {
+                format,
+                blend: Some(BlendState::PREMULTIPLIED_ALPHA_BLENDING),
+                write_mask: ColorWrites::ALL,
+            })],
+            compilation_options: PipelineCompilationOptions::default(),
+        }),
+        primitive: PrimitiveState {
+            topology: PrimitiveTopology::TriangleStrip,
+            ..Default::default()
+        },
+        depth_stencil: None,
+        multisample: MultisampleState::default(),
+        multiview_mask: None,
+        cache: None,
+    })
+}
+
+fn gpu_pass(
+    device: &Device,
+    shader: &ShaderModule,
+    format: TextureFormat,
+    label: &str,
     uniform_buffer: &wgpu::Buffer,
     size: u64,
     usage: BufferUsages,
-    extra_resources: [BindingResource<'_>; N],
+    extra_resources: &[BindingResource<'_>],
 ) -> GpuPass {
+    let pipeline = render_pipeline(device, shader, format, label);
     let buffer_label = format!("{label} Data");
     let buffer = device.create_buffer(&BufferDescriptor {
         label: Some(&buffer_label),
@@ -44,7 +82,7 @@ fn gpu_pass<const N: usize>(
         buffer.as_entire_binding(),
     ]
     .into_iter()
-    .chain(extra_resources)
+    .chain(extra_resources.iter().cloned())
     .enumerate()
     .map(|(binding, resource)| BindGroupEntry {
         binding: binding as u32,
@@ -54,7 +92,7 @@ fn gpu_pass<const N: usize>(
     let bind_group_label = format!("{label} Bind Group");
     let bind_group = device.create_bind_group(&BindGroupDescriptor {
         label: Some(&bind_group_label),
-        layout,
+        layout: &pipeline.get_bind_group_layout(0),
         entries: &entries,
     });
     GpuPass {
@@ -83,9 +121,9 @@ impl CantusApp {
             ..Default::default()
         }))
         .expect("No device");
-        device.on_uncaptured_error(Arc::new(|error| {
-            tracing::error!(%error, "uncaptured wgpu error");
-        }));
+        device.on_uncaptured_error(Arc::new(
+            |error| tracing::error!(%error, "uncaptured wgpu error"),
+        ));
 
         let capabilities = surface.get_capabilities(&adapter);
         let alpha_mode = [
@@ -108,116 +146,10 @@ impl CantusApp {
         surface.configure(&device, &surface_config);
 
         let text_renderer = TextRenderer::new(&device, self.config.height);
+        let text_atlas_view = text_renderer.atlas_view();
 
         let rust_gpu_shader =
             device.create_shader_module(wgpu::include_spirv!("../../../assets/cantus.spv"));
-
-        let bgl = |label, entries: &[(ShaderStages, BindingType)]| {
-            device.create_bind_group_layout(&BindGroupLayoutDescriptor {
-                label: Some(label),
-                entries: &entries
-                    .iter()
-                    .enumerate()
-                    .map(|(binding, &(visibility, ty))| BindGroupLayoutEntry {
-                        binding: binding as u32,
-                        visibility,
-                        ty,
-                        count: None,
-                    })
-                    .collect::<Vec<_>>(),
-            })
-        };
-
-        let ub = BindingType::Buffer {
-            ty: BufferBindingType::Uniform,
-            has_dynamic_offset: false,
-            min_binding_size: None,
-        };
-        let sb = BindingType::Buffer {
-            ty: BufferBindingType::Storage { read_only: true },
-            has_dynamic_offset: false,
-            min_binding_size: None,
-        };
-        let tx = |view_dimension| BindingType::Texture {
-            multisampled: false,
-            view_dimension,
-            sample_type: TextureSampleType::Float { filterable: true },
-        };
-        let sp = BindingType::Sampler(SamplerBindingType::Filtering);
-        let vf = ShaderStages::VERTEX | ShaderStages::FRAGMENT;
-
-        let playhead_layout = bgl("Playhead", &[(vf, ub), (ShaderStages::FRAGMENT, ub)]);
-        let particle_layout = bgl(
-            "Particles",
-            &[(ShaderStages::VERTEX, ub), (ShaderStages::VERTEX, sb)],
-        );
-        let textured_layout = |label, view_dimension| {
-            bgl(
-                label,
-                &[
-                    (vf, ub),
-                    (vf, sb),
-                    (ShaderStages::FRAGMENT, tx(view_dimension)),
-                    (ShaderStages::FRAGMENT, sp),
-                ],
-            )
-        };
-        let std_layout = textured_layout("Standard", TextureViewDimension::D2Array);
-        let text_layout = textured_layout("Text", TextureViewDimension::D2);
-        let create_pipe = |label, layout: &BindGroupLayout, vertex_entry, fragment_entry| {
-            device.create_render_pipeline(&RenderPipelineDescriptor {
-                label: Some(label),
-                layout: Some(&device.create_pipeline_layout(&PipelineLayoutDescriptor {
-                    label: Some(label),
-                    bind_group_layouts: &[Some(layout)],
-                    ..Default::default()
-                })),
-                vertex: VertexState {
-                    module: &rust_gpu_shader,
-                    entry_point: Some(vertex_entry),
-                    buffers: &[],
-                    compilation_options: PipelineCompilationOptions::default(),
-                },
-                fragment: Some(FragmentState {
-                    module: &rust_gpu_shader,
-                    entry_point: Some(fragment_entry),
-                    targets: &[Some(ColorTargetState {
-                        format,
-                        blend: Some(BlendState::PREMULTIPLIED_ALPHA_BLENDING),
-                        write_mask: ColorWrites::ALL,
-                    })],
-                    compilation_options: PipelineCompilationOptions::default(),
-                }),
-                primitive: PrimitiveState {
-                    topology: PrimitiveTopology::TriangleStrip,
-                    ..Default::default()
-                },
-                depth_stencil: None,
-                multisample: MultisampleState::default(),
-                multiview_mask: None,
-                cache: None,
-            })
-        };
-
-        let playhead_pipeline = create_pipe(
-            "Playhead",
-            &playhead_layout,
-            "playhead::vs_playhead",
-            "playhead::fs_playhead",
-        );
-        let particle_pipeline = create_pipe(
-            "Particles",
-            &particle_layout,
-            "particles::vs_particles",
-            "particles::fs_particles",
-        );
-        let background_pipeline = create_pipe(
-            "Background",
-            &std_layout,
-            "background::vs_background",
-            "background::fs_background",
-        );
-        let text_pipeline = create_pipe("Text", &text_layout, "text::vs_text", "text::fs_text");
 
         let uniform_buffer = device.create_buffer(&BufferDescriptor {
             label: Some("Uniforms"),
@@ -251,49 +183,45 @@ impl CantusApp {
             ..Default::default()
         });
 
-        let playhead = gpu_pass(
-            &device,
+        let create_pass = |label, size, usage, resources: &[BindingResource<'_>]| {
+            gpu_pass(
+                &device,
+                &rust_gpu_shader,
+                format,
+                label,
+                &uniform_buffer,
+                size,
+                usage,
+                resources,
+            )
+        };
+        let playhead = create_pass(
             "Playhead",
-            &playhead_layout,
-            playhead_pipeline,
-            &uniform_buffer,
             size_of::<PlayheadUniforms>() as u64,
             BufferUsages::UNIFORM,
-            [],
+            &[],
         );
-        let particles = gpu_pass(
-            &device,
+        let particles = create_pass(
             "Particles",
-            &particle_layout,
-            particle_pipeline,
-            &uniform_buffer,
             (size_of::<Particle>() * PARTICLE_COUNT) as u64,
             BufferUsages::STORAGE,
-            [],
+            &[],
         );
-        let background = gpu_pass(
-            &device,
+        let background = create_pass(
             "Background",
-            &std_layout,
-            background_pipeline,
-            &uniform_buffer,
             (size_of::<BackgroundPill>() * MAX_RENDER_INSTANCES) as u64,
             BufferUsages::STORAGE,
-            [
+            &[
                 BindingResource::TextureView(&image_view),
                 BindingResource::Sampler(&sampler),
             ],
         );
-        let text = gpu_pass(
-            &device,
+        let text = create_pass(
             "Text",
-            &text_layout,
-            text_pipeline,
-            &uniform_buffer,
             (size_of::<GlyphInstance>() * MAX_GLYPH_INSTANCES) as u64,
             BufferUsages::STORAGE,
-            [
-                BindingResource::TextureView(text_renderer.atlas_view()),
+            &[
+                BindingResource::TextureView(&text_atlas_view),
                 BindingResource::Sampler(&sampler),
             ],
         );
@@ -310,7 +238,7 @@ impl CantusApp {
             particles,
             images: ImageAtlas {
                 texture: texture_array,
-                slots: array::from_fn(|_| None),
+                slots: [const { None }; MAX_TEXTURE_IMAGES as usize],
                 used: 0,
             },
             text_renderer,

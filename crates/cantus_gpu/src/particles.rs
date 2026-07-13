@@ -1,4 +1,4 @@
-use crate::common::{pixel_to_ndc, quad_coord, unpack4x8unorm};
+use crate::common::{pixel_to_ndc, quad_coord, unpack3x8unorm};
 use cantus_shared::{GlobalUniforms, Particle, smoothstep};
 use spirv_std::{
     arch::kill,
@@ -17,11 +17,9 @@ pub fn vs_particles(
     #[spirv(location = 1)] out_uv: &mut Vec2,
 ) {
     let p = particles[i_idx as usize];
-    let color_vec = unpack4x8unorm(p.color);
-    let rgb = color_vec.truncate();
-    let duration = (color_vec.w * 255.0) / 100.0;
-    let spawn_time = p.end_time - duration;
-    let dt = global.time - spawn_time;
+    let rgb = unpack3x8unorm(p.color);
+    let duration = ((p.color >> 24) & 0xff) as f32 / 100.0;
+    let dt = global.time - (p.end_time - duration);
 
     if dt < 0.0 || dt > duration {
         *out_pos = Vec4::ZERO;
@@ -31,20 +29,17 @@ pub fn vs_particles(
     }
 
     let p_life = dt / duration;
-    let p_life_inv = 1.0 - p_life;
-    let pos = p.spawn_pos + p.spawn_vel * dt;
     let dir = p.spawn_vel.normalize();
     let perp = dir.perp();
     let growth = p_life + 0.5;
-    let half_len = 5.0 * growth;
-    let half_thick = 2.5 * growth;
     let uv = quad_coord(v_idx) * 2.0 - 1.0;
-    let world_pos = pos + (dir * uv.x * half_len) + (perp * uv.y * half_thick);
+    let extent = uv * vec2(5.0, 2.5) * growth;
+    let world_pos = p.spawn_pos + p.spawn_vel * dt + dir * extent.x + perp * extent.y;
     let luma = rgb.dot(vec3(0.299, 0.587, 0.114));
     let spark_color = Vec3::splat(luma).lerp(rgb, 2.0).lerp(Vec3::ONE, 0.2) * 2.0;
 
     *out_pos = pixel_to_ndc(world_pos, global.screen_size);
-    *out_color = spark_color.extend(p_life_inv * smoothstep(0.0, 0.15, dt) * 0.3);
+    *out_color = spark_color.extend((1.0 - p_life) * smoothstep(0.0, 0.15, dt) * 0.3);
     *out_uv = uv;
 }
 
@@ -54,8 +49,7 @@ pub fn fs_particles(
     #[spirv(location = 1)] uv: Vec2,
     #[spirv(location = 0)] out_color: &mut Vec4,
 ) {
-    let dist = (uv * vec2(0.8, 1.0)).length();
-    let alpha = color.w * smoothstep(1.0, 0.2, dist);
+    let alpha = color.w * smoothstep(1.0, 0.2, (uv * vec2(0.8, 1.0)).length());
     if alpha <= 0.0 {
         kill();
     }
