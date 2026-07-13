@@ -1,3 +1,5 @@
+use arrayvec::ArrayVec;
+use cantus_shared::MAX_PILL_PLAYLIST_ICONS;
 use serde::Deserialize;
 use std::fs;
 use tracing::warn;
@@ -5,7 +7,7 @@ use tracing::warn;
 #[derive(Deserialize)]
 #[serde(default)]
 pub struct Config {
-    // Spotify client ID
+    /// Spotify client ID to use for authentication.
     pub spotify_client_id: Option<String>,
 
     /// The monitor to display on.
@@ -17,13 +19,9 @@ pub struct Config {
     pub height: f32,
 
     /// The layer the app should be on.
-    ///
-    /// Can be one of 'background', 'bottom', 'top', or 'overlay'.
-    pub layer: String,
+    pub layer: Layer,
     /// The corner/edge the application should anchor to.
-    ///
-    /// Can be one of 'top' or 'bottom'.
-    pub layer_anchor: String,
+    pub layer_anchor: LayerAnchor,
 
     /// How many minutes in the future to display in the timeline.
     pub timeline_future_minutes: f32,
@@ -32,10 +30,26 @@ pub struct Config {
     /// The width in logical pixels on the left where previous tracks are displayed.
     pub history_width: f32,
 
-    /// Array of favourite playlists to display as buttons.
-    pub playlists: Vec<String>,
-    /// Should star ratings be enabled
+    /// Favourite playlists to display as buttons.
+    pub playlists: ArrayVec<String, MAX_PILL_PLAYLIST_ICONS>,
+    /// Whether star ratings should be enabled.
     pub ratings_enabled: bool,
+}
+
+#[derive(Clone, Copy, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum Layer {
+    Background,
+    Bottom,
+    Top,
+    Overlay,
+}
+
+#[derive(Clone, Copy, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum LayerAnchor {
+    Top,
+    Bottom,
 }
 
 impl Default for Config {
@@ -45,22 +59,23 @@ impl Default for Config {
             monitor: None,
             width: 1050.0,
             height: 50.0,
-            layer: "top".into(),
-            layer_anchor: "top".into(),
+            layer: Layer::Top,
+            layer_anchor: LayerAnchor::Top,
             timeline_future_minutes: 12.0,
             timeline_past_minutes: 1.5,
             history_width: 100.0,
-            playlists: Vec::new(),
+            playlists: ArrayVec::new(),
             ratings_enabled: false,
         }
     }
 }
 
 pub fn load() -> Config {
-    let path = dirs::config_dir()
-        .expect("config directory unavailable")
-        .join("cantus")
-        .join("cantus.toml");
+    let Some(config_dir) = dirs::config_dir() else {
+        warn!("Falling back to default config, user config directory is unavailable");
+        return Config::default();
+    };
+    let path = config_dir.join("cantus").join("cantus.toml");
 
     fs::read_to_string(&path)
         .inspect_err(|err| warn!("Falling back to default config, unable to read {path:?}: {err}"))

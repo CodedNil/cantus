@@ -1,9 +1,7 @@
 rec {
   description = "A beautiful interactive music widget for wayland";
 
-  inputs = {
-    nixpkgs.url = "github:NixOS/nixpkgs/nixos-unstable";
-  };
+  inputs.nixpkgs.url = "github:NixOS/nixpkgs/nixos-unstable";
 
   outputs =
     {
@@ -18,21 +16,11 @@ rec {
         "x86_64-linux"
         "aarch64-linux"
       ];
-      forAllSystems =
-        f:
-        lib.genAttrs supportedSystems (
-          system:
-          f (
-            import nixpkgs {
-              inherit system;
-            }
-          )
-        );
+      forAllSystems = f: lib.genAttrs supportedSystems (system: f nixpkgs.legacyPackages.${system});
       runtimeLibraries =
         pkgs: with pkgs; [
           wayland
           vulkan-loader
-          libxkbcommon
         ];
     in
     {
@@ -43,9 +31,7 @@ rec {
           version = (lib.importTOML ./crates/cantus_cpu/Cargo.toml).package.version;
 
           src = lib.cleanSource ./.;
-          cargoLock = {
-            lockFile = ./Cargo.lock;
-          };
+          cargoLock.lockFile = ./Cargo.lock;
 
           nativeBuildInputs = with pkgs; [
             pkg-config
@@ -146,15 +132,15 @@ rec {
                       };
 
                       width = mkOption {
-                        type = types.either types.int types.float;
+                        type = types.number;
                         default = 1050.0;
-                        description = "Width of the timeline in pixels.";
+                        description = "Width of the timeline in logical pixels.";
                       };
 
                       height = mkOption {
-                        type = types.either types.int types.float;
+                        type = types.number;
                         default = 50.0;
-                        description = "Height of the timeline in pixels.";
+                        description = "Height of the timeline in logical pixels.";
                       };
 
                       layer = mkOption {
@@ -165,7 +151,7 @@ rec {
                           "overlay"
                         ];
                         default = "top";
-                        description = "Layer shell layer to display Cantus on.";
+                        description = "Layer the app should be displayed on.";
                       };
 
                       layer_anchor = mkOption {
@@ -174,29 +160,31 @@ rec {
                           "bottom"
                         ];
                         default = "top";
-                        description = "Screen edge Cantus should anchor to.";
+                        description = "Screen edge the app should anchor to.";
                       };
 
                       timeline_future_minutes = mkOption {
-                        type = types.either types.int types.float;
+                        type = types.number;
                         default = 12.0;
                         description = "Minutes in the future to display in the timeline.";
                       };
 
                       timeline_past_minutes = mkOption {
-                        type = types.either types.int types.float;
+                        type = types.number;
                         default = 1.5;
                         description = "Minutes before the current time to display in the timeline.";
                       };
 
                       history_width = mkOption {
-                        type = types.either types.int types.float;
+                        type = types.number;
                         default = 100.0;
-                        description = "Width in pixels where previous tracks are displayed.";
+                        description = "Width in logical pixels where previous tracks are displayed.";
                       };
 
                       playlists = mkOption {
-                        type = types.listOf types.str;
+                        type = types.addCheck (types.listOf types.str) (items: builtins.length items <= 8) // {
+                          description = "list of strings with at most 8 entries";
+                        };
                         default = [ ];
                         description = "Favourite playlists to display as buttons.";
                       };

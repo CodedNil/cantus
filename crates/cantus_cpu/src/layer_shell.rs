@@ -1,4 +1,7 @@
-use crate::{CantusApp, Rect};
+use crate::{
+    CantusApp, Rect,
+    config::{Layer as ConfigLayer, LayerAnchor as ConfigLayerAnchor},
+};
 use glam::vec2;
 use raw_window_handle::{
     RawDisplayHandle, RawWindowHandle, WaylandDisplayHandle, WaylandWindowHandle,
@@ -9,7 +12,6 @@ use std::{
     hash::{Hash, Hasher},
     ptr::NonNull,
 };
-use tracing::error;
 use wayland_client::{
     Connection, Dispatch, Proxy, QueueHandle, WEnum, delegate_noop,
     protocol::{
@@ -72,15 +74,11 @@ pub fn run() {
     let layer_surface = layer_shell.get_layer_surface(
         surface,
         app.outputs.get(app.output_index).map(|info| &info.handle),
-        match app.cantus.config.layer.as_str() {
-            "background" => LayerStyle::Background,
-            "bottom" => LayerStyle::Bottom,
-            "top" => LayerStyle::Top,
-            "overlay" => LayerStyle::Overlay,
-            other => {
-                error!("Invalid layer '{other}', defaulting to 'top'");
-                LayerStyle::Top
-            }
+        match app.cantus.config.layer {
+            ConfigLayer::Background => LayerStyle::Background,
+            ConfigLayer::Bottom => LayerStyle::Bottom,
+            ConfigLayer::Top => LayerStyle::Top,
+            ConfigLayer::Overlay => LayerStyle::Overlay,
         },
         "cantus".into(),
         &qhandle,
@@ -88,13 +86,9 @@ pub fn run() {
     );
     let (_, total_height) = app.cantus.logical_surface_size();
     layer_surface.set_size(0, total_height as u32);
-    layer_surface.set_anchor(match app.cantus.config.layer_anchor.as_str() {
-        "top" => LayerAnchor::Top | LayerAnchor::Left | LayerAnchor::Right,
-        "bottom" => LayerAnchor::Bottom | LayerAnchor::Left | LayerAnchor::Right,
-        other => {
-            error!("Invalid layer anchor '{other}', defaulting to 'top'");
-            LayerAnchor::Top | LayerAnchor::Left | LayerAnchor::Right
-        }
+    layer_surface.set_anchor(match app.cantus.config.layer_anchor {
+        ConfigLayerAnchor::Top => LayerAnchor::Top | LayerAnchor::Left | LayerAnchor::Right,
+        ConfigLayerAnchor::Bottom => LayerAnchor::Bottom | LayerAnchor::Left | LayerAnchor::Right,
     });
     layer_surface.set_exclusive_zone(-1);
 
