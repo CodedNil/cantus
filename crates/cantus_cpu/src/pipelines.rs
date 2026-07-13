@@ -243,5 +243,6 @@ impl CantusApp {
             },
             text_renderer,
         });
+        self.particles_dirty = true;
     }
 }

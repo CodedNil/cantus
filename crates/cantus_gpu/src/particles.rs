@@ -17,7 +17,6 @@ pub fn vs_particles(
     #[spirv(location = 1)] out_uv: &mut Vec2,
 ) {
     let p = particles[i_idx as usize];
-    let rgb = unpack3x8unorm(p.color);
     let duration = ((p.color >> 24) & 0xff) as f32 / 100.0;
     let dt = global.time - (p.end_time - duration);
 
@@ -29,6 +28,7 @@ pub fn vs_particles(
     }
 
     let p_life = dt / duration;
+    let rgb = unpack3x8unorm(p.color);
     let dir = p.spawn_vel.normalize();
     let perp = dir.perp();
     let growth = p_life + 0.5;

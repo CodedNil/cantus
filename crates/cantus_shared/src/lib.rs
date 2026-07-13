@@ -63,13 +63,21 @@ pub struct GlyphInstance {
     pub pos: Vec2,
     /// Width and height of the glyph quad in logical pixels.
     pub size: Vec2,
-    /// Top-left UV coordinate (normalized 0..1) into the glyph atlas.
-    pub atlas_min: Vec2,
-    /// Bottom-right UV coordinate (normalized 0..1) into the glyph atlas.
-    pub atlas_max: Vec2,
+    /// Packed top-left and bottom-right atlas coordinates.
+    pub atlas: [u32; 2],
     /// Right clip edge in logical pixels.
     pub clip_right: f32,
     pub alpha: f32,
+}
+
+pub const GLYPH_ATLAS_SIZE: u32 = 2048;
+
+pub const fn pack_u16x2(value: [u32; 2]) -> u32 {
+    value[0] | value[1] << 16
+}
+
+pub const fn unpack_u16x2(value: u32) -> Vec2 {
+    Vec2::new((value & 0xffff) as f32, (value >> 16) as f32)
 }
 
 /// Maximum number of playlist artwork icons carried by one pill instance.

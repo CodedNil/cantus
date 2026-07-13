@@ -265,6 +265,15 @@ impl CantusApp {
         if show_details {
             self.draw_playlist_buttons(track, playlist_expansion, playlists, &mut pill);
         }
+        if hovered && pill.rating >= 0 {
+            let (index, right_half) = pill
+                .icon_rows(PANEL_START, self.config.height)
+                .0
+                .hit(self.global_uniforms.mouse_pos);
+            if (0..5).contains(&index) {
+                pill.rating = index * 2 + 1 + i32::from(right_half);
+            }
+        }
         track.runtime.primary_playlist_count = pill.primary_playlist_count as u8;
         track.runtime.secondary_playlist_count = pill.secondary_playlist_count as u8;
         let primary_icons = pill.star_count() + pill.primary_playlist_count as f32;
@@ -301,9 +310,9 @@ impl CantusApp {
             self.particles_accumulator = 0.0;
             0
         };
+        self.particles_dirty |= emit_count > 0;
 
-        let spawn_offset = avg_speed.signum() * 2.0;
-        let horizontal_bias = (avg_speed.abs().powf(0.2) * spawn_offset * 0.5).clamp(-3.0, 3.0);
+        let horizontal_bias = (avg_speed.abs().powf(0.2) * avg_speed.signum()).clamp(-3.0, 3.0);
         let time = self.global_uniforms.time;
 
         for particle in self

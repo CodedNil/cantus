@@ -10,11 +10,13 @@ use cantus_shared::{BackgroundPill, GlobalUniforms, Particle, PlayheadUniforms};
 use serde::{Deserialize, Deserializer, de};
 use std::{
     collections::HashSet,
-    io,
+    io, mem,
     sync::Arc,
     sync::mpsc::{self, Receiver, Sender},
     time::Instant,
 };
+use tracing::{Level, level_filters::LevelFilter};
+use tracing_subscriber::{filter::Targets, fmt, layer::SubscriberExt, util::SubscriberInitExt};
 use wgpu::{
     BindGroup, Buffer, Color, CommandEncoderDescriptor, CurrentSurfaceTexture, Device, Instance,
     LoadOp, Operations, Queue, RenderPass, RenderPassColorAttachment, RenderPassDescriptor,
@@ -54,6 +56,7 @@ struct CantusApp {
     last_toggle_playing: Instant,
     particles: [Particle; PARTICLE_COUNT],
     particles_accumulator: f32,
+    particles_dirty: bool,
     /// Physical buffer pixels per logical Wayland surface pixel.
     render_scale: f32,
     /// Logical width assigned by the layer-shell compositor.
@@ -86,6 +89,7 @@ impl Default for CantusApp {
             last_toggle_playing: Instant::now(),
             particles: [Particle::default(); PARTICLE_COUNT],
             particles_accumulator: 0.0,
+            particles_dirty: false,
             render_scale: 1.0,
             surface_width: None,
 
@@ -129,6 +133,7 @@ const NUM_SWATCHES: usize = 4;
 
 type TrackId = ArrayString<22>;
 type PlaylistId = ArrayString<22>;
+type PlaylistTracks = Arc<HashSet<TrackId>>;
 
 #[derive(Deserialize)]
 struct Track {
@@ -212,7 +217,7 @@ struct CondensedPlaylist {
     id: PlaylistId,
     name: String,
     image_url: Option<String>,
-    tracks: HashSet<TrackId>,
+    tracks: PlaylistTracks,
     rating_index: Option<u8>,
     art: ArtState,
 }
@@ -314,10 +319,6 @@ struct ImageAtlas {
 }
 
 impl ImageAtlas {
-    const fn begin_frame(&mut self) {
-        self.used = 0;
-    }
-
     fn image_index(&mut self, queue: &Queue, art: &Arc<AlbumArt>) -> i32 {
         if let Some(index) = self
             .slots
@@ -364,9 +365,14 @@ impl ImageAtlas {
 }
 
 fn main() {
-    tracing_subscriber::fmt()
-        .with_env_filter("warn,cantus=info,wgpu_hal=error")
-        .with_writer(io::stderr)
+    tracing_subscriber::registry()
+        .with(
+            Targets::new()
+                .with_default(LevelFilter::WARN)
+                .with_target("cantus", Level::INFO)
+                .with_target("wgpu_hal", Level::ERROR),
+        )
+        .with(fmt::layer().with_writer(io::stderr))
         .init();
 
     layer_shell::run();
@@ -427,8 +433,8 @@ impl CantusApp {
             }
         };
 
-        gpu.images.begin_frame();
-        gpu.text_renderer.begin_frame();
+        gpu.images.used = 0;
+        gpu.text_renderer.glyphs.clear();
 
         self.create_scene();
 
@@ -438,11 +444,13 @@ impl CantusApp {
             0,
             bytemuck::bytes_of(&self.global_uniforms),
         );
-        gpu.queue.write_buffer(
-            &gpu.particles.buffer,
-            0,
-            bytemuck::cast_slice(&self.particles),
-        );
+        if mem::take(&mut self.particles_dirty) {
+            gpu.queue.write_buffer(
+                &gpu.particles.buffer,
+                0,
+                bytemuck::cast_slice(&self.particles),
+            );
+        }
         gpu.queue.write_buffer(
             &gpu.playhead.buffer,
             0,
@@ -477,7 +485,7 @@ impl CantusApp {
                 .draw_data(&gpu.queue, &mut rpass, &self.background_pills);
 
             gpu.text
-                .draw_data(&gpu.queue, &mut rpass, gpu.text_renderer.glyphs());
+                .draw_data(&gpu.queue, &mut rpass, &gpu.text_renderer.glyphs);
 
             gpu.particles.draw(&mut rpass, PARTICLE_COUNT as u32);
 

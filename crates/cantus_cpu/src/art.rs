@@ -65,11 +65,10 @@ impl CantusApp {
 }
 
 fn art_request(state: &ArtState, url: Option<&str>, now: Instant) -> Option<String> {
-    if matches!(state, ArtState::Missing) || matches!(state, ArtState::RetryAt(at) if *at <= now) {
-        url.map(str::to_owned)
-    } else {
-        None
-    }
+    (matches!(state, ArtState::Missing) || matches!(state, ArtState::RetryAt(at) if *at <= now))
+        .then_some(url)
+        .flatten()
+        .map(str::to_owned)
 }
 
 fn image_palette(image: &RgbaImage) -> [u32; NUM_SWATCHES] {

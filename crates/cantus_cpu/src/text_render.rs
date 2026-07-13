@@ -1,6 +1,6 @@
 use crate::{PANEL_START, Track};
 use ab_glyph::{Font, FontArc, Glyph, GlyphId, PxScale, ScaleFont, point};
-use cantus_shared::{GlyphInstance, MAX_GLYPH_INSTANCES};
+use cantus_shared::{GLYPH_ATLAS_SIZE, GlyphInstance, MAX_GLYPH_INSTANCES, pack_u16x2};
 use glam::{Vec2, vec2};
 use std::collections::HashMap;
 use wgpu::{
@@ -12,7 +12,6 @@ const FONT_SIZE: f32 = 16.0;
 const FONT_SIZE_SMALL: f32 = 14.0;
 
 /// Size of the glyph atlas texture (square, in pixels).
-const ATLAS_SIZE: u32 = 2048;
 const ATLAS_PADDING: u32 = 1;
 const SCALE_STEPS: f32 = 4.0;
 
@@ -33,7 +32,7 @@ pub struct TextRenderer {
     /// Current write cursor in the atlas (x, y, `row_height`).
     atlas_cursor: (u32, u32, u32),
     /// Queued glyph instances for the current frame.
-    glyphs: Vec<GlyphInstance>,
+    pub glyphs: Vec<GlyphInstance>,
 }
 
 impl TextRenderer {
@@ -44,8 +43,8 @@ impl TextRenderer {
         let atlas = device.create_texture(&TextureDescriptor {
             label: Some("Glyph Atlas"),
             size: Extent3d {
-                width: ATLAS_SIZE,
-                height: ATLAS_SIZE,
+                width: GLYPH_ATLAS_SIZE,
+                height: GLYPH_ATLAS_SIZE,
                 depth_or_array_layers: 1,
             },
             mip_level_count: 1,
@@ -93,12 +92,12 @@ impl TextRenderer {
         // sample coverage from a neighbouring atlas entry.
         // Simple row-based packing; if it doesn't fit, start a new row.
         let (mut cx, mut cy, mut row_h) = self.atlas_cursor;
-        if cx + width + ATLAS_PADDING * 2 > ATLAS_SIZE {
+        if cx + width + ATLAS_PADDING * 2 > GLYPH_ATLAS_SIZE {
             cy += row_h;
             cx = 0;
             row_h = 0;
         }
-        if cy + height + ATLAS_PADDING * 2 > ATLAS_SIZE {
+        if cy + height + ATLAS_PADDING * 2 > GLYPH_ATLAS_SIZE {
             return None;
         }
         let gx = cx + ATLAS_PADDING;
@@ -254,14 +253,6 @@ impl TextRenderer {
         }
     }
 
-    pub fn begin_frame(&mut self) {
-        self.glyphs.clear();
-    }
-
-    pub fn glyphs(&self) -> &[GlyphInstance] {
-        &self.glyphs
-    }
-
     fn queue_glyphs(
         &mut self,
         queue: &Queue,
@@ -286,7 +277,6 @@ impl TextRenderer {
             .round()
             .max(SCALE_STEPS) as u16;
         let glyph_scale = px_size / (FONT_SIZE * render_scale);
-        let atlas_scale = 1.0 / ATLAS_SIZE as f32;
         let clip_right = match align {
             Align::Left if total_width - (clip_right - origin.x) > 0.5 / render_scale => clip_right,
             _ => f32::MAX,
@@ -322,11 +312,10 @@ impl TextRenderer {
                     glyph.size[0] as f32 * glyph_scale,
                     glyph.size[1] as f32 * glyph_scale,
                 ),
-                atlas_min: vec2(glyph.pos[0] as f32, glyph.pos[1] as f32) * atlas_scale,
-                atlas_max: vec2(
-                    (glyph.pos[0] + glyph.size[0]) as f32,
-                    (glyph.pos[1] + glyph.size[1]) as f32,
-                ) * atlas_scale,
+                atlas: [
+                    pack_u16x2(glyph.pos),
+                    pack_u16x2([glyph.pos[0] + glyph.size[0], glyph.pos[1] + glyph.size[1]]),
+                ],
                 clip_right,
                 alpha,
             });

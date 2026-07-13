@@ -91,6 +91,7 @@ impl CantusApp {
             })
         {
             // Spawn particles
+            self.particles_dirty = true;
             let time = self.start_time.elapsed().as_secs_f32();
             for particle in self
                 .particles
@@ -410,10 +411,11 @@ impl CantusApp {
             .iter_mut()
             .filter_map(|playlist| {
                 let add = playlist.rating_index? == rating_slot;
+                let tracks = Arc::make_mut(&mut playlist.tracks);
                 let changed = if add {
-                    playlist.tracks.insert(track_id)
+                    tracks.insert(track_id)
                 } else {
-                    playlist.tracks.remove(&track_id)
+                    tracks.remove(&track_id)
                 };
                 changed.then(|| (playlist.id, playlist.name.clone(), add))
             })
@@ -479,9 +481,10 @@ impl CantusApp {
             return;
         };
         let playlist_name = playlist.name.clone();
-        let add = playlist.tracks.insert(track_id);
+        let tracks = Arc::make_mut(&mut playlist.tracks);
+        let add = tracks.insert(track_id);
         if !add {
-            playlist.tracks.remove(&track_id);
+            tracks.remove(&track_id);
         }
         self.playback_state.last_interaction = Instant::now() + Duration::from_millis(500);
 

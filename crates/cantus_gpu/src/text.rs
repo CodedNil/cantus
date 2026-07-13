@@ -1,5 +1,7 @@
 use crate::common::{pixel_to_ndc, quad_coord};
-use cantus_shared::{GlobalUniforms, GlyphInstance, MAX_GLYPH_INSTANCES, smoothstep};
+use cantus_shared::{
+    GLYPH_ATLAS_SIZE, GlobalUniforms, GlyphInstance, MAX_GLYPH_INSTANCES, smoothstep, unpack_u16x2,
+};
 use spirv_std::{
     Sampler,
     arch::kill,
@@ -22,9 +24,11 @@ pub fn vs_text(
     let glyph = glyphs[i_idx as usize];
     let unit = quad_coord(v_idx);
     let pixel_pos = glyph.pos + unit * glyph.size;
+    let atlas_min = unpack_u16x2(glyph.atlas[0]);
+    let atlas_max = unpack_u16x2(glyph.atlas[1]);
 
     *out_pos = pixel_to_ndc(pixel_pos, global.screen_size);
-    *out_uv = glyph.atlas_min + unit * (glyph.atlas_max - glyph.atlas_min);
+    *out_uv = (atlas_min + unit * (atlas_max - atlas_min)) / GLYPH_ATLAS_SIZE as f32;
     *out_fade = Vec2::new(glyph.clip_right - pixel_pos.x, glyph.alpha);
 }
 

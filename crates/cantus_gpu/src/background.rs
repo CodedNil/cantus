@@ -3,7 +3,7 @@ use crate::common::{
 };
 use cantus_shared::{
     BACKPLATE_RADIUS, BackgroundPill, GlobalUniforms, ICON_WIDTH, MAX_PILL_PLAYLIST_ICONS,
-    smoothstep,
+    PillIconRow, smoothstep,
 };
 use spirv_std::{
     Sampler,
@@ -34,9 +34,10 @@ fn direction_and_length(vec: Vec2) -> (Vec2, f32) {
     (direction, length)
 }
 
-fn icon_local(pixel_pos: Vec2, center: Vec2, global: &GlobalUniforms) -> (Vec2, Vec2, f32) {
+fn icon_local(pixel_pos: Vec2, center: Vec2, global: &GlobalUniforms) -> (Vec2, Vec2, f32, f32) {
     let pressure = global.mouse_pressure.clamp(0.001, 1.0);
-    let proximity = smoothstep(30.0, 8.0, center.distance(global.mouse_pos) / pressure);
+    let mouse_distance = center.distance(global.mouse_pos);
+    let proximity = smoothstep(30.0, 8.0, mouse_distance / pressure);
     let pixel_radius = ICON_WIDTH * 0.5 * (1.05 + 0.63 * proximity);
     let x_push = (center.x - global.mouse_pos.x) * proximity * 0.5;
     let local = pixel_pos - (center + vec2(x_push, 0.0));
@@ -44,7 +45,28 @@ fn icon_local(pixel_pos: Vec2, center: Vec2, global: &GlobalUniforms) -> (Vec2, 
     let sin = angle.sin();
     let cos = angle.cos();
     let local = vec2(local.x * cos - local.y * sin, local.x * sin + local.y * cos);
-    (local / (pixel_radius * 2.0) + 0.5, local, pixel_radius)
+    (
+        local / (pixel_radius * 2.0) + 0.5,
+        local,
+        pixel_radius,
+        mouse_distance,
+    )
+}
+
+fn near(pixel_pos: Vec2, center: Vec2, half_size: Vec2) -> bool {
+    (pixel_pos - center).abs().cmplt(half_size).all()
+}
+
+fn near_icon(pixel_pos: Vec2, center: Vec2) -> bool {
+    near(pixel_pos, center, Vec2::splat(ICON_WIDTH * 1.8))
+}
+
+fn near_row(pixel_pos: Vec2, row: PillIconRow) -> bool {
+    near(
+        pixel_pos,
+        row.center,
+        vec2(row.padded_half_span() + ICON_WIDTH * 1.8, ICON_WIDTH * 1.8),
+    )
 }
 
 fn icon_overlay(color: Vec3, dist: f32, alpha: f32) -> Vec4 {
@@ -113,8 +135,8 @@ pub fn fs_background(
     let local_uv = local_pixel / pill_size;
     let local_centered = local_uv - 0.5;
 
-    let (ripple_dir, ripple_strength, ripple_flash) = {
-        let anim_t = (global.time - global.expansion_time) * 1.2;
+    let anim_t = (global.time - global.expansion_time) * 1.2;
+    let (ripple_dir, ripple_strength, ripple_flash) = if (-0.02..1.02).contains(&anim_t) {
         let ripple_t = anim_t.clamp(0.0, 1.0);
         let (ripple_dir, ripple_distance) = direction_and_length(pixel_pos - global.expansion_xy);
         let ripple_active = smoothstep(-0.02, 0.0, anim_t) * (1.0 - smoothstep(1.0, 1.02, anim_t));
@@ -126,9 +148,11 @@ pub fn fs_background(
             ripple_decay * ripple_decay * ripple_wave * 0.5,
             ripple_decay * ripple_wave * 0.5,
         )
+    } else {
+        (Vec2::ZERO, 0.0, 0.0)
     };
 
-    let (mouse_dir, mouse_d, mouse_inf) = {
+    let (mouse_dir, mouse_d, mouse_inf) = if global.mouse_pressure > 0.0 {
         let (mouse_dir, mouse_distance) = direction_and_length(pixel_pos - global.mouse_pos);
         let influence = smoothstep(120.0, 0.0, mouse_distance);
         (
@@ -136,6 +160,8 @@ pub fn fs_background(
             mouse_distance,
             influence * influence * global.mouse_pressure,
         )
+    } else {
+        (Vec2::ZERO, 0.0, 0.0)
     };
     let bulge = ripple_strength * 22.0 + mouse_inf * 8.0;
     let stretched_uv_y = local_centered.y * (pill_size.y / (pill_size.y + bulge)) + 0.5;
@@ -156,7 +182,6 @@ pub fn fs_background(
         backplate_radius,
     );
     dist = smooth_union(dist, primary_dist, 30.0, pill.primary_alpha);
-
     let secondary_dist = sd_capsule_box(
         pixel_pos - secondary_row.backplate_center(),
         secondary_row.padded_half_span(),
@@ -261,16 +286,15 @@ pub fn fs_background(
     // Keep shadows black while premultiplying the visible pill color.
     let mut output = (color * mask * pill.alpha).extend(alpha);
 
-    if pill.rating >= 0 {
-        let mut rating = pill.rating as f32;
-        let (index, right_half) = primary_row.hit(global.mouse_pos);
-        if global.mouse_pressure > 0.0 && (0..5).contains(&index) {
-            rating = index as f32 * 2.0 + 1.0 + u32::from(right_half) as f32;
-        }
+    if pill.rating >= 0 && pill.primary_alpha > 0.0 && near_row(pixel_pos, primary_row) {
+        let rating = pill.rating as f32;
         for index in 0..5 {
             let fill = ((rating - index as f32 * 2.0) * 0.5).clamp(0.0, 1.0);
             let center = primary_row.icon_center(index as f32);
-            let (local_uv, local_pixel, pixel_radius) = icon_local(pixel_pos, center, global);
+            if !near_icon(pixel_pos, center) {
+                continue;
+            }
+            let (local_uv, local_pixel, pixel_radius, _) = icon_local(pixel_pos, center, global);
             let dist =
                 sd_star(local_pixel, pixel_radius * 0.5, pixel_radius * 0.32) - pixel_radius * 0.1;
             let split_line = local_uv.x - fill;
@@ -282,45 +306,52 @@ pub fn fs_background(
     }
 
     // Playlist artwork icons.
-    let stars = pill.star_count();
-    let primary_playlists = pill.primary_playlist_count as usize;
-    let playlist_count =
-        (primary_playlists + pill.secondary_playlist_count as usize).min(MAX_PILL_PLAYLIST_ICONS);
-    for index in 0..playlist_count {
-        let image_index = pill.playlist_images[index];
-        if image_index < 0 {
-            continue;
+    if near_row(pixel_pos, primary_row) || near_row(pixel_pos, secondary_row) {
+        let stars = pill.star_count();
+        let primary_playlists = pill.primary_playlist_count as usize;
+        let playlist_count = (primary_playlists + pill.secondary_playlist_count as usize)
+            .min(MAX_PILL_PLAYLIST_ICONS);
+        for index in 0..playlist_count {
+            let image_index = pill.playlist_images[index];
+            if image_index < 0 {
+                continue;
+            }
+
+            let primary_icon = index < primary_playlists;
+            let (row, icon_index, alpha) = if primary_icon {
+                (primary_row, index as f32 + stars, pill.primary_alpha)
+            } else {
+                (
+                    secondary_row,
+                    (index - primary_playlists) as f32,
+                    pill.secondary_expansion,
+                )
+            };
+            if alpha <= 0.0 {
+                continue;
+            }
+            let center = row.icon_center(icon_index);
+            if !near_icon(pixel_pos, center) {
+                continue;
+            }
+            let (local_uv, local_pixel, pixel_radius, mouse_distance) =
+                icon_local(pixel_pos, center, global);
+            let desaturation = if primary_icon
+                || (global.mouse_pressure > 0.0 && mouse_distance <= ICON_WIDTH * 0.5)
+            {
+                0.0
+            } else {
+                0.2
+            };
+            let dist = sd_squircle(local_pixel, Vec2::splat(pixel_radius * 0.6), 6.0);
+            let tex = images.sample(*sampler, local_uv.extend(image_index as f32));
+            let overlay = icon_overlay(
+                tex.truncate().lerp(Vec3::splat(0.24), desaturation),
+                dist,
+                alpha,
+            );
+            output = over_premul(output, overlay, pill.alpha);
         }
-
-        let primary_icon = index < primary_playlists;
-        let (row, icon_index, alpha) = if primary_icon {
-            (primary_row, index as f32 + stars, pill.primary_alpha)
-        } else {
-            (
-                secondary_row,
-                (index - primary_playlists) as f32,
-                pill.secondary_expansion,
-            )
-        };
-        let center = row.icon_center(icon_index);
-        let desaturation = if primary_icon
-            || (global.mouse_pressure > 0.0
-                && center.distance(global.mouse_pos) <= ICON_WIDTH * 0.5)
-        {
-            0.0
-        } else {
-            0.2
-        };
-
-        let (local_uv, local_pixel, pixel_radius) = icon_local(pixel_pos, center, global);
-        let dist = sd_squircle(local_pixel, Vec2::splat(pixel_radius * 0.6), 6.0);
-        let tex = images.sample(*sampler, local_uv.extend(image_index as f32));
-        let overlay = icon_overlay(
-            tex.truncate().lerp(Vec3::splat(0.24), desaturation),
-            dist,
-            alpha,
-        );
-        output = over_premul(output, overlay, pill.alpha);
     }
 
     if output.w <= 0.0 {

@@ -10,14 +10,16 @@ path = "src/main.rs"
 [dependencies]
 cantus_shared = { path = "../cantus_shared", features = ["cpu"] }
 glam = { workspace = true }
-tracing = "0.1.44"
-tracing-subscriber = { version = "0.3.23", features = ["env-filter"] }
+tracing = { version = "0.1.44", default-features = false, features = ["std"] }
+tracing-subscriber = { version = "0.3.23", default-features = false, features = [
+    "fmt",
+    "smallvec",
+    "tracing-log",
+] }
 
 pollster = "1.0.1"
-raw-window-handle = "0.6.2"
 
-wayland-backend = { version = "0.3.15", features = ["client_system"] }
-wayland-client = { version = "0.31.14", default-features = false }
+wayland-client = { version = "0.31.14", default-features = false, features = ["system"] }
 wayland-protocols = { version = "0.32.13", features = ["client", "staging"] }
 wayland-protocols-wlr = { version = "0.3.12", features = ["client"] }
 
@@ -27,9 +29,8 @@ wgpu = { version = "30.0.0", default-features = false, features = [
     "std",
     "vulkan",
 ] }
-ab_glyph = "0.2.32"
+ab_glyph = { version = "0.2.32", default-features = false, features = ["std"] }
 
-time = { version = "0.3.53", features = ["serde"] }
 image = { version = "0.25.10", default-features = false, features = [
     "jpeg",
     "png",
@@ -39,20 +40,18 @@ kmeans_colors = { version = "0.7.1", default-features = false, features = [
 ] }
 palette = { version = "0.7.6", default-features = false, features = ["std"] }
 
-serde = { version = "1.0.228", features = ["derive"] }
+serde = { version = "1.0.228", features = ["derive", "rc"] }
 serde_json = "1.0.150"
 toml = "1.1.2"
 
 fastrand = "2.4.1"
 parking_lot = "0.12.5"
 arrayvec = { version = "0.7.8", features = ["serde"] }
-dirs = "6.0.0"
 thiserror = "2.0.18"
 base64 = "0.22.1"
-url = "2.5.8"
+form_urlencoded = "1.2.2"
 sha2 = { version = "0.11.0", default-features = false }
 bytemuck = { workspace = true }
-webbrowser = "1.2.1"
 ureq = { version = "3.3.0", default-features = false, features = ["rustls"] }
 
 [lints]

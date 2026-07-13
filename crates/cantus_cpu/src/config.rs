@@ -1,7 +1,7 @@
 use arrayvec::ArrayVec;
 use cantus_shared::MAX_PILL_PLAYLIST_ICONS;
 use serde::Deserialize;
-use std::fs;
+use std::{env, fs, path::PathBuf};
 use tracing::warn;
 
 #[derive(Deserialize)]
@@ -70,12 +70,17 @@ impl Default for Config {
     }
 }
 
+pub fn directory() -> PathBuf {
+    env::var_os("XDG_CONFIG_HOME")
+        .map(PathBuf::from)
+        .filter(|path| path.is_absolute())
+        .or_else(|| env::var_os("HOME").map(|home| PathBuf::from(home).join(".config")))
+        .unwrap_or_default()
+        .join("cantus")
+}
+
 pub fn load() -> Config {
-    let Some(config_dir) = dirs::config_dir() else {
-        warn!("Falling back to default config, user config directory is unavailable");
-        return Config::default();
-    };
-    let path = config_dir.join("cantus").join("cantus.toml");
+    let path = directory().join("cantus.toml");
 
     fs::read_to_string(&path)
         .inspect_err(|err| warn!("Falling back to default config, unable to read {path:?}: {err}"))

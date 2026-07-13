@@ -68,7 +68,7 @@ pub fn fs_playhead(
 
     let shadow =
         Vec2::ONE - (vec2(dist_bar, dist_icon) / line_thickness).clamp(Vec2::ZERO, Vec2::ONE);
-    let shadow = shadow.powf(2.0) * vec2(0.4, 0.4 * icon_alpha);
+    let shadow = shadow * shadow * vec2(0.4, 0.4 * icon_alpha);
     let shadow_mask = shadow.x.max(shadow.y);
 
     if main_mask <= 0.0 && shadow_mask <= 0.0 {

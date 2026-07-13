@@ -3,9 +3,6 @@ use crate::{
     config::{Layer as ConfigLayer, LayerAnchor as ConfigLayerAnchor},
 };
 use glam::vec2;
-use raw_window_handle::{
-    RawDisplayHandle, RawWindowHandle, WaylandDisplayHandle, WaylandWindowHandle,
-};
 use std::{
     collections::hash_map::DefaultHasher,
     ffi::c_void,
@@ -37,6 +34,7 @@ use wayland_protocols_wlr::layer_shell::v1::client::{
     zwlr_layer_surface_v1::{self, Anchor as LayerAnchor, ZwlrLayerSurfaceV1},
 };
 use wgpu::SurfaceTargetUnsafe;
+use wgpu::rwh::{RawDisplayHandle, RawWindowHandle, WaylandDisplayHandle, WaylandWindowHandle};
 
 pub fn run() {
     let connection = Connection::connect_to_env().expect("Failed to connect to Wayland display");
