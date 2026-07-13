@@ -5,10 +5,11 @@ use cantus_shared::{
     BACKPLATE_RADIUS, BackgroundPill, GlobalUniforms, ICON_WIDTH, MAX_PILL_PLAYLIST_ICONS,
     PillIconRow, smoothstep,
 };
+use core::f32::consts::{FRAC_PI_2, TAU};
 use spirv_std::{
     Sampler,
     arch::{Derivative, kill},
-    glam::{Vec2, Vec3, Vec4, vec2, vec3},
+    glam::{UVec3, Vec2, Vec3, Vec4, vec2, vec3},
     image::Image2dArray,
     spirv,
 };
@@ -16,11 +17,15 @@ use spirv_std::{
 #[cfg(target_arch = "spirv")]
 use spirv_std::num_traits::Float;
 
-fn repeat_art_uv(uv: Vec2) -> Vec2 {
-    vec2(
-        1.0 - ((uv.x * 0.5).fract() * 2.0 - 1.0).abs(),
-        uv.y.clamp(0.0, 1.0),
-    )
+fn hash(point: Vec2, seed: f32) -> f32 {
+    let bits = UVec3::new(point.x.to_bits(), point.y.to_bits(), seed.to_bits());
+    let mut value = bits.dot(UVec3::new(0x9e37_79b9, 0x85eb_ca6b, 0xc2b2_ae35));
+    value ^= value >> 16;
+    value = value.wrapping_mul(0x7feb_352d);
+    value ^= value >> 15;
+    value = value.wrapping_mul(0x846c_a68b);
+    value ^= value >> 16;
+    (value >> 8) as f32 * (1.0 / 16_777_216.0)
 }
 
 /// Returns direction and length without `glam::normalize_or_zero`, whose `is_finite` check emits an infinity literal that Naga rejects for this SPIR-V.
@@ -196,65 +201,73 @@ pub fn fs_background(
     let mask = (0.5 - dist).clamp(0.0, 1.0);
     let shadow = (1.0 - smoothstep(0.0, 14.0, dist)) * 0.16;
 
-    // Procedural colour and shared warp.
-    let seed = (pill.colors[0] % 1000) as f32 * 29.537;
+    // Domain-warped plasma distributes all four colours without fixed regions.
+    let seed = (pill.colors[0] % 1000) as f32 * 0.013;
     let lens_warp = (1.0 + dist.min(0.0) / 120.0).clamp(0.0, 1.0);
     let lens_warp = lens_warp * lens_warp * 0.6;
     let deformation =
         local_centered * lens_warp + ripple_dir * ripple_strength + mouse_dir * mouse_inf * 0.03;
-    let mut color = {
-        let palette_uv = (local_pixel / global.screen_size.y - deformation)
-            * 0.2
-            * vec2(1.0, global.screen_size.y / global.screen_size.x)
-            + seed;
-        let flow_seed = global.time * 0.15 + seed;
-        let s1 =
-            (palette_uv.x * 6.0 + flow_seed + (palette_uv.y * 4.0 + flow_seed * 0.5).sin()).sin();
-        let s2 =
-            (palette_uv.y * 5.0 - flow_seed + (palette_uv.x * 3.0 + flow_seed * 0.8).sin()).sin();
-        let c0 = unpack3x8unorm(pill.colors[0]);
-        let c1 = unpack3x8unorm(pill.colors[1]);
-        let c2 = unpack3x8unorm(pill.colors[2]);
-        let c3 = unpack3x8unorm(pill.colors[3]);
-
-        c0.lerp(c1, s1 * 0.5 + 0.5)
-            .lerp(c2.lerp(c3, s2 * 0.5 + 0.5), 0.5)
-            .lerp((c0 + c1 + c2 + c3) * 0.25, 0.1)
-    };
-
-    // Blurred album-art wash behind the procedural colour.
-    if pill.image_index >= 0 {
-        let art_uv = vec2(local_uv.x, stretched_uv_y);
-        let art_aspect = vec2(pill_size.y / pill_size.x, 1.0);
-        color = color.lerp(
-            images
-                .sample(
-                    *sampler,
-                    repeat_art_uv(art_uv - deformation * art_aspect)
-                        .extend(pill.image_index as f32 + 1.0),
-                )
-                .truncate(),
-            0.3,
-        );
+    let flow_time = global.time * 0.32 + seed;
+    let body_uv = local_uv.clamp(Vec2::ZERO, Vec2::ONE);
+    let frequency = (pill_size.x / pill_size.y * (0.55 + seed.fract() * 0.15)).max(1.7);
+    let field_uv = (body_uv - deformation * 0.08) * vec2(frequency, 1.6);
+    let warped_uv = field_uv
+        + vec2(
+            (field_uv.y * 2.7 + flow_time).sin() + (field_uv.x * 1.3 - flow_time * 0.7).cos(),
+            (field_uv.x * 2.3 - flow_time * 0.8).cos() + (field_uv.y * 1.7 + flow_time * 0.6).sin(),
+        ) * 0.22;
+    let directions = [
+        vec2(2.1, 0.7),
+        vec2(0.6, -2.4),
+        vec2(-1.5, 1.9),
+        vec2(2.4, 1.6),
+    ];
+    let speeds = [1.0, -0.8, 0.65, -0.55];
+    let offsets = [0.0, seed + FRAC_PI_2, 2.0, seed + FRAC_PI_2];
+    let mut color = Vec3::ZERO;
+    let mut weight_sum = 0.0;
+    for index in 0..4 {
+        let packed = pill.colors[index];
+        let wave = (warped_uv.dot(directions[index]) + flow_time * speeds[index] + offsets[index])
+            .sin()
+            * 0.5
+            + 0.5;
+        let weight = (0.12 + wave * wave) * (0.25 + (packed >> 24) as f32 / 255.0 * 3.0);
+        color += unpack3x8unorm(packed) * weight;
+        weight_sum += weight;
     }
+    color /= weight_sum;
 
-    // Apply color saturation and darkening.
-    color = {
-        let luma = color.dot(vec3(0.2126, 0.7152, 0.0722));
-        let saturation = 3.2 - 1.6 * smoothstep(0.1, 0.4, luma);
-        let color = Vec3::splat(luma)
-            .lerp(color, saturation)
-            .clamp(Vec3::splat(0.06), Vec3::splat(0.85))
-            * 1.0f32.min(0.52 / luma.max(0.001));
-        color.lerp(
-            color * 0.6,
-            smoothstep(
-                global.playhead_x + 3.0,
-                global.playhead_x - 3.0,
-                pixel_pos.x,
-            ),
-        )
-    };
+    // Preserve rich colour while keeping white text legible.
+    let luma = color.dot(vec3(0.2126, 0.7152, 0.0722));
+    let played = smoothstep(
+        global.playhead_x + 3.0,
+        global.playhead_x - 3.0,
+        pixel_pos.x,
+    );
+    color = Vec3::splat(luma)
+        .lerp(color, 1.75)
+        .clamp(Vec3::splat(0.035), Vec3::splat(0.92))
+        * (0.52 / luma.max(0.001)).min(1.0)
+        * (0.84 + smoothstep(0.45, 1.0, stretched_uv_y) * 0.1)
+        * (1.0 - 0.4 * played);
+
+    // Independently pulsing motes drift through the palette field.
+    let speckle_uv = local_pixel / 7.0
+        + global.time
+            * vec2(
+                0.16 + seed.fract() * 0.08,
+                0.055 + (seed * 0.7).sin() * 0.025,
+            );
+    let cell = speckle_uv.floor();
+    let random = hash(cell, seed);
+    let phase = hash(vec2(cell.y, cell.x), seed + 2.71);
+    let offset = vec2(phase, (phase * 7.13).fract()) * 0.56 - 0.28;
+    let twinkle = (global.time * (1.0 + phase * 1.6) + phase * TAU).sin() * 0.5 + 0.5;
+    let speck = smoothstep(0.93, 1.0, random)
+        * (1.0 - smoothstep(0.06, 0.28, (speckle_uv.fract() - 0.5 - offset).length()))
+        * twinkle;
+    color = color.lerp(unpack3x8unorm(pill.colors[3]), speck * 0.28);
 
     // Sharp cover art at the trailing edge.
     let image_left = pill_size.x - pill_size.y;

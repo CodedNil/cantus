@@ -326,7 +326,7 @@ impl ImageAtlas {
             .position(|slot| slot.as_ref().is_some_and(|slot| Arc::ptr_eq(slot, art)))
         {
             self.used |= 1 << index;
-            return (index * 2) as i32;
+            return index as i32;
         }
 
         let index = (!self.used).trailing_zeros();
@@ -334,7 +334,6 @@ impl ImageAtlas {
             return -1;
         }
         self.used |= 1 << index;
-        let layer = index * 2;
 
         queue.write_texture(
             wgpu::TexelCopyTextureInfo {
@@ -344,7 +343,7 @@ impl ImageAtlas {
                 origin: wgpu::Origin3d {
                     x: 0,
                     y: 0,
-                    z: layer,
+                    z: index,
                 },
             },
             &art.pixels,
@@ -356,11 +355,11 @@ impl ImageAtlas {
             wgpu::Extent3d {
                 width: IMAGE_SIZE,
                 height: IMAGE_SIZE,
-                depth_or_array_layers: 2,
+                depth_or_array_layers: 1,
             },
         );
         self.slots[index as usize] = Some(Arc::clone(art));
-        layer as i32
+        index as i32
     }
 }
 

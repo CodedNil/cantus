@@ -17,7 +17,6 @@ use wgpu::{
 };
 
 pub const MAX_TEXTURE_IMAGES: u32 = 32;
-pub const TEXTURE_LAYER_COUNT: u32 = MAX_TEXTURE_IMAGES * 2;
 pub const IMAGE_SIZE: u32 = 64;
 
 fn render_pipeline(
@@ -163,7 +162,7 @@ impl CantusApp {
             size: Extent3d {
                 width: IMAGE_SIZE,
                 height: IMAGE_SIZE,
-                depth_or_array_layers: TEXTURE_LAYER_COUNT,
+                depth_or_array_layers: MAX_TEXTURE_IMAGES,
             },
             mip_level_count: 1,
             sample_count: 1,

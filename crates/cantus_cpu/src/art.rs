@@ -1,6 +1,8 @@
 use crate::{CantusApp, NUM_SWATCHES, pipelines::IMAGE_SIZE, spotify};
+use arrayvec::ArrayVec;
 use image::{DynamicImage, RgbaImage, imageops};
-use palette::IntoColor;
+use kmeans_colors::Sort;
+use palette::{Clamp, IntoColor, Lch, color_theory::Analogous};
 use std::{array, sync::Arc, time::Instant};
 
 #[derive(Clone, Default)]
@@ -13,8 +15,9 @@ pub enum ArtState {
 }
 
 pub struct AlbumArt {
-    /// Original RGBA layer followed by its blurred RGBA layer.
+    /// RGBA image pixels.
     pub pixels: Box<[u8]>,
+    /// RGB swatches with their relative influence packed into alpha.
     pub palette: [u32; NUM_SWATCHES],
 }
 
@@ -22,11 +25,8 @@ pub fn prepare(image: &DynamicImage) -> AlbumArt {
     let image = image.resize_to_fill(IMAGE_SIZE, IMAGE_SIZE, imageops::FilterType::Lanczos3);
     let image = image.to_rgba8();
     let palette = image_palette(&image);
-    let blurred = imageops::blur(&image, 3.0);
-    let mut pixels = image.into_raw();
-    pixels.extend(blurred.into_raw());
     AlbumArt {
-        pixels: pixels.into_boxed_slice(),
+        pixels: image.into_raw().into_boxed_slice(),
         palette,
     }
 }
@@ -71,6 +71,52 @@ fn art_request(state: &ArtState, url: Option<&str>, now: Instant) -> Option<Stri
         .map(str::to_owned)
 }
 
+fn similar_hue(a: Lch, b: Lch) -> bool {
+    (a.hue - b.hue).into_degrees().abs() < 20.0
+}
+
+fn complete_palette(colors: &mut ArrayVec<(Lch, f32), NUM_SWATCHES>) {
+    colors.sort_by(|a, b| b.1.total_cmp(&a.1));
+    let mut index = 1;
+    while index < colors.len() {
+        let (color, weight) = colors[index];
+        if let Some(duplicate) = colors[..index]
+            .iter()
+            .position(|(other, _)| similar_hue(color, *other))
+        {
+            colors[duplicate].1 += weight;
+            colors.remove(index);
+        } else {
+            index += 1;
+        }
+    }
+
+    let measured = colors.len();
+    for index in 0..NUM_SWATCHES - measured {
+        let (source, weight) = colors[index % measured];
+        let (lower, upper) = source.analogous();
+        let mut generated = match index {
+            2 if measured == 1 => source.analogous_secondary().0,
+            index if index % 2 == 0 => lower,
+            _ => upper,
+        };
+        generated.chroma = generated.chroma.max(35.0);
+        colors.push((generated, weight * 0.5));
+    }
+    colors.sort_by(|a, b| a.0.l.total_cmp(&b.0.l));
+}
+
+fn pack_color((color, weight): (Lch, f32), total: f32) -> u32 {
+    let rgb: palette::Srgb = color.into_color();
+    let rgb = rgb.clamp();
+    u32::from_le_bytes([
+        (rgb.red * 255.0) as u8,
+        (rgb.green * 255.0) as u8,
+        (rgb.blue * 255.0) as u8,
+        (weight / total * 255.0).round().max(1.0) as u8,
+    ])
+}
+
 fn image_palette(image: &RgbaImage) -> [u32; NUM_SWATCHES] {
     let srgb_to_lab = |pixel: &image::Rgba<u8>| {
         palette::Srgb::new(
@@ -89,22 +135,23 @@ fn image_palette(image: &RgbaImage) -> [u32; NUM_SWATCHES] {
         })
         .map(srgb_to_lab)
         .collect();
-    if pixels.is_empty() {
+    let use_harmony = !pixels.is_empty();
+    if !use_harmony {
         pixels.extend(image.pixels().map(srgb_to_lab));
     }
 
-    let centroids =
-        kmeans_colors::get_kmeans_hamerly(NUM_SWATCHES, 20, 5.0, false, &pixels, 0).centroids;
-    if centroids.is_empty() {
+    let result = kmeans_colors::get_kmeans_hamerly(NUM_SWATCHES, 20, 5.0, false, &pixels, 0);
+    let swatches = palette::Lab::sort_indexed_colors(&result.centroids, &result.indices);
+    if swatches.is_empty() {
         return [u32::from_le_bytes([0, 0, 0, 255]); NUM_SWATCHES];
     }
-    array::from_fn(|index| {
-        let rgb: palette::Srgb = centroids[index % centroids.len()].into_color();
-        u32::from_le_bytes([
-            (rgb.red * 255.0) as u8,
-            (rgb.green * 255.0) as u8,
-            (rgb.blue * 255.0) as u8,
-            255,
-        ])
-    })
+    let mut colors: ArrayVec<_, NUM_SWATCHES> = swatches
+        .iter()
+        .map(|swatch| (swatch.centroid.into_color(), swatch.percentage))
+        .collect();
+    if use_harmony {
+        complete_palette(&mut colors);
+    }
+    let total = colors.iter().map(|(_, weight)| weight).sum();
+    array::from_fn(|index| pack_color(colors[index % colors.len()], total))
 }
