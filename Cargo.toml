@@ -9,6 +9,7 @@ bytemuck = { version = "1.25.1", features = ["derive"] }
 glam = { version = "=0.33.2", default-features = false, features = [
     "bytemuck",
     "libm",
+    "u8",
 ] }
 
 [workspace.lints.rust]

@@ -3,14 +3,14 @@ use crate::{
     TRACK_SPACING_MS,
     art::{AlbumArt, ArtState},
     config::Config,
-    model::{CondensedPlaylist, Rect, Track, playlist_icons},
+    model::{AudioFeatures, CondensedPlaylist, Rect, Track, playlist_icons},
     pipelines::{IMAGE_SIZE, MAX_TEXTURE_IMAGES},
     text_render::TextRenderer,
 };
 use arrayvec::ArrayVec;
 use cantus_shared::{
-    BackgroundPill, GlobalUniforms, ICON_SPACING, MAX_PILL_PLAYLIST_ICONS, Particle,
-    PlayheadUniforms, approach,
+    BackgroundPill, GlobalUniforms, ICON_SPACING, MAX_PILL_PLAYLIST_ICONS, PackedAudioFeatures,
+    Particle, PlayheadUniforms, approach,
 };
 use glam::{FloatExt, Vec2, vec2};
 use std::{f32::consts::TAU, mem, ops::Range, sync::Arc, time::Instant};
@@ -28,6 +28,9 @@ const SPARK_VELOCITY_X: Range<usize> = 40..60;
 const SPARK_VELOCITY_Y: f32 = 5.0;
 /// Lifetime range for individual particles, in seconds.
 const SPARK_LIFETIME: Range<f32> = 1.2..1.5;
+
+const DEFAULT_AUDIO_FEATURES: PackedAudioFeatures =
+    PackedAudioFeatures::new([128, 128, 77, 102], [128, 51, 26, 213]);
 
 const PLAYHEAD_START_DURATION: f32 = 0.7;
 const PLAYHEAD_TRANSITION_SPEED: f32 = 5.5;
@@ -525,6 +528,9 @@ impl CantusApp {
             dt.min(0.1) * 6.0,
         );
         let playlist_expansion = track.runtime.playlist_expansion;
+        let audio_features = track
+            .audio_features
+            .map_or(DEFAULT_AUDIO_FEATURES, AudioFeatures::packed);
         let mut pill = BackgroundPill {
             x: start_x,
             width,
@@ -532,6 +538,7 @@ impl CantusApp {
             alpha: detail_alpha,
             image_index,
             rating: -1,
+            audio_features,
             playlist_images: [-1; MAX_PILL_PLAYLIST_ICONS],
             ..Default::default()
         };

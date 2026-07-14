@@ -1,5 +1,7 @@
 use crate::{CantusApp, PANEL_START, TRACK_SPACING_MS, art::ArtState};
 use arrayvec::ArrayString;
+use cantus_shared::PackedAudioFeatures;
+use glam::{U8Vec4, Vec4, vec4};
 use serde::{Deserialize, Deserializer, de};
 use std::{
     collections::HashSet,
@@ -60,6 +62,58 @@ impl PlaybackState {
     }
 }
 
+#[derive(Copy, Clone, Deserialize)]
+#[serde(from = "RawAudioFeatures")]
+pub struct AudioFeatures {
+    /// energy, danceability, acousticness, tempo
+    motion: U8Vec4,
+    /// valence, liveness, instrumentalness, loudness
+    character: U8Vec4,
+}
+
+#[derive(Deserialize)]
+struct RawAudioFeatures {
+    acousticness: f32,
+    danceability: f32,
+    energy: f32,
+    instrumentalness: f32,
+    liveness: f32,
+    loudness: f32,
+    tempo: f32,
+    valence: f32,
+}
+
+impl From<RawAudioFeatures> for AudioFeatures {
+    fn from(raw: RawAudioFeatures) -> Self {
+        Self {
+            motion: quantize(vec4(
+                raw.energy,
+                raw.danceability,
+                raw.acousticness,
+                (raw.tempo - 40.0) / 200.0,
+            )),
+            character: quantize(vec4(
+                raw.valence,
+                raw.liveness,
+                raw.instrumentalness,
+                (raw.loudness + 60.0) / 60.0,
+            )),
+        }
+    }
+}
+
+fn quantize(values: Vec4) -> U8Vec4 {
+    (values.clamp(Vec4::ZERO, Vec4::ONE) * 255.0)
+        .round()
+        .as_u8vec4()
+}
+
+impl AudioFeatures {
+    pub const fn packed(self) -> PackedAudioFeatures {
+        PackedAudioFeatures::new(self.motion.to_array(), self.character.to_array())
+    }
+}
+
 #[derive(Deserialize)]
 pub struct Track {
     pub id: Option<TrackId>,
@@ -72,6 +126,8 @@ pub struct Track {
     pub art: ArtState,
     #[serde(skip)]
     pub runtime: TrackRuntime,
+    #[serde(skip)]
+    pub audio_features: Option<AudioFeatures>,
 }
 
 #[derive(Default)]

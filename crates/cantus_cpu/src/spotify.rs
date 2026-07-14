@@ -3,7 +3,7 @@ use crate::{
     art::{self, ArtState},
     config::{self, Config},
     model::{
-        AppUpdater, CondensedPlaylist, PlaylistId, PlaylistTracks, Track, TrackId,
+        AppUpdater, AudioFeatures, CondensedPlaylist, PlaylistId, PlaylistTracks, Track, TrackId,
         deserialize_images,
     },
 };
@@ -36,6 +36,7 @@ const API_BASE: &str = "https://api.spotify.com/v1";
 const TOKEN_URL: &str = "https://accounts.spotify.com/api/token";
 const PLAYLIST_TRACKS_CACHE: &str = "cantus_playlist_tracks.json";
 const SPOTIFY_TOKEN_CACHE: &str = "spotify_cache.json";
+const RECCO_TRACK_URL: &str = "https://api.reccobeats.com/v1/track";
 const SCOPES: &str = "\
 user-read-playback-state user-modify-playback-state user-read-currently-playing \
 playlist-read-private playlist-read-collaborative playlist-modify-private playlist-modify-public \
@@ -45,6 +46,18 @@ struct SpotifyState {
     current_context: Option<String>,
     context_updated: bool,
     last_grabbed_queue: Instant,
+    audio_features: HashMap<TrackId, Option<AudioFeatures>>,
+}
+
+#[derive(Deserialize)]
+struct ReccoTrack {
+    id: String,
+    href: String,
+}
+
+#[derive(Deserialize)]
+struct ReccoPage<T> {
+    content: Vec<T>,
 }
 
 const VERIFIER_BYTES: usize = 43;
@@ -491,6 +504,7 @@ impl SpotifyBackend {
                     current_context: None,
                     context_updated: false,
                     last_grabbed_queue: initial_poll,
+                    audio_features: HashMap::new(),
                 },
                 Duration::from_secs(1),
             ),
@@ -611,6 +625,7 @@ fn get_spotify_queue(
     let current_track_id = currently_playing.id;
     let mut new_queue = q.queue;
     new_queue.insert(0, currently_playing);
+    populate_audio_features(&client.http, &mut new_queue, spotify_state);
 
     let context_updated = spotify_state.context_updated;
     spotify_state.context_updated = false;
@@ -654,6 +669,66 @@ fn get_spotify_queue(
         state.queue = reconciled;
         state.queue_index = retained_history_len;
     });
+}
+
+fn populate_audio_features(http: &Agent, tracks: &mut [Track], state: &mut SpotifyState) {
+    let mut missing = tracks
+        .iter()
+        .filter_map(|track| track.id)
+        .filter(|id| !state.audio_features.contains_key(id))
+        .collect::<HashSet<_>>();
+
+    if !missing.is_empty() {
+        let result: ClientResult<ReccoPage<ReccoTrack>> = http
+            .get(RECCO_TRACK_URL)
+            .query("size", "50")
+            .query_pairs(missing.iter().map(|id| ("ids", id.as_str())))
+            .call()
+            .map_err(ClientError::from)
+            .and_then(|mut response| {
+                serde_json::from_reader(response.body_mut().as_reader()).map_err(Into::into)
+            });
+
+        if let Ok(page) = result.inspect_err(|err| {
+            warn!("Failed to resolve Spotify tracks with ReccoBeats: {err}");
+        }) {
+            for recco_track in page.content {
+                let Some(spotify_id) = recco_track
+                    .href
+                    .rsplit('/')
+                    .next()
+                    .and_then(|id| id.parse::<TrackId>().ok())
+                    .filter(|id| missing.remove(id))
+                else {
+                    continue;
+                };
+                let url = format!("{RECCO_TRACK_URL}/{}/audio-features", recco_track.id);
+                match http
+                    .get(url)
+                    .call()
+                    .map_err(ClientError::from)
+                    .and_then(|mut response| {
+                        serde_json::from_reader(response.body_mut().as_reader()).map_err(Into::into)
+                    }) {
+                    Ok(features) => {
+                        state.audio_features.insert(spotify_id, Some(features));
+                    }
+                    Err(err) => {
+                        warn!("Failed to fetch ReccoBeats features for {spotify_id}: {err}");
+                    }
+                }
+            }
+            state
+                .audio_features
+                .extend(missing.drain().map(|id| (id, None)));
+        }
+    }
+
+    for track in tracks {
+        track.audio_features = track
+            .id
+            .and_then(|id| state.audio_features.get(&id).copied().flatten());
+    }
 }
 
 pub fn download_image(backend: &SpotifyBackend, url: String) {

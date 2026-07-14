@@ -1,6 +1,6 @@
 #![no_std]
 
-use glam::Vec2;
+use glam::{Vec2, Vec4};
 
 #[repr(C)]
 #[derive(Copy, Clone, Default)]
@@ -39,7 +39,60 @@ pub struct BackgroundPill {
     pub secondary_playlist_count: u32,
     pub primary_alpha: f32,
     pub secondary_expansion: f32,
+    pub audio_features: PackedAudioFeatures,
     pub playlist_images: [i32; MAX_PILL_PLAYLIST_ICONS],
+}
+
+#[repr(C)]
+#[derive(Copy, Clone, Default)]
+#[cfg_attr(feature = "cpu", derive(bytemuck::Pod, bytemuck::Zeroable))]
+pub struct PackedAudioFeatures([u32; 2]);
+
+pub struct AudioAnimationFeatures {
+    pub energy: f32,
+    pub danceability: f32,
+    pub acousticness: f32,
+    pub tempo: f32,
+    pub valence: f32,
+    pub liveness: f32,
+    pub instrumentalness: f32,
+    pub loudness: f32,
+}
+
+impl PackedAudioFeatures {
+    pub const fn new(motion: [u8; 4], character: [u8; 4]) -> Self {
+        Self([u32::from_le_bytes(motion), u32::from_le_bytes(character)])
+    }
+
+    pub fn decode(self) -> AudioAnimationFeatures {
+        let motion = unpack_u8x4(self.0[0]);
+        let character = unpack_u8x4(self.0[1]);
+        AudioAnimationFeatures {
+            energy: motion.x,
+            danceability: motion.y,
+            acousticness: motion.z,
+            tempo: 40.0 + motion.w * 200.0,
+            valence: character.x,
+            liveness: character.y,
+            instrumentalness: character.z,
+            loudness: character.w,
+        }
+    }
+}
+
+impl AudioAnimationFeatures {
+    pub const fn tempo_hz(&self) -> f32 {
+        self.tempo / 60.0
+    }
+
+    pub const fn tempo_normalized(&self) -> f32 {
+        ((self.tempo - 60.0) / 120.0).clamp(0.0, 1.0)
+    }
+
+    pub const fn turbulence(&self) -> f32 {
+        (self.energy * 0.55 + self.danceability * 0.2 + self.liveness * 0.15 + self.loudness * 0.1)
+            * (1.0 - self.acousticness * 0.35)
+    }
 }
 
 #[repr(C)]
@@ -78,6 +131,15 @@ pub const fn pack_u16x2(value: [u32; 2]) -> u32 {
 
 pub const fn unpack_u16x2(value: u32) -> Vec2 {
     Vec2::new((value & 0xffff) as f32, (value >> 16) as f32)
+}
+
+fn unpack_u8x4(value: u32) -> Vec4 {
+    Vec4::new(
+        (value & 0xff) as f32,
+        ((value >> 8) & 0xff) as f32,
+        ((value >> 16) & 0xff) as f32,
+        (value >> 24) as f32,
+    ) * (1.0 / 255.0)
 }
 
 /// Maximum number of playlist artwork icons carried by one pill instance.

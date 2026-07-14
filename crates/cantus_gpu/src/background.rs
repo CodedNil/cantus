@@ -192,20 +192,30 @@ pub fn fs_background(
     let shadow = (1.0 - smoothstep(0.0, 14.0, dist)) * 0.16;
 
     // Domain-warped plasma distributes all four colours without fixed regions.
+    // ReccoBeats features shape its pace, rhythmic pulse, and turbulence per track.
     let seed = (pill.colors[0] % 1000) as f32 * 0.013;
+    let audio = pill.audio_features.decode();
+    let turbulence = audio.turbulence();
+    let beat_wave = (global.time * audio.tempo_hz() * TAU).sin() * 0.5 + 0.5;
+    let beat = beat_wave * beat_wave * audio.danceability * (0.025 + audio.energy * 0.055);
     let lens_warp = (1.0 + dist.min(0.0) / 120.0).clamp(0.0, 1.0);
     let lens_warp = lens_warp * lens_warp * 0.6;
     let deformation =
         local_centered * lens_warp + ripple_dir * ripple_strength + mouse_dir * mouse_inf * 0.03;
-    let flow_time = global.time * 0.32 + seed;
+    let flow_speed = 0.12 + audio.energy * 0.25 + audio.tempo_normalized() * 0.12
+        - audio.instrumentalness * 0.035
+        - audio.acousticness * 0.025;
+    let flow_time = global.time * flow_speed + seed;
     let body_uv = local_uv.clamp(Vec2::ZERO, Vec2::ONE);
-    let frequency = (pill_size.x / pill_size.y * (0.55 + seed.fract() * 0.15)).max(1.7);
+    let frequency =
+        (pill_size.x / pill_size.y * (0.5 + seed.fract() * 0.12 + turbulence * 0.18)).max(1.7);
     let field_uv = (body_uv - deformation * 0.08) * vec2(frequency, 1.6);
+    let warp_amount = 0.14 + turbulence * 0.2 + beat;
     let warped_uv = field_uv
         + vec2(
             (field_uv.y * 2.7 + flow_time).sin() + (field_uv.x * 1.3 - flow_time * 0.7).cos(),
             (field_uv.x * 2.3 - flow_time * 0.8).cos() + (field_uv.y * 1.7 + flow_time * 0.6).sin(),
-        ) * 0.22;
+        ) * warp_amount;
     let directions = [
         vec2(2.1, 0.7),
         vec2(0.6, -2.4),
@@ -236,15 +246,17 @@ pub fn fs_background(
         pixel_pos.x,
     );
     color = Vec3::splat(luma)
-        .lerp(color, 1.75)
+        .lerp(color, 1.55 + audio.valence * 0.4)
         .clamp(Vec3::splat(0.035), Vec3::splat(0.92))
         * (0.52 / luma.max(0.001)).min(1.0)
+        * (0.96 + audio.valence * 0.06 + beat * 0.5)
         * (0.84 + smoothstep(0.45, 1.0, stretched_uv_y) * 0.1)
         * (1.0 - 0.4 * played);
 
     // Independently pulsing motes drift through the palette field.
-    let speckle_uv = local_pixel / 7.0
+    let speckle_uv = local_pixel / (8.0 - audio.acousticness * 0.8)
         + global.time
+            * (0.35 + audio.acousticness * 0.55)
             * vec2(
                 0.16 + seed.fract() * 0.08,
                 0.055 + (seed * 0.7).sin() * 0.025,
@@ -253,11 +265,17 @@ pub fn fs_background(
     let random = hash(cell, seed);
     let phase = hash(vec2(cell.y, cell.x), seed + 2.71);
     let offset = vec2(phase, (phase * 7.13).fract()) * 0.56 - 0.28;
-    let twinkle = (global.time * (1.0 + phase * 1.6) + phase * TAU).sin() * 0.5 + 0.5;
-    let speck = smoothstep(0.93, 1.0, random)
+    let twinkle =
+        (global.time * (0.7 + phase * 0.9 + audio.acousticness * 0.8) + phase * TAU).sin() * 0.5
+            + 0.5;
+    let speckle_threshold = 0.985 - audio.acousticness * 0.09;
+    let speck = smoothstep(speckle_threshold, 1.0, random)
         * (1.0 - smoothstep(0.06, 0.28, (speckle_uv.fract() - 0.5 - offset).length()))
         * twinkle;
-    color = color.lerp(unpack3x8unorm(pill.colors[3]), speck * 0.28);
+    color = color.lerp(
+        unpack3x8unorm(pill.colors[3]),
+        speck * (0.12 + audio.acousticness * 0.48),
+    );
 
     // Sharp cover art at the trailing edge.
     let image_left = pill_size.x - pill_size.y;
