@@ -1,4 +1,4 @@
-use crate::common::{pixel_to_ndc, quad_coord};
+use crate::{pixel_to_ndc, quad_coord};
 use cantus_shared::{
     GLYPH_ATLAS_SIZE, GlobalUniforms, GlyphInstance, MAX_GLYPH_INSTANCES, smoothstep, unpack_u16x2,
 };

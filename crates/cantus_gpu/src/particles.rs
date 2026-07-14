@@ -1,4 +1,4 @@
-use crate::common::{pixel_to_ndc, quad_coord, unpack3x8unorm};
+use crate::{pixel_to_ndc, quad_coord, unpack3x8unorm};
 use cantus_shared::{GlobalUniforms, Particle, smoothstep};
 use spirv_std::{
     arch::kill,

@@ -1,4 +1,4 @@
-use crate::common::{pixel_to_ndc, quad_coord, sd_rounded_triangle};
+use crate::{pixel_to_ndc, quad_coord, sd_rounded_triangle};
 use cantus_shared::{GlobalUniforms, PlayheadUniforms, smoothstep};
 use spirv_std::{
     arch::kill,

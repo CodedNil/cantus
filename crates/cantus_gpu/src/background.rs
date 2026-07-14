@@ -1,4 +1,4 @@
-use crate::common::{
+use crate::{
     pixel_to_ndc, quad_coord, sd_capsule_box, sd_squircle, sd_star, smooth_union, unpack3x8unorm,
 };
 use cantus_shared::{
