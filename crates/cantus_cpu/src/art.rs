@@ -35,12 +35,12 @@ impl CantusApp {
     pub fn start_missing_art_downloads(&mut self) {
         let now = Instant::now();
         while let Some(url) = self
-            .playback_state
+            .playback
             .queue
             .iter()
             .find_map(|track| art_request(&track.art, track.album.image.as_deref(), now))
             .or_else(|| {
-                self.playback_state.playlists.iter().find_map(|playlist| {
+                self.playback.playlists.iter().find_map(|playlist| {
                     art_request(&playlist.art, playlist.image_url.as_deref(), now)
                 })
             })
@@ -51,12 +51,12 @@ impl CantusApp {
     }
 
     pub fn set_art_state(&mut self, url: &str, state: &ArtState) {
-        for track in &mut self.playback_state.queue {
+        for track in &mut self.playback.queue {
             if track.album.image.as_deref() == Some(url) {
                 track.art = state.clone();
             }
         }
-        for playlist in &mut self.playback_state.playlists {
+        for playlist in &mut self.playback.playlists {
             if playlist.image_url.as_deref() == Some(url) {
                 playlist.art = state.clone();
             }

@@ -104,11 +104,13 @@ fn gpu_pass(
 
 impl CantusApp {
     pub fn configure_render_surface(&mut self, surface: Surface<'static>, width: u32, height: u32) {
-        let adapter = pollster::block_on(self.instance.request_adapter(&RequestAdapterOptions {
-            power_preference: PowerPreference::LowPower,
-            compatible_surface: Some(&surface),
-            ..Default::default()
-        }))
+        let adapter = pollster::block_on(self.render.instance.request_adapter(
+            &RequestAdapterOptions {
+                power_preference: PowerPreference::LowPower,
+                compatible_surface: Some(&surface),
+                ..Default::default()
+            },
+        ))
         .expect("No adapter");
 
         let info = adapter.get_info();
@@ -226,7 +228,7 @@ impl CantusApp {
             ],
         );
 
-        self.gpu_resources = Some(GpuResources {
+        self.render.gpu = Some(GpuResources {
             device,
             queue,
             surface,
@@ -243,6 +245,5 @@ impl CantusApp {
             },
             text_renderer,
         });
-        self.particles_dirty = true;
     }
 }

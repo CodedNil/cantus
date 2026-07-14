@@ -112,15 +112,10 @@ struct OutputInfo {
 
 impl OutputInfo {
     fn matches(&self, target: &str) -> bool {
-        self.name.as_ref().is_some_and(|name| name.contains(target))
-            || self
-                .make_model
-                .as_ref()
-                .is_some_and(|make_model| make_model.contains(target))
-            || self
-                .description
-                .as_ref()
-                .is_some_and(|description| description.contains(target))
+        [&self.name, &self.make_model, &self.description]
+            .into_iter()
+            .flatten()
+            .any(|description| description.contains(target))
     }
 }
 
@@ -185,7 +180,7 @@ impl LayerShellApp {
             return;
         }
 
-        if let Some(gpu) = &mut self.cantus.gpu_resources {
+        if let Some(gpu) = &mut self.cantus.render.gpu {
             gpu.resize_surface(width, height);
             return;
         }
@@ -199,7 +194,7 @@ impl LayerShellApp {
             ))),
             raw_window_handle: RawWindowHandle::Wayland(WaylandWindowHandle::new(surface_ptr)),
         };
-        let surface = unsafe { self.cantus.instance.create_surface_unsafe(target) }
+        let surface = unsafe { self.cantus.render.instance.create_surface_unsafe(target) }
             .expect("Failed to create surface");
 
         self.cantus.configure_render_surface(surface, width, height);
@@ -221,7 +216,7 @@ impl LayerShellApp {
 
         if self.cantus.render() {
             tracing::warn!("wgpu surface was lost; recreating it");
-            self.cantus.gpu_resources = None;
+            self.cantus.render.gpu = None;
             self.ensure_surface(buffer_width, buffer_height);
         }
         self.update_input_region(qhandle);
@@ -238,7 +233,7 @@ impl LayerShellApp {
             surface.set_buffer_scale(
                 self.viewport
                     .as_ref()
-                    .map_or_else(|| self.cantus.render_scale.ceil() as i32, |_| 1),
+                    .map_or_else(|| self.cantus.render.scale.ceil() as i32, |_| 1),
             );
         }
         if let Some(viewport) = &self.viewport {
@@ -278,7 +273,7 @@ impl LayerShellApp {
 
 impl CantusApp {
     fn input_rects(&self) -> impl Iterator<Item = Rect> + '_ {
-        self.playback_state.queue.iter().flat_map(|track| {
+        self.playback.queue.iter().flat_map(|track| {
             track
                 .runtime
                 .rect(self.config.height)
@@ -301,7 +296,7 @@ impl Dispatch<ZwlrLayerSurfaceV1, ()> for LayerShellApp {
             zwlr_layer_surface_v1::Event::Configure { serial, width, .. } => {
                 proxy.ack_configure(serial);
                 if width > 0 {
-                    state.cantus.surface_width = Some(width as f32);
+                    state.cantus.render.surface_width = Some(width as f32);
                 }
                 state.is_configured = true;
                 state.update_scale_and_viewport();
@@ -323,7 +318,7 @@ impl Dispatch<WpFractionalScaleV1, ()> for LayerShellApp {
         qhandle: &QueueHandle<Self>,
     ) {
         if let wp_fractional_scale_v1::Event::PreferredScale { scale } = event {
-            state.cantus.render_scale = scale as f32 / 120.0;
+            state.cantus.render.scale = scale as f32 / 120.0;
 
             if state.is_configured {
                 state.update_scale_and_viewport();
@@ -417,7 +412,7 @@ impl Dispatch<WlPointer, ()> for LayerShellApp {
                 surface_y,
                 ..
             } if surface_id == Some(surface.id()) => {
-                cantus.global_uniforms.mouse_pos = vec2(surface_x as f32, surface_y as f32);
+                cantus.render.uniforms.mouse_pos = vec2(surface_x as f32, surface_y as f32);
                 interaction.mouse_pressure = 1.0;
             }
             wl_pointer::Event::Motion {
@@ -425,7 +420,7 @@ impl Dispatch<WlPointer, ()> for LayerShellApp {
                 surface_y,
                 ..
             } => {
-                cantus.global_uniforms.mouse_pos = vec2(surface_x as f32, surface_y as f32);
+                cantus.render.uniforms.mouse_pos = vec2(surface_x as f32, surface_y as f32);
                 cantus.handle_mouse_drag();
             }
             wl_pointer::Event::Leave { .. } => {

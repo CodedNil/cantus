@@ -33,6 +33,7 @@ fn row_rect(row: PillIconRow) -> Rect {
 #[derive(Default)]
 pub struct InteractionState {
     pub mouse_pressure: f32, // 0 not hovered - 1 hovered - 2 mouse down
+    pub hovered_track: Option<usize>,
     pub dragging: bool,
     pub drag_origin: Option<Vec2>,
     pub drag_track: Option<(Option<TrackId>, f32)>,
@@ -42,7 +43,7 @@ impl CantusApp {
     pub const fn left_click(&mut self) {
         let interaction = &mut self.interaction;
         interaction.mouse_pressure = 2.0;
-        interaction.drag_origin = Some(self.global_uniforms.mouse_pos);
+        interaction.drag_origin = Some(self.render.uniforms.mouse_pos);
         interaction.drag_track = None;
         interaction.dragging = false;
     }
@@ -70,21 +71,21 @@ impl CantusApp {
 
     /// Handle click events.
     fn handle_click(&mut self) {
-        let mouse_pos = self.global_uniforms.mouse_pos;
-        let playlists = &self.playback_state.playlists;
+        let mouse_pos = self.render.uniforms.mouse_pos;
+        let playlists = &self.playback.playlists;
         let icon_click = |track: &Track| self.icon_at(track, playlists);
 
         if let Some((track_id, action)) = self
-            .render_state
+            .interaction
             .hovered_track
-            .and_then(|index| self.playback_state.queue.get(index))
+            .and_then(|index| self.playback.queue.get(index))
             .and_then(icon_click)
             .or_else(|| {
-                self.playback_state
+                self.playback
                     .queue
                     .iter()
                     .enumerate()
-                    .filter(|(index, _)| Some(*index) != self.render_state.hovered_track)
+                    .filter(|(index, _)| Some(*index) != self.interaction.hovered_track)
                     .find_map(|(_, track)| icon_click(track))
             })
         {
@@ -99,10 +100,10 @@ impl CantusApp {
         } else if self.playhead_rect().contains(mouse_pos) {
             // Play/pause
             self.pulse_at_playhead();
-            self.last_toggle_playing = Instant::now();
-            self.toggle_playing(!self.playback_state.playing);
+            self.render.last_toggle_playing = Instant::now();
+            self.toggle_playing(!self.playback.playing);
         } else if let Some((track_id, (track_range_a, track_range_b))) =
-            self.playback_state.queue.iter().rev().find_map(|track| {
+            self.playback.queue.iter().rev().find_map(|track| {
                 let rect = track.runtime.rect(self.config.height)?;
                 let range =
                     track.natural_x_range(self.config.playhead_x(), self.config.px_per_ms());
@@ -126,8 +127,8 @@ impl CantusApp {
     }
 
     fn pulse_at(&mut self, pos: Vec2) {
-        self.global_uniforms.expansion_xy = pos;
-        self.global_uniforms.expansion_time = self.start_time.elapsed().as_secs_f32();
+        self.render.uniforms.expansion_xy = pos;
+        self.render.uniforms.expansion_time = self.render.start_time.elapsed().as_secs_f32();
     }
 
     fn pulse_at_playhead(&mut self) {
@@ -143,7 +144,7 @@ impl CantusApp {
         let Some(origin) = interaction.drag_origin else {
             return;
         };
-        let delta = (self.global_uniforms.mouse_pos - origin).abs();
+        let delta = (self.render.uniforms.mouse_pos - origin).abs();
         interaction.dragging |= delta.x >= 2.0 || delta.y >= 2.0;
     }
 
@@ -153,24 +154,18 @@ impl CantusApp {
         if scroll_direction == 0 {
             return;
         }
-        if let Some(volume) = &mut self.playback_state.volume {
+        if let Some(volume) = &mut self.playback.volume {
             *volume = if scroll_direction < 0 {
                 volume.saturating_add(5).min(100)
             } else {
                 volume.saturating_sub(5)
             };
             let volume = *volume;
-            let client = Arc::clone(&self.spotify.client);
-            spawn(move || {
-                info!("Setting volume to {volume}%");
-                if let Err(err) = client.api_request(
-                    Method::PUT,
-                    &format!("me/player/volume?volume_percent={volume}"),
-                    None,
-                ) {
-                    error!("Failed to set volume: {err}");
-                }
-            });
+            info!("Setting volume to {volume}%");
+            self.spotify.client.put_in_background(
+                format!("me/player/volume?volume_percent={volume}"),
+                "set volume",
+            );
         }
     }
 
@@ -211,7 +206,7 @@ impl CantusApp {
         track: &Track,
         playlists: &[CondensedPlaylist],
     ) -> Option<(TrackId, IconAction)> {
-        let mouse_pos = self.global_uniforms.mouse_pos;
+        let mouse_pos = self.render.uniforms.mouse_pos;
         let (track_id, stars, primary_row, secondary_row) = self.icon_layout(track)?;
 
         if track.runtime.primary_icon_alpha > 0.0
@@ -244,7 +239,7 @@ fn skip_to_track(
     client: Arc<spotify::SpotifyClient>,
 ) {
     updater.send(move |app| {
-        let state = &mut app.playback_state;
+        let state = &mut app.playback;
         let queue_index = state.queue_index;
         let Some(position_in_queue) = state.queue.iter().position(|t| t.id == Some(track_id))
         else {
@@ -252,90 +247,67 @@ fn skip_to_track(
             return;
         };
         let song_ms = state.queue[position_in_queue].duration_ms;
-        if queue_index != position_in_queue {
-            state.queue_index = position_in_queue;
-            state.progress = 0;
-            state.last_progress_update = Instant::now();
-            state.last_interaction = Instant::now() + Duration::from_secs(2);
-            let skip_client = Arc::clone(&client);
-            spawn(move || {
-                let forward = queue_index < position_in_queue;
-                let skips = position_in_queue.abs_diff(queue_index);
-                for _ in 0..skips.min(10) {
-                    let path = if forward {
-                        "me/player/next"
-                    } else {
-                        "me/player/previous"
-                    };
-                    if let Err(err) = skip_client.api_request(Method::POST, path, None) {
-                        error!("Failed to skip track: {err}");
-                    }
-                }
-            });
-        }
         if queue_index == position_in_queue {
             let milliseconds = if position < 0.05 {
                 0.0
             } else {
                 song_ms as f32 * position
             };
-            state.progress = milliseconds.round() as u32;
-            state.last_progress_update = Instant::now();
-            state.last_interaction = Instant::now() + Duration::from_secs(2);
-            spawn(move || {
-                if let Err(err) = client.api_request(
-                    Method::PUT,
-                    &format!("me/player/seek?position_ms={}", milliseconds.round()),
-                    None,
-                ) {
-                    error!("Failed to seek track: {err}");
-                }
-            });
+            state.update_progress(milliseconds.round() as u32, Instant::now());
+            state.defer_remote_updates(Duration::from_secs(2));
+            client.put_in_background(
+                format!("me/player/seek?position_ms={}", milliseconds.round()),
+                "seek track",
+            );
+            return;
         }
+
+        state.queue_index = position_in_queue;
+        state.update_progress(0, Instant::now());
+        state.defer_remote_updates(Duration::from_secs(2));
+        spawn(move || {
+            let path = if queue_index < position_in_queue {
+                "me/player/next"
+            } else {
+                "me/player/previous"
+            };
+            for _ in 0..position_in_queue.abs_diff(queue_index).min(10) {
+                if let Err(err) = client.api_request(Method::POST, path, None) {
+                    error!("Failed to skip track: {err}");
+                }
+            }
+        });
     });
 }
 
 fn set_playlist_membership(
     client: &spotify::SpotifyClient,
     playlist_id: PlaylistId,
-    playlist_name: &str,
     track_id: TrackId,
-    track_uri: &str,
     add: bool,
 ) {
-    let (action, error_action, preposition) = if add {
-        ("Adding", "add", "to")
-    } else {
-        ("Removing", "remove", "from")
-    };
-    info!("{action} track {track_id} {preposition} playlist {playlist_name}");
+    let track_uri = format!("spotify:track:{track_id}");
     let path = format!("playlists/{playlist_id}/items");
-    let result = if add {
-        client.api_request(
-            Method::POST,
-            &path,
-            Some(&format!(r#"{{"uris": ["{track_uri}"]}}"#)),
-        )
+    let (method, body) = if add {
+        (Method::POST, format!(r#"{{"uris": ["{track_uri}"]}}"#))
     } else {
-        client.api_request(
+        (
             Method::DELETE,
-            &path,
-            Some(&format!(r#"{{"items": [{{"uri": "{track_uri}"}}]}}"#)),
+            format!(r#"{{"items": [{{"uri": "{track_uri}"}}]}}"#),
         )
     };
-    if let Err(err) = result {
-        error!(
-            "Failed to {error_action} track {track_id} {preposition} playlist {playlist_name}: {err}"
-        );
+    if let Err(err) = client.api_request(method, &path, Some(&body)) {
+        error!("Failed to update playlist {playlist_id} for track {track_id}: {err}");
     }
 }
 
 /// Update Spotify rating playlists for the given track.
 impl CantusApp {
     fn update_star_rating(&mut self, track_id: TrackId, rating_slot: u8) {
-        self.playback_state.last_interaction = Instant::now() + Duration::from_millis(500);
+        self.playback
+            .defer_remote_updates(Duration::from_millis(500));
         let changes = self
-            .playback_state
+            .playback
             .playlists
             .iter_mut()
             .filter_map(|playlist| {
@@ -346,60 +318,40 @@ impl CantusApp {
                 } else {
                     tracks.remove(&track_id)
                 };
-                changed.then(|| (playlist.id, playlist.name.clone(), add))
+                changed.then_some((playlist.id, add))
             })
             .collect::<Vec<_>>();
 
         let client = Arc::clone(&self.spotify.client);
         spawn(move || {
-            let track_uri = format!("spotify:track:{track_id}");
-            for (playlist_id, playlist_name, add) in changes {
-                set_playlist_membership(
-                    &client,
-                    playlist_id,
-                    &playlist_name,
-                    track_id,
-                    &track_uri,
-                    add,
-                );
+            for (playlist_id, add) in changes {
+                set_playlist_membership(&client, playlist_id, track_id, add);
             }
 
-            let library_path = format!("me/library/?uris={track_uri}");
+            let track_uri = format!("spotify:track:{track_id}");
             let should_like = rating_slot >= 5;
-            match client.api_json::<[bool; 1]>(
+            if let Some([liked]) = client.api_json::<[bool; 1]>(
                 &format!("me/library/contains/?uris={track_uri}"),
                 "liked state",
-            ) {
-                Some([liked]) if liked != should_like => {
-                    let (action, error_action) = if should_like {
-                        ("Adding", "add")
-                    } else {
-                        ("Removing", "remove")
-                    };
-                    info!(
-                        "{action} track {track_id} {} liked songs",
-                        if should_like { "to" } else { "from" }
-                    );
-                    let result = if should_like {
-                        client.api_request(Method::PUT, &library_path, None)
-                    } else {
-                        client.api_request(Method::DELETE, &library_path, None)
-                    };
-                    if let Err(err) = result {
-                        error!(
-                            "Failed to {} track {track_id} in liked songs: {err}",
-                            error_action
-                        );
-                    }
+            ) && liked != should_like
+            {
+                let method = if should_like {
+                    Method::PUT
+                } else {
+                    Method::DELETE
+                };
+                if let Err(err) =
+                    client.api_request(method, &format!("me/library/?uris={track_uri}"), None)
+                {
+                    error!("Failed to update liked state for track {track_id}: {err}");
                 }
-                _ => {}
             }
         });
     }
 
     fn toggle_playlist_membership(&mut self, track_id: TrackId, playlist_id: PlaylistId) {
         let Some(playlist) = self
-            .playback_state
+            .playback
             .playlists
             .iter_mut()
             .find(|playlist| playlist.id == playlist_id)
@@ -409,42 +361,33 @@ impl CantusApp {
             );
             return;
         };
-        let playlist_name = playlist.name.clone();
         let tracks = Arc::make_mut(&mut playlist.tracks);
-        let add = tracks.insert(track_id);
-        if !add {
-            tracks.remove(&track_id);
+        let add = !tracks.remove(&track_id);
+        if add {
+            tracks.insert(track_id);
         }
-        self.playback_state.last_interaction = Instant::now() + Duration::from_millis(500);
+        self.playback
+            .defer_remote_updates(Duration::from_millis(500));
 
         let client = Arc::clone(&self.spotify.client);
         spawn(move || {
-            let track_uri = format!("spotify:track:{track_id}");
-            set_playlist_membership(
-                &client,
-                playlist_id,
-                &playlist_name,
-                track_id,
-                &track_uri,
-                add,
-            );
+            set_playlist_membership(&client, playlist_id, track_id, add);
         });
     }
 
     /// Set Spotify playing or paused.
     fn toggle_playing(&mut self, play: bool) {
         info!("{} current track", if play { "Playing" } else { "Pausing" });
-        self.playback_state.playing = play;
+        self.playback.playing = play;
 
-        let client = Arc::clone(&self.spotify.client);
-        spawn(move || {
-            // https://developer.spotify.com/documentation/web-api/reference/#/operations/start-a-users-playback
-            // https://developer.spotify.com/documentation/web-api/reference/#/operations/pause-a-users-playback
-            let action = if play { "play" } else { "pause" };
-            if let Err(err) = client.api_request(Method::PUT, &format!("me/player/{action}"), None)
-            {
-                error!("Failed to {action} playback: {err}");
-            }
-        });
+        let action = if play { "play" } else { "pause" };
+        self.spotify.client.put_in_background(
+            format!("me/player/{action}"),
+            if play {
+                "start playback"
+            } else {
+                "pause playback"
+            },
+        );
     }
 }

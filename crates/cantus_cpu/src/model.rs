@@ -4,7 +4,7 @@ use serde::{Deserialize, Deserializer, de};
 use std::{
     collections::HashSet,
     sync::{Arc, mpsc::Sender},
-    time::Instant,
+    time::{Duration, Instant},
 };
 
 pub const NUM_SWATCHES: usize = 4;
@@ -37,6 +37,26 @@ impl Default for PlaybackState {
             last_interaction: now,
             last_progress_update: now,
         }
+    }
+}
+
+impl PlaybackState {
+    pub const fn update_progress(&mut self, progress: u32, now: Instant) {
+        self.progress = progress;
+        self.last_progress_update = now;
+    }
+
+    pub fn defer_remote_updates(&mut self, duration: Duration) {
+        self.last_interaction = Instant::now() + duration;
+    }
+
+    pub fn estimated_progress(&self) -> f32 {
+        self.progress as f32
+            + if self.playing {
+                self.last_progress_update.elapsed().as_millis() as f32
+            } else {
+                0.0
+            }
     }
 }
 
@@ -150,7 +170,7 @@ impl AppUpdater {
     }
 }
 
-#[derive(Copy, Clone, Default)]
+#[derive(Copy, Clone)]
 pub struct Rect {
     pub x0: f32,
     pub y0: f32,
