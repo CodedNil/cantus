@@ -1,4 +1,4 @@
-use crate::{CantusApp, NUM_SWATCHES, pipelines::IMAGE_SIZE, spotify};
+use crate::{CantusApp, model::NUM_SWATCHES, pipelines::IMAGE_SIZE, spotify};
 use arrayvec::ArrayVec;
 use image::{DynamicImage, RgbaImage, imageops};
 use kmeans_colors::Sort;
@@ -46,7 +46,7 @@ impl CantusApp {
             })
         {
             self.set_art_state(&url, &ArtState::Fetching);
-            spotify::download_image(Arc::clone(&self.spotify.client), self.updater.clone(), url);
+            spotify::download_image(&self.spotify, url);
         }
     }
 

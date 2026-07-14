@@ -1,7 +1,20 @@
-use crate::{CantusApp, CondensedPlaylist, PANEL_START, TRACK_SPACING_MS, Track};
+use crate::{
+    CantusApp, MAX_RENDER_INSTANCES, PANEL_EXTENSION, PANEL_START, PARTICLE_COUNT,
+    TRACK_SPACING_MS,
+    art::{AlbumArt, ArtState},
+    model::{CondensedPlaylist, Rect, Track, playlist_icons},
+    pipelines::{IMAGE_SIZE, MAX_TEXTURE_IMAGES},
+    text_render::TextRenderer,
+};
+use arrayvec::ArrayVec;
 use cantus_shared::{BackgroundPill, ICON_SPACING, MAX_PILL_PLAYLIST_ICONS, approach};
-use glam::{FloatExt, vec2};
-use std::{mem, ops::Range, time::Instant};
+use glam::{FloatExt, Vec2, vec2};
+use std::{f32::consts::TAU, mem, ops::Range, sync::Arc, time::Instant};
+use wgpu::{
+    BindGroup, Buffer, Color, CommandEncoderDescriptor, CurrentSurfaceTexture, Device, LoadOp,
+    Operations, Queue, RenderPass, RenderPassColorAttachment, RenderPassDescriptor, RenderPipeline,
+    StoreOp, Surface, SurfaceConfiguration, Texture, TextureViewDescriptor,
+};
 
 /// Particles emitted per second when playback is active.
 const SPARK_EMISSION: f32 = 20.0;
@@ -15,6 +28,111 @@ const SPARK_LIFETIME: Range<f32> = 1.2..1.5;
 const PLAYHEAD_START_DURATION: f32 = 0.7;
 const PLAYHEAD_TRANSITION_SPEED: f32 = 5.5;
 const DETAIL_FADE_DURATION: f32 = 0.2;
+
+pub struct GpuResources {
+    pub device: Device,
+    pub queue: Queue,
+    pub surface: Surface<'static>,
+    pub surface_config: SurfaceConfiguration,
+    pub uniform_buffer: Buffer,
+    pub playhead: GpuPass,
+    pub background: GpuPass,
+    pub text: GpuPass,
+    pub particles: GpuPass,
+    pub images: ImageAtlas,
+    pub text_renderer: TextRenderer,
+}
+
+pub struct GpuPass {
+    pub pipeline: RenderPipeline,
+    pub buffer: Buffer,
+    pub bind_group: BindGroup,
+}
+
+impl GpuPass {
+    fn draw<'pass>(&'pass self, pass: &mut RenderPass<'pass>, instances: u32) {
+        pass.set_pipeline(&self.pipeline);
+        pass.set_bind_group(0, &self.bind_group, &[]);
+        pass.draw(0..4, 0..instances);
+    }
+
+    fn draw_data<'pass, T: bytemuck::NoUninit>(
+        &'pass self,
+        queue: &Queue,
+        pass: &mut RenderPass<'pass>,
+        data: &[T],
+    ) {
+        if data.is_empty() {
+            return;
+        }
+        queue.write_buffer(&self.buffer, 0, bytemuck::cast_slice(data));
+        self.draw(pass, data.len() as u32);
+    }
+}
+
+impl GpuResources {
+    pub fn configure_surface(&self) {
+        self.surface.configure(&self.device, &self.surface_config);
+    }
+
+    pub fn resize_surface(&mut self, width: u32, height: u32) {
+        if (self.surface_config.width, self.surface_config.height) != (width, height) {
+            self.surface_config.width = width;
+            self.surface_config.height = height;
+            self.configure_surface();
+        }
+    }
+}
+
+pub struct ImageAtlas {
+    pub texture: Texture,
+    pub slots: [Option<Arc<AlbumArt>>; MAX_TEXTURE_IMAGES as usize],
+    pub used: u32,
+}
+
+impl ImageAtlas {
+    fn image_index(&mut self, queue: &Queue, art: &Arc<AlbumArt>) -> i32 {
+        if let Some(index) = self
+            .slots
+            .iter()
+            .position(|slot| slot.as_ref().is_some_and(|slot| Arc::ptr_eq(slot, art)))
+        {
+            self.used |= 1 << index;
+            return index as i32;
+        }
+
+        let index = (!self.used).trailing_zeros();
+        if index >= MAX_TEXTURE_IMAGES {
+            return -1;
+        }
+        self.used |= 1 << index;
+        queue.write_texture(
+            wgpu::TexelCopyTextureInfo {
+                texture: &self.texture,
+                mip_level: 0,
+                aspect: wgpu::TextureAspect::All,
+                origin: wgpu::Origin3d {
+                    x: 0,
+                    y: 0,
+                    z: index,
+                },
+            },
+            &art.pixels,
+            wgpu::TexelCopyBufferLayout {
+                offset: 0,
+                bytes_per_row: Some(4 * IMAGE_SIZE),
+                rows_per_image: Some(IMAGE_SIZE),
+            },
+            wgpu::Extent3d {
+                width: IMAGE_SIZE,
+                height: IMAGE_SIZE,
+                depth_or_array_layers: 1,
+            },
+        );
+        self.slots[index as usize] = Some(Arc::clone(art));
+        index as i32
+    }
+}
 
 pub struct RenderState {
     pub last_update: Instant,
@@ -33,8 +151,148 @@ impl Default for RenderState {
     }
 }
 
-/// Build the scene for rendering.
 impl CantusApp {
+    pub fn emit_click_particles(&mut self, position: Vec2) {
+        self.particles_dirty = true;
+        let time = self.start_time.elapsed().as_secs_f32();
+        for particle in self
+            .particles
+            .iter_mut()
+            .filter(|particle| time > particle.end_time)
+            .take(20)
+        {
+            let angle = fastrand::f32() * TAU;
+            let speed = 30.0 + fastrand::f32() * 20.0;
+            let duration = 0.5.lerp(1.5, fastrand::f32());
+            particle.spawn_pos = position;
+            particle.spawn_vel = Vec2::from_angle(angle) * speed;
+            particle.color =
+                u32::from_le_bytes([255, 215, 50, (duration * 100.0).min(255.0) as u8]);
+            particle.end_time = time + duration;
+        }
+    }
+
+    pub fn logical_surface_size(&self) -> (f32, f32) {
+        (
+            self.surface_width.unwrap_or(self.config.width),
+            self.config.height + PANEL_START + PANEL_EXTENSION,
+        )
+    }
+
+    pub fn buffer_size(&self) -> (u32, u32) {
+        let (width, height) = self.logical_surface_size();
+        (
+            (width * self.render_scale).round() as u32,
+            (height * self.render_scale).round() as u32,
+        )
+    }
+
+    pub fn playhead_rect(&self) -> Rect {
+        let x = self.config.playhead_x();
+        let radius = self.config.height * 0.25;
+        Rect::new(
+            x - radius,
+            PANEL_START,
+            x + radius,
+            PANEL_START + self.config.height,
+        )
+    }
+
+    /// Render a frame and report whether the surface must be recreated.
+    pub fn render(&mut self) -> bool {
+        self.spotify.tick();
+        while let Ok(update) = self.app_updates.try_recv() {
+            update(self);
+        }
+        self.start_missing_art_downloads();
+
+        let Some(gpu) = self.gpu_resources.as_mut() else {
+            return false;
+        };
+        let (surface_texture, reconfigure_after_present) = match gpu.surface.get_current_texture() {
+            CurrentSurfaceTexture::Success(texture) => (texture, false),
+            CurrentSurfaceTexture::Suboptimal(texture) => (texture, true),
+            CurrentSurfaceTexture::Timeout | CurrentSurfaceTexture::Occluded => return false,
+            CurrentSurfaceTexture::Outdated => {
+                gpu.configure_surface();
+                return false;
+            }
+            CurrentSurfaceTexture::Lost => return true,
+            CurrentSurfaceTexture::Validation => {
+                tracing::error!("surface texture acquisition failed validation");
+                return false;
+            }
+        };
+
+        gpu.images.used = 0;
+        gpu.text_renderer.glyphs.clear();
+        self.create_scene();
+
+        let gpu = self.gpu_resources.as_mut().unwrap();
+        gpu.queue.write_buffer(
+            &gpu.uniform_buffer,
+            0,
+            bytemuck::bytes_of(&self.global_uniforms),
+        );
+        if mem::take(&mut self.particles_dirty) {
+            gpu.queue.write_buffer(
+                &gpu.particles.buffer,
+                0,
+                bytemuck::cast_slice(&self.particles),
+            );
+        }
+        gpu.queue.write_buffer(
+            &gpu.playhead.buffer,
+            0,
+            bytemuck::bytes_of(&self.playhead_info),
+        );
+
+        let surface_view = surface_texture
+            .texture
+            .create_view(&TextureViewDescriptor::default());
+        let mut encoder = gpu
+            .device
+            .create_command_encoder(&CommandEncoderDescriptor::default());
+        {
+            let mut pass = encoder.begin_render_pass(&RenderPassDescriptor {
+                label: Some("Main Render Pass"),
+                color_attachments: &[Some(RenderPassColorAttachment {
+                    view: &surface_view,
+                    resolve_target: None,
+                    ops: Operations {
+                        load: LoadOp::Clear(Color::TRANSPARENT),
+                        store: StoreOp::Store,
+                    },
+                    depth_slice: None,
+                })],
+                depth_stencil_attachment: None,
+                timestamp_writes: None,
+                occlusion_query_set: None,
+                multiview_mask: None,
+            });
+            gpu.background
+                .draw_data(&gpu.queue, &mut pass, &self.background_pills);
+            gpu.text
+                .draw_data(&gpu.queue, &mut pass, &gpu.text_renderer.glyphs);
+            gpu.particles.draw(&mut pass, PARTICLE_COUNT as u32);
+            gpu.playhead.draw(&mut pass, 1);
+        }
+
+        gpu.queue.submit([encoder.finish()]);
+        gpu.queue.present(surface_texture);
+        if reconfigure_after_present {
+            gpu.configure_surface();
+        }
+        false
+    }
+
+    fn get_image_index(&mut self, art: &ArtState) -> i32 {
+        let (Some(gpu), ArtState::Ready(art)) = (self.gpu_resources.as_mut(), art) else {
+            return -1;
+        };
+        gpu.images.image_index(&gpu.queue, art)
+    }
+
     pub fn create_scene(&mut self) {
         let now = Instant::now();
         let dt = now
@@ -163,8 +421,11 @@ impl CantusApp {
             .filter(|&index| Some(index) != hovered_track)
             .chain(hovered_track);
         for queue_index in render_order {
+            if self.background_pills.len() == MAX_RENDER_INSTANCES {
+                break;
+            }
             let track = &mut playback_state.queue[queue_index];
-            if track.runtime.is_visible() {
+            if track.runtime.rect(self.config.height).is_some() {
                 let hovered = Some(queue_index) == hovered_track;
                 self.draw_track(track, playhead_x, hovered, dt, playlists);
             }
@@ -263,16 +524,17 @@ impl CantusApp {
 
         // Expand the hitbox vertically so it includes the playlist buttons
         if show_details {
-            self.draw_playlist_buttons(track, playlist_expansion, playlists, &mut pill);
+            self.populate_playlist_buttons(track, playlist_expansion, playlists, &mut pill);
         }
-        if hovered && pill.rating >= 0 {
-            let (index, right_half) = pill
+        if hovered
+            && pill.rating >= 0
+            && let Some((index, right_half)) = pill
                 .icon_rows(PANEL_START, self.config.height)
                 .0
-                .hit(self.global_uniforms.mouse_pos);
-            if (0..5).contains(&index) {
-                pill.rating = index * 2 + 1 + i32::from(right_half);
-            }
+                .hit(self.global_uniforms.mouse_pos)
+            && index < 5
+        {
+            pill.rating = index as i32 * 2 + 1 + i32::from(right_half);
         }
         track.runtime.primary_playlist_count = pill.primary_playlist_count as u8;
         track.runtime.secondary_playlist_count = pill.secondary_playlist_count as u8;
@@ -288,6 +550,48 @@ impl CantusApp {
         pill.primary_alpha = track.runtime.primary_icon_alpha;
         pill.secondary_expansion = playlist_expansion;
         self.background_pills.push(pill);
+    }
+
+    fn populate_playlist_buttons(
+        &mut self,
+        track: &Track,
+        secondary_expansion: f32,
+        playlists: &[CondensedPlaylist],
+        pill: &mut BackgroundPill,
+    ) {
+        let Some(track_id) = track.id else {
+            return;
+        };
+        let icons = playlist_icons(track_id, playlists, true)
+            .chain(playlist_icons(track_id, playlists, false))
+            .take(MAX_PILL_PLAYLIST_ICONS)
+            .collect::<ArrayVec<_, MAX_PILL_PLAYLIST_ICONS>>();
+        let primary_count = icons.partition_point(|playlist| playlist.tracks.contains(&track_id));
+        let visible_count = if secondary_expansion > 0.0 {
+            icons.len()
+        } else {
+            primary_count
+        };
+        for (slot, playlist) in pill.playlist_images.iter_mut().zip(&icons[..visible_count]) {
+            *slot = self.get_image_index(&playlist.art);
+        }
+
+        pill.rating = if self.config.ratings_enabled {
+            i32::from(
+                playlists
+                    .iter()
+                    .find_map(|playlist| {
+                        playlist
+                            .rating_index
+                            .filter(|_| playlist.tracks.contains(&track_id))
+                    })
+                    .map_or(0, |rating| rating + 1),
+            )
+        } else {
+            -1
+        };
+        pill.primary_playlist_count = primary_count as u32;
+        pill.secondary_playlist_count = (visible_count - primary_count) as u32;
     }
 
     fn render_playhead_particles(

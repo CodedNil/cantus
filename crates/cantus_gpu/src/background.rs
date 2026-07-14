@@ -1,5 +1,6 @@
 use crate::{
-    pixel_to_ndc, quad_coord, sd_capsule_box, sd_squircle, sd_star, smooth_union, unpack3x8unorm,
+    direction_and_length, pixel_to_ndc, quad_coord, sd_capsule_box, sd_squircle, sd_star,
+    smooth_union, unpack3x8unorm,
 };
 use cantus_shared::{
     BACKPLATE_RADIUS, BackgroundPill, GlobalUniforms, ICON_WIDTH, MAX_PILL_PLAYLIST_ICONS,
@@ -26,17 +27,6 @@ fn hash(point: Vec2, seed: f32) -> f32 {
     value = value.wrapping_mul(0x846c_a68b);
     value ^= value >> 16;
     (value >> 8) as f32 * (1.0 / 16_777_216.0)
-}
-
-/// Returns direction and length without `glam::normalize_or_zero`, whose `is_finite` check emits an infinity literal that Naga rejects for this SPIR-V.
-fn direction_and_length(vec: Vec2) -> (Vec2, f32) {
-    let length = vec.length();
-    let direction = if length > 0.001 {
-        vec / length
-    } else {
-        Vec2::ZERO
-    };
-    (direction, length)
 }
 
 fn icon_local(pixel_pos: Vec2, center: Vec2, global: &GlobalUniforms) -> (Vec2, Vec2, f32, f32) {

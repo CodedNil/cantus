@@ -1,8 +1,11 @@
 use crate::{
-    AppUpdater, CondensedPlaylist, MAX_HISTORY_TRACKS, PlaylistId, PlaylistTracks, Track, TrackId,
+    MAX_HISTORY_TRACKS,
     art::{self, ArtState},
     config::{self, Config},
-    deserialize_images,
+    model::{
+        AppUpdater, CondensedPlaylist, PlaylistId, PlaylistTracks, Track, TrackId,
+        deserialize_images,
+    },
 };
 use arrayvec::{ArrayString, ArrayVec};
 use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
@@ -436,7 +439,6 @@ struct Page<T> {
     items: Vec<Option<T>>,
 }
 
-// --- SPOTIFY LOGIC ---
 const RATING_PLAYLISTS: [&str; 10] = [
     "0.5", "1.0", "1.5", "2.0", "2.5", "3.0", "3.5", "4.0", "4.5", "5.0",
 ];
@@ -475,7 +477,7 @@ fn persist_playlist_cache(cache: &PlaylistCache) {
 
 pub struct SpotifyBackend {
     pub client: Arc<SpotifyClient>,
-    updater: AppUpdater,
+    pub updater: AppUpdater,
     playback: PollTask<SpotifyState>,
     playlists: PollTask<PlaylistPollState>,
 }
@@ -658,7 +660,9 @@ fn get_spotify_queue(
     });
 }
 
-pub fn download_image(client: Arc<SpotifyClient>, updater: AppUpdater, url: String) {
+pub fn download_image(backend: &SpotifyBackend, url: String) {
+    let client = Arc::clone(&backend.client);
+    let updater = backend.updater.clone();
     spawn(move || {
         let result = client
             .http
@@ -756,7 +760,7 @@ fn rating_index(enabled: bool, name: &str) -> Option<u8> {
 fn fetch_playlist_tracks(client: &SpotifyClient, playlist: &Playlist) -> Option<PlaylistTracks> {
     let chunk_size = 50;
     let num_pages = playlist.tracks.total.div_ceil(chunk_size);
-    let mut tracks = HashSet::new();
+    let mut tracks = HashSet::with_capacity(playlist.tracks.total as usize);
     info!("Fetching {num_pages} pages from playlist {}", playlist.name);
 
     for page in 0..num_pages {

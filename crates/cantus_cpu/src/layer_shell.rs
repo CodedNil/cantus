@@ -1,6 +1,7 @@
 use crate::{
-    CantusApp, Rect,
+    CantusApp,
     config::{Layer as ConfigLayer, LayerAnchor as ConfigLayerAnchor},
+    model::Rect,
 };
 use glam::vec2;
 use std::{
@@ -269,6 +270,7 @@ impl LayerShellApp {
                 );
             }
             wl_surface.set_input_region(Some(&region));
+            region.destroy();
             self.last_hitbox_hash = hash;
         }
     }

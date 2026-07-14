@@ -120,24 +120,21 @@ pub struct PillIconRow {
 }
 
 impl PillIconRow {
-    pub fn hit(self, point: Vec2) -> (i32, bool) {
+    pub fn hit(self, point: Vec2) -> Option<(usize, bool)> {
         if self.expansion <= 0.0 {
-            return (-1, false);
+            return None;
         }
         let index = (point.x - self.center.x) / (ICON_SPACING * self.expansion)
             + (self.count - 1.0).max(0.0) * 0.5
             + 0.5;
         if !(0.0..self.count).contains(&index) {
-            return (-1, false);
+            return None;
         }
-        let index = index as i32;
+        let index = index as usize;
         let center = self.icon_center(index as f32);
         let delta = (point - center).abs();
-        if delta.x <= ICON_WIDTH * 0.5 && delta.y <= ICON_WIDTH * 0.5 {
-            (index, point.x >= center.x)
-        } else {
-            (-1, false)
-        }
+        (delta.x <= ICON_WIDTH * 0.5 && delta.y <= ICON_WIDTH * 0.5)
+            .then_some((index, point.x >= center.x))
     }
 
     pub fn padded_half_span(self) -> f32 {

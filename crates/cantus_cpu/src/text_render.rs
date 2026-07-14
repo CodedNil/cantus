@@ -1,4 +1,4 @@
-use crate::{PANEL_START, Track};
+use crate::{PANEL_START, model::Track};
 use ab_glyph::{Font, FontArc, Glyph, GlyphId, PxScale, ScaleFont, point};
 use cantus_shared::{GLYPH_ATLAS_SIZE, GlyphInstance, MAX_GLYPH_INSTANCES, pack_u16x2};
 use glam::{Vec2, vec2};
@@ -60,7 +60,7 @@ impl TextRenderer {
             atlas,
             atlas_cache: HashMap::new(),
             atlas_cursor: (0, 0, 0),
-            glyphs: Vec::new(),
+            glyphs: Vec::with_capacity(MAX_GLYPH_INSTANCES),
         }
     }
 
@@ -105,9 +105,9 @@ impl TextRenderer {
         let row_h = row_h.max(height + ATLAS_PADDING * 2);
         self.atlas_cursor = (cx + width + ATLAS_PADDING * 2, cy, row_h);
 
-        let mut buf = vec![0u8; (width * height) as usize];
+        let mut buffer = vec![0u8; (width * height) as usize];
         outlined.draw(|x, y, c| {
-            buf[y as usize * width as usize + x as usize] = (c * 255.0).round() as u8;
+            buffer[y as usize * width as usize + x as usize] = (c * 255.0).round() as u8;
         });
 
         queue.write_texture(
@@ -117,7 +117,7 @@ impl TextRenderer {
                 aspect: wgpu::TextureAspect::All,
                 origin: wgpu::Origin3d { x: gx, y: gy, z: 0 },
             },
-            &buf,
+            &buffer,
             wgpu::TexelCopyBufferLayout {
                 offset: 0,
                 bytes_per_row: Some(width),

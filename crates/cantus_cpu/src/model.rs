@@ -1,0 +1,189 @@
+use crate::{CantusApp, PANEL_START, TRACK_SPACING_MS, art::ArtState};
+use arrayvec::ArrayString;
+use serde::{Deserialize, Deserializer, de};
+use std::{
+    collections::HashSet,
+    sync::{Arc, mpsc::Sender},
+    time::Instant,
+};
+
+pub const NUM_SWATCHES: usize = 4;
+
+pub type TrackId = ArrayString<22>;
+pub type PlaylistId = ArrayString<22>;
+pub type PlaylistTracks = Arc<HashSet<TrackId>>;
+
+pub struct PlaybackState {
+    pub playing: bool,
+    pub progress: u32,
+    pub volume: Option<u8>,
+    pub queue: Vec<Track>,
+    pub queue_index: usize,
+    pub playlists: Vec<CondensedPlaylist>,
+    pub last_interaction: Instant,
+    pub last_progress_update: Instant,
+}
+
+impl Default for PlaybackState {
+    fn default() -> Self {
+        let now = Instant::now();
+        Self {
+            playing: false,
+            progress: 0,
+            volume: None,
+            queue: Vec::new(),
+            queue_index: 0,
+            playlists: Vec::new(),
+            last_interaction: now,
+            last_progress_update: now,
+        }
+    }
+}
+
+#[derive(Deserialize)]
+pub struct Track {
+    pub id: Option<TrackId>,
+    pub name: String,
+    pub album: Album,
+    #[serde(deserialize_with = "deserialize_first_artist", rename = "artists")]
+    pub artist: Artist,
+    pub duration_ms: u32,
+    #[serde(skip)]
+    pub art: ArtState,
+    #[serde(skip)]
+    pub runtime: TrackRuntime,
+}
+
+#[derive(Default)]
+pub struct TrackRuntime {
+    pub playlist_expansion: f32,
+    pub detail_alpha: f32,
+    pub primary_icon_alpha: f32,
+    pub primary_playlist_count: u8,
+    pub secondary_playlist_count: u8,
+    pub start_ms: f32,
+    pub start_x: f32,
+    pub width: f32,
+}
+
+impl Track {
+    pub fn queue_span_ms(&self) -> f32 {
+        self.duration_ms as f32 + TRACK_SPACING_MS
+    }
+
+    pub fn is_current(&self) -> bool {
+        self.runtime.start_ms <= 0.0 && self.runtime.start_ms + self.duration_ms as f32 >= 0.0
+    }
+
+    pub fn palette(&self) -> [u32; NUM_SWATCHES] {
+        match &self.art {
+            ArtState::Ready(art) => art.palette,
+            _ => [0; NUM_SWATCHES],
+        }
+    }
+
+    pub fn natural_x_range(&self, playhead_x: f32, px_per_ms: f32) -> (f32, f32) {
+        let start = playhead_x + self.runtime.start_ms * px_per_ms;
+        (start, start + self.duration_ms as f32 * px_per_ms)
+    }
+}
+
+impl TrackRuntime {
+    pub fn end_x(&self) -> f32 {
+        self.start_x + self.width
+    }
+
+    pub fn rect(&self, height: f32) -> Option<Rect> {
+        (self.width > 0.0 && self.end_x() > 0.0).then_some(Rect::new(
+            self.start_x,
+            PANEL_START,
+            self.end_x(),
+            PANEL_START + height,
+        ))
+    }
+}
+
+#[derive(Deserialize)]
+pub struct Album {
+    #[serde(default, deserialize_with = "deserialize_images", rename = "images")]
+    pub image: Option<String>,
+}
+
+#[derive(Deserialize)]
+pub struct Artist {
+    pub name: String,
+}
+
+pub struct CondensedPlaylist {
+    pub id: PlaylistId,
+    pub name: String,
+    pub image_url: Option<String>,
+    pub tracks: PlaylistTracks,
+    pub rating_index: Option<u8>,
+    pub art: ArtState,
+}
+
+pub fn playlist_icons(
+    track_id: TrackId,
+    playlists: &[CondensedPlaylist],
+    contains_track: bool,
+) -> impl Iterator<Item = &CondensedPlaylist> {
+    playlists.iter().filter(move |playlist| {
+        playlist.rating_index.is_none() && playlist.tracks.contains(&track_id) == contains_track
+    })
+}
+
+#[derive(Deserialize)]
+struct Image {
+    url: String,
+    width: Option<u32>,
+}
+
+pub type AppUpdate = Box<dyn FnOnce(&mut CantusApp) + Send>;
+
+#[derive(Clone)]
+pub struct AppUpdater(pub Sender<AppUpdate>);
+
+impl AppUpdater {
+    pub fn send(&self, update: impl FnOnce(&mut CantusApp) + Send + 'static) {
+        let _ = self.0.send(Box::new(update));
+    }
+}
+
+#[derive(Copy, Clone, Default)]
+pub struct Rect {
+    pub x0: f32,
+    pub y0: f32,
+    pub x1: f32,
+    pub y1: f32,
+}
+
+impl Rect {
+    pub const fn new(x0: f32, y0: f32, x1: f32, y1: f32) -> Self {
+        Self { x0, y0, x1, y1 }
+    }
+
+    pub fn contains(self, point: glam::Vec2) -> bool {
+        point.x >= self.x0 && point.x <= self.x1 && point.y >= self.y0 && point.y <= self.y1
+    }
+}
+
+pub fn deserialize_images<'de, D>(deserializer: D) -> Result<Option<String>, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    Ok(Vec::<Image>::deserialize(deserializer)?
+        .into_iter()
+        .min_by_key(|image| image.width.unwrap_or(u32::MAX))
+        .map(|image| image.url))
+}
+
+fn deserialize_first_artist<'de, D>(deserializer: D) -> Result<Artist, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    Vec::<Artist>::deserialize(deserializer)?
+        .into_iter()
+        .next()
+        .ok_or_else(|| de::Error::custom("artists array is empty"))
+}

@@ -1,4 +1,4 @@
-use crate::{pixel_to_ndc, quad_coord, unpack3x8unorm};
+use crate::{direction_and_length, pixel_to_ndc, quad_coord, unpack3x8unorm};
 use cantus_shared::{GlobalUniforms, Particle, smoothstep};
 use spirv_std::{
     arch::kill,
@@ -29,7 +29,7 @@ pub fn vs_particles(
 
     let p_life = dt / duration;
     let rgb = unpack3x8unorm(p.color);
-    let dir = p.spawn_vel.normalize();
+    let (dir, _) = direction_and_length(p.spawn_vel);
     let perp = dir.perp();
     let growth = p_life + 0.5;
     let uv = quad_coord(v_idx) * 2.0 - 1.0;

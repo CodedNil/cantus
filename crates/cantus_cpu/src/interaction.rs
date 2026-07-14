@@ -1,15 +1,13 @@
 use crate::{
-    AppUpdater, CantusApp, CondensedPlaylist, PANEL_START, PlaylistId, Rect, Track, TrackId,
+    CantusApp, PANEL_START,
+    model::{AppUpdater, CondensedPlaylist, PlaylistId, Rect, Track, TrackId, playlist_icons},
     spotify,
 };
-use arrayvec::ArrayVec;
 use cantus_shared::{
-    BACKPLATE_RADIUS, BackgroundPill, ICON_WIDTH, MAX_PILL_PLAYLIST_ICONS, PillIconRow,
-    pill_icon_primary_center_y, pill_icon_rows,
+    BACKPLATE_RADIUS, ICON_WIDTH, PillIconRow, pill_icon_primary_center_y, pill_icon_rows,
 };
-use glam::{FloatExt, Vec2, vec2};
+use glam::{Vec2, vec2};
 use std::{
-    f32::consts::PI,
     sync::Arc,
     thread::spawn,
     time::{Duration, Instant},
@@ -58,7 +56,7 @@ impl CantusApp {
             self.pulse_at_playhead();
             if let Some(track_id) = track_id {
                 let client = Arc::clone(&self.spotify.client);
-                skip_to_track(track_id, position, &self.updater, client);
+                skip_to_track(track_id, position, &self.spotify.updater, client);
             }
         }
         self.cancel_drag();
@@ -90,24 +88,7 @@ impl CantusApp {
                     .find_map(|(_, track)| icon_click(track))
             })
         {
-            // Spawn particles
-            self.particles_dirty = true;
-            let time = self.start_time.elapsed().as_secs_f32();
-            for particle in self
-                .particles
-                .iter_mut()
-                .filter(|particle| time > particle.end_time)
-                .take(20)
-            {
-                particle.spawn_pos = mouse_pos;
-                let angle = fastrand::f32() * 2.0 * PI;
-                let speed = 30.0 + (fastrand::f32() * 20.0);
-                particle.spawn_vel = Vec2::from_angle(angle) * speed;
-                let duration = 0.5.lerp(1.5, fastrand::f32());
-                particle.color =
-                    u32::from_le_bytes([255, 215, 50, (duration * 100.0).min(255.0) as u8]);
-                particle.end_time = time + duration;
-            }
+            self.emit_click_particles(mouse_pos);
 
             match action {
                 IconAction::Rate(rating) => self.update_star_rating(track_id, rating),
@@ -139,7 +120,7 @@ impl CantusApp {
             };
             if let Some(track_id) = track_id {
                 let client = Arc::clone(&self.spotify.client);
-                skip_to_track(track_id, position, &self.updater, client);
+                skip_to_track(track_id, position, &self.spotify.updater, client);
             }
         }
     }
@@ -199,18 +180,6 @@ impl CantusApp {
         interaction.drag_origin = None;
         interaction.dragging = false;
     }
-}
-
-impl CantusApp {
-    fn playlist_icons(
-        track_id: TrackId,
-        playlists: &[CondensedPlaylist],
-        contains_track: bool,
-    ) -> impl Iterator<Item = &CondensedPlaylist> {
-        playlists.iter().filter(move |p| {
-            p.rating_index.is_none() && p.tracks.contains(&track_id) == contains_track
-        })
-    }
 
     fn icon_layout(&self, track: &Track) -> Option<(TrackId, usize, PillIconRow, PillIconRow)> {
         let track_id = track.id?;
@@ -245,65 +214,25 @@ impl CantusApp {
         let mouse_pos = self.global_uniforms.mouse_pos;
         let (track_id, stars, primary_row, secondary_row) = self.icon_layout(track)?;
 
-        let (index, right_half) = primary_row.hit(mouse_pos);
-        if track.runtime.primary_icon_alpha > 0.0 && index >= 0 {
-            let index = index as usize;
+        if track.runtime.primary_icon_alpha > 0.0
+            && let Some((index, right_half)) = primary_row.hit(mouse_pos)
+        {
             return if index < stars {
                 Some((
                     track_id,
                     IconAction::Rate(index as u8 * 2 + u8::from(right_half)),
                 ))
             } else {
-                Self::playlist_icons(track_id, playlists, true)
+                playlist_icons(track_id, playlists, true)
                     .nth(index - stars)
                     .map(|playlist| (track_id, IconAction::TogglePlaylist(playlist.id)))
             };
         }
 
-        let (index, _) = secondary_row.hit(mouse_pos);
-        (index >= 0)
-            .then(|| Self::playlist_icons(track_id, playlists, false).nth(index as usize))
-            .flatten()
+        secondary_row
+            .hit(mouse_pos)
+            .and_then(|(index, _)| playlist_icons(track_id, playlists, false).nth(index))
             .map(|playlist| (track_id, IconAction::TogglePlaylist(playlist.id)))
-    }
-
-    /// Star ratings and favourite playlists
-    pub fn draw_playlist_buttons(
-        &mut self,
-        track: &Track,
-        secondary_expansion: f32,
-        playlists: &[CondensedPlaylist],
-        pill: &mut BackgroundPill,
-    ) {
-        let Some(track_id) = track.id else {
-            return;
-        };
-        let icons = Self::playlist_icons(track_id, playlists, true)
-            .chain(Self::playlist_icons(track_id, playlists, false))
-            .take(MAX_PILL_PLAYLIST_ICONS)
-            .collect::<ArrayVec<_, MAX_PILL_PLAYLIST_ICONS>>();
-        let primary_count = icons.partition_point(|playlist| playlist.tracks.contains(&track_id));
-        let visible_count = if secondary_expansion > 0.0 {
-            icons.len()
-        } else {
-            primary_count
-        };
-        for (slot, playlist) in pill.playlist_images.iter_mut().zip(&icons[..visible_count]) {
-            *slot = self.get_image_index(&playlist.art);
-        }
-
-        pill.rating = if self.config.ratings_enabled {
-            i32::from(
-                playlists
-                    .iter()
-                    .find_map(|p| p.rating_index.filter(|_| p.tracks.contains(&track_id)))
-                    .map_or(0, |rating| rating + 1),
-            )
-        } else {
-            -1
-        };
-        pill.primary_playlist_count = primary_count as u32;
-        pill.secondary_playlist_count = (visible_count - primary_count) as u32;
     }
 }
 

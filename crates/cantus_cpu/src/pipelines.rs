@@ -1,5 +1,6 @@
 use crate::{
-    CantusApp, GpuPass, GpuResources, ImageAtlas, MAX_RENDER_INSTANCES, PARTICLE_COUNT,
+    CantusApp, MAX_RENDER_INSTANCES, PARTICLE_COUNT,
+    render::{GpuPass, GpuResources, ImageAtlas},
     text_render::TextRenderer,
 };
 use cantus_shared::{

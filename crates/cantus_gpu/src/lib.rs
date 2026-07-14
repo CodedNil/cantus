@@ -19,6 +19,17 @@ pub fn pixel_to_ndc(pixel: Vec2, screen_size: Vec2) -> Vec4 {
     vec4(ndc.x, -ndc.y, 0.0, 1.0)
 }
 
+/// Return a direction and length without `glam::normalize_or_zero`, whose infinity literal is rejected by Naga when translating SPIR-V.
+pub fn direction_and_length(vector: Vec2) -> (Vec2, f32) {
+    let length = vector.length();
+    let direction = if length > 0.001 {
+        vector / length
+    } else {
+        Vec2::ZERO
+    };
+    (direction, length)
+}
+
 pub fn sd_squircle(p: Vec2, half_size: Vec2, radius: f32) -> f32 {
     let q = p.abs() - half_size + radius;
     let outside = q.max(Vec2::ZERO);
