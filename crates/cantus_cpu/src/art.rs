@@ -71,10 +71,6 @@ fn art_request(state: &ArtState, url: Option<&str>, now: Instant) -> Option<Stri
         .map(str::to_owned)
 }
 
-fn similar_hue(a: Lch, b: Lch) -> bool {
-    (a.hue - b.hue).into_degrees().abs() < 20.0
-}
-
 fn complete_palette(colors: &mut ArrayVec<(Lch, f32), NUM_SWATCHES>) {
     colors.sort_by(|a, b| b.1.total_cmp(&a.1));
     let mut index = 1;
@@ -82,7 +78,7 @@ fn complete_palette(colors: &mut ArrayVec<(Lch, f32), NUM_SWATCHES>) {
         let (color, weight) = colors[index];
         if let Some(duplicate) = colors[..index]
             .iter()
-            .position(|(other, _)| similar_hue(color, *other))
+            .position(|(other, _)| (color.hue - other.hue).into_degrees().abs() < 20.0)
         {
             colors[duplicate].1 += weight;
             colors.remove(index);

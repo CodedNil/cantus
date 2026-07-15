@@ -1,13 +1,9 @@
-use crate::{
-    interaction::InteractionState,
-    model::{AppUpdate, AppUpdater, PlaybackState},
-    render::RenderState,
-};
+use crate::{interaction::InteractionState, model::PlaybackState, render::RenderState};
 use std::{
     io,
-    sync::mpsc::{self, Receiver},
+    sync::mpsc::{self, Sender},
 };
-use tracing::{Level, level_filters::LevelFilter};
+use tracing::{Level, debug, level_filters::LevelFilter};
 use tracing_subscriber::{filter::Targets, fmt, layer::SubscriberExt, util::SubscriberInitExt};
 
 mod art;
@@ -27,19 +23,27 @@ const MAX_RENDER_INSTANCES: usize = 256;
 const MAX_HISTORY_TRACKS: usize = 6;
 const TRACK_SPACING_MS: f32 = 4000.0;
 
+type Update<T> = Box<dyn FnOnce(&mut T) + Send>;
+type AppUpdater = Sender<Update<CantusApp>>;
+
+fn send_update<T>(sender: &Sender<Update<T>>, update: impl FnOnce(&mut T) + Send + 'static) {
+    if sender.send(Box::new(update)).is_err() {
+        debug!("Discarded update after its receiver stopped");
+    }
+}
+
 struct CantusApp {
     render: RenderState,
     interaction: InteractionState,
     playback: PlaybackState,
-    app_updates: Receiver<AppUpdate>,
+    app_updates: mpsc::Receiver<Update<Self>>,
     config: config::Config,
     spotify: spotify::SpotifyBackend,
 }
 
 impl Default for CantusApp {
     fn default() -> Self {
-        let (update_tx, app_updates) = mpsc::channel();
-        let updater = AppUpdater(update_tx);
+        let (updater, app_updates) = mpsc::channel();
         let config = config::load();
         let spotify = spotify::SpotifyBackend::new(&config, updater);
         Self {

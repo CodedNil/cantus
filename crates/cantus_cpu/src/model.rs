@@ -1,11 +1,11 @@
-use crate::{CantusApp, PANEL_START, TRACK_SPACING_MS, art::ArtState};
+use crate::{PANEL_START, TRACK_SPACING_MS, art::ArtState};
 use arrayvec::ArrayString;
 use cantus_shared::PackedAudioFeatures;
-use glam::{U8Vec4, Vec4, vec4};
+use glam::{U8Vec4, Vec2, Vec4, vec4};
 use serde::{Deserialize, Deserializer, de};
 use std::{
     collections::HashSet,
-    sync::{Arc, mpsc::Sender},
+    sync::Arc,
     time::{Duration, Instant},
 };
 
@@ -215,17 +215,6 @@ struct Image {
     width: Option<u32>,
 }
 
-pub type AppUpdate = Box<dyn FnOnce(&mut CantusApp) + Send>;
-
-#[derive(Clone)]
-pub struct AppUpdater(pub Sender<AppUpdate>);
-
-impl AppUpdater {
-    pub fn send(&self, update: impl FnOnce(&mut CantusApp) + Send + 'static) {
-        let _ = self.0.send(Box::new(update));
-    }
-}
-
 #[derive(Copy, Clone)]
 pub struct Rect {
     pub x0: f32,
@@ -239,7 +228,16 @@ impl Rect {
         Self { x0, y0, x1, y1 }
     }
 
-    pub fn contains(self, point: glam::Vec2) -> bool {
+    pub fn from_center(center: Vec2, half_size: Vec2) -> Self {
+        Self::new(
+            center.x - half_size.x,
+            center.y - half_size.y,
+            center.x + half_size.x,
+            center.y + half_size.y,
+        )
+    }
+
+    pub fn contains(self, point: Vec2) -> bool {
         point.x >= self.x0 && point.x <= self.x1 && point.y >= self.y0 && point.y <= self.y1
     }
 }

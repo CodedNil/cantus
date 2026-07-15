@@ -266,18 +266,14 @@ impl CantusApp {
 
     pub fn playhead_rect(&self) -> Rect {
         let x = self.config.playhead_x();
-        let radius = self.config.height * 0.25;
-        Rect::new(
-            x - radius,
-            PANEL_START,
-            x + radius,
-            PANEL_START + self.config.height,
+        Rect::from_center(
+            vec2(x, PANEL_START + self.config.height * 0.5),
+            vec2(self.config.height * 0.25, self.config.height * 0.5),
         )
     }
 
     /// Render a frame and report whether the surface must be recreated.
     pub fn render(&mut self) -> bool {
-        self.spotify.tick();
         while let Ok(update) = self.app_updates.try_recv() {
             update(self);
         }

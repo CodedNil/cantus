@@ -20,6 +20,10 @@ use wgpu::{
 pub const MAX_TEXTURE_IMAGES: u32 = 32;
 pub const IMAGE_SIZE: u32 = 64;
 
+const fn buffer_size<T>(len: usize) -> u64 {
+    (size_of::<T>() * len) as u64
+}
+
 fn render_pipeline(
     device: &Device,
     shader: &ShaderModule,
@@ -155,7 +159,7 @@ impl CantusApp {
 
         let uniform_buffer = device.create_buffer(&BufferDescriptor {
             label: Some("Uniforms"),
-            size: size_of::<GlobalUniforms>() as u64,
+            size: buffer_size::<GlobalUniforms>(1),
             usage: BufferUsages::UNIFORM | BufferUsages::COPY_DST,
             mapped_at_creation: false,
         });
@@ -199,19 +203,19 @@ impl CantusApp {
         };
         let playhead = create_pass(
             "Playhead",
-            size_of::<PlayheadUniforms>() as u64,
+            buffer_size::<PlayheadUniforms>(1),
             BufferUsages::UNIFORM,
             &[],
         );
         let particles = create_pass(
             "Particles",
-            (size_of::<Particle>() * PARTICLE_COUNT) as u64,
+            buffer_size::<Particle>(PARTICLE_COUNT),
             BufferUsages::STORAGE,
             &[],
         );
         let background = create_pass(
             "Background",
-            (size_of::<BackgroundPill>() * MAX_RENDER_INSTANCES) as u64,
+            buffer_size::<BackgroundPill>(MAX_RENDER_INSTANCES),
             BufferUsages::STORAGE,
             &[
                 BindingResource::TextureView(&image_view),
@@ -220,7 +224,7 @@ impl CantusApp {
         );
         let text = create_pass(
             "Text",
-            (size_of::<GlyphInstance>() * MAX_GLYPH_INSTANCES) as u64,
+            buffer_size::<GlyphInstance>(MAX_GLYPH_INSTANCES),
             BufferUsages::STORAGE,
             &[
                 BindingResource::TextureView(&text_atlas_view),

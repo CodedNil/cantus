@@ -181,11 +181,8 @@ impl TextRenderer {
 
         let seconds_until_start = (track.runtime.start_ms / 1000.0).abs();
         let time_text = if seconds_until_start >= 60.0 {
-            format!(
-                "{}m{}s",
-                (seconds_until_start / 60.0).floor(),
-                (seconds_until_start % 60.0).floor()
-            )
+            let seconds = seconds_until_start as u32;
+            format!("{}m{}s", seconds / 60, seconds % 60)
         } else {
             format!("{}s", seconds_until_start.round())
         };
@@ -284,21 +281,10 @@ impl TextRenderer {
         let baseline_y = origin.y + baseline_offset;
 
         let font = self.font.clone();
-        let font = font.as_scaled(px_size);
-        let mut caret = caret;
-        let mut last_glyph = None;
-        for c in text.chars() {
+        for (glyph_id, glyph_x, _) in layout_glyphs(&font, text, px_size, caret) {
             if self.glyphs.len() == MAX_GLYPH_INSTANCES {
                 break;
             }
-            let glyph_id = font.glyph_id(c);
-            if let Some(previous) = last_glyph {
-                caret += font.kern(previous, glyph_id);
-            }
-            let glyph_x = caret;
-            caret += font.h_advance(glyph_id);
-            last_glyph = Some(glyph_id);
-
             let key = (glyph_id, scale_quarters);
             let Some(glyph) = self.rasterize_glyph(queue, key) else {
                 continue;
@@ -330,16 +316,27 @@ enum Align {
 }
 
 fn measure_text(font: &FontArc, text: &str, px_size: f32) -> f32 {
+    layout_glyphs(font, text, px_size, 0.0)
+        .last()
+        .map_or(0.0, |(_, _, end)| end)
+}
+
+fn layout_glyphs<'a>(
+    font: &'a FontArc,
+    text: &'a str,
+    px_size: f32,
+    mut caret: f32,
+) -> impl Iterator<Item = (GlyphId, f32, f32)> + 'a {
     let font = font.as_scaled(px_size);
-    let mut caret = 0.0f32;
-    let mut last_glyph: Option<GlyphId> = None;
-    for c in text.chars() {
+    let mut previous = None;
+    text.chars().map(move |c| {
         let glyph_id = font.glyph_id(c);
-        if let Some(prev) = last_glyph {
+        if let Some(prev) = previous {
             caret += font.kern(prev, glyph_id);
         }
+        let start = caret;
         caret += font.h_advance(glyph_id);
-        last_glyph = Some(glyph_id);
-    }
-    caret
+        previous = Some(glyph_id);
+        (glyph_id, start, caret)
+    })
 }
