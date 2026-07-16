@@ -13,10 +13,11 @@ pub struct Config {
     /// The monitor to display on.
     pub monitor: Option<String>,
 
-    /// The width of the timeline in logical pixels.
-    pub width: f32,
     /// The height of the timeline in logical pixels.
     pub height: f32,
+
+    /// Latitude and longitude used for the weather pill.
+    pub location: [f32; 2],
 
     /// The layer the app should be on.
     pub layer: Layer,
@@ -57,8 +58,8 @@ impl Default for Config {
         Self {
             spotify_client_id: None,
             monitor: None,
-            width: 1050.0,
             height: 50.0,
+            location: [51.5074, -0.1278],
             layer: Layer::Top,
             layer_anchor: LayerAnchor::Top,
             timeline_future_minutes: 12.0,
@@ -93,26 +94,4 @@ pub fn load() -> Config {
                 .ok()
         })
         .unwrap_or_default()
-}
-
-impl Config {
-    pub fn timeline_width(&self) -> f32 {
-        self.width - self.history_width - 16.0
-    }
-
-    pub fn timeline_duration_ms(&self) -> f32 {
-        self.timeline_future_minutes * 60_000.0
-    }
-
-    pub fn timeline_start_ms(&self) -> f32 {
-        -self.timeline_past_minutes * 60_000.0
-    }
-
-    pub fn px_per_ms(&self) -> f32 {
-        self.timeline_width() / self.timeline_duration_ms()
-    }
-
-    pub fn playhead_x(&self) -> f32 {
-        self.history_width - self.timeline_start_ms() * self.px_per_ms()
-    }
 }

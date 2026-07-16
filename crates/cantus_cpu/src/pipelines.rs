@@ -5,6 +5,7 @@ use crate::{
 };
 use cantus_shared::{
     BackgroundPill, GlobalUniforms, GlyphInstance, MAX_GLYPH_INSTANCES, Particle, PlayheadUniforms,
+    StatusPill, WeatherPill,
 };
 use std::{mem::size_of, sync::Arc};
 use wgpu::{
@@ -222,6 +223,18 @@ impl CantusApp {
                 BindingResource::Sampler(&sampler),
             ],
         );
+        let status = create_pass(
+            "Status",
+            buffer_size::<StatusPill>(1),
+            BufferUsages::STORAGE,
+            &[],
+        );
+        let weather = create_pass(
+            "Weather",
+            buffer_size::<WeatherPill>(1),
+            BufferUsages::STORAGE,
+            &[],
+        );
         let text = create_pass(
             "Text",
             buffer_size::<GlyphInstance>(MAX_GLYPH_INSTANCES),
@@ -240,6 +253,8 @@ impl CantusApp {
             uniform_buffer,
             playhead,
             background,
+            weather,
+            status,
             text,
             particles,
             images: ImageAtlas {

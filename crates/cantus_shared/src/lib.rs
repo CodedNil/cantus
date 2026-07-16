@@ -46,9 +46,35 @@ pub struct BackgroundPill {
 #[repr(C)]
 #[derive(Copy, Clone, Default)]
 #[cfg_attr(feature = "cpu", derive(bytemuck::Pod, bytemuck::Zeroable))]
+pub struct StatusPill {
+    pub x: f32,
+    pub width: f32,
+    pub battery: [f32; 2],
+    pub volume: [f32; 2],
+}
+
+#[repr(C)]
+#[derive(Copy, Clone, Default)]
+#[cfg_attr(feature = "cpu", derive(bytemuck::Pod, bytemuck::Zeroable))]
+pub struct WeatherPill {
+    pub x: f32,
+    pub width: f32,
+    pub sun: [f32; 2],
+    pub conditions: [[f32; 3]; 3],
+}
+
+#[repr(C)]
+#[derive(Copy, Clone, Default)]
+#[cfg_attr(
+    feature = "cpu",
+    derive(bytemuck::Pod, bytemuck::Zeroable, serde::Deserialize)
+)]
+#[cfg_attr(feature = "cpu", serde(from = "AudioFeatures"))]
 pub struct PackedAudioFeatures([u32; 2]);
 
-pub struct AudioAnimationFeatures {
+#[derive(Copy, Clone)]
+#[cfg_attr(feature = "cpu", derive(serde::Deserialize))]
+pub struct AudioFeatures {
     pub energy: f32,
     pub danceability: f32,
     pub acousticness: f32,
@@ -59,15 +85,40 @@ pub struct AudioAnimationFeatures {
     pub loudness: f32,
 }
 
+#[cfg(feature = "cpu")]
+impl From<AudioFeatures> for PackedAudioFeatures {
+    fn from(features: AudioFeatures) -> Self {
+        Self([
+            quantize([
+                features.energy,
+                features.danceability,
+                features.acousticness,
+                (features.tempo - 40.0) / 200.0,
+            ]),
+            quantize([
+                features.valence,
+                features.liveness,
+                features.instrumentalness,
+                (features.loudness + 60.0) / 60.0,
+            ]),
+        ])
+    }
+}
+
+#[cfg(feature = "cpu")]
+fn quantize(values: [f32; 4]) -> u32 {
+    u32::from_le_bytes(values.map(|value| (value.clamp(0.0, 1.0) * 255.0).round() as u8))
+}
+
 impl PackedAudioFeatures {
     pub const fn new(motion: [u8; 4], character: [u8; 4]) -> Self {
         Self([u32::from_le_bytes(motion), u32::from_le_bytes(character)])
     }
 
-    pub fn decode(self) -> AudioAnimationFeatures {
+    pub fn decode(self) -> AudioFeatures {
         let motion = unpack_u8x4(self.0[0]);
         let character = unpack_u8x4(self.0[1]);
-        AudioAnimationFeatures {
+        AudioFeatures {
             energy: motion.x,
             danceability: motion.y,
             acousticness: motion.z,
@@ -75,12 +126,12 @@ impl PackedAudioFeatures {
             valence: character.x,
             liveness: character.y,
             instrumentalness: character.z,
-            loudness: character.w,
+            loudness: character.w * 60.0 - 60.0,
         }
     }
 }
 
-impl AudioAnimationFeatures {
+impl AudioFeatures {
     pub const fn tempo_hz(&self) -> f32 {
         self.tempo / 60.0
     }
@@ -90,7 +141,10 @@ impl AudioAnimationFeatures {
     }
 
     pub const fn turbulence(&self) -> f32 {
-        (self.energy * 0.55 + self.danceability * 0.2 + self.liveness * 0.15 + self.loudness * 0.1)
+        (self.energy * 0.55
+            + self.danceability * 0.2
+            + self.liveness * 0.15
+            + (self.loudness + 60.0) / 60.0 * 0.1)
             * (1.0 - self.acousticness * 0.35)
     }
 }
@@ -121,6 +175,10 @@ pub struct GlyphInstance {
     /// Right clip edge in logical pixels.
     pub clip_right: f32,
     pub alpha: f32,
+    /// Coverage threshold offset; positive values produce lighter strokes.
+    pub weight: f32,
+    /// Keeps storage-buffer array elements aligned identically on CPU and GPU.
+    pub padding: f32,
 }
 
 pub const GLYPH_ATLAS_SIZE: u32 = 2048;

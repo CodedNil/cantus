@@ -1,14 +1,14 @@
 #![no_std]
 
+use cantus_shared::GlobalUniforms;
 use spirv_std::glam::{Vec2, Vec3, Vec4, vec2, vec3, vec4};
 
 pub mod background;
 pub mod particles;
 pub mod playhead;
+pub mod status;
 pub mod text;
-
-#[cfg(target_arch = "spirv")]
-use spirv_std::num_traits::Float;
+pub mod weather;
 
 pub const fn quad_coord(vertex_index: u32) -> Vec2 {
     vec2((vertex_index & 1) as f32, (vertex_index >> 1) as f32)
@@ -17,6 +17,24 @@ pub const fn quad_coord(vertex_index: u32) -> Vec2 {
 pub fn pixel_to_ndc(pixel: Vec2, screen_size: Vec2) -> Vec4 {
     let ndc = pixel / screen_size * 2.0 - 1.0;
     vec4(ndc.x, -ndc.y, 0.0, 1.0)
+}
+
+pub fn pill_vertex(vertex: u32, global: &GlobalUniforms, x: f32, width: f32) -> (Vec4, Vec2) {
+    let pixel =
+        vec2(x, global.bar_height.x) + quad_coord(vertex) * vec2(width, global.bar_height.y);
+    (pixel_to_ndc(pixel, global.screen_size), pixel)
+}
+
+pub fn pill_fragment(
+    pixel: Vec2,
+    global: &GlobalUniforms,
+    x: f32,
+    width: f32,
+) -> (Vec2, Vec2, f32) {
+    let size = vec2(width, global.bar_height.y);
+    let local = pixel - vec2(x, global.bar_height.x);
+    let distance = sd_capsule_box(local - size * 0.5, (size.x - size.y) * 0.5, size.y * 0.5);
+    (local, size, distance)
 }
 
 /// Return a direction and length without `glam::normalize_or_zero`, whose infinity literal is rejected by Naga when translating SPIR-V.
@@ -30,11 +48,9 @@ pub fn direction_and_length(vector: Vec2) -> (Vec2, f32) {
     (direction, length)
 }
 
-pub fn sd_squircle(p: Vec2, half_size: Vec2, radius: f32) -> f32 {
-    let q = p.abs() - half_size + radius;
-    let outside = q.max(Vec2::ZERO);
-    let outside_squared = outside * outside;
-    (outside_squared.dot(outside_squared)).sqrt().sqrt() - radius + q.x.max(q.y).min(0.0)
+pub fn sd_rounded_box(point: Vec2, half_size: Vec2, radius: f32) -> f32 {
+    let corner = point.abs() - half_size + radius;
+    corner.max(Vec2::ZERO).length() + corner.x.max(corner.y).min(0.0) - radius
 }
 
 pub fn sd_capsule_box(point: Vec2, half_span: f32, radius: f32) -> f32 {

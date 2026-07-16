@@ -131,10 +131,13 @@ rec {
                         description = "Monitor to display Cantus on.";
                       };
 
-                      width = mkOption {
-                        type = types.number;
-                        default = 1050.0;
-                        description = "Width of the timeline in logical pixels.";
+                      location = mkOption {
+                        type = types.addCheck (types.listOf types.number) (coordinates: builtins.length coordinates == 2);
+                        default = [
+                          51.5074
+                          (-0.1278)
+                        ];
+                        description = "Latitude and longitude used for weather.";
                       };
 
                       height = mkOption {
@@ -201,7 +204,10 @@ rec {
                 description = "Settings written as TOML to `~/.config/cantus/cantus.toml`.";
                 example = {
                   monitor = "eDP-1";
-                  width = 1050.0;
+                  location = [
+                    51.5
+                    (-0.1)
+                  ];
                   height = 40.0;
                   timeline_future_minutes = 12.0;
                   timeline_past_minutes = 1.5;

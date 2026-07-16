@@ -1,6 +1,7 @@
 use crate::{
     CantusApp, PANEL_START,
     model::{CondensedPlaylist, PlaylistId, Rect, Track, TrackId, playlist_icons},
+    status::Status,
 };
 use cantus_shared::{
     BACKPLATE_RADIUS, ICON_WIDTH, PillIconRow, pill_icon_primary_center_y, pill_icon_rows,
@@ -65,6 +66,10 @@ impl CantusApp {
     /// Handle click events.
     fn handle_click(&mut self) {
         let mouse_pos = self.render.uniforms.mouse_pos;
+        let timeline = self.timeline();
+        if Status::run_power_action(mouse_pos, self.render.status) {
+            return;
+        }
         let icon_click = |track: &Track| self.icon_at(track, &self.playback.playlists);
 
         if let Some((track_id, action)) = self
@@ -91,8 +96,7 @@ impl CantusApp {
         } else if let Some((track_id, (track_range_a, track_range_b))) =
             self.playback.queue.iter().rev().find_map(|track| {
                 let rect = track.runtime.rect(self.config.height)?;
-                let range =
-                    track.natural_x_range(self.config.playhead_x(), self.config.px_per_ms());
+                let range = track.natural_x_range(timeline.playhead_x, timeline.px_per_ms);
                 rect.contains(mouse_pos).then_some((track.id, range))
             })
         {
@@ -118,7 +122,7 @@ impl CantusApp {
 
     fn pulse_at_playhead(&mut self) {
         self.pulse_at(vec2(
-            self.config.playhead_x(),
+            self.timeline().playhead_x,
             PANEL_START + self.config.height * 0.5,
         ));
     }

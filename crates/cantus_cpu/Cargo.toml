@@ -52,6 +52,11 @@ form_urlencoded = "1.2.2"
 sha2 = { version = "0.11.0", default-features = false }
 bytemuck = { workspace = true }
 ureq = { version = "3.3.0", default-features = false, features = ["rustls"] }
+jiff = { version = "0.2.32", default-features = false, features = [
+    "std",
+    "tz-system",
+    "tzdb-zoneinfo",
+] }
 
 [lints]
 workspace = true

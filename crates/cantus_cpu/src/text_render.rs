@@ -10,16 +10,18 @@ use wgpu::{
 
 const FONT_SIZE: f32 = 16.0;
 const FONT_SIZE_SMALL: f32 = 14.0;
+const LIGHT_WEIGHT: f32 = 0.08;
 
 /// Size of the glyph atlas texture (square, in pixels).
 const ATLAS_PADDING: u32 = 1;
+const RASTER_OVERSAMPLE: f32 = 2.0;
 const SCALE_STEPS: f32 = 4.0;
 
 #[derive(Clone, Copy)]
 struct AtlasEntry {
     pos: [u32; 2],
     size: [u32; 2],
-    bearing: [i32; 2],
+    bearing: [f32; 2],
 }
 
 pub struct TextRenderer {
@@ -27,7 +29,7 @@ pub struct TextRenderer {
     font: FontArc,
     /// Glyph atlas texture.
     atlas: Texture,
-    /// Packed glyph data keyed by glyph ID, size, and subpixel phase.
+    /// Packed glyph data keyed by glyph ID and raster size.
     atlas_cache: HashMap<(GlyphId, u16), AtlasEntry>,
     /// Current write cursor in the atlas (x, y, `row_height`).
     atlas_cursor: (u32, u32, u32),
@@ -133,7 +135,7 @@ impl TextRenderer {
         let entry = AtlasEntry {
             pos: [gx, gy],
             size: [width, height],
-            bearing: [bounds.min.x as i32, bounds.min.y as i32],
+            bearing: [bounds.min.x, bounds.min.y],
         };
         self.atlas_cache.insert(key, entry);
         Some(entry)
@@ -206,6 +208,7 @@ impl TextRenderer {
                 size,
                 align,
                 alpha,
+                0.0,
                 text_start_right,
                 render_scale,
             );
@@ -250,6 +253,36 @@ impl TextRenderer {
         }
     }
 
+    pub fn render_label(
+        &mut self,
+        queue: &Queue,
+        text: &str,
+        x: f32,
+        width: f32,
+        max_size: f32,
+        render_scale: f32,
+        light: bool,
+    ) {
+        let measured = measure_text(&self.font, text, max_size);
+        let size = max_size * ((width - 20.0) / measured.max(1.0)).min(1.0);
+        let measured = measured * size / max_size;
+        self.queue_glyphs(
+            queue,
+            text,
+            measured,
+            vec2(
+                x + (width - measured) * 0.5,
+                PANEL_START + self.panel_height * 0.46,
+            ),
+            size,
+            Align::Left,
+            1.0,
+            if light { LIGHT_WEIGHT } else { 0.0 },
+            x + width - 8.0,
+            render_scale,
+        );
+    }
+
     fn queue_glyphs(
         &mut self,
         queue: &Queue,
@@ -259,6 +292,7 @@ impl TextRenderer {
         px_size: f32,
         align: Align,
         alpha: f32,
+        weight: f32,
         clip_right: f32,
         render_scale: f32,
     ) {
@@ -270,10 +304,10 @@ impl TextRenderer {
             Align::Right => origin.x - total_width,
         };
 
-        let scale_quarters = (FONT_SIZE * render_scale * SCALE_STEPS)
+        let scale_quarters = (px_size * render_scale * RASTER_OVERSAMPLE * SCALE_STEPS)
             .round()
             .max(SCALE_STEPS) as u16;
-        let glyph_scale = px_size / (FONT_SIZE * render_scale);
+        let glyph_scale = px_size * SCALE_STEPS / f32::from(scale_quarters);
         let clip_right = match align {
             Align::Left if total_width - (clip_right - origin.x) > 0.5 / render_scale => clip_right,
             _ => f32::MAX,
@@ -291,8 +325,8 @@ impl TextRenderer {
             };
             self.glyphs.push(GlyphInstance {
                 pos: vec2(
-                    glyph_x + glyph.bearing[0] as f32 * glyph_scale,
-                    baseline_y + glyph.bearing[1] as f32 * glyph_scale,
+                    glyph_x + glyph.bearing[0] * glyph_scale,
+                    baseline_y + glyph.bearing[1] * glyph_scale,
                 ),
                 size: vec2(
                     glyph.size[0] as f32 * glyph_scale,
@@ -304,6 +338,8 @@ impl TextRenderer {
                 ],
                 clip_right,
                 alpha,
+                weight,
+                padding: 0.0,
             });
         }
     }

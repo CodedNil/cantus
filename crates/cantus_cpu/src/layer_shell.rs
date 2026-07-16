@@ -1,7 +1,8 @@
 use crate::{
-    CantusApp,
+    CantusApp, PANEL_START,
     config::{Layer as ConfigLayer, LayerAnchor as ConfigLayerAnchor},
     model::Rect,
+    status::Status,
 };
 use glam::vec2;
 use std::{
@@ -22,6 +23,10 @@ use wayland_client::{
         wl_seat::{self, WlSeat},
         wl_surface::WlSurface,
     },
+};
+use wayland_protocols::ext::background_effect::v1::client::{
+    ext_background_effect_manager_v1::ExtBackgroundEffectManagerV1,
+    ext_background_effect_surface_v1::ExtBackgroundEffectSurfaceV1,
 };
 use wayland_protocols::wp::{
     fractional_scale::v1::client::{
@@ -69,6 +74,9 @@ pub fn run() {
         app.viewport = Some(vp.get_viewport(surface, &qhandle, ()));
         app.fractional = Some(fm.get_fractional_scale(surface, &qhandle, ()));
     }
+    if let Some(manager) = &app.background_effect_manager {
+        app.background_effect = Some(manager.get_background_effect(surface, &qhandle, ()));
+    }
 
     let layer_surface = layer_shell.get_layer_surface(
         surface,
@@ -89,7 +97,7 @@ pub fn run() {
         ConfigLayerAnchor::Top => LayerAnchor::Top | LayerAnchor::Left | LayerAnchor::Right,
         ConfigLayerAnchor::Bottom => LayerAnchor::Bottom | LayerAnchor::Left | LayerAnchor::Right,
     });
-    layer_surface.set_exclusive_zone(-1);
+    layer_surface.set_exclusive_zone((PANEL_START + app.cantus.config.height) as i32);
 
     surface.commit();
     connection.flush().expect("Failed to flush initial commit");
@@ -100,6 +108,23 @@ pub fn run() {
         event_queue
             .blocking_dispatch(&mut app)
             .expect("Wayland dispatch error");
+    }
+}
+
+/// Approximate a rounded rectangle with one region rectangle per logical-pixel row.
+fn add_capsule(region: &WlRegion, x: f32, y: f32, width: f32, height: f32) {
+    // Integer Wayland regions cannot exactly follow an anti-aliased edge. Keeping
+    // the effect one pixel inside prevents blur leaking past the rendered pill.
+    let x = x.round() as i32 + 1;
+    let y = y.round() as i32 + 1;
+    let width = width.round() as i32 - 2;
+    let height = height.round() as i32 - 2;
+    let radius = height as f32 * 0.5;
+    for row in 0..height {
+        let y_from_center = (row as f32 + 0.5 - radius).abs();
+        let inset =
+            (radius - (radius * radius - y_from_center * y_from_center).sqrt()).ceil() as i32;
+        region.add(x + inset, y + row, width - inset * 2, 1);
     }
 }
 
@@ -140,6 +165,8 @@ pub struct LayerShellApp {
     frame_callback: Option<WlCallback>,
     viewporter: Option<WpViewporter>,
     fractional_manager: Option<WpFractionalScaleManagerV1>,
+    background_effect_manager: Option<ExtBackgroundEffectManagerV1>,
+    background_effect: Option<ExtBackgroundEffectSurfaceV1>,
     display_ptr: NonNull<c_void>,
 }
 
@@ -163,6 +190,8 @@ impl LayerShellApp {
             frame_callback: None,
             viewporter: None,
             fractional_manager: None,
+            background_effect_manager: None,
+            background_effect: None,
             display_ptr,
         }
     }
@@ -269,17 +298,42 @@ impl LayerShellApp {
             self.last_hitbox_hash = hash;
         }
     }
+
+    fn update_blur_region(&self, qhandle: &QueueHandle<Self>) {
+        let (Some(effect), Some(compositor)) = (&self.background_effect, &self.compositor) else {
+            return;
+        };
+        let region = compositor.create_region(qhandle, ());
+        let width = self.cantus.logical_surface_size().0;
+        let pill = self.cantus.status.pill(width);
+        add_capsule(
+            &region,
+            pill.x,
+            PANEL_START,
+            pill.width,
+            self.cantus.config.height,
+        );
+        effect.set_blur_region(Some(&region));
+        region.destroy();
+    }
 }
 
 impl CantusApp {
     fn input_rects(&self) -> impl Iterator<Item = Rect> + '_ {
-        self.playback.queue.iter().flat_map(|track| {
-            track
-                .runtime
-                .rect(self.config.height)
-                .into_iter()
-                .chain(self.icon_row_rects(track).into_iter().flatten())
-        })
+        self.playback
+            .queue
+            .iter()
+            .flat_map(|track| {
+                track
+                    .runtime
+                    .rect(self.config.height)
+                    .into_iter()
+                    .chain(self.icon_row_rects(track).into_iter().flatten())
+            })
+            .chain([Status::controls_rect(
+                self.render.status,
+                self.config.height,
+            )])
     }
 }
 
@@ -300,6 +354,7 @@ impl Dispatch<ZwlrLayerSurfaceV1, ()> for LayerShellApp {
                 }
                 state.is_configured = true;
                 state.update_scale_and_viewport();
+                state.update_blur_region(qhandle);
                 state.try_render_frame(qhandle);
             }
             zwlr_layer_surface_v1::Event::Closed => state.should_exit = true,
@@ -489,6 +544,10 @@ impl Dispatch<WlRegistry, ()> for LayerShellApp {
                         proxy.bind::<WpFractionalScaleManagerV1, (), Self>(name, 1, qhandle, ()),
                     );
                 }
+                "ext_background_effect_manager_v1" => {
+                    state.background_effect_manager =
+                        Some(proxy.bind(name, version.min(1), qhandle, ()));
+                }
                 "wl_seat" => {
                     state.seat =
                         Some(proxy.bind::<WlSeat, (), Self>(name, version.min(7), qhandle, ()));
@@ -514,3 +573,5 @@ delegate_noop!(LayerShellApp: ignore WpViewporter);
 delegate_noop!(LayerShellApp: ignore WpViewport);
 delegate_noop!(LayerShellApp: ignore WlCompositor);
 delegate_noop!(LayerShellApp: ignore WlRegion);
+delegate_noop!(LayerShellApp: ignore ExtBackgroundEffectSurfaceV1);
+delegate_noop!(LayerShellApp: ignore ExtBackgroundEffectManagerV1);

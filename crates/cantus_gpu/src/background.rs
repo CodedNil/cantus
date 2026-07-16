@@ -1,6 +1,6 @@
 use crate::{
-    direction_and_length, pixel_to_ndc, quad_coord, sd_capsule_box, sd_squircle, sd_star,
-    smooth_union, unpack3x8unorm,
+    direction_and_length, pixel_to_ndc, quad_coord, sd_capsule_box, sd_star, smooth_union,
+    unpack3x8unorm,
 };
 use cantus_shared::{
     BACKPLATE_RADIUS, BackgroundPill, GlobalUniforms, ICON_WIDTH, MAX_PILL_PLAYLIST_ICONS,
@@ -161,16 +161,16 @@ pub fn fs_background(
     let bulge = ripple_strength * 22.0 + mouse_inf * 8.0;
     let stretched_uv_y = local_centered.y * (pill_size.y / (pill_size.y + bulge)) + 0.5;
 
-    let pill_corner_radius = BACKPLATE_RADIUS + ICON_WIDTH * 0.5;
     let (primary_row, secondary_row) = pill.icon_rows(global.bar_height.x, global.bar_height.y);
 
     // Overall frame SDF: pill body plus icon-row backplates.
     let backplate_radius = BACKPLATE_RADIUS + mouse_inf * ICON_WIDTH / 3.0;
-    let mut dist = sd_squircle(
+    let body_dist = sd_capsule_box(
         local_centered * pill_size,
-        (pill_size + vec2(0.0, bulge)) * 0.5,
-        pill_corner_radius,
+        ((pill_size.x - pill_size.y) * 0.5).max(0.0),
+        (pill_size.y + bulge) * 0.5,
     );
+    let mut dist = body_dist;
     let primary_dist = sd_capsule_box(
         pixel_pos - primary_row.backplate_center(),
         primary_row.padded_half_span(),
@@ -282,16 +282,9 @@ pub fn fs_background(
     if pill.image_index >= 0 && local_pixel.x >= image_left {
         let uv_img = vec2((local_pixel.x - image_left) / pill_size.y, stretched_uv_y);
         let tex = images.sample(*sampler, uv_img.extend(pill.image_index as f32));
-        let img_mask = 1.0
-            - smoothstep(
-                -0.5,
-                0.5,
-                sd_squircle(
-                    (uv_img - 0.5) * pill_size.y,
-                    Vec2::splat(pill_size.y * 0.5),
-                    pill_corner_radius,
-                ),
-            );
+        let image_dist = sd_capsule_box((uv_img - 0.5) * pill_size.y, 0.0, pill_size.y * 0.5);
+        let img_mask =
+            (1.0 - smoothstep(-4.0, 0.0, image_dist)) * (1.0 - smoothstep(-0.5, 0.5, body_dist));
         color = color.lerp(tex.truncate(), img_mask * tex.w);
     }
 
@@ -364,7 +357,7 @@ pub fn fs_background(
             } else {
                 0.2
             };
-            let dist = sd_squircle(local_pixel, Vec2::splat(pixel_radius * 0.6), 6.0);
+            let dist = sd_capsule_box(local_pixel, 0.0, pixel_radius * 0.6);
             let tex = images.sample(*sampler, local_uv.extend(image_index as f32));
             let overlay = icon_overlay(
                 tex.truncate().lerp(Vec3::splat(0.24), desaturation),
