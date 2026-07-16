@@ -118,11 +118,10 @@ impl TrackRuntime {
     }
 
     pub fn rect(&self, height: f32) -> Option<Rect> {
-        (self.width > 0.0 && self.end_x() > 0.0).then_some(Rect::new(
+        (self.width > 0.0 && self.end_x() > 0.0).then_some(Rect::pill(
             self.start_x,
-            PANEL_START,
-            self.end_x(),
-            PANEL_START + height,
+            self.width,
+            height,
         ))
     }
 }
@@ -174,6 +173,10 @@ pub struct Rect {
 impl Rect {
     pub const fn new(x0: f32, y0: f32, x1: f32, y1: f32) -> Self {
         Self { x0, y0, x1, y1 }
+    }
+
+    pub const fn pill(x: f32, width: f32, height: f32) -> Self {
+        Self::new(x, PANEL_START, x + width, PANEL_START + height)
     }
 
     pub fn from_center(center: Vec2, half_size: Vec2) -> Self {

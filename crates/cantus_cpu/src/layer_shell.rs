@@ -111,20 +111,26 @@ pub fn run() {
     }
 }
 
-/// Approximate a rounded rectangle with one region rectangle per logical-pixel row.
-fn add_capsule(region: &WlRegion, x: f32, y: f32, width: f32, height: f32) {
+fn region_rect(rect: Rect) -> [i32; 4] {
+    [rect.x0, rect.y0, rect.x1 - rect.x0, rect.y1 - rect.y0].map(|value| value.round() as i32)
+}
+
+fn add_rect(region: &WlRegion, [x, y, width, height]: [i32; 4]) {
+    region.add(x, y, width, height);
+}
+
+/// Approximate a capsule with one region rectangle per logical-pixel row.
+fn add_capsule(region: &WlRegion, rect: Rect) {
     // Integer Wayland regions cannot exactly follow an anti-aliased edge. Keeping
     // the effect one pixel inside prevents blur leaking past the rendered pill.
-    let x = x.round() as i32 + 1;
-    let y = y.round() as i32 + 1;
-    let width = width.round() as i32 - 2;
-    let height = height.round() as i32 - 2;
+    let [x, y, width, height] = region_rect(rect);
+    let (x, y, width, height) = (x + 1, y + 1, width - 2, height - 2);
     let radius = height as f32 * 0.5;
     for row in 0..height {
         let y_from_center = (row as f32 + 0.5 - radius).abs();
         let inset =
             (radius - (radius * radius - y_from_center * y_from_center).sqrt()).ceil() as i32;
-        region.add(x + inset, y + row, width - inset * 2, 1);
+        add_rect(region, [x + inset, y + row, width - inset * 2, 1]);
     }
 }
 
@@ -276,22 +282,15 @@ impl LayerShellApp {
             return;
         };
         let mut hasher = DefaultHasher::new();
-        for r in self.cantus.input_rects() {
-            [r.x0, r.y0, r.x1, r.y1]
-                .map(|value| value.round() as i32)
-                .hash(&mut hasher);
+        for rect in self.cantus.input_rects().map(region_rect) {
+            rect.hash(&mut hasher);
         }
         let hash = hasher.finish();
 
         if hash != self.last_hitbox_hash {
             let region = compositor.create_region(qhandle, ());
-            for r in self.cantus.input_rects() {
-                region.add(
-                    r.x0.round() as i32,
-                    r.y0.round() as i32,
-                    (r.x1 - r.x0).round() as i32,
-                    (r.y1 - r.y0).round() as i32,
-                );
+            for rect in self.cantus.input_rects() {
+                add_rect(&region, region_rect(rect));
             }
             wl_surface.set_input_region(Some(&region));
             region.destroy();
@@ -308,10 +307,7 @@ impl LayerShellApp {
         let pill = self.cantus.status.pill(width);
         add_capsule(
             &region,
-            pill.x,
-            PANEL_START,
-            pill.width,
-            self.cantus.config.height,
+            Rect::pill(pill.x, pill.width, self.cantus.config.height),
         );
         effect.set_blur_region(Some(&region));
         region.destroy();

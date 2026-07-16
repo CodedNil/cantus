@@ -99,7 +99,7 @@ pub fn fs_status(
     #[spirv(location = 0)] out_color: &mut Vec4,
 ) {
     let pill = status[0];
-    let (local, size, dist) = pill_fragment(pixel, global, pill.x, pill.width);
+    let (local, size, dist) = pill_fragment(pixel, global, pill.x, pill.width, 0.0);
     let alpha = (1.0 - smoothstep(-0.6, 0.6, dist)) * 0.5;
     if alpha <= 0.0 {
         kill();

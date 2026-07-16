@@ -11,8 +11,8 @@ use crate::{
 };
 use arrayvec::ArrayVec;
 use cantus_shared::{
-    BackgroundPill, GlobalUniforms, ICON_SPACING, MAX_PILL_PLAYLIST_ICONS, PackedAudioFeatures,
-    Particle, PlayheadUniforms, StatusPill, WeatherPill, approach,
+    GlobalUniforms, ICON_SPACING, MAX_PILL_PLAYLIST_ICONS, PackedAudioFeatures, Particle,
+    PlayheadUniforms, StatusPill, TrackPill, WeatherPill, approach,
 };
 use glam::{FloatExt, Vec2, vec2};
 use std::{f32::consts::TAU, mem, ops::Range, slice, sync::Arc, time::Instant};
@@ -98,7 +98,7 @@ pub struct GpuResources {
     pub surface_config: SurfaceConfiguration,
     pub uniform_buffer: Buffer,
     pub playhead: GpuPass,
-    pub background: GpuPass,
+    pub track: GpuPass,
     pub weather: GpuPass,
     pub status: GpuPass,
     pub text: GpuPass,
@@ -212,7 +212,7 @@ pub struct RenderState {
     pub scale: f32,
     pub surface_width: Option<f32>,
     pub uniforms: GlobalUniforms,
-    pub pills: Vec<BackgroundPill>,
+    pub track_pills: Vec<TrackPill>,
     pub status: StatusPill,
     pub playhead: PlayheadUniforms,
 }
@@ -232,7 +232,7 @@ impl Default for RenderState {
             scale: 1.0,
             surface_width: None,
             uniforms: GlobalUniforms::default(),
-            pills: Vec::with_capacity(MAX_RENDER_INSTANCES),
+            track_pills: Vec::with_capacity(MAX_RENDER_INSTANCES),
             status: StatusPill::default(),
             playhead: PlayheadUniforms::default(),
         }
@@ -363,8 +363,8 @@ impl CantusApp {
                 occlusion_query_set: None,
                 multiview_mask: None,
             });
-            gpu.background
-                .draw_data(&gpu.queue, &mut pass, &self.render.pills);
+            gpu.track
+                .draw_data(&gpu.queue, &mut pass, &self.render.track_pills);
             gpu.weather
                 .draw_data(&gpu.queue, &mut pass, slice::from_ref(&weather));
             gpu.status
@@ -423,7 +423,7 @@ impl CantusApp {
 
         let mut playback_state = mem::take(&mut self.playback);
         if playback_state.queue.is_empty() {
-            self.render.pills.clear();
+            self.render.track_pills.clear();
             self.playback = playback_state;
             return weather;
         }
@@ -440,11 +440,12 @@ impl CantusApp {
             self.interaction.drag_track = None;
         }
 
-        let current_queue_offset = queue[..cur_idx]
-            .iter()
-            .map(Track::queue_span_ms)
-            .sum::<f32>();
-        let mut current_ms = -playback_elapsed - current_queue_offset + drag_offset_ms;
+        let mut current_ms = -playback_elapsed
+            - queue[..cur_idx]
+                .iter()
+                .map(Track::queue_span_ms)
+                .sum::<f32>()
+            + drag_offset_ms;
         let diff = current_ms - self.render.track_offset;
         self.render.uniforms.expansion_xy.x += diff * px_per_ms * dt;
         if !self.render.uniforms.expansion_xy.x.is_finite() {
@@ -473,14 +474,14 @@ impl CantusApp {
             .flatten();
         self.interaction.hovered_track = hovered_track;
 
-        self.render.pills.clear();
+        self.render.track_pills.clear();
         let current_track = queue.iter().position(Track::is_current);
         let playlists = &playback_state.playlists;
-        let render_order = (0..queue.len())
+        for queue_index in (0..queue.len())
             .filter(|&index| Some(index) != hovered_track)
-            .chain(hovered_track);
-        for queue_index in render_order {
-            if self.render.pills.len() == MAX_RENDER_INSTANCES {
+            .chain(hovered_track)
+        {
+            if self.render.track_pills.len() == MAX_RENDER_INSTANCES {
                 break;
             }
             let track = &mut queue[queue_index];
@@ -549,8 +550,6 @@ impl CantusApp {
             ));
         }
 
-        let image_index = self.get_image_index(&track.art);
-        let colors = track.palette();
         let show_details = width > self.config.height;
         approach(
             &mut track.runtime.detail_alpha,
@@ -564,15 +563,14 @@ impl CantusApp {
             dt.min(0.1) * 6.0,
         );
         let playlist_expansion = track.runtime.playlist_expansion;
-        let audio_features = track.audio_features.unwrap_or(DEFAULT_AUDIO_FEATURES);
-        let mut pill = BackgroundPill {
+        let mut pill = TrackPill {
             x: start_x,
             width,
-            colors,
+            colors: track.palette(),
             alpha: detail_alpha,
-            image_index,
+            image_index: self.get_image_index(&track.art),
             rating: -1,
-            audio_features,
+            audio_features: track.audio_features.unwrap_or(DEFAULT_AUDIO_FEATURES),
             playlist_images: [-1; MAX_PILL_PLAYLIST_ICONS],
             ..Default::default()
         };
@@ -612,7 +610,7 @@ impl CantusApp {
         );
         pill.primary_alpha = track.runtime.primary_icon_alpha;
         pill.secondary_expansion = playlist_expansion;
-        self.render.pills.push(pill);
+        self.render.track_pills.push(pill);
     }
 
     fn populate_playlist_buttons(
@@ -620,7 +618,7 @@ impl CantusApp {
         track: &Track,
         secondary_expansion: f32,
         playlists: &[CondensedPlaylist],
-        pill: &mut BackgroundPill,
+        pill: &mut TrackPill,
     ) {
         let Some(track_id) = track.id else {
             return;
@@ -700,9 +698,8 @@ impl CantusApp {
             let duration = SPARK_LIFETIME
                 .start
                 .lerp(SPARK_LIFETIME.end, fastrand::f32());
-            let packed_duration = (duration * 100.0).min(255.0) as u8;
-            let base_color = palette[fastrand::usize(0..palette.len())];
-            particle.color = (base_color & 0x00FF_FFFF) | (u32::from(packed_duration) << 24);
+            particle.color = (palette[fastrand::usize(0..palette.len())] & 0x00FF_FFFF)
+                | (u32::from((duration * 100.0).min(255.0) as u8) << 24);
             particle.end_time = time + duration;
         }
 
@@ -714,8 +711,7 @@ impl CantusApp {
         let last_toggle =
             self.render.last_toggle_playing.elapsed().as_secs_f32() / PLAYHEAD_START_DURATION;
 
-        let play_intro_active = !playhead_hovered && playing && last_toggle < 1.0;
-        if play_intro_active {
+        if !playhead_hovered && playing && last_toggle < 1.0 {
             self.render.playhead.bar_split = 1.0 - last_toggle;
             self.render.playhead.icon_presence = 1.0 - last_toggle;
             approach(&mut self.render.playhead.icon_morph, 1.0, speed * 1.5);

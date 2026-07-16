@@ -4,8 +4,8 @@ use crate::{
     text_render::TextRenderer,
 };
 use cantus_shared::{
-    BackgroundPill, GlobalUniforms, GlyphInstance, MAX_GLYPH_INSTANCES, Particle, PlayheadUniforms,
-    StatusPill, WeatherPill,
+    GlobalUniforms, GlyphInstance, MAX_GLYPH_INSTANCES, Particle, PlayheadUniforms, StatusPill,
+    TrackPill, WeatherPill,
 };
 use std::{mem::size_of, sync::Arc};
 use wgpu::{
@@ -214,9 +214,9 @@ impl CantusApp {
             BufferUsages::STORAGE,
             &[],
         );
-        let background = create_pass(
-            "Background",
-            buffer_size::<BackgroundPill>(MAX_RENDER_INSTANCES),
+        let track = create_pass(
+            "Track",
+            buffer_size::<TrackPill>(MAX_RENDER_INSTANCES),
             BufferUsages::STORAGE,
             &[
                 BindingResource::TextureView(&image_view),
@@ -252,7 +252,7 @@ impl CantusApp {
             surface_config,
             uniform_buffer,
             playhead,
-            background,
+            track,
             weather,
             status,
             text,

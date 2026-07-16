@@ -3,11 +3,11 @@
 use cantus_shared::GlobalUniforms;
 use spirv_std::glam::{Vec2, Vec3, Vec4, vec2, vec3, vec4};
 
-pub mod background;
 pub mod particles;
 pub mod playhead;
 pub mod status;
 pub mod text;
+pub mod track;
 pub mod weather;
 
 pub const fn quad_coord(vertex_index: u32) -> Vec2 {
@@ -30,10 +30,15 @@ pub fn pill_fragment(
     global: &GlobalUniforms,
     x: f32,
     width: f32,
+    bulge: f32,
 ) -> (Vec2, Vec2, f32) {
     let size = vec2(width, global.bar_height.y);
     let local = pixel - vec2(x, global.bar_height.x);
-    let distance = sd_capsule_box(local - size * 0.5, (size.x - size.y) * 0.5, size.y * 0.5);
+    let distance = sd_capsule_box(
+        local - size * 0.5,
+        (size.x - size.y) * 0.5,
+        (size.y + bulge) * 0.5,
+    );
     (local, size, distance)
 }
 

@@ -28,7 +28,7 @@ pub struct PlayheadUniforms {
 #[repr(C)]
 #[derive(Copy, Clone, Default)]
 #[cfg_attr(feature = "cpu", derive(bytemuck::Pod, bytemuck::Zeroable))]
-pub struct BackgroundPill {
+pub struct TrackPill {
     pub x: f32,
     pub width: f32,
     pub colors: [u32; 4],
@@ -212,7 +212,7 @@ pub const ICON_SPACING: f32 = 20.0;
 /// Corner radius, in pixels, for pill bodies and icon backplates.
 pub const BACKPLATE_RADIUS: f32 = 10.0;
 
-impl BackgroundPill {
+impl TrackPill {
     pub const fn star_count(&self) -> f32 {
         if self.rating >= 0 { 5.0 } else { 0.0 }
     }

@@ -78,7 +78,7 @@ pub fn fs_weather(
     #[spirv(location = 0)] out_color: &mut Vec4,
 ) {
     let pill = weather[0];
-    let (local, size, dist) = pill_fragment(pixel, global, pill.x, pill.width);
+    let (local, size, dist) = pill_fragment(pixel, global, pill.x, pill.width, 0.0);
     let alpha = 0.96 * (1.0 - smoothstep(-0.6, 0.6, dist));
     if alpha <= 0.0 {
         kill();
