@@ -80,7 +80,6 @@ pub struct AudioFeatures {
     pub acousticness: f32,
     pub tempo: f32,
     pub valence: f32,
-    pub liveness: f32,
     pub instrumentalness: f32,
     pub loudness: f32,
 }
@@ -97,7 +96,7 @@ impl From<AudioFeatures> for PackedAudioFeatures {
             ]),
             quantize([
                 features.valence,
-                features.liveness,
+                0.0,
                 features.instrumentalness,
                 (features.loudness + 60.0) / 60.0,
             ]),
@@ -124,7 +123,6 @@ impl PackedAudioFeatures {
             acousticness: motion.z,
             tempo: 40.0 + motion.w * 200.0,
             valence: character.x,
-            liveness: character.y,
             instrumentalness: character.z,
             loudness: character.w * 60.0 - 60.0,
         }
@@ -141,10 +139,7 @@ impl AudioFeatures {
     }
 
     pub const fn turbulence(&self) -> f32 {
-        (self.energy * 0.55
-            + self.danceability * 0.2
-            + self.liveness * 0.15
-            + (self.loudness + 60.0) / 60.0 * 0.1)
+        (self.energy * 0.55 + self.danceability * 0.25 + (self.loudness + 60.0) / 60.0 * 0.2)
             * (1.0 - self.acousticness * 0.35)
     }
 }
@@ -175,10 +170,6 @@ pub struct GlyphInstance {
     /// Right clip edge in logical pixels.
     pub clip_right: f32,
     pub alpha: f32,
-    /// Coverage threshold offset; positive values produce lighter strokes.
-    pub weight: f32,
-    /// Keeps storage-buffer array elements aligned identically on CPU and GPU.
-    pub padding: f32,
 }
 
 pub const GLYPH_ATLAS_SIZE: u32 = 2048;
@@ -204,13 +195,10 @@ fn unpack_u8x4(value: u32) -> Vec4 {
 pub const MAX_PILL_PLAYLIST_ICONS: usize = 8;
 
 /// Visual width, in pixels, of rating and playlist icons before hover growth.
-pub const ICON_WIDTH: f32 = 24.0;
+pub const ICON_WIDTH: f32 = 21.6;
 
 /// Center-to-center icon spacing for rating stars and playlist artwork.
-pub const ICON_SPACING: f32 = 20.0;
-
-/// Corner radius, in pixels, for pill bodies and icon backplates.
-pub const BACKPLATE_RADIUS: f32 = 10.0;
+pub const ICON_SPACING: f32 = 18.0;
 
 impl TrackPill {
     pub const fn star_count(&self) -> f32 {
@@ -229,7 +217,7 @@ impl TrackPill {
 }
 
 pub fn pill_icon_primary_center_y(bar_start_y: f32, bar_height: f32) -> f32 {
-    bar_start_y + bar_height * 0.975
+    bar_start_y + bar_height * 0.975 - 3.0
 }
 
 #[derive(Copy, Clone)]
@@ -257,13 +245,13 @@ impl PillIconRow {
             .then_some((index, point.x >= center.x))
     }
 
-    pub fn padded_half_span(self) -> f32 {
+    pub fn half_span(self) -> f32 {
         let icon_span = (self.count - 1.0).max(0.0) * ICON_SPACING * self.expansion;
-        icon_span * 0.5 + ICON_SPACING * 0.15
+        icon_span * 0.5
     }
 
     pub fn half_size(self, radius: f32) -> Vec2 {
-        Vec2::new(self.padded_half_span() + radius, radius)
+        Vec2::new(self.half_span() + radius, radius)
     }
 
     pub fn backplate_center(self) -> Vec2 {
@@ -274,7 +262,7 @@ impl PillIconRow {
         let row_center = (self.count - 1.0).max(0.0) * 0.5;
         Vec2::new(
             self.center.x + (index - row_center) * ICON_SPACING * self.expansion,
-            self.center.y,
+            self.center.y + 2.0,
         )
     }
 }

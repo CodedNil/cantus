@@ -1,6 +1,6 @@
 #![no_std]
 
-use cantus_shared::GlobalUniforms;
+use cantus_shared::{GlobalUniforms, smoothstep};
 use spirv_std::glam::{Vec2, Vec3, Vec4, vec2, vec3, vec4};
 
 pub mod particles;
@@ -20,8 +20,8 @@ pub fn pixel_to_ndc(pixel: Vec2, screen_size: Vec2) -> Vec4 {
 }
 
 pub fn pill_vertex(vertex: u32, global: &GlobalUniforms, x: f32, width: f32) -> (Vec4, Vec2) {
-    let pixel =
-        vec2(x, global.bar_height.x) + quad_coord(vertex) * vec2(width, global.bar_height.y);
+    let pixel = vec2(x - 48.0, global.bar_height.x - 48.0)
+        + quad_coord(vertex) * vec2(width + 96.0, global.bar_height.y + 96.0);
     (pixel_to_ndc(pixel, global.screen_size), pixel)
 }
 
@@ -45,12 +45,69 @@ pub fn pill_fragment(
 /// Return a direction and length without `glam::normalize_or_zero`, whose infinity literal is rejected by Naga when translating SPIR-V.
 pub fn direction_and_length(vector: Vec2) -> (Vec2, f32) {
     let length = vector.length();
-    let direction = if length > 0.001 {
-        vector / length
+    if length > 0.001 {
+        (vector / length, length)
     } else {
-        Vec2::ZERO
+        (Vec2::ZERO, length)
+    }
+}
+
+/// Shared hover/click deformation used by every pill-shaped surface.
+#[derive(Clone, Copy)]
+pub struct PillInteraction {
+    pub mouse: Vec2,
+    pub mouse_distance: f32,
+    pub ripple: Vec2,
+    pub ripple_flash: f32,
+}
+
+impl PillInteraction {
+    pub fn bulge(self) -> f32 {
+        self.mouse.length() * 8.0 + self.ripple.length() * 22.0
+    }
+
+    pub fn refract(self, local: Vec2, size: Vec2, distance: f32) -> Vec2 {
+        let uv = local / size;
+        uv - (uv - 0.5) * (1.0 + distance.min(0.0) / 120.0).clamp(0.0, 0.6) * 0.08
+            - self.ripple * 0.04
+            - self.mouse * 0.012
+    }
+}
+
+pub fn pill_interaction(pixel: Vec2, global: &GlobalUniforms) -> PillInteraction {
+    let anim_t = (global.time - global.expansion_time) * 1.2;
+    let (ripple, ripple_flash) = if (-0.02..1.02).contains(&anim_t) {
+        let progress = anim_t.clamp(0.0, 1.0);
+        let (direction, distance) = direction_and_length(pixel - global.expansion_xy);
+        let active = smoothstep(-0.02, 0.0, anim_t) * (1.0 - smoothstep(1.0, 1.02, anim_t));
+        let decay = 1.0 - progress;
+        let wave = smoothstep(80.0, 0.0, (distance - progress * 600.0).abs()) * active;
+        let flash = decay * wave * 0.5;
+        (direction * decay * flash, flash)
+    } else {
+        (Vec2::ZERO, 0.0)
     };
-    (direction, length)
+
+    let (mouse, mouse_distance) = if global.mouse_pressure > 0.0 {
+        let (direction, distance) = direction_and_length(pixel - global.mouse_pos);
+        let influence = smoothstep(120.0, 0.0, distance);
+        (direction * influence * influence * global.mouse_pressure, distance)
+    } else {
+        (Vec2::ZERO, 0.0)
+    };
+    PillInteraction { mouse, mouse_distance, ripple, ripple_flash }
+}
+
+pub fn pill_coverage(distance: f32) -> (f32, f32) {
+    ((0.5 - distance).clamp(0.0, 1.0), (1.0 - smoothstep(0.0, 14.0, distance)) * 0.16)
+}
+
+pub fn pill_sheen(uv_y: f32, distance: f32, interaction: PillInteraction) -> f32 {
+    smoothstep(0.12, 0.0, uv_y) * 0.12
+        + smoothstep(5.0, -3.0, distance) * 0.08
+        + smoothstep(30.0, 0.0, (interaction.mouse_distance - 15.0).abs())
+            * interaction.mouse.length()
+            * 0.18
 }
 
 pub fn sd_rounded_box(point: Vec2, half_size: Vec2, radius: f32) -> f32 {

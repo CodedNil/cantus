@@ -53,6 +53,8 @@ fn layout(queue: &mut [Track], config: &Config, timeline: Timeline, current_ms: 
     let height = config.height;
     let end_ms = (config.timeline_future_minutes - config.timeline_past_minutes) * 60_000.0;
     let end_x = history_width + config.timeline_future_minutes * 60_000.0 * timeline.px_per_ms;
+    let gap = TRACK_SPACING_MS * timeline.px_per_ms;
+    let width_trim = (GAP - gap).max(0.0);
     let mut compact_count = 0;
     let mut transition = 0.0;
     let mut queue_offset = 0.0;
@@ -71,7 +73,7 @@ fn layout(queue: &mut [Track], config: &Config, timeline: Timeline, current_ms: 
         runtime.start_ms = start_ms;
         if natural_end >= history_width + height {
             runtime.start_x = natural_start.max(history_width);
-            runtime.width = natural_end.min(end_x) - runtime.start_x;
+            runtime.width = (natural_end.min(end_x) - runtime.start_x - width_trim).max(0.0);
         } else if natural_end >= history_width {
             transition = (history_width + height - natural_end) / height;
             runtime.start_x = natural_end - height;
@@ -82,7 +84,6 @@ fn layout(queue: &mut [Track], config: &Config, timeline: Timeline, current_ms: 
     }
 
     let stride = height * 0.55;
-    let gap = TRACK_SPACING_MS * timeline.px_per_ms;
     for (index, track) in queue[..compact_count].iter_mut().enumerate() {
         let slot = compact_count - index - 1;
         let right = history_width - gap - (slot as f32 + transition) * stride;
@@ -113,11 +114,28 @@ pub struct GpuPass {
     pub bind_group: BindGroup,
 }
 
+fn upload<T: bytemuck::NoUninit>(queue: &Queue, buffer: &Buffer, data: &T) {
+    queue.write_buffer(buffer, 0, bytemuck::bytes_of(data));
+}
+
 impl GpuPass {
     fn draw<'pass>(&'pass self, pass: &mut RenderPass<'pass>, instances: u32) {
+        self.draw_range(pass, 0..instances);
+    }
+
+    fn draw_range<'pass>(&'pass self, pass: &mut RenderPass<'pass>, instances: Range<u32>) {
+        if instances.is_empty() {
+            return;
+        }
         pass.set_pipeline(&self.pipeline);
         pass.set_bind_group(0, &self.bind_group, &[]);
-        pass.draw(0..4, 0..instances);
+        pass.draw(0..4, instances);
+    }
+
+    fn upload_data<T: bytemuck::NoUninit>(&self, queue: &Queue, data: &[T]) {
+        if !data.is_empty() {
+            queue.write_buffer(&self.buffer, 0, bytemuck::cast_slice(data));
+        }
     }
 
     fn draw_data<'pass, T: bytemuck::NoUninit>(
@@ -126,10 +144,7 @@ impl GpuPass {
         pass: &mut RenderPass<'pass>,
         data: &[T],
     ) {
-        if data.is_empty() {
-            return;
-        }
-        queue.write_buffer(&self.buffer, 0, bytemuck::cast_slice(data));
+        self.upload_data(queue, data);
         self.draw(pass, data.len() as u32);
     }
 }
@@ -213,6 +228,7 @@ pub struct RenderState {
     pub surface_width: Option<f32>,
     pub uniforms: GlobalUniforms,
     pub track_pills: Vec<TrackPill>,
+    pub track_glyphs: Vec<Range<u32>>,
     pub status: StatusPill,
     pub playhead: PlayheadUniforms,
 }
@@ -233,6 +249,7 @@ impl Default for RenderState {
             surface_width: None,
             uniforms: GlobalUniforms::default(),
             track_pills: Vec::with_capacity(MAX_RENDER_INSTANCES),
+            track_glyphs: Vec::with_capacity(MAX_RENDER_INSTANCES),
             status: StatusPill::default(),
             playhead: PlayheadUniforms::default(),
         }
@@ -321,24 +338,15 @@ impl CantusApp {
 
         gpu.images.used = 0;
         gpu.text_renderer.glyphs.clear();
-        let weather = self.create_scene();
+        self.render.track_glyphs.clear();
+        let (weather, weather_glyph_end, label_end) = self.create_scene();
 
         let gpu = self.render.gpu.as_mut().unwrap();
-        gpu.queue.write_buffer(
-            &gpu.uniform_buffer,
-            0,
-            bytemuck::bytes_of(&self.render.uniforms),
-        );
-        gpu.queue.write_buffer(
-            &gpu.particles.buffer,
-            0,
-            bytemuck::cast_slice(&self.render.particles),
-        );
-        gpu.queue.write_buffer(
-            &gpu.playhead.buffer,
-            0,
-            bytemuck::bytes_of(&self.render.playhead),
-        );
+        upload(&gpu.queue, &gpu.uniform_buffer, &self.render.uniforms);
+        upload(&gpu.queue, &gpu.particles.buffer, &self.render.particles);
+        upload(&gpu.queue, &gpu.playhead.buffer, &self.render.playhead);
+        gpu.track.upload_data(&gpu.queue, &self.render.track_pills);
+        gpu.text.upload_data(&gpu.queue, &gpu.text_renderer.glyphs);
 
         let surface_view = surface_texture
             .texture
@@ -363,14 +371,27 @@ impl CantusApp {
                 occlusion_query_set: None,
                 multiview_mask: None,
             });
-            gpu.track
-                .draw_data(&gpu.queue, &mut pass, &self.render.track_pills);
+            let foreground = self
+                .render
+                .track_glyphs
+                .len()
+                .saturating_sub(usize::from(self.interaction.hovered_track.is_some()));
+            for (index, glyphs) in self.render.track_glyphs.iter().take(foreground).enumerate() {
+                let index = index as u32;
+                gpu.track.draw_range(&mut pass, index..index + 1);
+                gpu.text.draw_range(&mut pass, glyphs.clone());
+            }
             gpu.weather
                 .draw_data(&gpu.queue, &mut pass, slice::from_ref(&weather));
+            gpu.text.draw_range(&mut pass, 0..weather_glyph_end);
+            if let Some(glyphs) = self.render.track_glyphs.get(foreground) {
+                let foreground = foreground as u32;
+                gpu.track.draw_range(&mut pass, foreground..foreground + 1);
+                gpu.text.draw_range(&mut pass, glyphs.clone());
+            }
             gpu.status
                 .draw_data(&gpu.queue, &mut pass, slice::from_ref(&self.render.status));
-            gpu.text
-                .draw_data(&gpu.queue, &mut pass, &gpu.text_renderer.glyphs);
+            gpu.text.draw_range(&mut pass, weather_glyph_end..label_end);
             gpu.particles.draw(&mut pass, PARTICLE_COUNT as u32);
             gpu.playhead.draw(&mut pass, 1);
         }
@@ -390,7 +411,7 @@ impl CantusApp {
         gpu.images.image_index(&gpu.queue, art)
     }
 
-    fn create_scene(&mut self) -> WeatherPill {
+    fn create_scene(&mut self) -> (WeatherPill, u32, u32) {
         let now = Instant::now();
         let dt = now
             .duration_since(self.render.last_update)
@@ -403,18 +424,25 @@ impl CantusApp {
         self.render.uniforms.screen_size = vec2(screen_width, screen_height);
         self.render.uniforms.bar_height = vec2(PANEL_START, self.config.height);
         self.render.status = self.status.pill(screen_width);
-        let weather_x = self.render.status.x - weather::WIDTH - GAP;
+        let weather_x = weather::rect(self.render.status, self.config.height).x0;
         let (weather, weather_label) = self.weather.scene(weather_x);
         let scale = self.render.scale;
         let gpu = self.render.gpu.as_mut().unwrap();
-        let mut draw = |text: &str, x, width, size, light| {
-            gpu.text_renderer
-                .render_label(&gpu.queue, text, x, width, size, scale, light);
-        };
+        gpu.text_renderer.render_label(
+            &gpu.queue,
+            &weather_label,
+            weather_x,
+            weather::WIDTH,
+            24.0,
+            scale,
+            true,
+        );
+        let weather_glyph_end = gpu.text_renderer.glyphs.len() as u32;
         self.status.labels(self.render.status, |text, x, width| {
-            draw(text, x, width, 16.0, false);
+            gpu.text_renderer
+                .render_label(&gpu.queue, text, x, width, 16.0, scale, false);
         });
-        draw(&weather_label, weather_x, weather::WIDTH, 27.0, true);
+        let label_end = gpu.text_renderer.glyphs.len() as u32;
 
         let timeline = self.timeline();
         let px_per_ms = timeline.px_per_ms;
@@ -425,7 +453,7 @@ impl CantusApp {
         if playback_state.queue.is_empty() {
             self.render.track_pills.clear();
             self.playback = playback_state;
-            return weather;
+            return (weather, weather_glyph_end, label_end);
         }
         // Lerp the progress based on when the data was last updated.
         let playback_elapsed = playback_state.estimated_progress();
@@ -462,6 +490,18 @@ impl CantusApp {
         self.render.track_offset = current_ms;
 
         layout(queue, &self.config, timeline, current_ms);
+        if let Some(gpu) = &self.render.gpu {
+            for track in &mut *queue {
+                let expansion = track.runtime.playlist_expansion;
+                if expansion > 0.0 {
+                    let extra_width = (gpu.text_renderer.track_width(track) - track.runtime.width)
+                        .max(0.0)
+                        * expansion;
+                    track.runtime.start_x -= extra_width * 0.5;
+                    track.runtime.width += extra_width;
+                }
+            }
+        }
 
         approach(
             &mut self.render.uniforms.mouse_pressure,
@@ -499,7 +539,7 @@ impl CantusApp {
             playback_state.playing,
         );
         self.playback = playback_state;
-        weather
+        (weather, weather_glyph_end, label_end)
     }
 
     fn hovered_track(&self, queue: &[Track]) -> Option<usize> {
@@ -538,6 +578,11 @@ impl CantusApp {
         dt: f32,
         playlists: &[CondensedPlaylist],
     ) {
+        let glyph_start = self
+            .render
+            .gpu
+            .as_ref()
+            .map_or(0, |gpu| gpu.text_renderer.glyphs.len() as u32);
         let width = track.runtime.width;
         let start_x = track.runtime.start_x;
         let origin_x = timeline.playhead_x;
@@ -610,6 +655,12 @@ impl CantusApp {
         );
         pill.primary_alpha = track.runtime.primary_icon_alpha;
         pill.secondary_expansion = playlist_expansion;
+        let glyph_end = self
+            .render
+            .gpu
+            .as_ref()
+            .map_or(glyph_start, |gpu| gpu.text_renderer.glyphs.len() as u32);
+        self.render.track_glyphs.push(glyph_start..glyph_end);
         self.render.track_pills.push(pill);
     }
 

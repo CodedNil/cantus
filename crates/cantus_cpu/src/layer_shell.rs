@@ -3,6 +3,7 @@ use crate::{
     config::{Layer as ConfigLayer, LayerAnchor as ConfigLayerAnchor},
     model::Rect,
     status::Status,
+    weather,
 };
 use glam::vec2;
 use std::{
@@ -67,7 +68,24 @@ pub fn run() {
     let surface_ptr = NonNull::new(wl_surface.id().as_ptr().cast::<c_void>())
         .expect("Failed to get surface pointer");
     app.surface_ptr = Some(surface_ptr);
-    app.select_output();
+    let output_index = app
+        .cantus
+        .config
+        .monitor
+        .as_ref()
+        .and_then(|target| {
+            app.outputs.iter().position(|info| {
+                info.name
+                    .iter()
+                    .chain(&info.description)
+                    .any(|value| value.contains(target))
+                    || matches!(
+                        (&info.make, &info.model),
+                        (Some(make), Some(model)) if format!("{make} {model}").contains(target)
+                    )
+            })
+        })
+        .unwrap_or(0);
 
     let surface = app.wl_surface.insert(wl_surface);
     if let (Some(vp), Some(fm)) = (app.viewporter.take(), app.fractional_manager.take()) {
@@ -80,7 +98,7 @@ pub fn run() {
 
     let layer_surface = layer_shell.get_layer_surface(
         surface,
-        app.outputs.get(app.output_index).map(|info| &info.handle),
+        Some(&app.outputs[output_index].handle),
         match app.cantus.config.layer {
             ConfigLayer::Background => LayerStyle::Background,
             ConfigLayer::Bottom => LayerStyle::Bottom,
@@ -138,18 +156,11 @@ struct OutputInfo {
     handle: WlOutput,
     name: Option<String>,
     description: Option<String>,
-    make_model: Option<String>,
+    make: Option<String>,
+    model: Option<String>,
 }
 
-impl OutputInfo {
-    fn matches(&self, target: &str) -> bool {
-        [&self.name, &self.make_model, &self.description]
-            .into_iter()
-            .flatten()
-            .any(|description| description.contains(target))
-    }
-}
-
+#[derive(Default)]
 pub struct LayerShellApp {
     pub cantus: CantusApp,
 
@@ -161,7 +172,6 @@ pub struct LayerShellApp {
     seat: Option<WlSeat>,
     pointer: Option<WlPointer>,
     outputs: Vec<OutputInfo>,
-    output_index: usize,
     last_hitbox_hash: u64,
 
     surface_ptr: Option<NonNull<c_void>>,
@@ -173,32 +183,29 @@ pub struct LayerShellApp {
     fractional_manager: Option<WpFractionalScaleManagerV1>,
     background_effect_manager: Option<ExtBackgroundEffectManagerV1>,
     background_effect: Option<ExtBackgroundEffectSurfaceV1>,
-    display_ptr: NonNull<c_void>,
+    display_ptr: Option<NonNull<c_void>>,
+}
+
+macro_rules! dispatch {
+    ($proxy:ty, |$state:ident, $object:ident, $value:ident, $queue:ident| $body:block) => {
+        impl Dispatch<$proxy, ()> for LayerShellApp {
+            fn event(
+                $state: &mut Self,
+                $object: &$proxy,
+                $value: <$proxy as Proxy>::Event,
+                _data: &(),
+                _conn: &Connection,
+                $queue: &QueueHandle<Self>,
+            ) $body
+        }
+    };
 }
 
 impl LayerShellApp {
     fn new(display_ptr: NonNull<c_void>) -> Self {
         Self {
-            cantus: CantusApp::default(),
-            is_configured: false,
-            should_exit: false,
-            compositor: None,
-            layer_shell: None,
-            seat: None,
-            pointer: None,
-            outputs: Vec::new(),
-            output_index: 0,
-            last_hitbox_hash: 0,
-            surface_ptr: None,
-            wl_surface: None,
-            viewport: None,
-            fractional: None,
-            frame_callback: None,
-            viewporter: None,
-            fractional_manager: None,
-            background_effect_manager: None,
-            background_effect: None,
-            display_ptr,
+            display_ptr: Some(display_ptr),
+            ..Self::default()
         }
     }
 
@@ -220,12 +227,12 @@ impl LayerShellApp {
             return;
         }
 
-        let Some(surface_ptr) = self.surface_ptr else {
+        let (Some(surface_ptr), Some(display_ptr)) = (self.surface_ptr, self.display_ptr) else {
             return;
         };
         let target = SurfaceTargetUnsafe::RawHandle {
             raw_display_handle: Some(RawDisplayHandle::Wayland(WaylandDisplayHandle::new(
-                self.display_ptr,
+                display_ptr,
             ))),
             raw_window_handle: RawWindowHandle::Wayland(WaylandWindowHandle::new(surface_ptr)),
         };
@@ -233,16 +240,6 @@ impl LayerShellApp {
             .expect("Failed to create surface");
 
         self.cantus.configure_render_surface(surface, width, height);
-    }
-
-    fn select_output(&mut self) {
-        self.output_index = self
-            .cantus
-            .config
-            .monitor
-            .as_ref()
-            .and_then(|target| self.outputs.iter().position(|info| info.matches(target)))
-            .unwrap_or(0);
     }
 
     fn try_render_frame(&mut self, qhandle: &QueueHandle<Self>) {
@@ -309,6 +306,7 @@ impl LayerShellApp {
             &region,
             Rect::pill(pill.x, pill.width, self.cantus.config.height),
         );
+        add_capsule(&region, weather::rect(pill, self.cantus.config.height));
         effect.set_blur_region(Some(&region));
         region.destroy();
     }
@@ -326,241 +324,170 @@ impl CantusApp {
                     .into_iter()
                     .chain(self.icon_row_rects(track).into_iter().flatten())
             })
-            .chain([Status::controls_rect(
-                self.render.status,
-                self.config.height,
-            )])
+            .chain([
+                weather::rect(self.render.status, self.config.height),
+                Status::controls_rect(self.render.status, self.config.height),
+            ])
     }
 }
 
-impl Dispatch<ZwlrLayerSurfaceV1, ()> for LayerShellApp {
-    fn event(
-        state: &mut Self,
-        proxy: &ZwlrLayerSurfaceV1,
-        event: zwlr_layer_surface_v1::Event,
-        _data: &(),
-        _conn: &Connection,
-        qhandle: &QueueHandle<Self>,
-    ) {
-        match event {
-            zwlr_layer_surface_v1::Event::Configure { serial, width, .. } => {
-                proxy.ack_configure(serial);
-                if width > 0 {
-                    state.cantus.render.surface_width = Some(width as f32);
-                }
-                state.is_configured = true;
-                state.update_scale_and_viewport();
-                state.update_blur_region(qhandle);
-                state.try_render_frame(qhandle);
+dispatch!(ZwlrLayerSurfaceV1, |state, proxy, event, qhandle| {
+    match event {
+        zwlr_layer_surface_v1::Event::Configure { serial, width, .. } => {
+            proxy.ack_configure(serial);
+            if width > 0 {
+                state.cantus.render.surface_width = Some(width as f32);
             }
-            zwlr_layer_surface_v1::Event::Closed => state.should_exit = true,
-            _ => {}
+            state.is_configured = true;
+            state.update_scale_and_viewport();
+            state.update_blur_region(qhandle);
+            state.try_render_frame(qhandle);
         }
+        zwlr_layer_surface_v1::Event::Closed => state.should_exit = true,
+        _ => {}
     }
-}
+});
 
-impl Dispatch<WpFractionalScaleV1, ()> for LayerShellApp {
-    fn event(
-        state: &mut Self,
-        _proxy: &WpFractionalScaleV1,
-        event: wp_fractional_scale_v1::Event,
-        _data: &(),
-        _conn: &Connection,
-        qhandle: &QueueHandle<Self>,
-    ) {
-        if let wp_fractional_scale_v1::Event::PreferredScale { scale } = event {
-            state.cantus.render.scale = scale as f32 / 120.0;
+dispatch!(WpFractionalScaleV1, |state, _proxy, event, qhandle| {
+    if let wp_fractional_scale_v1::Event::PreferredScale { scale } = event {
+        state.cantus.render.scale = scale as f32 / 120.0;
 
-            if state.is_configured {
-                state.update_scale_and_viewport();
-                state.try_render_frame(qhandle);
-            }
-        }
-    }
-}
-
-impl Dispatch<WlCallback, ()> for LayerShellApp {
-    fn event(
-        state: &mut Self,
-        _proxy: &WlCallback,
-        event: wl_callback::Event,
-        _data: &(),
-        _conn: &Connection,
-        qhandle: &QueueHandle<Self>,
-    ) {
-        if matches!(event, wl_callback::Event::Done { .. }) && state.frame_callback.take().is_some()
-        {
+        if state.is_configured {
+            state.update_scale_and_viewport();
             state.try_render_frame(qhandle);
         }
     }
-}
+});
 
-impl Dispatch<WlOutput, ()> for LayerShellApp {
-    fn event(
-        state: &mut Self,
-        proxy: &WlOutput,
-        event: wl_output::Event,
-        _data: &(),
-        _conn: &Connection,
-        _qhandle: &QueueHandle<Self>,
-    ) {
-        let id = proxy.id();
-        if let Some(info) = state.outputs.iter_mut().find(|info| info.handle.id() == id) {
-            match event {
-                wl_output::Event::Geometry { make, model, .. } => {
-                    info.make_model = Some(format!("{make} {model}"));
-                }
-                wl_output::Event::Name { name } => info.name = Some(name),
-                wl_output::Event::Description { description } => {
-                    info.description = Some(description);
-                }
-                _ => {}
-            }
-        }
+dispatch!(WlCallback, |state, _proxy, event, qhandle| {
+    if matches!(event, wl_callback::Event::Done { .. }) && state.frame_callback.take().is_some() {
+        state.try_render_frame(qhandle);
     }
-}
+});
 
-impl Dispatch<WlSeat, ()> for LayerShellApp {
-    fn event(
-        state: &mut Self,
-        proxy: &WlSeat,
-        event: wl_seat::Event,
-        _data: &(),
-        _conn: &Connection,
-        qhandle: &QueueHandle<Self>,
-    ) {
-        if let wl_seat::Event::Capabilities { capabilities } = event
-            && let WEnum::Value(caps) = capabilities
-        {
-            if caps.contains(wl_seat::Capability::Pointer) {
-                if state.pointer.is_none() {
-                    state.pointer = Some(proxy.get_pointer(qhandle, ()));
-                }
-            } else if let Some(pointer) = state.pointer.take() {
-                pointer.release();
-            }
-        }
-    }
-}
-
-impl Dispatch<WlPointer, ()> for LayerShellApp {
-    fn event(
-        state: &mut Self,
-        _proxy: &WlPointer,
-        event: wl_pointer::Event,
-        _data: &(),
-        _conn: &Connection,
-        _qhandle: &QueueHandle<Self>,
-    ) {
-        let cantus = &mut state.cantus;
-        let interaction = &mut cantus.interaction;
-
-        let surface_id = state.wl_surface.as_ref().map(Proxy::id);
+dispatch!(WlOutput, |state, proxy, event, _qhandle| {
+    let id = proxy.id();
+    if let Some(info) = state.outputs.iter_mut().find(|info| info.handle.id() == id) {
         match event {
-            wl_pointer::Event::Enter {
-                surface,
-                surface_x,
-                surface_y,
-                ..
-            } if surface_id == Some(surface.id()) => {
-                cantus.render.uniforms.mouse_pos = vec2(surface_x as f32, surface_y as f32);
-                interaction.mouse_pressure = 1.0;
+            wl_output::Event::Geometry { make, model, .. } => {
+                info.make = Some(make);
+                info.model = Some(model);
             }
-            wl_pointer::Event::Motion {
-                surface_x,
-                surface_y,
-                ..
-            } => {
-                cantus.render.uniforms.mouse_pos = vec2(surface_x as f32, surface_y as f32);
-                cantus.handle_mouse_drag();
+            wl_output::Event::Name { name } => info.name = Some(name),
+            wl_output::Event::Description { description } => {
+                info.description = Some(description);
             }
-            wl_pointer::Event::Leave { .. } => {
-                interaction.mouse_pressure = 0.0;
-                cantus.cancel_drag();
-            }
-            wl_pointer::Event::Button {
-                button,
-                state: button_state,
-                ..
-            } => match (button, button_state) {
-                (0x110, WEnum::Value(wl_pointer::ButtonState::Pressed)) => cantus.left_click(),
-                (0x110, WEnum::Value(wl_pointer::ButtonState::Released)) => {
-                    cantus.left_click_released();
-                }
-                (0x111, WEnum::Value(wl_pointer::ButtonState::Pressed)) if interaction.dragging => {
-                    cantus.right_click();
-                }
-                _ => {}
-            },
-            wl_pointer::Event::AxisDiscrete {
-                axis: WEnum::Value(wl_pointer::Axis::VerticalScroll),
-                discrete,
-                ..
-            }
-            | wl_pointer::Event::AxisValue120 {
-                axis: WEnum::Value(wl_pointer::Axis::VerticalScroll),
-                value120: discrete,
-                ..
-            } => state.cantus.handle_scroll(discrete.signum()),
             _ => {}
         }
     }
-}
+});
 
-impl Dispatch<WlRegistry, ()> for LayerShellApp {
-    fn event(
-        state: &mut Self,
-        proxy: &WlRegistry,
-        event: wl_registry::Event,
-        _data: &(),
-        _conn: &Connection,
-        qhandle: &QueueHandle<Self>,
-    ) {
-        if let wl_registry::Event::Global {
-            name,
-            interface,
-            version,
-        } = event
-        {
-            match interface.as_ref() {
-                "wl_compositor" => {
-                    state.compositor =
-                        Some(proxy.bind::<WlCompositor, (), Self>(name, version, qhandle, ()));
-                }
-                "zwlr_layer_shell_v1" => {
-                    state.layer_shell =
-                        Some(proxy.bind::<ZwlrLayerShellV1, (), Self>(name, 4, qhandle, ()));
-                }
-                "wp_viewporter" => {
-                    state.viewporter =
-                        Some(proxy.bind::<WpViewporter, (), Self>(name, 1, qhandle, ()));
-                }
-                "wp_fractional_scale_manager_v1" => {
-                    state.fractional_manager = Some(
-                        proxy.bind::<WpFractionalScaleManagerV1, (), Self>(name, 1, qhandle, ()),
-                    );
-                }
-                "ext_background_effect_manager_v1" => {
-                    state.background_effect_manager =
-                        Some(proxy.bind(name, version.min(1), qhandle, ()));
-                }
-                "wl_seat" => {
-                    state.seat =
-                        Some(proxy.bind::<WlSeat, (), Self>(name, version.min(7), qhandle, ()));
-                }
-                "wl_output" => {
-                    state.outputs.push(OutputInfo {
-                        handle: proxy.bind::<WlOutput, (), Self>(name, version.min(4), qhandle, ()),
-                        name: None,
-                        description: None,
-                        make_model: None,
-                    });
-                }
-                _ => {}
+dispatch!(WlSeat, |state, proxy, event, qhandle| {
+    if let wl_seat::Event::Capabilities { capabilities } = event
+        && let WEnum::Value(caps) = capabilities
+    {
+        if caps.contains(wl_seat::Capability::Pointer) {
+            if state.pointer.is_none() {
+                state.pointer = Some(proxy.get_pointer(qhandle, ()));
             }
+        } else if let Some(pointer) = state.pointer.take() {
+            pointer.release();
         }
     }
-}
+});
+
+dispatch!(WlPointer, |state, _proxy, event, _qhandle| {
+    let cantus = &mut state.cantus;
+    let interaction = &mut cantus.interaction;
+
+    let surface_id = state.wl_surface.as_ref().map(Proxy::id);
+    match event {
+        wl_pointer::Event::Enter {
+            surface,
+            surface_x,
+            surface_y,
+            ..
+        } if surface_id == Some(surface.id()) => {
+            cantus.render.uniforms.mouse_pos = vec2(surface_x as f32, surface_y as f32);
+            interaction.mouse_pressure = 1.0;
+        }
+        wl_pointer::Event::Motion {
+            surface_x,
+            surface_y,
+            ..
+        } => {
+            cantus.render.uniforms.mouse_pos = vec2(surface_x as f32, surface_y as f32);
+            cantus.handle_mouse_drag();
+        }
+        wl_pointer::Event::Leave { .. } => {
+            interaction.mouse_pressure = 0.0;
+            cantus.cancel_drag();
+        }
+        wl_pointer::Event::Button {
+            button,
+            state: button_state,
+            ..
+        } => match (button, button_state) {
+            (0x110, WEnum::Value(wl_pointer::ButtonState::Pressed)) => cantus.left_click(),
+            (0x110, WEnum::Value(wl_pointer::ButtonState::Released)) => {
+                cantus.left_click_released();
+            }
+            (0x111, WEnum::Value(wl_pointer::ButtonState::Pressed)) if interaction.dragging => {
+                cantus.right_click();
+            }
+            _ => {}
+        },
+        wl_pointer::Event::AxisDiscrete {
+            axis: WEnum::Value(wl_pointer::Axis::VerticalScroll),
+            discrete,
+            ..
+        }
+        | wl_pointer::Event::AxisValue120 {
+            axis: WEnum::Value(wl_pointer::Axis::VerticalScroll),
+            value120: discrete,
+            ..
+        } => state.cantus.handle_scroll(discrete.signum()),
+        _ => {}
+    }
+});
+
+dispatch!(WlRegistry, |state, proxy, event, qhandle| {
+    if let wl_registry::Event::Global {
+        name,
+        interface,
+        version,
+    } = event
+    {
+        macro_rules! bind {
+            ($type:ty, $version:expr) => {
+                proxy.bind::<$type, (), Self>(name, $version, qhandle, ())
+            };
+        }
+        match interface.as_ref() {
+            "wl_compositor" => state.compositor = Some(bind!(WlCompositor, version)),
+            "zwlr_layer_shell_v1" => state.layer_shell = Some(bind!(ZwlrLayerShellV1, 4)),
+            "wp_viewporter" => state.viewporter = Some(bind!(WpViewporter, 1)),
+            "wp_fractional_scale_manager_v1" => {
+                state.fractional_manager = Some(bind!(WpFractionalScaleManagerV1, 1));
+            }
+            "ext_background_effect_manager_v1" => {
+                state.background_effect_manager =
+                    Some(bind!(ExtBackgroundEffectManagerV1, version.min(1)));
+            }
+            "wl_seat" => state.seat = Some(bind!(WlSeat, version.min(7))),
+            "wl_output" => {
+                state.outputs.push(OutputInfo {
+                    handle: bind!(WlOutput, version.min(4)),
+                    name: None,
+                    description: None,
+                    make: None,
+                    model: None,
+                });
+            }
+            _ => {}
+        }
+    }
+});
 
 delegate_noop!(LayerShellApp: ignore WlSurface);
 delegate_noop!(LayerShellApp: ignore ZwlrLayerShellV1);

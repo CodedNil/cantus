@@ -30,11 +30,9 @@ pub fn vs_particles(
     let p_life = dt / duration;
     let rgb = unpack3x8unorm(p.color);
     let (dir, _) = direction_and_length(p.spawn_vel);
-    let perp = dir.perp();
-    let growth = p_life + 0.5;
     let uv = quad_coord(v_idx) * 2.0 - 1.0;
-    let extent = uv * vec2(5.0, 2.5) * growth;
-    let world_pos = p.spawn_pos + p.spawn_vel * dt + dir * extent.x + perp * extent.y;
+    let extent = uv * vec2(5.0, 2.5) * (p_life + 0.5);
+    let world_pos = p.spawn_pos + p.spawn_vel * dt + dir * extent.x + dir.perp() * extent.y;
     let luma = rgb.dot(vec3(0.299, 0.587, 0.114));
     let spark_color = Vec3::splat(luma).lerp(rgb, 2.0).lerp(Vec3::ONE, 0.2) * 2.0;
 

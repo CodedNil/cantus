@@ -146,6 +146,17 @@ pub struct CondensedPlaylist {
     pub art: ArtState,
 }
 
+impl CondensedPlaylist {
+    pub fn set_membership(&mut self, track_id: TrackId, add: bool) -> bool {
+        let tracks = Arc::make_mut(&mut self.tracks);
+        if add {
+            tracks.insert(track_id)
+        } else {
+            tracks.remove(&track_id)
+        }
+    }
+}
+
 pub fn playlist_icons(
     track_id: TrackId,
     playlists: &[CondensedPlaylist],

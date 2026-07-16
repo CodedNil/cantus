@@ -1,11 +1,15 @@
-use crate::{AppUpdater, send_update};
-use cantus_shared::WeatherPill;
+use crate::{AppUpdater, model::Rect, send_update, status::GAP};
+use cantus_shared::{StatusPill, WeatherPill};
 use jiff::Zoned;
 use serde::Deserialize;
 use std::{error::Error, f32::consts::PI, thread, time::Duration};
 use tracing::warn;
 
 pub const WIDTH: f32 = 310.0;
+
+pub fn rect(status: StatusPill, height: f32) -> Rect {
+    Rect::pill(status.x - WIDTH - GAP, WIDTH, height)
+}
 
 #[derive(Clone, Copy, Default)]
 pub struct Weather {

@@ -82,16 +82,11 @@ pub fn directory() -> PathBuf {
 
 pub fn load() -> Config {
     let path = directory().join("cantus.toml");
-
     fs::read_to_string(&path)
-        .inspect_err(|err| warn!("Falling back to default config, unable to read {path:?}: {err}"))
-        .ok()
-        .and_then(|contents| {
-            toml::from_str::<Config>(&contents)
-                .inspect_err(|err| {
-                    warn!("Falling back to default config, failed to parse {path:?}: {err}");
-                })
-                .ok()
+        .map_err(|error| error.to_string())
+        .and_then(|contents| toml::from_str(&contents).map_err(|error| error.to_string()))
+        .unwrap_or_else(|error| {
+            warn!("Falling back to default config for {path:?}: {error}");
+            Config::default()
         })
-        .unwrap_or_default()
 }

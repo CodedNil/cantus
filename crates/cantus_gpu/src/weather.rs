@@ -1,4 +1,4 @@
-use crate::{pill_fragment, pill_vertex};
+use crate::{pill_coverage, pill_fragment, pill_interaction, pill_sheen, pill_vertex};
 use cantus_shared::{GlobalUniforms, WeatherPill, smoothstep};
 use spirv_std::{
     arch::kill,
@@ -10,15 +10,7 @@ use spirv_std::{
 use spirv_std::num_traits::Float;
 
 fn noise(p: Vec2) -> f32 {
-    let cell = p.floor();
-    let f = p.fract();
-    let u = f * f * (3.0 - 2.0 * f);
-    let hash = |p: Vec2| ((p.dot(vec2(127.1, 311.7))).sin() * 43_758.547).fract();
-    let a = hash(cell);
-    let b = hash(cell + Vec2::X);
-    let c = hash(cell + Vec2::Y);
-    let d = hash(cell + Vec2::ONE);
-    a + (b - a) * u.x + (c - a) * u.y + (a - b - c + d) * u.x * u.y
+    ((p.dot(vec2(127.1, 311.7))).sin() * 43_758.547).fract()
 }
 
 fn sky(p: Vec2, size: Vec2, pill: WeatherPill, time: f32) -> Vec3 {
@@ -28,9 +20,12 @@ fn sky(p: Vec2, size: Vec2, pill: WeatherPill, time: f32) -> Vec3 {
     let daylight = smoothstep(-0.2, 0.12, sun_y);
     let twilight = smoothstep(-0.45, 0.05, sun_y) * (1.0 - daylight);
     let vertical = smoothstep(1.0, 0.0, uv.y);
-    let night = vec3(0.018, 0.035, 0.11).lerp(vec3(0.12, 0.08, 0.24), vertical);
-    let day = vec3(0.08, 0.34, 0.62).lerp(vec3(0.32, 0.67, 0.87), vertical);
-    let mut color = night.lerp(day, daylight);
+    let mut color = vec3(0.018, 0.035, 0.11)
+        .lerp(vec3(0.12, 0.08, 0.24), vertical)
+        .lerp(
+            vec3(0.08, 0.34, 0.62).lerp(vec3(0.32, 0.67, 0.87), vertical),
+            daylight,
+        );
     color += vec3(0.95, 0.25, 0.12) * twilight * (1.0 - uv.y) * 0.65;
 
     let sun = vec2(sun_x * size.x, size.y * (0.78 - sun_y * 0.55));
@@ -38,10 +33,10 @@ fn sky(p: Vec2, size: Vec2, pill: WeatherPill, time: f32) -> Vec3 {
     color += vec3(1.0, 0.42, 0.08) * sun_glow * sun_glow * 0.9;
 
     let edge = (uv.x - 0.5).abs() * 2.0;
-    let near = smoothstep(0.22, 0.86, edge);
-    let far = smoothstep(0.68, 0.98, edge);
-    let weather = Vec3::from_array(current)
-        .max(Vec3::from_array(near_weather) * near + Vec3::from_array(far_weather) * far);
+    let weather = Vec3::from_array(current).max(
+        Vec3::from_array(near_weather) * smoothstep(0.22, 0.86, edge)
+            + Vec3::from_array(far_weather) * smoothstep(0.68, 0.98, edge),
+    );
     let cloud = weather.x;
     let clouds = smoothstep(
         0.72 - cloud * 0.32,
@@ -78,11 +73,17 @@ pub fn fs_weather(
     #[spirv(location = 0)] out_color: &mut Vec4,
 ) {
     let pill = weather[0];
-    let (local, size, dist) = pill_fragment(pixel, global, pill.x, pill.width, 0.0);
-    let alpha = 0.96 * (1.0 - smoothstep(-0.6, 0.6, dist));
-    if alpha <= 0.0 {
+    let interaction = pill_interaction(pixel, global);
+    let bulge = interaction.bulge();
+    let (local, size, dist) = pill_fragment(pixel, global, pill.x, pill.width, bulge);
+    let (mask, shadow) = pill_coverage(dist);
+    if mask.max(shadow) <= 0.0 {
         kill();
     }
-    let color = sky(local, size, pill, global.time) + (1.0 - smoothstep(0.0, -3.0, dist)) * 0.08;
-    *out_color = (color * alpha).extend(alpha);
+    let refracted = interaction.refract(local, size, dist);
+    let color =
+        sky(refracted * size, size, pill, global.time) + pill_sheen(refracted.y, dist, interaction);
+    let color = color.lerp(color * 1.5 + 0.1, interaction.ripple_flash);
+    let opacity = 0.96;
+    *out_color = (color * mask * opacity).extend(mask.max(shadow) * opacity);
 }

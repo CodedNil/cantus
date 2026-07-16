@@ -12,7 +12,7 @@ use wgpu::{
     BindGroupDescriptor, BindGroupEntry, BindingResource, BlendState, BufferDescriptor,
     BufferUsages, ColorTargetState, ColorWrites, CompositeAlphaMode, Device, DeviceDescriptor,
     Extent3d, FilterMode, FragmentState, Limits, MemoryHints, MultisampleState,
-    PipelineCompilationOptions, PowerPreference, PrimitiveState, PrimitiveTopology, RenderPipeline,
+    PipelineCompilationOptions, PowerPreference, PrimitiveState, PrimitiveTopology,
     RenderPipelineDescriptor, RequestAdapterOptions, SamplerDescriptor, ShaderModule, Surface,
     TextureDescriptor, TextureDimension, TextureFormat, TextureUsages, TextureViewDescriptor,
     TextureViewDimension, VertexState,
@@ -25,16 +25,20 @@ const fn buffer_size<T>(len: usize) -> u64 {
     (size_of::<T>() * len) as u64
 }
 
-fn render_pipeline(
+fn gpu_pass(
     device: &Device,
     shader: &ShaderModule,
     format: TextureFormat,
     label: &str,
-) -> RenderPipeline {
+    uniform_buffer: &wgpu::Buffer,
+    size: u64,
+    usage: BufferUsages,
+    extra_resources: &[BindingResource<'_>],
+) -> GpuPass {
     let name = label.to_ascii_lowercase();
     let vertex_entry = format!("{name}::vs_{name}");
     let fragment_entry = format!("{name}::fs_{name}");
-    device.create_render_pipeline(&RenderPipelineDescriptor {
+    let pipeline = device.create_render_pipeline(&RenderPipelineDescriptor {
         label: Some(label),
         layout: None,
         vertex: VertexState {
@@ -61,20 +65,7 @@ fn render_pipeline(
         multisample: MultisampleState::default(),
         multiview_mask: None,
         cache: None,
-    })
-}
-
-fn gpu_pass(
-    device: &Device,
-    shader: &ShaderModule,
-    format: TextureFormat,
-    label: &str,
-    uniform_buffer: &wgpu::Buffer,
-    size: u64,
-    usage: BufferUsages,
-    extra_resources: &[BindingResource<'_>],
-) -> GpuPass {
-    let pipeline = render_pipeline(device, shader, format, label);
+    });
     let buffer_label = format!("{label} Data");
     let buffer = device.create_buffer(&BufferDescriptor {
         label: Some(&buffer_label),
@@ -202,47 +193,35 @@ impl CantusApp {
                 resources,
             )
         };
-        let playhead = create_pass(
-            "Playhead",
-            buffer_size::<PlayheadUniforms>(1),
-            BufferUsages::UNIFORM,
-            &[],
-        );
-        let particles = create_pass(
-            "Particles",
-            buffer_size::<Particle>(PARTICLE_COUNT),
-            BufferUsages::STORAGE,
-            &[],
-        );
-        let track = create_pass(
+        macro_rules! pass {
+            ($label:literal, $type:ty, $count:expr, $usage:ident $(, $resource:expr)*) => {
+                create_pass(
+                    $label,
+                    buffer_size::<$type>($count),
+                    BufferUsages::$usage,
+                    &[$($resource),*],
+                )
+            };
+        }
+        let playhead = pass!("Playhead", PlayheadUniforms, 1, UNIFORM);
+        let particles = pass!("Particles", Particle, PARTICLE_COUNT, STORAGE);
+        let track = pass!(
             "Track",
-            buffer_size::<TrackPill>(MAX_RENDER_INSTANCES),
-            BufferUsages::STORAGE,
-            &[
-                BindingResource::TextureView(&image_view),
-                BindingResource::Sampler(&sampler),
-            ],
+            TrackPill,
+            MAX_RENDER_INSTANCES,
+            STORAGE,
+            BindingResource::TextureView(&image_view),
+            BindingResource::Sampler(&sampler)
         );
-        let status = create_pass(
-            "Status",
-            buffer_size::<StatusPill>(1),
-            BufferUsages::STORAGE,
-            &[],
-        );
-        let weather = create_pass(
-            "Weather",
-            buffer_size::<WeatherPill>(1),
-            BufferUsages::STORAGE,
-            &[],
-        );
-        let text = create_pass(
+        let status = pass!("Status", StatusPill, 1, STORAGE);
+        let weather = pass!("Weather", WeatherPill, 1, STORAGE);
+        let text = pass!(
             "Text",
-            buffer_size::<GlyphInstance>(MAX_GLYPH_INSTANCES),
-            BufferUsages::STORAGE,
-            &[
-                BindingResource::TextureView(&text_atlas_view),
-                BindingResource::Sampler(&sampler),
-            ],
+            GlyphInstance,
+            MAX_GLYPH_INSTANCES,
+            STORAGE,
+            BindingResource::TextureView(&text_atlas_view),
+            BindingResource::Sampler(&sampler)
         );
 
         self.render.gpu = Some(GpuResources {

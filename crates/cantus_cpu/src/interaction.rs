@@ -3,14 +3,9 @@ use crate::{
     model::{CondensedPlaylist, PlaylistId, Rect, Track, TrackId, playlist_icons},
     status::Status,
 };
-use cantus_shared::{
-    BACKPLATE_RADIUS, ICON_WIDTH, PillIconRow, pill_icon_primary_center_y, pill_icon_rows,
-};
+use cantus_shared::{ICON_WIDTH, PillIconRow, pill_icon_primary_center_y, pill_icon_rows};
 use glam::{Vec2, vec2};
-use std::{
-    sync::Arc,
-    time::{Duration, Instant},
-};
+use std::time::{Duration, Instant};
 use tracing::{info, warn};
 
 enum IconAction {
@@ -19,10 +14,7 @@ enum IconAction {
 }
 
 fn row_rect(row: PillIconRow) -> Rect {
-    Rect::from_center(
-        row.center,
-        row.half_size(BACKPLATE_RADIUS + ICON_WIDTH / 3.0),
-    )
+    Rect::from_center(row.center, row.half_size(9.0 + ICON_WIDTH / 3.0))
 }
 
 #[derive(Default)]
@@ -224,27 +216,23 @@ impl CantusApp {
             warn!("Track not found in queue");
             return;
         };
-        let song_ms = state.queue[position_in_queue].duration_ms;
-        if queue_index == position_in_queue {
+        let skip_count = position_in_queue.abs_diff(queue_index);
+        if skip_count == 0 {
             let milliseconds = if position < 0.05 {
                 0.0
             } else {
-                song_ms as f32 * position
-            };
-            let milliseconds = milliseconds.round() as u32;
+                state.queue[position_in_queue].duration_ms as f32 * position
+            }
+            .round() as u32;
             state.update_progress(milliseconds, Instant::now());
-            state.defer_remote_updates(Duration::from_secs(2));
             self.spotify.seek(milliseconds);
-            return;
+        } else {
+            state.queue_index = position_in_queue;
+            state.update_progress(0, Instant::now());
+            self.spotify
+                .skip(queue_index < position_in_queue, skip_count.min(10));
         }
-
-        state.queue_index = position_in_queue;
-        state.update_progress(0, Instant::now());
         state.defer_remote_updates(Duration::from_secs(2));
-        self.spotify.skip(
-            queue_index < position_in_queue,
-            position_in_queue.abs_diff(queue_index).min(10),
-        );
     }
 
     /// Update Spotify rating playlists for the given track.
@@ -257,13 +245,9 @@ impl CantusApp {
             .iter_mut()
             .filter_map(|playlist| {
                 let add = playlist.rating_index? == rating_slot;
-                let tracks = Arc::make_mut(&mut playlist.tracks);
-                let changed = if add {
-                    tracks.insert(track_id)
-                } else {
-                    tracks.remove(&track_id)
-                };
-                changed.then_some((playlist.id, add))
+                playlist
+                    .set_membership(track_id, add)
+                    .then_some((playlist.id, add))
             })
             .collect::<Vec<_>>();
 
@@ -282,11 +266,8 @@ impl CantusApp {
             );
             return;
         };
-        let tracks = Arc::make_mut(&mut playlist.tracks);
-        let add = !tracks.remove(&track_id);
-        if add {
-            tracks.insert(track_id);
-        }
+        let add = !playlist.tracks.contains(&track_id);
+        playlist.set_membership(track_id, add);
         self.playback
             .defer_remote_updates(Duration::from_millis(500));
 
