@@ -39,7 +39,7 @@ pub struct TrackPill {
     pub secondary_playlist_count: u32,
     pub primary_alpha: f32,
     pub secondary_expansion: f32,
-    pub audio_features: PackedAudioFeatures,
+    pub audio_features: AudioFeatures,
     pub playlist_images: [i32; MAX_PILL_PLAYLIST_ICONS],
 }
 
@@ -79,11 +79,6 @@ pub struct WeatherCondition {
     feature = "cpu",
     derive(bytemuck::Pod, bytemuck::Zeroable, serde::Deserialize)
 )]
-#[cfg_attr(feature = "cpu", serde(from = "AudioFeatures"))]
-pub struct PackedAudioFeatures([u32; 2]);
-
-#[derive(Copy, Clone)]
-#[cfg_attr(feature = "cpu", derive(serde::Deserialize))]
 pub struct AudioFeatures {
     pub energy: f32,
     pub danceability: f32,
@@ -92,66 +87,6 @@ pub struct AudioFeatures {
     pub valence: f32,
     pub instrumentalness: f32,
     pub loudness: f32,
-}
-
-#[cfg(feature = "cpu")]
-impl From<AudioFeatures> for PackedAudioFeatures {
-    fn from(features: AudioFeatures) -> Self {
-        Self([
-            quantize([
-                features.energy,
-                features.danceability,
-                features.acousticness,
-                (features.tempo - 40.0) / 200.0,
-            ]),
-            quantize([
-                features.valence,
-                0.0,
-                features.instrumentalness,
-                (features.loudness + 60.0) / 60.0,
-            ]),
-        ])
-    }
-}
-
-#[cfg(feature = "cpu")]
-fn quantize(values: [f32; 4]) -> u32 {
-    u32::from_le_bytes(values.map(|value| (value.clamp(0.0, 1.0) * 255.0).round() as u8))
-}
-
-impl PackedAudioFeatures {
-    pub const fn new(motion: [u8; 4], character: [u8; 4]) -> Self {
-        Self([u32::from_le_bytes(motion), u32::from_le_bytes(character)])
-    }
-
-    pub fn decode(self) -> AudioFeatures {
-        let motion = unpack_u8x4(self.0[0]);
-        let character = unpack_u8x4(self.0[1]);
-        AudioFeatures {
-            energy: motion.x,
-            danceability: motion.y,
-            acousticness: motion.z,
-            tempo: 40.0 + motion.w * 200.0,
-            valence: character.x,
-            instrumentalness: character.z,
-            loudness: character.w * 60.0 - 60.0,
-        }
-    }
-}
-
-impl AudioFeatures {
-    pub const fn tempo_hz(&self) -> f32 {
-        self.tempo / 60.0
-    }
-
-    pub const fn tempo_normalized(&self) -> f32 {
-        ((self.tempo - 60.0) / 120.0).clamp(0.0, 1.0)
-    }
-
-    pub const fn turbulence(&self) -> f32 {
-        (self.energy * 0.55 + self.danceability * 0.25 + (self.loudness + 60.0) / 60.0 * 0.2)
-            * (1.0 - self.acousticness * 0.35)
-    }
 }
 
 #[repr(C)]
@@ -190,15 +125,6 @@ pub const fn pack_u16x2(value: [u32; 2]) -> u32 {
 
 pub const fn unpack_u16x2(value: u32) -> Vec2 {
     Vec2::new((value & 0xffff) as f32, (value >> 16) as f32)
-}
-
-fn unpack_u8x4(value: u32) -> Vec4 {
-    Vec4::new(
-        (value & 0xff) as f32,
-        ((value >> 8) & 0xff) as f32,
-        ((value >> 16) & 0xff) as f32,
-        (value >> 24) as f32,
-    ) * (1.0 / 255.0)
 }
 
 /// Maximum number of playlist artwork icons carried by one pill instance.

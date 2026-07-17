@@ -1,6 +1,6 @@
 use crate::{PANEL_START, TRACK_SPACING_MS, art::ArtState};
 use arrayvec::ArrayString;
-use cantus_shared::PackedAudioFeatures;
+use cantus_shared::AudioFeatures;
 use glam::Vec2;
 use serde::{Deserialize, Deserializer, de};
 use std::{
@@ -75,7 +75,7 @@ pub struct Track {
     #[serde(skip)]
     pub runtime: TrackRuntime,
     #[serde(skip)]
-    pub audio_features: Option<PackedAudioFeatures>,
+    pub audio_features: Option<AudioFeatures>,
 }
 
 #[derive(Default)]

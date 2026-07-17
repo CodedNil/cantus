@@ -7,7 +7,7 @@ use crate::{
 };
 use arrayvec::{ArrayString, ArrayVec};
 use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
-use cantus_shared::{MAX_PILL_PLAYLIST_ICONS, PackedAudioFeatures};
+use cantus_shared::{AudioFeatures, MAX_PILL_PLAYLIST_ICONS};
 use jiff::Timestamp;
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
 use serde_json::json;
@@ -716,7 +716,7 @@ fn audio_features_backend(http: Agent, updater: AppUpdater) -> Sender<Vec<TrackI
             resolve_audio_features(&http, &ids, &mut cache);
             let features = ids
                 .into_iter()
-                .filter_map(|id| cache.get(&id).copied().flatten().map(|value| (id, value)))
+                .filter_map(|id| cache.get(&id).copied().map(|value| (id, value)))
                 .collect::<HashMap<_, _>>();
             send_update(&updater, move |app| {
                 for track in &mut app.playback.queue {
@@ -731,7 +731,7 @@ fn audio_features_backend(http: Agent, updater: AppUpdater) -> Sender<Vec<TrackI
 fn resolve_audio_features(
     http: &Agent,
     track_ids: &[TrackId],
-    cache: &mut HashMap<TrackId, Option<PackedAudioFeatures>>,
+    cache: &mut HashMap<TrackId, AudioFeatures>,
 ) {
     let mut missing = track_ids
         .iter()
@@ -742,16 +742,15 @@ fn resolve_audio_features(
     if missing.is_empty() {
         return;
     }
-    let result: ClientResult<ReccoPage<ReccoTrack>> = http
+    let Ok(page) = http
         .get(RECCO_TRACK_URL)
         .query("size", "50")
         .query_pairs(missing.iter().map(|id| ("ids", id.as_str())))
         .call()
         .map_err(boxed_error)
-        .and_then(response_json);
-    let Ok(page) = result.inspect_err(|err| {
-        warn!("Failed to resolve Spotify tracks with ReccoBeats: {err}");
-    }) else {
+        .and_then(response_json::<ReccoPage<ReccoTrack>>)
+        .inspect_err(|err| warn!("Failed to resolve Spotify tracks with ReccoBeats: {err}"))
+    else {
         return;
     };
     for recco_track in page.content {
@@ -770,14 +769,11 @@ fn resolve_audio_features(
             .call()
             .map_err(boxed_error)
             .and_then(response_json)
-            .inspect_err(|err| {
-                warn!("Failed to fetch ReccoBeats features for {spotify_id}: {err}");
-            })
+            .inspect_err(|err| warn!("Failed to fetch ReccoBeats features for {spotify_id}: {err}"))
         {
-            cache.insert(spotify_id, Some(features));
+            cache.insert(spotify_id, features);
         }
     }
-    cache.extend(missing.drain().map(|id| (id, None)));
 }
 
 impl SpotifyWorker {

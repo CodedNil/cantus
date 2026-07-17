@@ -11,7 +11,7 @@ use crate::{
 };
 use arrayvec::ArrayVec;
 use cantus_shared::{
-    GlobalUniforms, ICON_SPACING, MAX_PILL_PLAYLIST_ICONS, PackedAudioFeatures, Particle,
+    AudioFeatures, GlobalUniforms, ICON_SPACING, MAX_PILL_PLAYLIST_ICONS, Particle,
     PlayheadUniforms, StatusPill, TrackPill, WeatherPill, approach,
 };
 use glam::{FloatExt, Vec2, vec2};
@@ -31,8 +31,15 @@ const SPARK_VELOCITY_Y: f32 = 5.0;
 /// Lifetime range for individual particles, in seconds.
 const SPARK_LIFETIME: Range<f32> = 1.2..1.5;
 
-const DEFAULT_AUDIO_FEATURES: PackedAudioFeatures =
-    PackedAudioFeatures::new([128, 128, 77, 102], [128, 51, 26, 213]);
+const DEFAULT_AUDIO_FEATURES: AudioFeatures = AudioFeatures {
+    energy: 0.5,
+    danceability: 0.5,
+    acousticness: 0.3,
+    tempo: 120.0,
+    valence: 0.5,
+    instrumentalness: 0.1,
+    loudness: -10.0,
+};
 
 const PLAYHEAD_START_DURATION: f32 = 0.7;
 const PLAYHEAD_TRANSITION_SPEED: f32 = 5.5;
