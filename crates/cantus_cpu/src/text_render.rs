@@ -12,15 +12,28 @@ use wgpu::{
     TextureUsages, TextureView, TextureViewDescriptor,
 };
 
-const FONT_SIZE: f32 = 16.0;
-const FONT_SIZE_SMALL: f32 = 14.0;
 const FONT_DATA: &[u8] = include_bytes!("../../../assets/NotoSans-Variable.ttf");
-const FONT_WEIGHTS: [f32; 2] = [700.0, 600.0];
 
 /// Size of the glyph atlas texture (square, in pixels).
 const ATLAS_PADDING: u32 = 2;
 const RASTER_OVERSAMPLE: f32 = 2.5;
 const SCALE_STEPS: f32 = 4.0;
+
+#[derive(Clone, Copy)]
+pub struct TextStyle {
+    size: f32,
+    weight: u16,
+}
+
+impl TextStyle {
+    pub const PRIMARY: Self = Self::new(16.0, 700);
+    pub const DETAILS: Self = Self::new(14.0, 700);
+    pub const WEATHER: Self = Self::new(24.0, 600);
+
+    const fn new(size: f32, weight: u16) -> Self {
+        Self { size, weight }
+    }
+}
 
 #[derive(Clone, Copy)]
 struct AtlasEntry {
@@ -38,7 +51,7 @@ pub struct TextRenderer {
     /// Glyph atlas texture.
     atlas: Texture,
     /// Packed glyph data keyed by glyph ID and raster size.
-    atlas_cache: HashMap<(bool, GlyphId, u16), AtlasEntry>,
+    atlas_cache: HashMap<(u16, GlyphId, u16), AtlasEntry>,
     /// Current write cursor in the atlas (x, y, `row_height`).
     atlas_cursor: (u32, u32, u32),
     shaped: Vec<(GlyphId, Vec2)>,
@@ -84,19 +97,19 @@ impl TextRenderer {
 
     pub fn track_width(&mut self, track: &Track) -> f32 {
         let text_width = self
-            .shape(song_name(track), FONT_SIZE, false)
+            .shape(song_name(track), TextStyle::PRIMARY)
             .0
-            .max(self.shape(&track_details(track), FONT_SIZE_SMALL, false).0);
+            .max(self.shape(&track_details(track), TextStyle::DETAILS).0);
         text_width + self.panel_height + 20.0
     }
 
-    fn shape(&mut self, text: &str, size: f32, weather: bool) -> (f32, f32) {
+    fn shape(&mut self, text: &str, style: TextStyle) -> (f32, f32) {
         self.shaped.clear();
         let (context, output) = (&mut self.shape_context, &mut self.shaped);
         let mut shaper = context
             .builder(self.font)
-            .size(size * self.height_to_em)
-            .variations([("wght", FONT_WEIGHTS[usize::from(weather)])])
+            .size(style.size * self.height_to_em)
+            .variations([("wght", f32::from(style.weight))])
             .build();
         let metrics = shaper.metrics();
         shaper.add_str(text);
@@ -110,7 +123,7 @@ impl TextRenderer {
         (x, (metrics.ascent - metrics.descent) * 0.5)
     }
 
-    fn rasterize_glyph(&mut self, queue: &Queue, key: (bool, GlyphId, u16)) -> Option<AtlasEntry> {
+    fn rasterize_glyph(&mut self, queue: &Queue, key: (u16, GlyphId, u16)) -> Option<AtlasEntry> {
         if let Some(&entry) = self.atlas_cache.get(&key) {
             return Some(entry);
         }
@@ -119,7 +132,7 @@ impl TextRenderer {
             .scale_context
             .builder(self.font)
             .size(f32::from(key.2) / SCALE_STEPS * self.height_to_em)
-            .variations([("wght", FONT_WEIGHTS[usize::from(key.0)])])
+            .variations([("wght", f32::from(key.0))])
             .build();
         let image = Render::new(&[Source::Outline]).render(&mut scaler, key.1)?;
         let (width, height) = (image.placement.width, image.placement.height);
@@ -185,12 +198,11 @@ impl TextRenderer {
         let alpha = alpha.clamp(0.0, 1.0);
         let top = PANEL_START + (self.panel_height * 0.26).floor();
         let bottom = PANEL_START + (self.panel_height * 0.57).floor();
-        let mut line = |text: &str, y, size| {
-            let width = self.shape(text, size, false).0;
+        let mut line = |text: &str, y, style| {
+            let (width, baseline) = self.shape(text, style);
             let fits = width <= available_width;
             self.queue_glyphs(
                 queue,
-                text,
                 vec2(
                     if fits {
                         (left + right - width) * 0.5
@@ -199,40 +211,36 @@ impl TextRenderer {
                     },
                     y,
                 ),
-                size,
+                style,
+                baseline,
                 alpha,
-                false,
                 if fits { f32::MAX } else { right },
                 render_scale,
             );
         };
-        line(song_name(track), top, FONT_SIZE);
-        line(&track_details(track), bottom, FONT_SIZE_SMALL);
+        line(song_name(track), top, TextStyle::PRIMARY);
+        line(&track_details(track), bottom, TextStyle::DETAILS);
     }
 
-    pub fn render_label(
+    pub fn render_centered_label(
         &mut self,
         queue: &Queue,
         text: &str,
         x: f32,
         width: f32,
-        max_size: f32,
+        style: TextStyle,
         render_scale: f32,
-        weather: bool,
     ) {
-        let measured = self.shape(text, max_size, weather).0;
-        let size = max_size * ((width - 20.0) / measured.max(1.0)).min(1.0);
-        let measured = measured * size / max_size;
+        let (measured, baseline) = self.shape(text, style);
         self.queue_glyphs(
             queue,
-            text,
             vec2(
                 x + (width - measured) * 0.5,
                 PANEL_START + self.panel_height * 0.46,
             ),
-            size,
+            style,
+            baseline,
             1.0,
-            weather,
             f32::MAX,
             render_scale,
         );
@@ -241,26 +249,25 @@ impl TextRenderer {
     fn queue_glyphs(
         &mut self,
         queue: &Queue,
-        text: &str,
         origin: Vec2,
-        px_size: f32,
+        style: TextStyle,
+        baseline: f32,
         alpha: f32,
-        weather: bool,
         clip_right: f32,
         render_scale: f32,
     ) {
-        let scale_quarters = (px_size * render_scale * RASTER_OVERSAMPLE * SCALE_STEPS)
+        let scale_quarters = (style.size * render_scale * RASTER_OVERSAMPLE * SCALE_STEPS)
             .round()
             .max(SCALE_STEPS) as u16;
-        let glyph_scale = px_size * SCALE_STEPS / f32::from(scale_quarters);
-        let baseline_y = origin.y + self.shape(text, px_size, weather).1;
+        let glyph_scale = style.size * SCALE_STEPS / f32::from(scale_quarters);
+        let baseline_y = origin.y + baseline;
 
         for index in 0..self.shaped.len() {
             if self.glyphs.len() == MAX_GLYPH_INSTANCES {
                 break;
             }
             let (id, offset) = self.shaped[index];
-            let key = (weather, id, scale_quarters);
+            let key = (style.weight, id, scale_quarters);
             let Some(glyph) = self.rasterize_glyph(queue, key) else {
                 continue;
             };

@@ -1,7 +1,6 @@
-use core::f32::consts::TAU;
-
 use crate::{pill_coverage, pill_fragment, pill_interaction, pill_sheen, pill_vertex};
 use cantus_shared::{GlobalUniforms, WeatherCondition as Condition, WeatherPill, smoothstep};
+use core::f32::consts::TAU;
 use spirv_std::{
     arch::kill,
     glam::{FloatExt, Vec2, Vec3, Vec4, vec2, vec3},
@@ -172,11 +171,7 @@ fn sky(p: Vec2, size: Vec2, pill: WeatherPill, time: f32) -> Vec3 {
     let weather = if edge <= 0.6 {
         pill.conditions[0]
     } else {
-        let (from, start) = if edge <= 0.8 {
-            (0, 0.6)
-        } else {
-            (1, 0.8)
-        };
+        let (from, start) = if edge <= 0.8 { (0, 0.6) } else { (1, 0.8) };
         let (from, to) = (pill.conditions[from], pill.conditions[from + 1]);
         let blend = smoothstep(start, start + 0.2, edge);
         Condition {

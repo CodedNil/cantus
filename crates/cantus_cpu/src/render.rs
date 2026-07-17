@@ -6,7 +6,7 @@ use crate::{
     model::{CondensedPlaylist, Rect, Track, playlist_icons},
     pipelines::{IMAGE_SIZE, MAX_TEXTURE_IMAGES},
     status::{self, GAP},
-    text_render::TextRenderer,
+    text_render::{TextRenderer, TextStyle},
     weather,
 };
 use cantus_shared::{
@@ -422,19 +422,24 @@ impl CantusApp {
         let (weather, weather_label) = self.weather.scene(weather_x);
         let scale = self.render.scale;
         let gpu = self.render.gpu.as_mut().unwrap();
-        gpu.text_renderer.render_label(
+        gpu.text_renderer.render_centered_label(
             &gpu.queue,
             &weather_label,
             weather_x,
             weather::WIDTH,
-            24.0,
+            TextStyle::WEATHER,
             scale,
-            true,
         );
         let weather_glyph_end = gpu.text_renderer.glyphs.len() as u32;
         self.status.labels(self.render.status, |text, x, width| {
-            gpu.text_renderer
-                .render_label(&gpu.queue, text, x, width, 16.0, scale, false);
+            gpu.text_renderer.render_centered_label(
+                &gpu.queue,
+                text,
+                x,
+                width,
+                TextStyle::PRIMARY,
+                scale,
+            );
         });
         let label_end = gpu.text_renderer.glyphs.len() as u32;
 

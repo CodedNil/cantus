@@ -25,7 +25,6 @@ const PANEL_START: f32 = 6.0;
 const PANEL_EXTENSION: f32 = 44.0;
 const PARTICLE_COUNT: usize = 64;
 const MAX_RENDER_INSTANCES: usize = 256;
-const MAX_HISTORY_TRACKS: usize = 6;
 const TRACK_SPACING_MS: f32 = 4000.0;
 
 type Update<T> = Box<dyn FnOnce(&mut T) + Send>;

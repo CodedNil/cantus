@@ -5,11 +5,13 @@ use glam::Vec2;
 use serde::{Deserialize, Deserializer, de};
 use std::{
     collections::HashSet,
+    mem,
     sync::Arc,
     time::{Duration, Instant},
 };
 
 pub const NUM_SWATCHES: usize = 4;
+const MAX_HISTORY_TRACKS: usize = 6;
 
 pub type TrackId = ArrayString<22>;
 pub type PlaylistId = ArrayString<22>;
@@ -59,6 +61,40 @@ impl PlaybackState {
             } else {
                 0.0
             }
+    }
+
+    pub fn replace_queue(
+        &mut self,
+        new_queue: Vec<Track>,
+        current_id: Option<TrackId>,
+        context_changed: bool,
+    ) {
+        let mut old_queue = mem::take(&mut self.queue);
+        let history_len = track_index(&old_queue, current_id, &new_queue[0].name)
+            .filter(|_| !context_changed)
+            .unwrap_or(0);
+        let mut remaining = old_queue.split_off(history_len);
+        let mut reconciled = old_queue.split_off(history_len.saturating_sub(MAX_HISTORY_TRACKS));
+        self.queue_index = reconciled.len();
+
+        for mut track in new_queue {
+            if let Some(index) = remaining.iter().position(|old| old.id == track.id) {
+                let old = remaining.swap_remove(index);
+                track.art = old.art;
+                track.runtime = old.runtime;
+                track.audio_features = old.audio_features;
+            } else if let Some(art) = remaining
+                .iter()
+                .chain(&old_queue)
+                .chain(&reconciled)
+                .find_map(|old| (old.album.image == track.album.image).then_some(&old.art))
+                && let ArtState::Ready(art) = art
+            {
+                track.art = ArtState::Ready(Arc::clone(art));
+            }
+            reconciled.push(track);
+        }
+        self.queue = reconciled;
     }
 }
 
@@ -222,4 +258,9 @@ where
         .into_iter()
         .next()
         .ok_or_else(|| de::Error::custom("artists array is empty"))
+}
+
+pub fn track_index(queue: &[Track], id: Option<TrackId>, name: &str) -> Option<usize> {
+    id.and_then(|track_id| queue.iter().position(|track| track.id == Some(track_id)))
+        .or_else(|| queue.iter().position(|track| track.name == name))
 }

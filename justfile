@@ -5,6 +5,14 @@ options_output := "generated-options.nix"
 
 default: run
 
+fmt:
+    cargo fmt --all
+    cargo fmt --manifest-path crates/cantus_gpu/Cargo.toml
+
+update:
+    cargo update
+    cargo update --manifest-path crates/cantus_gpu/Cargo.toml
+
 options:
     @if [ ! -f "{{ options_output }}" ] || [ "{{ options_input }}" -nt "{{ options_output }}" ]; then \
         cargo run -q -p cantus_cpu --features generate-nix --bin generate-options; \

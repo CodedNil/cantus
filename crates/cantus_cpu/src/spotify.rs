@@ -1,8 +1,11 @@
 use crate::{
-    AppUpdater, MAX_HISTORY_TRACKS, Update,
+    AppUpdater, Update,
     art::{self, ArtState},
     config::{self, Config},
-    model::{CondensedPlaylist, PlaylistId, PlaylistTracks, Track, TrackId, deserialize_images},
+    model::{
+        CondensedPlaylist, PlaylistId, PlaylistTracks, Track, TrackId, deserialize_images,
+        track_index,
+    },
     send_update,
 };
 use arrayvec::{ArrayString, ArrayVec};
@@ -172,10 +175,8 @@ fn prompt_for_token(
     expected_state: &str,
 ) -> ClientResult<OAuthCredentials> {
     match Command::new("xdg-open").arg(url).spawn() {
-        Ok(_) => println!("Opened {url} in your browser."),
-        Err(err) => eprintln!(
-            "Error when trying to open an URL in your browser: {err:?}. Please navigate here manually: {url}"
-        ),
+        Ok(_) => info!(%url, "Opened Spotify authorization URL in browser"),
+        Err(err) => warn!(%err, %url, "Failed to open Spotify authorization URL; open it manually"),
     }
 
     let listener = TcpListener::bind((REDIRECT_HOST, REDIRECT_PORT))?;
@@ -569,14 +570,13 @@ fn set_liked_state(client: &mut SpotifyClient, track_id: TrackId, should_like: b
     }
 }
 
-fn track_index(queue: &[Track], id: Option<TrackId>, name: &str) -> Option<usize> {
-    id.and_then(|track_id| queue.iter().position(|track| track.id == Some(track_id)))
-        .or_else(|| queue.iter().position(|track| track.name == name))
-}
-
 impl SpotifyWorker {
+    /// Refreshes playback progress, volume, playing state, and context.
+    ///
+    /// Uses Spotify's [Get Playback State] endpoint.
+    ///
+    /// [Get Playback State]: https://developer.spotify.com/documentation/web-api/reference/get-information-about-the-users-current-playback
     fn poll_playback(&mut self) {
-        // https://developer.spotify.com/documentation/web-api/reference/get-information-about-the-users-current-playback
         let Some(current_playback) =
             self.client
                 .api_json_payload::<CurrentPlaybackContext>("me/player", &[], "playback")
@@ -586,11 +586,10 @@ impl SpotifyWorker {
 
         let now = Instant::now();
         let new_context = current_playback.context.as_ref().map(|c| &c.uri);
-        let queue_deadline = now.checked_sub(Duration::from_mins(1)).unwrap_or(now);
         if self.current_context.as_ref() != new_context {
             self.context_updated = true;
             self.current_context = new_context.map(String::from);
-            self.last_grabbed_queue = queue_deadline;
+            self.last_grabbed_queue = now.checked_sub(Duration::from_mins(1)).unwrap_or(now);
         }
         send_update(&self.updater, move |app| {
             let state = &mut app.playback;
@@ -610,13 +609,18 @@ impl SpotifyWorker {
             }
         });
     }
+
+    /// Refreshes the current and upcoming tracks while preserving local runtime state and history.
+    ///
+    /// Uses Spotify's [Get the User's Queue] endpoint.
+    ///
+    /// [Get the User's Queue]: https://developer.spotify.com/documentation/web-api/reference/get-queue
     fn poll_queue(&mut self) {
         let now = Instant::now();
         if now < self.last_grabbed_queue + Duration::from_secs(15) {
             return;
         }
 
-        // https://developer.spotify.com/documentation/web-api/reference/get-queue
         let Some(q) =
             self.client
                 .api_json_payload::<CurrentUserQueue>("me/player/queue", &[], "queue")
@@ -646,44 +650,8 @@ impl SpotifyWorker {
         self.context_updated = false;
         self.last_grabbed_queue = Instant::now();
         send_update(&self.updater, move |app| {
-            let state = &mut app.playback;
-            let current_title = &new_queue[0].name;
-            let art_by_url: HashMap<_, _> = state
-                .queue
-                .iter()
-                .filter_map(|track| match (&track.album.image, &track.art) {
-                    (Some(url), ArtState::Ready(art)) => Some((url.clone(), Arc::clone(art))),
-                    _ => None,
-                })
-                .collect();
-            let mut old_queue = mem::take(&mut state.queue);
-            let history_len = if context_updated {
-                0
-            } else {
-                track_index(&old_queue, current_track_id, current_title).unwrap_or(0)
-            };
-            let history_start = history_len.saturating_sub(MAX_HISTORY_TRACKS);
-            let mut remaining = old_queue.split_off(history_len);
-            let mut reconciled = old_queue.split_off(history_start);
-            let retained_history_len = reconciled.len();
-            for mut track in new_queue {
-                if let Some(index) = remaining.iter().position(|old| old.id == track.id) {
-                    let old = remaining.swap_remove(index);
-                    track.art = old.art;
-                    track.runtime = old.runtime;
-                    track.audio_features = old.audio_features;
-                } else if let Some(art) = track
-                    .album
-                    .image
-                    .as_ref()
-                    .and_then(|url| art_by_url.get(url))
-                {
-                    track.art = ArtState::Ready(Arc::clone(art));
-                }
-                reconciled.push(track);
-            }
-            state.queue = reconciled;
-            state.queue_index = retained_history_len;
+            app.playback
+                .replace_queue(new_queue, current_track_id, context_updated);
         });
 
         if self.features.send(feature_ids).is_err() {
@@ -761,8 +729,13 @@ fn resolve_audio_features(
 }
 
 impl SpotifyWorker {
+    /// Refreshes configured and rating playlists whose snapshots have changed.
+    ///
+    /// Uses Spotify's [Get Current User's Playlists] endpoint and delegates changed playlist
+    /// contents to [`fetch_playlist_tracks`].
+    ///
+    /// [Get Current User's Playlists]: https://developer.spotify.com/documentation/web-api/reference/get-a-list-of-current-users-playlists
     fn poll_playlists(&mut self) {
-        // https://developer.spotify.com/documentation/web-api/reference/get-a-list-of-current-users-playlists
         let Some(playlists) = self.client.api_json_payload::<Page<Option<Playlist>>>(
             "me/playlists",
             &[("limit", "50")],
@@ -835,6 +808,11 @@ fn rating_index(enabled: bool, name: &str) -> Option<u8> {
         .map(|index| index as u8)
 }
 
+/// Fetches every track ID in a playlist, following Spotify's paginated response.
+///
+/// Uses Spotify's [Get Playlist Items] endpoint.
+///
+/// [Get Playlist Items]: https://developer.spotify.com/documentation/web-api/reference/get-playlists-items
 fn fetch_playlist_tracks(
     client: &mut SpotifyClient,
     playlist: &Playlist,
