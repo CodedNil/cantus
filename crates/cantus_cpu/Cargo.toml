@@ -29,7 +29,7 @@ wgpu = { version = "30.0.0", default-features = false, features = [
     "std",
     "vulkan",
 ] }
-ab_glyph = { version = "0.2.32", default-features = false, features = ["std", "variable-fonts"] }
+swash = { version = "0.2.9", default-features = false, features = ["std", "render"] }
 
 image = { version = "0.25.10", default-features = false, features = [
     "jpeg",

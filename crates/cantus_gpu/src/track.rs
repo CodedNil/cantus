@@ -2,10 +2,8 @@ use crate::{
     pill_coverage, pill_fragment, pill_interaction, pill_sheen, pixel_to_ndc, quad_coord,
     sd_capsule_box, sd_star, smooth_union, unpack3x8unorm,
 };
-use cantus_shared::{
-    GlobalUniforms, ICON_WIDTH, MAX_PILL_PLAYLIST_ICONS, TrackPill, smoothstep,
-};
-use core::f32::consts::TAU;
+use cantus_shared::{GlobalUniforms, ICON_WIDTH, MAX_PILL_PLAYLIST_ICONS, TrackPill, smoothstep};
+use core::f32::consts::{FRAC_PI_2, TAU};
 use spirv_std::{
     Sampler,
     arch::{Derivative, kill},
@@ -17,8 +15,10 @@ use spirv_std::{
 #[cfg(target_arch = "spirv")]
 use spirv_std::num_traits::Float;
 
-fn noise(point: Vec2, seed: f32) -> f32 {
-    ((point.dot(vec2(127.1, 311.7)) + seed).sin() * 43_758.547).fract()
+fn plasma_field(uv: Vec2, packed: u32, x: f32, y: f32, phase: f32) -> Vec4 {
+    let wave = (uv.dot(vec2(x, y)) + phase).sin() * 0.5 + 0.5;
+    let weight = (0.12 + wave * wave) * (0.25 + (packed >> 24) as f32 / 255.0 * 3.0);
+    (unpack3x8unorm(packed) * weight).extend(weight)
 }
 
 fn icon_local(pixel_pos: Vec2, center: Vec2, global: &GlobalUniforms) -> (Vec2, Vec2, f32, f32) {
@@ -136,29 +136,47 @@ pub fn fs_track(
     );
     let (mask, shadow) = pill_coverage(dist);
 
+    // Weight overlapping wave fields by each palette colour's prevalence.
     let seed = (pill.colors[0] % 1000) as f32 * 0.013;
     let audio = pill.audio_features.decode();
-    let loudness = ((audio.loudness + 60.0) / 60.0).clamp(0.0, 1.0);
+    let turbulence = audio.turbulence();
     let beat = (global.time * audio.tempo_hz() * TAU).sin() * 0.5 + 0.5;
-    let beat = beat * beat * audio.danceability;
+    let beat = beat * beat * audio.danceability * (0.025 + audio.energy * 0.055);
+    let lens_warp = (1.0 + dist.min(0.0) / 120.0).clamp(0.0, 1.0);
+    let deformation = local_centered * lens_warp * lens_warp * 0.6
+        + interaction.ripple
+        + interaction.mouse * 0.03;
     let flow_time = global.time
-        * (0.08 + audio.energy * 0.2 + audio.tempo_normalized() * 0.12 - audio.acousticness * 0.05)
+        * (0.12 + audio.energy * 0.25 + audio.tempo_normalized() * 0.12
+            - audio.instrumentalness * 0.035
+            - audio.acousticness * 0.025)
         + seed;
-    let uv = interaction.refract(local_pixel, pill_size, dist);
-    let scale = 4.0 - audio.instrumentalness * 1.4;
-    let warp = vec2(
-        (uv.y * scale + flow_time).sin(),
-        (uv.x * (scale + 2.0) - flow_time * 0.8).cos(),
-    ) * (0.025 + audio.turbulence() * 0.08 + beat * 0.025);
-    let uv = uv + warp;
-    let blend_x = (uv.x * scale + flow_time * 0.35).sin() * 0.5 + 0.5;
-    let blend_y = (uv.y * (scale + 1.0) - flow_time * 0.25).cos() * 0.5 + 0.5;
-    let mut color = unpack3x8unorm(pill.colors[0])
-        .lerp(unpack3x8unorm(pill.colors[1]), blend_x)
-        .lerp(
-            unpack3x8unorm(pill.colors[2]).lerp(unpack3x8unorm(pill.colors[3]), blend_y),
-            (blend_x + blend_y) * 0.25,
+    let frequency =
+        (pill_size.x / pill_size.y * (0.5 + seed.fract() * 0.12 + turbulence * 0.18)).max(1.7);
+    let field_uv =
+        (local_uv.clamp(Vec2::ZERO, Vec2::ONE) - deformation * 0.08) * vec2(frequency, 1.6);
+    let warped_uv = field_uv
+        + vec2(
+            (field_uv.y * 2.7 + flow_time).sin() + (field_uv.x * 1.3 - flow_time * 0.7).cos(),
+            (field_uv.x * 2.3 - flow_time * 0.8).cos() + (field_uv.y * 1.7 + flow_time * 0.6).sin(),
+        ) * (0.14 + turbulence * 0.2 + beat);
+    let weighted = plasma_field(warped_uv, pill.colors[0], 2.1, 0.7, flow_time)
+        + plasma_field(
+            warped_uv,
+            pill.colors[1],
+            0.6,
+            -2.4,
+            flow_time * -0.8 + seed + FRAC_PI_2,
+        )
+        + plasma_field(warped_uv, pill.colors[2], -1.5, 1.9, flow_time * 0.65 + 2.0)
+        + plasma_field(
+            warped_uv,
+            pill.colors[3],
+            2.4,
+            1.6,
+            flow_time * -0.55 + seed + FRAC_PI_2,
         );
+    let mut color = weighted.truncate() / weighted.w;
 
     let luma = color.dot(vec3(0.2126, 0.7152, 0.0722));
     let played = smoothstep(
@@ -167,21 +185,12 @@ pub fn fs_track(
         pixel_pos.x,
     );
     color = Vec3::splat(luma)
-        .lerp(color, 1.25 + audio.valence * 0.65)
+        .lerp(color, 1.55 + audio.valence * 0.4)
         .clamp(Vec3::splat(0.035), Vec3::splat(0.92))
         * (0.52 / luma.max(0.001)).min(1.0)
-        * (0.88 + loudness * 0.12 + beat * (0.04 + audio.energy * 0.09))
+        * (0.96 + audio.valence * 0.06 + beat * 0.5)
         * (0.84 + smoothstep(0.45, 1.0, stretched_uv_y) * 0.1)
         * (1.0 - 0.4 * played);
-
-    let glitter_uv = local_pixel / (9.0 - audio.acousticness * 3.0)
-        + vec2(global.time * 0.025, -global.time * 0.04);
-    let glitter_seed = noise(glitter_uv.floor(), seed);
-    let glitter = smoothstep(0.45, 0.9, audio.acousticness)
-        * smoothstep(0.94, 1.0, glitter_seed)
-        * (1.0 - smoothstep(0.08, 0.35, (glitter_uv.fract() - 0.5).length()))
-        * ((global.time * (1.5 + glitter_seed) + glitter_seed * TAU).sin() * 0.5 + 0.5);
-    color = color.lerp(Vec3::ONE, glitter * 0.7);
 
     let image_left = pill_size.x - pill_size.y;
     if pill.image_index >= 0 && local_pixel.x >= image_left {

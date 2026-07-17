@@ -1,8 +1,12 @@
 use crate::{PANEL_START, model::Track};
-use ab_glyph::{Font, FontArc, FontRef, Glyph, GlyphId, PxScale, ScaleFont, VariableFont, point};
 use cantus_shared::{GLYPH_ATLAS_SIZE, GlyphInstance, MAX_GLYPH_INSTANCES, pack_u16x2};
 use glam::{Vec2, vec2};
 use std::collections::HashMap;
+use swash::{
+    FontRef, GlyphId,
+    scale::{Render, ScaleContext, Source},
+    shape::ShapeContext,
+};
 use wgpu::{
     Device, Extent3d, Queue, Texture, TextureDescriptor, TextureDimension, TextureFormat,
     TextureUsages, TextureView, TextureViewDescriptor,
@@ -11,10 +15,11 @@ use wgpu::{
 const FONT_SIZE: f32 = 16.0;
 const FONT_SIZE_SMALL: f32 = 14.0;
 const FONT_DATA: &[u8] = include_bytes!("../../../assets/NotoSans-Variable.ttf");
+const FONT_WEIGHTS: [f32; 2] = [700.0, 600.0];
 
 /// Size of the glyph atlas texture (square, in pixels).
-const ATLAS_PADDING: u32 = 1;
-const RASTER_OVERSAMPLE: f32 = 2.0;
+const ATLAS_PADDING: u32 = 2;
+const RASTER_OVERSAMPLE: f32 = 2.5;
 const SCALE_STEPS: f32 = 4.0;
 
 #[derive(Clone, Copy)]
@@ -26,19 +31,25 @@ struct AtlasEntry {
 
 pub struct TextRenderer {
     panel_height: f32,
-    fonts: [FontArc; 2],
+    font: FontRef<'static>,
+    height_to_em: f32,
+    scale_context: ScaleContext,
+    shape_context: ShapeContext,
     /// Glyph atlas texture.
     atlas: Texture,
     /// Packed glyph data keyed by glyph ID and raster size.
     atlas_cache: HashMap<(bool, GlyphId, u16), AtlasEntry>,
     /// Current write cursor in the atlas (x, y, `row_height`).
     atlas_cursor: (u32, u32, u32),
+    shaped: Vec<(GlyphId, Vec2)>,
     /// Queued glyph instances for the current frame.
     pub glyphs: Vec<GlyphInstance>,
 }
 
 impl TextRenderer {
     pub fn new(device: &Device, panel_height: f32) -> Self {
+        let font = FontRef::from_index(FONT_DATA, 0).unwrap();
+        let metrics = font.metrics(&[]);
         let atlas = device.create_texture(&TextureDescriptor {
             label: Some("Glyph Atlas"),
             size: Extent3d {
@@ -55,10 +66,14 @@ impl TextRenderer {
         });
         Self {
             panel_height,
-            fonts: [variable_font(700.0), variable_font(450.0)],
+            font,
+            height_to_em: f32::from(metrics.units_per_em) / (metrics.ascent + metrics.descent),
+            scale_context: ScaleContext::new(),
+            shape_context: ShapeContext::new(),
             atlas,
             atlas_cache: HashMap::new(),
             atlas_cursor: (0, 0, 0),
+            shaped: Vec::new(),
             glyphs: Vec::with_capacity(MAX_GLYPH_INSTANCES),
         }
     }
@@ -67,11 +82,35 @@ impl TextRenderer {
         self.atlas.create_view(&TextureViewDescriptor::default())
     }
 
-    pub fn track_width(&self, track: &Track) -> f32 {
-        let text_width = measure_text(&self.fonts[0], song_name(track), FONT_SIZE).max(
-            measure_text(&self.fonts[0], &track_details(track), FONT_SIZE_SMALL),
-        );
+    pub fn track_width(&mut self, track: &Track) -> f32 {
+        let text_width = self
+            .measure(song_name(track), FONT_SIZE, false)
+            .max(self.measure(&track_details(track), FONT_SIZE_SMALL, false));
         text_width + self.panel_height + 20.0
+    }
+
+    fn measure(&mut self, text: &str, size: f32, weather: bool) -> f32 {
+        self.shape(text, size, weather).0
+    }
+
+    fn shape(&mut self, text: &str, size: f32, weather: bool) -> (f32, f32) {
+        self.shaped.clear();
+        let (context, output) = (&mut self.shape_context, &mut self.shaped);
+        let mut shaper = context
+            .builder(self.font)
+            .size(size * self.height_to_em)
+            .variations([("wght", FONT_WEIGHTS[usize::from(weather)])])
+            .build();
+        let metrics = shaper.metrics();
+        shaper.add_str(text);
+        let mut x = 0.0;
+        shaper.shape_with(|cluster| {
+            for glyph in cluster.glyphs {
+                output.push((glyph.id, vec2(x + glyph.x, -glyph.y)));
+                x += glyph.advance;
+            }
+        });
+        (x, (metrics.ascent - metrics.descent) * 0.5)
     }
 
     fn rasterize_glyph(&mut self, queue: &Queue, key: (bool, GlyphId, u16)) -> Option<AtlasEntry> {
@@ -79,17 +118,14 @@ impl TextRenderer {
             return Some(entry);
         }
 
-        let scale = PxScale::from(f32::from(key.2) / SCALE_STEPS);
-        let glyph = Glyph {
-            id: key.1,
-            scale,
-            position: point(0.0, 0.0),
-        };
-        let font = &self.fonts[usize::from(key.0)];
-        let outlined = font.as_scaled(scale).outline_glyph(glyph)?;
-        let bounds = outlined.px_bounds();
-        let width = bounds.width() as u32;
-        let height = bounds.height() as u32;
+        let mut scaler = self
+            .scale_context
+            .builder(self.font)
+            .size(f32::from(key.2) / SCALE_STEPS * self.height_to_em)
+            .variations([("wght", FONT_WEIGHTS[usize::from(key.0)])])
+            .build();
+        let image = Render::new(&[Source::Outline]).render(&mut scaler, key.1)?;
+        let (width, height) = (image.placement.width, image.placement.height);
 
         if width == 0 || height == 0 {
             return None;
@@ -112,11 +148,6 @@ impl TextRenderer {
         let row_h = row_h.max(height + ATLAS_PADDING * 2);
         self.atlas_cursor = (cx + width + ATLAS_PADDING * 2, cy, row_h);
 
-        let mut buffer = vec![0u8; (width * height) as usize];
-        outlined.draw(|x, y, c| {
-            buffer[y as usize * width as usize + x as usize] = (c * 255.0).round() as u8;
-        });
-
         queue.write_texture(
             wgpu::TexelCopyTextureInfo {
                 texture: &self.atlas,
@@ -124,7 +155,7 @@ impl TextRenderer {
                 aspect: wgpu::TextureAspect::All,
                 origin: wgpu::Origin3d { x: gx, y: gy, z: 0 },
             },
-            &buffer,
+            &image.data,
             wgpu::TexelCopyBufferLayout {
                 offset: 0,
                 bytes_per_row: Some(width),
@@ -140,7 +171,7 @@ impl TextRenderer {
         let entry = AtlasEntry {
             pos: [gx, gy],
             size: [width, height],
-            bearing: [bounds.min.x, bounds.min.y],
+            bearing: [image.placement.left as f32, -image.placement.top as f32],
         };
         self.atlas_cache.insert(key, entry);
         Some(entry)
@@ -158,7 +189,7 @@ impl TextRenderer {
         let top = PANEL_START + (self.panel_height * 0.26).floor();
         let bottom = PANEL_START + (self.panel_height * 0.57).floor();
         let mut line = |text: &str, y, size| {
-            let width = measure_text(&self.fonts[0], text, size);
+            let width = self.measure(text, size, false);
             let fits = width <= available_width;
             self.queue_glyphs(
                 queue,
@@ -192,8 +223,7 @@ impl TextRenderer {
         render_scale: f32,
         weather: bool,
     ) {
-        let font = &self.fonts[usize::from(weather)];
-        let measured = measure_text(font, text, max_size);
+        let measured = self.measure(text, max_size, weather);
         let size = max_size * ((width - 20.0) / measured.max(1.0)).min(1.0);
         let measured = measured * size / max_size;
         self.queue_glyphs(
@@ -222,29 +252,25 @@ impl TextRenderer {
         clip_right: f32,
         render_scale: f32,
     ) {
-        let font = &self.fonts[usize::from(weather)];
-        let scaled_font = font.as_scaled(px_size);
-        let baseline_offset = (scaled_font.ascent() + scaled_font.descent()) * 0.5;
-
         let scale_quarters = (px_size * render_scale * RASTER_OVERSAMPLE * SCALE_STEPS)
             .round()
             .max(SCALE_STEPS) as u16;
         let glyph_scale = px_size * SCALE_STEPS / f32::from(scale_quarters);
-        let baseline_y = origin.y + baseline_offset;
+        let baseline_y = origin.y + self.shape(text, px_size, weather).1;
 
-        let font = font.clone();
-        for (glyph_id, glyph_x, _) in layout_glyphs(&font, text, px_size, origin.x) {
+        for index in 0..self.shaped.len() {
             if self.glyphs.len() == MAX_GLYPH_INSTANCES {
                 break;
             }
-            let key = (weather, glyph_id, scale_quarters);
+            let (id, offset) = self.shaped[index];
+            let key = (weather, id, scale_quarters);
             let Some(glyph) = self.rasterize_glyph(queue, key) else {
                 continue;
             };
             self.glyphs.push(GlyphInstance {
                 pos: vec2(
-                    glyph_x + glyph.bearing[0] * glyph_scale,
-                    baseline_y + glyph.bearing[1] * glyph_scale,
+                    origin.x + offset.x + glyph.bearing[0] * glyph_scale,
+                    baseline_y + offset.y + glyph.bearing[1] * glyph_scale,
                 ),
                 size: vec2(
                     glyph.size[0] as f32 * glyph_scale,
@@ -259,12 +285,6 @@ impl TextRenderer {
             });
         }
     }
-}
-
-fn variable_font(weight: f32) -> FontArc {
-    let mut font = FontRef::try_from_slice(FONT_DATA).unwrap();
-    assert!(font.set_variation(b"wght", weight));
-    FontArc::new(font)
 }
 
 fn song_name(track: &Track) -> &str {
@@ -289,30 +309,4 @@ fn track_details(track: &Track) -> String {
         format!("{}s", seconds.round())
     };
     format!("{time}\u{2004}•\u{2004}{}", track.artist.name)
-}
-
-fn measure_text(font: &FontArc, text: &str, px_size: f32) -> f32 {
-    layout_glyphs(font, text, px_size, 0.0)
-        .last()
-        .map_or(0.0, |(_, _, end)| end)
-}
-
-fn layout_glyphs<'a>(
-    font: &'a FontArc,
-    text: &'a str,
-    px_size: f32,
-    mut caret: f32,
-) -> impl Iterator<Item = (GlyphId, f32, f32)> + 'a {
-    let font = font.as_scaled(px_size);
-    let mut previous = None;
-    text.chars().map(move |c| {
-        let glyph_id = font.glyph_id(c);
-        if let Some(prev) = previous {
-            caret += font.kern(prev, glyph_id);
-        }
-        let start = caret;
-        caret += font.h_advance(glyph_id);
-        previous = Some(glyph_id);
-        (glyph_id, start, caret)
-    })
 }

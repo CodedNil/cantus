@@ -4,8 +4,8 @@ use cantus_shared::{
 };
 use spirv_std::{
     Sampler,
-    arch::kill,
-    glam::{Vec2, Vec4},
+    arch::{Derivative, kill},
+    glam::{Vec2, Vec4, vec2},
     image::Image2d,
     spirv,
 };
@@ -40,7 +40,12 @@ pub fn fs_text(
     #[spirv(descriptor_set = 0, binding = 3)] sampler: &Sampler,
     #[spirv(location = 0)] out_color: &mut Vec4,
 ) {
-    let coverage = atlas.sample(*sampler, uv).x;
+    let offset = uv.fwidth() * 0.25;
+    let coverage = (atlas.sample(*sampler, uv - offset).x
+        + atlas.sample(*sampler, uv + offset).x
+        + atlas.sample(*sampler, uv + vec2(offset.x, -offset.y)).x
+        + atlas.sample(*sampler, uv + vec2(-offset.x, offset.y)).x)
+        * 0.25;
     let alpha = coverage * style.y * smoothstep(0.0, 8.0, style.x);
     if alpha <= 0.0 {
         kill();

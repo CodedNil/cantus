@@ -490,7 +490,7 @@ impl CantusApp {
         self.render.track_offset = current_ms;
 
         layout(queue, &self.config, timeline, current_ms);
-        if let Some(gpu) = &self.render.gpu {
+        if let Some(gpu) = &mut self.render.gpu {
             for track in &mut *queue {
                 let expansion = track.runtime.playlist_expansion;
                 if expansion > 0.0 {
