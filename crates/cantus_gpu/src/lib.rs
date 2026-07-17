@@ -91,15 +91,26 @@ pub fn pill_interaction(pixel: Vec2, global: &GlobalUniforms) -> PillInteraction
     let (mouse, mouse_distance) = if global.mouse_pressure > 0.0 {
         let (direction, distance) = direction_and_length(pixel - global.mouse_pos);
         let influence = smoothstep(120.0, 0.0, distance);
-        (direction * influence * influence * global.mouse_pressure, distance)
+        (
+            direction * influence * influence * global.mouse_pressure,
+            distance,
+        )
     } else {
         (Vec2::ZERO, 0.0)
     };
-    PillInteraction { mouse, mouse_distance, ripple, ripple_flash }
+    PillInteraction {
+        mouse,
+        mouse_distance,
+        ripple,
+        ripple_flash,
+    }
 }
 
 pub fn pill_coverage(distance: f32) -> (f32, f32) {
-    ((0.5 - distance).clamp(0.0, 1.0), (1.0 - smoothstep(0.0, 14.0, distance)) * 0.16)
+    (
+        (0.5 - distance).clamp(0.0, 1.0),
+        (1.0 - smoothstep(0.0, 14.0, distance)) * 0.16,
+    )
 }
 
 pub fn pill_sheen(uv_y: f32, distance: f32, interaction: PillInteraction) -> f32 {

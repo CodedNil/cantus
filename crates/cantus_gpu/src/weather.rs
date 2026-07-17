@@ -1,3 +1,5 @@
+use core::f32::consts::TAU;
+
 use crate::{pill_coverage, pill_fragment, pill_interaction, pill_sheen, pill_vertex};
 use cantus_shared::{GlobalUniforms, WeatherCondition as Condition, WeatherPill, smoothstep};
 use spirv_std::{
@@ -58,8 +60,8 @@ fn rain_layer(p: Vec2, time: f32, wind: f32, depth: f32, offset: f32) -> f32 {
     let cell = (q / cell_size).floor();
     let random = vec2(noise(cell), noise(cell + 17.3));
     let local = q - (cell + 0.15 + random * 0.7) * cell_size;
-    let curve = local.x - local.y * slant
-        + (local.y * 0.18 + random.x * 6.283).sin() * (0.2 + wind * 0.35);
+    let curve =
+        local.x - local.y * slant + (local.y * 0.18 + random.x * TAU).sin() * (0.2 + wind * 0.35);
     smoothstep(0.9, 0.12, curve.abs())
         * smoothstep(9.0 + depth * 2.0, 6.0 + depth * 2.0, local.y.abs())
         * smoothstep(0.64 - depth * 0.16, 1.0, noise(cell + 31.7))
@@ -87,8 +89,8 @@ fn scene(p: Vec2, size: Vec2, pill: WeatherPill, weather: Condition, time: f32) 
     );
 
     let sun = vec2(sun_x * size.x, size.y * (0.78 - sun_y * 0.55));
-    let text_clearance = smoothstep(0.48, 0.3, (uv.x - 0.5).abs())
-        * smoothstep(0.4, 0.18, (uv.y - 0.5).abs());
+    let text_clearance =
+        smoothstep(0.48, 0.3, (uv.x - 0.5).abs()) * smoothstep(0.4, 0.18, (uv.y - 0.5).abs());
     let sun_glow = smoothstep(40.0, 0.0, p.distance(sun))
         * daylight
         * (1.0 - cloud * cloud * 0.82)
@@ -108,13 +110,8 @@ fn scene(p: Vec2, size: Vec2, pill: WeatherPill, weather: Condition, time: f32) 
     ) - 0.5;
     let cloud_field = cloud_noise(cloud_uv * 0.82 + drift + turbulence * 0.2) * 0.62
         + cloud_noise(cloud_uv * 0.28 + drift * 0.35 - turbulence * 0.1) * 0.38;
-    let cloud_density = smoothstep(
-        0.5 - cloud * 0.22,
-        0.72 - cloud * 0.08,
-        cloud_field,
-    );
-    let cloud_mask = (cloud * (0.12 + cloud_density * 0.72)
-        + smoothstep(0.76, 1.0, cloud) * 0.15)
+    let cloud_density = smoothstep(0.5 - cloud * 0.22, 0.72 - cloud * 0.08, cloud_field);
+    let cloud_mask = (cloud * (0.12 + cloud_density * 0.72) + smoothstep(0.76, 1.0, cloud) * 0.15)
         .clamp(0.0, 0.94)
         * (0.75 + vertical * 0.25);
     let cloud_light = smoothstep(0.18, 0.88, cloud_field);
@@ -127,8 +124,7 @@ fn scene(p: Vec2, size: Vec2, pill: WeatherPill, weather: Condition, time: f32) 
     color = color.lerp(cloud_color, cloud_mask);
 
     color = color.lerp(vec3(0.1, 0.17, 0.25), rain_amount * 0.14);
-    let rain = (rain_layer(p, time, wind, 1.0, 0.0)
-        + rain_layer(p, time, wind, 0.35, 37.0))
+    let rain = (rain_layer(p, time, wind, 1.0, 0.0) + rain_layer(p, time, wind, 0.35, 37.0))
         * smoothstep(0.05, 0.95, uv.y)
         * rain_amount;
     color += vec3(0.52, 0.72, 0.9) * rain * 0.42;
@@ -147,8 +143,7 @@ fn scene(p: Vec2, size: Vec2, pill: WeatherPill, weather: Condition, time: f32) 
         1.0,
         1.3,
         0.65,
-    ))
-        * snow;
+    )) * snow;
     color = color.lerp(Vec3::splat(0.96), snow.clamp(0.0, 0.92));
 
     let hail = particles(

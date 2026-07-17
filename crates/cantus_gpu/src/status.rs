@@ -12,8 +12,11 @@ fn shape(point: Vec2, size: Vec2, radius: f32) -> f32 {
 
 fn control_icon(point: Vec2, center: Vec2) -> f32 {
     let local = point - center;
-    smoothstep(1.8, 0.0, (local.length() - 8.0).abs())
-        .max(shape(local - vec2(0.0, -5.0), vec2(1.2, 5.0), 0.5))
+    smoothstep(1.8, 0.0, (local.length() - 8.0).abs()).max(shape(
+        local - vec2(0.0, -5.0),
+        vec2(1.2, 5.0),
+        0.5,
+    ))
 }
 
 fn system(p: Vec2, size: Vec2) -> Vec3 {

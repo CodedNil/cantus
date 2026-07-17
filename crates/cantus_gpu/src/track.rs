@@ -185,9 +185,21 @@ pub fn fs_track(
         ) * (0.14 + turbulence * 0.2 + beat);
     let phase = seed + FRAC_PI_2;
     let weighted = plasma_field(warped_uv, pill.colors[0], 2.1, 0.7, flow_time)
-        + plasma_field(warped_uv, pill.colors[1], 0.6, -2.4, flow_time * -0.8 + phase)
+        + plasma_field(
+            warped_uv,
+            pill.colors[1],
+            0.6,
+            -2.4,
+            flow_time * -0.8 + phase,
+        )
         + plasma_field(warped_uv, pill.colors[2], -1.5, 1.9, flow_time * 0.65 + 2.0)
-        + plasma_field(warped_uv, pill.colors[3], 2.4, 1.6, flow_time * -0.55 + phase);
+        + plasma_field(
+            warped_uv,
+            pill.colors[3],
+            2.4,
+            1.6,
+            flow_time * -0.55 + phase,
+        );
     let mut color = weighted.truncate() / weighted.w;
 
     let luma = color.dot(vec3(0.2126, 0.7152, 0.0722));
