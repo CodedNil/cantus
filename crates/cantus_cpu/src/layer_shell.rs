@@ -40,8 +40,8 @@ use wayland_protocols_wlr::layer_shell::v1::client::{
     zwlr_layer_shell_v1::{Layer as LayerStyle, ZwlrLayerShellV1},
     zwlr_layer_surface_v1::{self, Anchor as LayerAnchor, ZwlrLayerSurfaceV1},
 };
-use wgpu::SurfaceTargetUnsafe;
 use wgpu::rwh::{RawDisplayHandle, RawWindowHandle, WaylandDisplayHandle, WaylandWindowHandle};
+use wgpu::{Surface, SurfaceTargetUnsafe};
 
 pub fn run() {
     let connection = Connection::connect_to_env().expect("Failed to connect to Wayland display");
@@ -51,7 +51,7 @@ pub fn run() {
 
     let display_ptr = NonNull::new(connection.backend().display_ptr().cast::<c_void>())
         .expect("Failed to get display pointer");
-    let mut app = LayerShellApp::new(display_ptr);
+    let mut app = LayerShellApp::default();
 
     event_queue
         .roundtrip(&mut app)
@@ -67,7 +67,16 @@ pub fn run() {
     let wl_surface = compositor.create_surface(&qhandle, ());
     let surface_ptr = NonNull::new(wl_surface.id().as_ptr().cast::<c_void>())
         .expect("Failed to get surface pointer");
-    app.surface_ptr = Some(surface_ptr);
+    let target = SurfaceTargetUnsafe::RawHandle {
+        raw_display_handle: Some(RawDisplayHandle::Wayland(WaylandDisplayHandle::new(
+            display_ptr,
+        ))),
+        raw_window_handle: RawWindowHandle::Wayland(WaylandWindowHandle::new(surface_ptr)),
+    };
+    app.pending_surface = Some(
+        unsafe { app.cantus.render.instance.create_surface_unsafe(target) }
+            .expect("Failed to create surface"),
+    );
     let output_index = app
         .cantus
         .config
@@ -75,14 +84,10 @@ pub fn run() {
         .as_ref()
         .and_then(|target| {
             app.outputs.iter().position(|info| {
-                info.name
+                info.identifiers
                     .iter()
-                    .chain(&info.description)
+                    .flatten()
                     .any(|value| value.contains(target))
-                    || matches!(
-                        (&info.make, &info.model),
-                        (Some(make), Some(model)) if format!("{make} {model}").contains(target)
-                    )
             })
         })
         .unwrap_or(0);
@@ -154,10 +159,7 @@ fn add_capsule(region: &WlRegion, rect: Rect) {
 
 struct OutputInfo {
     handle: WlOutput,
-    name: Option<String>,
-    description: Option<String>,
-    make: Option<String>,
-    model: Option<String>,
+    identifiers: [Option<String>; 3],
 }
 
 #[derive(Default)]
@@ -174,7 +176,7 @@ pub struct LayerShellApp {
     outputs: Vec<OutputInfo>,
     last_hitbox_hash: u64,
 
-    surface_ptr: Option<NonNull<c_void>>,
+    pending_surface: Option<Surface<'static>>,
     wl_surface: Option<WlSurface>,
     viewport: Option<WpViewport>,
     fractional: Option<WpFractionalScaleV1>,
@@ -183,7 +185,6 @@ pub struct LayerShellApp {
     fractional_manager: Option<WpFractionalScaleManagerV1>,
     background_effect_manager: Option<ExtBackgroundEffectManagerV1>,
     background_effect: Option<ExtBackgroundEffectSurfaceV1>,
-    display_ptr: Option<NonNull<c_void>>,
 }
 
 macro_rules! dispatch {
@@ -202,13 +203,6 @@ macro_rules! dispatch {
 }
 
 impl LayerShellApp {
-    fn new(display_ptr: NonNull<c_void>) -> Self {
-        Self {
-            display_ptr: Some(display_ptr),
-            ..Self::default()
-        }
-    }
-
     fn request_frame(&mut self, qhandle: &QueueHandle<Self>) {
         if self.frame_callback.is_none()
             && let Some(surface) = &self.wl_surface
@@ -227,18 +221,9 @@ impl LayerShellApp {
             return;
         }
 
-        let (Some(surface_ptr), Some(display_ptr)) = (self.surface_ptr, self.display_ptr) else {
+        let Some(surface) = self.pending_surface.take() else {
             return;
         };
-        let target = SurfaceTargetUnsafe::RawHandle {
-            raw_display_handle: Some(RawDisplayHandle::Wayland(WaylandDisplayHandle::new(
-                display_ptr,
-            ))),
-            raw_window_handle: RawWindowHandle::Wayland(WaylandWindowHandle::new(surface_ptr)),
-        };
-        let surface = unsafe { self.cantus.render.instance.create_surface_unsafe(target) }
-            .expect("Failed to create surface");
-
         self.cantus.configure_render_surface(surface, width, height);
     }
 
@@ -246,11 +231,7 @@ impl LayerShellApp {
         let (buffer_width, buffer_height) = self.cantus.buffer_size();
         self.ensure_surface(buffer_width, buffer_height);
 
-        if self.cantus.render() {
-            tracing::warn!("wgpu surface was lost; recreating it");
-            self.cantus.render.gpu = None;
-            self.ensure_surface(buffer_width, buffer_height);
-        }
+        self.cantus.render();
         self.update_input_region(qhandle);
         self.request_frame(qhandle);
         if let Some(surface) = &self.wl_surface {
@@ -370,12 +351,11 @@ dispatch!(WlOutput, |state, proxy, event, _qhandle| {
     if let Some(info) = state.outputs.iter_mut().find(|info| info.handle.id() == id) {
         match event {
             wl_output::Event::Geometry { make, model, .. } => {
-                info.make = Some(make);
-                info.model = Some(model);
+                info.identifiers[2] = Some(format!("{make} {model}"));
             }
-            wl_output::Event::Name { name } => info.name = Some(name),
+            wl_output::Event::Name { name } => info.identifiers[0] = Some(name),
             wl_output::Event::Description { description } => {
-                info.description = Some(description);
+                info.identifiers[1] = Some(description);
             }
             _ => {}
         }
@@ -478,10 +458,7 @@ dispatch!(WlRegistry, |state, proxy, event, qhandle| {
             "wl_output" => {
                 state.outputs.push(OutputInfo {
                     handle: bind!(WlOutput, version.min(4)),
-                    name: None,
-                    description: None,
-                    make: None,
-                    model: None,
+                    identifiers: [None, None, None],
                 });
             }
             _ => {}

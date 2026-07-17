@@ -84,13 +84,10 @@ impl TextRenderer {
 
     pub fn track_width(&mut self, track: &Track) -> f32 {
         let text_width = self
-            .measure(song_name(track), FONT_SIZE, false)
-            .max(self.measure(&track_details(track), FONT_SIZE_SMALL, false));
+            .shape(song_name(track), FONT_SIZE, false)
+            .0
+            .max(self.shape(&track_details(track), FONT_SIZE_SMALL, false).0);
         text_width + self.panel_height + 20.0
-    }
-
-    fn measure(&mut self, text: &str, size: f32, weather: bool) -> f32 {
-        self.shape(text, size, weather).0
     }
 
     fn shape(&mut self, text: &str, size: f32, weather: bool) -> (f32, f32) {
@@ -189,7 +186,7 @@ impl TextRenderer {
         let top = PANEL_START + (self.panel_height * 0.26).floor();
         let bottom = PANEL_START + (self.panel_height * 0.57).floor();
         let mut line = |text: &str, y, size| {
-            let width = self.measure(text, size, false);
+            let width = self.shape(text, size, false).0;
             let fits = width <= available_width;
             self.queue_glyphs(
                 queue,
@@ -223,7 +220,7 @@ impl TextRenderer {
         render_scale: f32,
         weather: bool,
     ) {
-        let measured = self.measure(text, max_size, weather);
+        let measured = self.shape(text, max_size, weather).0;
         let size = max_size * ((width - 20.0) / measured.max(1.0)).min(1.0);
         let measured = measured * size / max_size;
         self.queue_glyphs(

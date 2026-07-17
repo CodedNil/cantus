@@ -153,14 +153,12 @@ impl CantusApp {
             return;
         }
         if let Some(volume) = &mut self.playback.volume {
-            *volume = if scroll_direction < 0 {
-                volume.saturating_add(5).min(100)
-            } else {
-                volume.saturating_sub(5)
-            };
-            let volume = *volume;
+            *volume = volume
+                .saturating_add_signed(if scroll_direction < 0 { 5 } else { -5 })
+                .min(100);
             info!("Setting volume to {volume}%");
-            self.spotify.set_volume(volume);
+            self.spotify
+                .player_parameter("volume", "volume_percent", volume);
         }
     }
 
@@ -242,7 +240,8 @@ impl CantusApp {
             }
             .round() as u32;
             state.update_progress(milliseconds, Instant::now());
-            self.spotify.seek(milliseconds);
+            self.spotify
+                .player_parameter("seek", "position_ms", milliseconds);
         } else {
             state.queue_index = position_in_queue;
             state.update_progress(0, Instant::now());
@@ -268,7 +267,8 @@ impl CantusApp {
             })
             .collect::<Vec<_>>();
 
-        self.spotify.set_rating(track_id, changes, rating_slot >= 5);
+        self.spotify
+            .update_library(track_id, changes, Some(rating_slot >= 5));
     }
 
     fn toggle_playlist_membership(&mut self, track_id: TrackId, playlist_id: PlaylistId) {
@@ -289,7 +289,7 @@ impl CantusApp {
             .defer_remote_updates(Duration::from_millis(500));
 
         self.spotify
-            .set_playlist_membership(playlist_id, track_id, add);
+            .update_library(track_id, vec![(playlist_id, add)], None);
     }
 
     /// Set Spotify playing or paused.

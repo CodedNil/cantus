@@ -9,13 +9,12 @@ use crate::{
     text_render::TextRenderer,
     weather,
 };
-use arrayvec::ArrayVec;
 use cantus_shared::{
     AudioFeatures, GlobalUniforms, ICON_SPACING, MAX_PILL_PLAYLIST_ICONS, Particle,
     PlayheadUniforms, StatusPill, TrackPill, WeatherPill, approach,
 };
 use glam::{FloatExt, Vec2, vec2};
-use std::{f32::consts::TAU, mem, ops::Range, slice, sync::Arc, time::Instant};
+use std::{f32::consts::TAU, mem, ops::Range, sync::Arc, time::Instant};
 use wgpu::{
     BindGroup, Buffer, Color, CommandEncoderDescriptor, CurrentSurfaceTexture, Device, Instance,
     LoadOp, Operations, Queue, RenderPass, RenderPassColorAttachment, RenderPassDescriptor,
@@ -143,16 +142,6 @@ impl GpuPass {
         if !data.is_empty() {
             queue.write_buffer(&self.buffer, 0, bytemuck::cast_slice(data));
         }
-    }
-
-    fn draw_data<'pass, T: bytemuck::NoUninit>(
-        &'pass self,
-        queue: &Queue,
-        pass: &mut RenderPass<'pass>,
-        data: &[T],
-    ) {
-        self.upload_data(queue, data);
-        self.draw(pass, data.len() as u32);
     }
 }
 
@@ -318,28 +307,26 @@ impl CantusApp {
         )
     }
 
-    /// Render a frame and report whether the surface must be recreated.
-    pub fn render(&mut self) -> bool {
+    pub fn render(&mut self) {
         while let Ok(update) = self.app_updates.try_recv() {
             update(self);
         }
         self.start_missing_art_downloads();
 
         let Some(gpu) = self.render.gpu.as_mut() else {
-            return false;
+            return;
         };
         let (surface_texture, reconfigure_after_present) = match gpu.surface.get_current_texture() {
             CurrentSurfaceTexture::Success(texture) => (texture, false),
             CurrentSurfaceTexture::Suboptimal(texture) => (texture, true),
-            CurrentSurfaceTexture::Timeout | CurrentSurfaceTexture::Occluded => return false,
-            CurrentSurfaceTexture::Outdated => {
+            CurrentSurfaceTexture::Timeout | CurrentSurfaceTexture::Occluded => return,
+            CurrentSurfaceTexture::Outdated | CurrentSurfaceTexture::Lost => {
                 gpu.configure_surface();
-                return false;
+                return;
             }
-            CurrentSurfaceTexture::Lost => return true,
             CurrentSurfaceTexture::Validation => {
                 tracing::error!("surface texture acquisition failed validation");
-                return false;
+                return;
             }
         };
 
@@ -354,6 +341,8 @@ impl CantusApp {
         upload(&gpu.queue, &gpu.playhead.buffer, &self.render.playhead);
         gpu.track.upload_data(&gpu.queue, &self.render.track_pills);
         gpu.text.upload_data(&gpu.queue, &gpu.text_renderer.glyphs);
+        gpu.weather.upload_data(&gpu.queue, &[weather]);
+        gpu.status.upload_data(&gpu.queue, &[self.render.status]);
 
         let surface_view = surface_texture
             .texture
@@ -388,16 +377,14 @@ impl CantusApp {
                 gpu.track.draw_range(&mut pass, index..index + 1);
                 gpu.text.draw_range(&mut pass, glyphs.clone());
             }
-            gpu.weather
-                .draw_data(&gpu.queue, &mut pass, slice::from_ref(&weather));
+            gpu.weather.draw(&mut pass, 1);
             gpu.text.draw_range(&mut pass, 0..weather_glyph_end);
             if let Some(glyphs) = self.render.track_glyphs.get(foreground) {
                 let foreground = foreground as u32;
                 gpu.track.draw_range(&mut pass, foreground..foreground + 1);
                 gpu.text.draw_range(&mut pass, glyphs.clone());
             }
-            gpu.status
-                .draw_data(&gpu.queue, &mut pass, slice::from_ref(&self.render.status));
+            gpu.status.draw(&mut pass, 1);
             gpu.text.draw_range(&mut pass, weather_glyph_end..label_end);
             gpu.particles.draw(&mut pass, PARTICLE_COUNT as u32);
             gpu.playhead.draw(&mut pass, 1);
@@ -408,13 +395,13 @@ impl CantusApp {
         if reconfigure_after_present {
             gpu.configure_surface();
         }
-        false
     }
 
     fn get_image_index(&mut self, art: &ArtState) -> i32 {
-        let (Some(gpu), ArtState::Ready(art)) = (self.render.gpu.as_mut(), art) else {
+        let ArtState::Ready(art) = art else {
             return -1;
         };
+        let gpu = self.render.gpu.as_mut().unwrap();
         gpu.images.image_index(&gpu.queue, art)
     }
 
@@ -501,16 +488,15 @@ impl CantusApp {
         self.render.track_offset = current_ms;
 
         layout(queue, &self.config, timeline, current_ms);
-        if let Some(gpu) = &mut self.render.gpu {
-            for track in &mut *queue {
-                let expansion = track.runtime.playlist_expansion;
-                if expansion > 0.0 {
-                    let extra_width = (gpu.text_renderer.track_width(track) - track.runtime.width)
-                        .max(0.0)
-                        * expansion;
-                    track.runtime.start_x -= extra_width * 0.5;
-                    track.runtime.width += extra_width;
-                }
+        let gpu = self.render.gpu.as_mut().unwrap();
+        for track in &mut *queue {
+            let expansion = track.runtime.playlist_expansion;
+            if expansion > 0.0 {
+                let extra_width = (gpu.text_renderer.track_width(track) - track.runtime.width)
+                    .max(0.0)
+                    * expansion;
+                track.runtime.start_x -= extra_width * 0.5;
+                track.runtime.width += extra_width;
             }
         }
 
@@ -589,11 +575,7 @@ impl CantusApp {
         dt: f32,
         playlists: &[CondensedPlaylist],
     ) {
-        let glyph_start = self
-            .render
-            .gpu
-            .as_ref()
-            .map_or(0, |gpu| gpu.text_renderer.glyphs.len() as u32);
+        let glyph_start = self.render.gpu.as_ref().unwrap().text_renderer.glyphs.len() as u32;
         let width = track.runtime.width;
         let start_x = track.runtime.start_x;
         let origin_x = timeline.playhead_x;
@@ -666,11 +648,7 @@ impl CantusApp {
         );
         pill.primary_alpha = track.runtime.primary_icon_alpha;
         pill.secondary_expansion = playlist_expansion;
-        let glyph_end = self
-            .render
-            .gpu
-            .as_ref()
-            .map_or(glyph_start, |gpu| gpu.text_renderer.glyphs.len() as u32);
+        let glyph_end = self.render.gpu.as_ref().unwrap().text_renderer.glyphs.len() as u32;
         self.render.track_glyphs.push(glyph_start..glyph_end);
         self.render.track_pills.push(pill);
     }
@@ -685,18 +663,14 @@ impl CantusApp {
         let Some(track_id) = track.id else {
             return;
         };
-        let icons = playlist_icons(track_id, playlists, true)
-            .chain(playlist_icons(track_id, playlists, false))
-            .take(MAX_PILL_PLAYLIST_ICONS)
-            .collect::<ArrayVec<_, MAX_PILL_PLAYLIST_ICONS>>();
-        let primary_count = icons.partition_point(|playlist| playlist.tracks.contains(&track_id));
-        let visible_count = if secondary_expansion > 0.0 {
-            icons.len()
-        } else {
-            primary_count
-        };
-        for (slot, playlist) in pill.playlist_images.iter_mut().zip(&icons[..visible_count]) {
+        let icons = playlist_icons(track_id, playlists, true).chain(
+            playlist_icons(track_id, playlists, false).filter(|_| secondary_expansion > 0.0),
+        );
+        for (slot, playlist) in pill.playlist_images.iter_mut().zip(icons) {
             *slot = self.get_image_index(&playlist.art);
+            let primary = playlist.tracks.contains(&track_id);
+            pill.primary_playlist_count += u32::from(primary);
+            pill.secondary_playlist_count += u32::from(!primary);
         }
 
         pill.rating = if self.config.ratings_enabled {
@@ -713,8 +687,6 @@ impl CantusApp {
         } else {
             -1
         };
-        pill.primary_playlist_count = primary_count as u32;
-        pill.secondary_playlist_count = (visible_count - primary_count) as u32;
     }
 
     fn render_playhead_particles(

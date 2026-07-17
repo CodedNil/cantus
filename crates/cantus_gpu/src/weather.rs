@@ -169,18 +169,22 @@ fn scene(p: Vec2, size: Vec2, pill: WeatherPill, weather: Condition, time: f32) 
 
 fn sky(p: Vec2, size: Vec2, pill: WeatherPill, time: f32) -> Vec3 {
     let edge = ((p / size).x - 0.5).abs() * 2.0;
-    if edge <= 0.6 {
-        return scene(p, size, pill, pill.conditions[0], time);
-    }
-    let (from, to, start, end) = if edge <= 0.8 {
-        (0, 1, 0.6, 0.8)
+    let weather = if edge <= 0.6 {
+        pill.conditions[0]
     } else {
-        (1, 2, 0.8, 1.0)
+        let (from, start) = if edge <= 0.8 {
+            (0, 0.6)
+        } else {
+            (1, 0.8)
+        };
+        let (from, to) = (pill.conditions[from], pill.conditions[from + 1]);
+        let blend = smoothstep(start, start + 0.2, edge);
+        Condition {
+            atmosphere: from.atmosphere.lerp(to.atmosphere, blend),
+            precipitation: from.precipitation.lerp(to.precipitation, blend),
+        }
     };
-    scene(p, size, pill, pill.conditions[from], time).lerp(
-        scene(p, size, pill, pill.conditions[to], time),
-        smoothstep(start, end, edge),
-    )
+    scene(p, size, pill, weather, time)
 }
 
 #[spirv(vertex)]

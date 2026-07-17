@@ -1,10 +1,11 @@
 use arrayvec::ArrayVec;
 use cantus_shared::MAX_PILL_PLAYLIST_ICONS;
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use std::{env, fs, path::PathBuf};
 use tracing::warn;
 
 #[derive(Deserialize)]
+#[cfg_attr(feature = "generate-nix", derive(schemars::JsonSchema))]
 #[serde(default)]
 pub struct Config {
     /// Spotify client ID to use for authentication.
@@ -37,7 +38,8 @@ pub struct Config {
     pub ratings_enabled: bool,
 }
 
-#[derive(Clone, Copy, Deserialize)]
+#[derive(Clone, Copy, Deserialize, Serialize)]
+#[cfg_attr(feature = "generate-nix", derive(schemars::JsonSchema))]
 #[serde(rename_all = "lowercase")]
 pub enum Layer {
     Background,
@@ -46,7 +48,8 @@ pub enum Layer {
     Overlay,
 }
 
-#[derive(Clone, Copy, Deserialize)]
+#[derive(Clone, Copy, Deserialize, Serialize)]
+#[cfg_attr(feature = "generate-nix", derive(schemars::JsonSchema))]
 #[serde(rename_all = "lowercase")]
 pub enum LayerAnchor {
     Top,

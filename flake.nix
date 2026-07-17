@@ -123,9 +123,6 @@ rec {
 
             cfg = config.programs.cantus;
             settingsFormat = pkgs.formats.toml { };
-            setting =
-              type: default: description:
-              mkOption { inherit type default description; };
           in
           {
             options.programs.cantus = {
@@ -138,62 +135,16 @@ rec {
                 description = "Cantus package to install.";
               };
 
-              autoStart = setting types.bool true "Whether to start the Cantus widget automatically.";
+              autoStart = mkOption {
+                type = types.bool;
+                default = true;
+                description = "Whether to start the Cantus widget automatically.";
+              };
 
               settings = mkOption {
                 type = types.nullOr (
                   types.submodule {
-                    options = {
-                      spotify_client_id =
-                        setting (types.nullOr types.str) null
-                          "Spotify client ID to use for authentication.";
-
-                      monitor = setting (types.nullOr types.str) null "Monitor to display Cantus on.";
-
-                      location =
-                        setting (types.addCheck (types.listOf types.number) (coordinates: builtins.length coordinates == 2))
-                          [
-                            51.5074
-                            (-0.1278)
-                          ]
-                          "Latitude and longitude used for weather.";
-
-                      height = setting types.number 50.0 "Height of the timeline in logical pixels.";
-
-                      layer = setting (types.enum [
-                        "background"
-                        "bottom"
-                        "top"
-                        "overlay"
-                      ]) "top" "Layer the app should be displayed on.";
-
-                      layer_anchor = setting (types.enum [
-                        "top"
-                        "bottom"
-                      ]) "top" "Screen edge the app should anchor to.";
-
-                      timeline_future_minutes =
-                        setting types.number 12.0
-                          "Minutes in the future to display in the timeline.";
-
-                      timeline_past_minutes =
-                        setting types.number 1.5
-                          "Minutes before the current time to display in the timeline.";
-
-                      history_width =
-                        setting types.number 100.0
-                          "Width in logical pixels where previous tracks are displayed.";
-
-                      playlists = mkOption {
-                        type = types.addCheck (types.listOf types.str) (items: builtins.length items <= 8) // {
-                          description = "list of strings with at most 8 entries";
-                        };
-                        default = [ ];
-                        description = "Favourite playlists to display as buttons.";
-                      };
-
-                      ratings_enabled = setting types.bool false "Whether star ratings should be enabled.";
-                    };
+                    options = import ./generated-options.nix { inherit lib; };
                   }
                 );
                 default = null;
