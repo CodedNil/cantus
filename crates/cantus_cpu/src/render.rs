@@ -459,9 +459,13 @@ impl CantusApp {
         let playback_elapsed = playback_state.estimated_progress();
         let queue = &mut playback_state.queue;
 
-        let drag_offset_ms = self.interaction.drag_origin.map_or(0.0, |origin| {
-            (self.render.uniforms.mouse_pos.x - origin.x) / px_per_ms
-        });
+        let drag_offset_ms = if self.interaction.dragging {
+            self.interaction.drag_origin.map_or(0.0, |origin| {
+                (self.render.uniforms.mouse_pos.x - origin.x) / px_per_ms
+            })
+        } else {
+            0.0
+        };
         let cur_idx = playback_state.queue_index.min(queue.len() - 1);
 
         if self.interaction.dragging {

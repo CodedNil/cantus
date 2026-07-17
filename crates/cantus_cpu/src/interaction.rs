@@ -2,6 +2,7 @@ use crate::{
     CantusApp, PANEL_START,
     model::{CondensedPlaylist, PlaylistId, Rect, Track, TrackId, playlist_icons},
     status::Status,
+    weather,
 };
 use cantus_shared::{ICON_WIDTH, PillIconRow, pill_icon_primary_center_y, pill_icon_rows};
 use glam::{Vec2, vec2};
@@ -27,16 +28,28 @@ pub struct InteractionState {
 }
 
 impl CantusApp {
-    pub const fn left_click(&mut self) {
+    pub fn left_click(&mut self) {
+        let mouse_pos = self.render.uniforms.mouse_pos;
+        let drag_origin = self
+            .playback
+            .queue
+            .iter()
+            .any(|track| {
+                track
+                    .runtime
+                    .rect(self.config.height)
+                    .is_some_and(|rect| rect.contains(mouse_pos))
+            })
+            .then_some(mouse_pos);
         let interaction = &mut self.interaction;
         interaction.mouse_pressure = 2.0;
-        interaction.drag_origin = Some(self.render.uniforms.mouse_pos);
+        interaction.drag_origin = drag_origin;
         interaction.drag_track = None;
         interaction.dragging = false;
     }
 
     pub fn left_click_released(&mut self) {
-        if !self.interaction.dragging && self.interaction.drag_origin.is_some() {
+        if !self.interaction.dragging && self.interaction.mouse_pressure > 1.0 {
             self.handle_click();
         }
         if let Some((track_id, position)) = self.interaction.drag_track.take() {
@@ -60,6 +73,10 @@ impl CantusApp {
         let mouse_pos = self.render.uniforms.mouse_pos;
         let timeline = self.timeline();
         if Status::run_power_action(mouse_pos, self.render.status) {
+            return;
+        }
+        if weather::rect(self.render.status, self.config.height).contains(mouse_pos) {
+            self.pulse_at(mouse_pos);
             return;
         }
         let icon_click = |track: &Track| self.icon_at(track, &self.playback.playlists);

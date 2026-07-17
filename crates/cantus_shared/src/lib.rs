@@ -60,7 +60,17 @@ pub struct WeatherPill {
     pub x: f32,
     pub width: f32,
     pub sun: [f32; 2],
-    pub conditions: [[f32; 3]; 3],
+    pub conditions: [WeatherCondition; 3],
+}
+
+#[repr(C)]
+#[derive(Copy, Clone, Default)]
+#[cfg_attr(feature = "cpu", derive(bytemuck::Pod, bytemuck::Zeroable))]
+pub struct WeatherCondition {
+    /// cloud, fog, wind, lightning
+    pub atmosphere: Vec4,
+    /// rain, showers, snow, hail
+    pub precipitation: Vec4,
 }
 
 #[repr(C)]
