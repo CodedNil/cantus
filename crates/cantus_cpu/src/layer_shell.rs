@@ -3,7 +3,6 @@ use crate::{
     config::{Layer as ConfigLayer, LayerAnchor as ConfigLayerAnchor},
     model::Rect,
     status::Status,
-    weather,
 };
 use glam::vec2;
 use std::{
@@ -24,10 +23,6 @@ use wayland_client::{
         wl_seat::{self, WlSeat},
         wl_surface::WlSurface,
     },
-};
-use wayland_protocols::ext::background_effect::v1::client::{
-    ext_background_effect_manager_v1::ExtBackgroundEffectManagerV1,
-    ext_background_effect_surface_v1::ExtBackgroundEffectSurfaceV1,
 };
 use wayland_protocols::wp::{
     fractional_scale::v1::client::{
@@ -97,10 +92,6 @@ pub fn run() {
         app.viewport = Some(vp.get_viewport(surface, &qhandle, ()));
         app.fractional = Some(fm.get_fractional_scale(surface, &qhandle, ()));
     }
-    if let Some(manager) = &app.background_effect_manager {
-        app.background_effect = Some(manager.get_background_effect(surface, &qhandle, ()));
-    }
-
     let layer_surface = layer_shell.get_layer_surface(
         surface,
         Some(&app.outputs[output_index].handle),
@@ -142,21 +133,6 @@ fn add_rect(region: &WlRegion, [x, y, width, height]: [i32; 4]) {
     region.add(x, y, width, height);
 }
 
-/// Approximate a capsule with one region rectangle per logical-pixel row.
-fn add_capsule(region: &WlRegion, rect: Rect) {
-    // Integer Wayland regions cannot exactly follow an anti-aliased edge. Keeping
-    // the effect one pixel inside prevents blur leaking past the rendered pill.
-    let [x, y, width, height] = region_rect(rect);
-    let (x, y, width, height) = (x + 1, y + 1, width - 2, height - 2);
-    let radius = height as f32 * 0.5;
-    for row in 0..height {
-        let y_from_center = (row as f32 + 0.5 - radius).abs();
-        let inset =
-            (radius - (radius * radius - y_from_center * y_from_center).sqrt()).ceil() as i32;
-        add_rect(region, [x + inset, y + row, width - inset * 2, 1]);
-    }
-}
-
 struct OutputInfo {
     handle: WlOutput,
     identifiers: [Option<String>; 3],
@@ -183,8 +159,6 @@ pub struct LayerShellApp {
     frame_callback: Option<WlCallback>,
     viewporter: Option<WpViewporter>,
     fractional_manager: Option<WpFractionalScaleManagerV1>,
-    background_effect_manager: Option<ExtBackgroundEffectManagerV1>,
-    background_effect: Option<ExtBackgroundEffectSurfaceV1>,
 }
 
 macro_rules! dispatch {
@@ -275,25 +249,23 @@ impl LayerShellApp {
             self.last_hitbox_hash = hash;
         }
     }
-
-    fn update_blur_region(&self, qhandle: &QueueHandle<Self>) {
-        let (Some(effect), Some(compositor)) = (&self.background_effect, &self.compositor) else {
-            return;
-        };
-        let region = compositor.create_region(qhandle, ());
-        let width = self.cantus.logical_surface_size().0;
-        let pill = self.cantus.status.pill(width);
-        add_capsule(
-            &region,
-            Rect::pill(pill.x, pill.width, self.cantus.config.height),
-        );
-        add_capsule(&region, weather::rect(pill, self.cantus.config.height));
-        effect.set_blur_region(Some(&region));
-        region.destroy();
-    }
 }
 
 impl CantusApp {
+    pub(crate) fn overlay_rects(&self) -> [Rect; 2] {
+        [
+            self.weather
+                .interaction_rect(self.render.status, self.config.height),
+            Status::rect(self.render.status, self.config.height),
+        ]
+    }
+
+    pub(crate) fn overlay_contains(&self, point: glam::Vec2) -> bool {
+        self.overlay_rects()
+            .into_iter()
+            .any(|rect| rect.contains(point))
+    }
+
     fn input_rects(&self) -> impl Iterator<Item = Rect> + '_ {
         self.playback
             .queue
@@ -305,10 +277,7 @@ impl CantusApp {
                     .into_iter()
                     .chain(self.icon_row_rects(track).into_iter().flatten())
             })
-            .chain([
-                weather::rect(self.render.status, self.config.height),
-                Status::controls_rect(self.render.status, self.config.height),
-            ])
+            .chain(self.overlay_rects())
     }
 }
 
@@ -321,7 +290,6 @@ dispatch!(ZwlrLayerSurfaceV1, |state, proxy, event, qhandle| {
             }
             state.is_configured = true;
             state.update_scale_and_viewport();
-            state.update_blur_region(qhandle);
             state.try_render_frame(qhandle);
         }
         zwlr_layer_surface_v1::Event::Closed => state.should_exit = true,
@@ -450,10 +418,6 @@ dispatch!(WlRegistry, |state, proxy, event, qhandle| {
             "wp_fractional_scale_manager_v1" => {
                 state.fractional_manager = Some(bind!(WpFractionalScaleManagerV1, 1));
             }
-            "ext_background_effect_manager_v1" => {
-                state.background_effect_manager =
-                    Some(bind!(ExtBackgroundEffectManagerV1, version.min(1)));
-            }
             "wl_seat" => state.seat = Some(bind!(WlSeat, version.min(7))),
             "wl_output" => {
                 state.outputs.push(OutputInfo {
@@ -473,5 +437,3 @@ delegate_noop!(LayerShellApp: ignore WpViewporter);
 delegate_noop!(LayerShellApp: ignore WpViewport);
 delegate_noop!(LayerShellApp: ignore WlCompositor);
 delegate_noop!(LayerShellApp: ignore WlRegion);
-delegate_noop!(LayerShellApp: ignore ExtBackgroundEffectSurfaceV1);
-delegate_noop!(LayerShellApp: ignore ExtBackgroundEffectManagerV1);

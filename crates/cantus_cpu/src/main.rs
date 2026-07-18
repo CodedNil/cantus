@@ -2,6 +2,7 @@ use crate::{
     interaction::InteractionState, model::PlaybackState, render::RenderState, status::Status,
     weather::Weather,
 };
+use cantus_shared::WEATHER_CALENDAR_EXTENSION;
 use std::{
     io,
     sync::mpsc::{self, Sender},
@@ -22,7 +23,7 @@ mod text_render;
 mod weather;
 
 const PANEL_START: f32 = 6.0;
-const PANEL_EXTENSION: f32 = 44.0;
+const PANEL_EXTENSION: f32 = WEATHER_CALENDAR_EXTENSION + 16.0;
 const PARTICLE_COUNT: usize = 64;
 const MAX_RENDER_INSTANCES: usize = 256;
 const TRACK_SPACING_MS: f32 = 4000.0;

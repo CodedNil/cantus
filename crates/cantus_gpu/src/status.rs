@@ -73,7 +73,7 @@ pub fn vs_status(
     #[spirv(location = 0)] out_pixel: &mut Vec2,
 ) {
     let pill = status[0];
-    (*out_pos, *out_pixel) = pill_vertex(vertex, global, pill.x, pill.width);
+    (*out_pos, *out_pixel) = pill_vertex(vertex, global, pill.x, vec2(pill.width, 0.0));
 }
 
 #[spirv(fragment)]
@@ -84,13 +84,14 @@ pub fn fs_status(
     #[spirv(location = 0)] out_color: &mut Vec4,
 ) {
     let pill = status[0];
-    let (local, size, dist) = pill_fragment(pixel, global, pill.x, pill.width, 0.0);
-    let alpha = (1.0 - smoothstep(-0.6, 0.6, dist)) * 0.5;
+    let (interaction, local, size, dist) = pill_fragment(pixel, global, pill.x, pill.width);
+    let (dist, mask, alpha) = interaction.surface(dist);
     if alpha <= 0.0 {
         kill();
     }
     let controls_x = size.x - 190.0;
     let color =
         system(local, size) + controls(local - vec2(controls_x, 0.0), vec2(190.0, size.y), pill);
-    *out_color = ((color + (1.0 - smoothstep(0.0, -3.0, dist)) * 0.08) * alpha).extend(alpha);
+    let color = color + (1.0 - smoothstep(0.0, -3.0, dist)) * 0.08;
+    *out_color = (color * mask).extend(alpha);
 }

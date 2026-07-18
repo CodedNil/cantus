@@ -38,7 +38,7 @@ wgpu = { version = "30.0.0", default-features = false, features = [
     "std",
     "vulkan",
 ] }
-swash = { version = "0.2.9", default-features = false, features = ["std", "render"] }
+swash = { version = "0.2.10", default-features = false, features = ["std", "render"] }
 
 image = { version = "0.25.10", default-features = false, features = [
     "jpeg",
@@ -63,6 +63,7 @@ sha2 = { version = "0.11.0", default-features = false }
 bytemuck = { workspace = true }
 ureq = { version = "3.3.0", default-features = false, features = ["rustls"] }
 jiff = { version = "0.2.32", default-features = false, features = [
+    "serde",
     "std",
     "tz-system",
     "tzdb-zoneinfo",

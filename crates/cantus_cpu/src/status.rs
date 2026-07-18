@@ -6,7 +6,7 @@ use tracing::warn;
 
 pub const GAP: f32 = 6.0;
 pub const WIDTH: f32 = 496.0;
-const LABEL_LAYOUT: [(f32, f32); 4] = [(24.0, 55.0), (96.0, 42.0), (159.0, 58.0), (249.0, 48.0)];
+const LABEL_CENTERS: [f32; 4] = [51.5, 117.0, 188.0, 273.0];
 const SENSORS: [&str; 2] = ["k10temp", "amdgpu"];
 
 #[derive(Default)]
@@ -31,16 +31,16 @@ impl Status {
         }
     }
 
-    pub fn labels(&self, pill: StatusPill, mut draw: impl FnMut(&str, f32, f32)) {
-        for (text, (offset, width)) in self.labels.iter().zip(LABEL_LAYOUT) {
-            draw(text, pill.x + offset, width);
+    pub fn labels(&self, pill: StatusPill, mut draw: impl FnMut(&str, f32)) {
+        for (text, center) in self.labels.iter().zip(LABEL_CENTERS) {
+            draw(text, pill.x + center);
         }
         let controls_x = pill.x + pill.width - 190.0;
         if let Some(level) = self.battery {
-            draw(&percent(level), controls_x + 32.0, 35.0);
+            draw(&percent(level), controls_x + 49.5);
         }
-        let volume_x = controls_x + if self.battery.is_some() { 92.0 } else { 32.0 };
-        draw(&percent(self.volume[0]), volume_x, 38.0);
+        let volume_x = controls_x + if self.battery.is_some() { 111.0 } else { 51.0 };
+        draw(&percent(self.volume[0]), volume_x);
     }
 
     pub fn run_power_action(position: glam::Vec2, pill: StatusPill) -> bool {
@@ -55,9 +55,8 @@ impl Status {
         true
     }
 
-    pub fn controls_rect(pill: StatusPill, height: f32) -> Rect {
-        let right = pill.x + pill.width;
-        Rect::new(right - 72.0, 6.0, right, 6.0 + height)
+    pub const fn rect(pill: StatusPill, height: f32) -> Rect {
+        Rect::pill(pill.x, pill.width, height)
     }
 }
 

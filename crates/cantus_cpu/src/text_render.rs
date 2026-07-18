@@ -27,6 +27,7 @@ pub struct TextStyle {
 
 impl TextStyle {
     pub const PRIMARY: Self = Self::new(16.0, 700);
+    pub const TODAY: Self = Self::new(16.0, 900);
     pub const DETAILS: Self = Self::new(14.0, 700);
     pub const WEATHER: Self = Self::new(24.0, 600);
 
@@ -226,21 +227,18 @@ impl TextRenderer {
         &mut self,
         queue: &Queue,
         text: &str,
-        x: f32,
-        width: f32,
+        position: Vec2,
         style: TextStyle,
+        alpha: f32,
         render_scale: f32,
     ) {
         let (measured, baseline) = self.shape(text, style);
         self.queue_glyphs(
             queue,
-            vec2(
-                x + (width - measured) * 0.5,
-                PANEL_START + self.panel_height * 0.46,
-            ),
+            position - vec2(measured * 0.5, 0.0),
             style,
             baseline,
-            1.0,
+            alpha,
             f32::MAX,
             render_scale,
         );

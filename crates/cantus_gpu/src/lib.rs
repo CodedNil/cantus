@@ -19,9 +19,9 @@ pub fn pixel_to_ndc(pixel: Vec2, screen_size: Vec2) -> Vec4 {
     vec4(ndc.x, -ndc.y, 0.0, 1.0)
 }
 
-pub fn pill_vertex(vertex: u32, global: &GlobalUniforms, x: f32, width: f32) -> (Vec4, Vec2) {
+pub fn pill_vertex(vertex: u32, global: &GlobalUniforms, x: f32, size: Vec2) -> (Vec4, Vec2) {
     let pixel = vec2(x - 48.0, global.bar_height.x - 48.0)
-        + quad_coord(vertex) * vec2(width + 96.0, global.bar_height.y + 96.0);
+        + quad_coord(vertex) * (size + vec2(96.0, global.bar_height.y + 96.0));
     (pixel_to_ndc(pixel, global.screen_size), pixel)
 }
 
@@ -30,16 +30,11 @@ pub fn pill_fragment(
     global: &GlobalUniforms,
     x: f32,
     width: f32,
-    bulge: f32,
-) -> (Vec2, Vec2, f32) {
+) -> (PillInteraction, Vec2, Vec2, f32) {
     let size = vec2(width, global.bar_height.y);
     let local = pixel - vec2(x, global.bar_height.x);
-    let distance = sd_capsule_box(
-        local - size * 0.5,
-        (size.x - size.y) * 0.5,
-        (size.y + bulge) * 0.5,
-    );
-    (local, size, distance)
+    let distance = sd_capsule_box(local - size * 0.5, (size.x - size.y) * 0.5, size.y * 0.5);
+    (pill_interaction(pixel, global), local, size, distance)
 }
 
 /// Return a direction and length without `glam::normalize_or_zero`, whose infinity literal is rejected by Naga when translating SPIR-V.
@@ -66,6 +61,19 @@ impl PillInteraction {
         self.mouse.length() * 8.0 + self.ripple.length() * 22.0
     }
 
+    /// Apply the shared hover/click expansion to an assembled signed-distance field.
+    pub fn expand(self, distance: f32) -> f32 {
+        distance - self.bulge() * 0.5
+    }
+
+    /// Return the expanded distance, fill coverage, and combined fill/shadow alpha.
+    pub fn surface(self, distance: f32) -> (f32, f32, f32) {
+        let distance = self.expand(distance);
+        let mask = (0.5 - distance).clamp(0.0, 1.0);
+        let shadow = (1.0 - smoothstep(0.0, 14.0, distance)) * 0.16;
+        (distance, mask, mask.max(shadow))
+    }
+
     pub fn refract(self, local: Vec2, size: Vec2, distance: f32) -> Vec2 {
         let uv = local / size;
         uv - (uv - 0.5) * (1.0 + distance.min(0.0) / 120.0).clamp(0.0, 0.6) * 0.08
@@ -74,7 +82,7 @@ impl PillInteraction {
     }
 }
 
-pub fn pill_interaction(pixel: Vec2, global: &GlobalUniforms) -> PillInteraction {
+fn pill_interaction(pixel: Vec2, global: &GlobalUniforms) -> PillInteraction {
     let anim_t = (global.time - global.expansion_time) * 1.2;
     let (ripple, ripple_flash) = if (-0.02..1.02).contains(&anim_t) {
         let progress = anim_t.clamp(0.0, 1.0);
@@ -104,13 +112,6 @@ pub fn pill_interaction(pixel: Vec2, global: &GlobalUniforms) -> PillInteraction
         ripple,
         ripple_flash,
     }
-}
-
-pub fn pill_coverage(distance: f32) -> (f32, f32) {
-    (
-        (0.5 - distance).clamp(0.0, 1.0),
-        (1.0 - smoothstep(0.0, 14.0, distance)) * 0.16,
-    )
 }
 
 pub fn pill_sheen(uv_y: f32, distance: f32, interaction: PillInteraction) -> f32 {

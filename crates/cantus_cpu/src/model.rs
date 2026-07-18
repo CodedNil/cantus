@@ -146,6 +146,12 @@ impl Track {
         let start = playhead_x + self.runtime.start_ms * px_per_ms;
         (start, start + self.duration_ms as f32 * px_per_ms)
     }
+
+    pub fn contains(&self, point: Vec2, height: f32) -> bool {
+        self.runtime
+            .rect(height)
+            .is_some_and(|rect| rect.contains(point))
+    }
 }
 
 impl TrackRuntime {

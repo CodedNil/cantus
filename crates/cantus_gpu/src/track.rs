@@ -1,6 +1,6 @@
 use crate::{
-    pill_coverage, pill_fragment, pill_interaction, pill_sheen, pixel_to_ndc, quad_coord,
-    sd_capsule_box, sd_star, smooth_union, unpack3x8unorm,
+    pill_fragment, pill_sheen, pixel_to_ndc, quad_coord, sd_capsule_box, sd_star, smooth_union,
+    unpack3x8unorm,
 };
 use cantus_shared::{
     AudioFeatures, GlobalUniforms, ICON_WIDTH, MAX_PILL_PLAYLIST_ICONS, TrackPill, smoothstep,
@@ -71,13 +71,12 @@ fn near_icon(pixel_pos: Vec2, center: Vec2) -> bool {
         .all()
 }
 
-fn over_icon(base: Vec4, color: Vec3, dist: f32, alpha: f32, pill_alpha: f32) -> Vec4 {
+fn over_icon(base: Vec4, color: Vec3, dist: f32, alpha: f32) -> Vec4 {
     let mask = (0.5 - dist).clamp(0.0, 1.0);
     let shadow = 1.0 - smoothstep(0.0, 6.0, dist);
     let bevel = 1.0 - smoothstep(0.0, -5.0, dist);
-    let opacity = alpha * pill_alpha;
-    let overlay = ((color + bevel * bevel * 0.045) * mask * opacity)
-        .extend(mask.max(shadow * shadow * 0.2) * opacity);
+    let overlay = ((color + bevel * bevel * 0.045) * mask * alpha)
+        .extend(mask.max(shadow * shadow * 0.2) * alpha);
     base * (1.0 - overlay.w) + overlay
 }
 
@@ -127,23 +126,21 @@ pub fn fs_track(
     #[spirv(location = 0)] out_color: &mut Vec4,
 ) {
     let pill = pills[pill_idx as usize];
-    let interaction = pill_interaction(pixel_pos, global);
-    let bulge = interaction.bulge();
-    let (local_pixel, pill_size, body_dist) =
-        pill_fragment(pixel_pos, global, pill.x, pill.width, bulge);
+    let (interaction, local_pixel, pill_size, body_dist) =
+        pill_fragment(pixel_pos, global, pill.x, pill.width);
     let local_uv = local_pixel / pill_size;
     let local_centered = local_uv - 0.5;
-    let stretched_uv_y = local_centered.y * (pill_size.y / (pill_size.y + bulge)) + 0.5;
+    let stretched_uv_y =
+        local_centered.y * (pill_size.y / (pill_size.y + interaction.bulge())) + 0.5;
 
     let (primary_row, secondary_row) = pill.icon_rows(global.bar_height.x, global.bar_height.y);
 
-    let backplate_radius = 9.0 + interaction.mouse.length() * ICON_WIDTH * 0.25;
     let mut dist = smooth_union(
         body_dist,
         sd_capsule_box(
             pixel_pos - (primary_row.backplate_center() - vec2(0.0, 2.0)),
             primary_row.half_span(),
-            backplate_radius,
+            9.0,
         ),
         10.0,
         pill.primary_alpha,
@@ -153,12 +150,12 @@ pub fn fs_track(
         sd_capsule_box(
             pixel_pos - secondary_row.backplate_center(),
             secondary_row.half_span(),
-            backplate_radius + 1.5,
+            10.5,
         ),
         ICON_WIDTH * 0.5,
         pill.secondary_expansion,
     );
-    let (mask, shadow) = pill_coverage(dist);
+    let (dist, mask, alpha) = interaction.surface(dist);
 
     // Weight overlapping wave fields by each palette colour's prevalence.
     let seed = (pill.colors[0] % 1000) as f32 * 0.013;
@@ -224,15 +221,15 @@ pub fn fs_track(
         let uv_img = vec2((local_pixel.x - image_left) / pill_size.y, stretched_uv_y);
         let tex = images.sample(*sampler, uv_img.extend(pill.image_index as f32));
         let image_dist = sd_capsule_box((uv_img - 0.5) * pill_size.y, 0.0, pill_size.y * 0.5);
-        let img_mask =
-            (1.0 - smoothstep(-4.0, 0.0, image_dist)) * (1.0 - smoothstep(-0.5, 0.5, body_dist));
+        let img_mask = (1.0 - smoothstep(-4.0, 0.0, image_dist))
+            * (1.0 - smoothstep(-0.5, 0.5, interaction.expand(body_dist)));
         color = color.lerp(tex.truncate(), img_mask * tex.w);
     }
 
     color += color.lerp(Vec3::ONE, 0.32) * pill_sheen(stretched_uv_y, dist, interaction);
     color = color.lerp(color * 1.5 + 0.1, interaction.ripple_flash);
 
-    let mut output = (color * mask * pill.alpha).extend(mask.max(shadow) * pill.alpha);
+    let mut output = (color * mask).extend(alpha);
 
     if pill.rating >= 0 && pill.primary_alpha > 0.0 {
         for index in 0..5 {
@@ -247,7 +244,7 @@ pub fn fs_track(
             let split_line = local_uv.x - fill;
             let selection_mask = (split_line / split_line.fwidth() + 0.5).clamp(0.0, 1.0);
             let color = vec3(1.0, 0.85, 0.2).lerp(vec3(0.33, 0.33, 0.33), selection_mask);
-            output = over_icon(output, color, dist, pill.primary_alpha, pill.alpha);
+            output = over_icon(output, color, dist, pill.primary_alpha);
         }
     }
 
@@ -297,10 +294,10 @@ pub fn fs_track(
             tex.truncate().lerp(Vec3::splat(0.24), desaturation),
             dist,
             alpha,
-            pill.alpha,
         );
     }
 
+    output *= pill.visibility;
     if output.w <= 0.0 {
         kill();
     }

@@ -2,7 +2,6 @@ use crate::{
     CantusApp, PANEL_START,
     model::{CondensedPlaylist, PlaylistId, Rect, Track, TrackId, playlist_icons},
     status::Status,
-    weather,
 };
 use cantus_shared::{ICON_WIDTH, PillIconRow, pill_icon_primary_center_y, pill_icon_rows};
 use glam::{Vec2, vec2};
@@ -23,6 +22,7 @@ pub struct InteractionState {
     pub mouse_pressure: f32, // 0 not hovered - 1 hovered - 2 mouse down
     pub hovered_track: Option<usize>,
     pub dragging: bool,
+    pub press_origin: Vec2,
     pub drag_origin: Option<Vec2>,
     pub drag_track: Option<(Option<TrackId>, f32)>,
 }
@@ -31,25 +31,26 @@ impl CantusApp {
     pub fn left_click(&mut self) {
         let mouse_pos = self.render.uniforms.mouse_pos;
         let drag_origin = self
-            .playback
-            .queue
-            .iter()
-            .any(|track| {
-                track
-                    .runtime
-                    .rect(self.config.height)
-                    .is_some_and(|rect| rect.contains(mouse_pos))
-            })
+            .interaction
+            .hovered_track
+            .and_then(|index| self.playback.queue.get(index))
+            .is_some_and(|track| track.contains(mouse_pos, self.config.height))
             .then_some(mouse_pos);
         let interaction = &mut self.interaction;
         interaction.mouse_pressure = 2.0;
+        interaction.press_origin = mouse_pos;
         interaction.drag_origin = drag_origin;
         interaction.drag_track = None;
         interaction.dragging = false;
     }
 
     pub fn left_click_released(&mut self) {
-        if !self.interaction.dragging && self.interaction.mouse_pressure > 1.0 {
+        let same_spot = self
+            .interaction
+            .press_origin
+            .distance(self.render.uniforms.mouse_pos)
+            < 2.0;
+        if same_spot && !self.interaction.dragging && self.interaction.mouse_pressure > 1.0 {
             self.handle_click();
         }
         if let Some((track_id, position)) = self.interaction.drag_track.take() {
@@ -75,7 +76,14 @@ impl CantusApp {
         if Status::run_power_action(mouse_pos, self.render.status) {
             return;
         }
-        if weather::rect(self.render.status, self.config.height).contains(mouse_pos) {
+        if self
+            .weather
+            .navigate_calendar(mouse_pos, self.render.status, self.config.height)
+        {
+            self.pulse_at(mouse_pos);
+            return;
+        }
+        if self.overlay_contains(mouse_pos) {
             self.pulse_at(mouse_pos);
             return;
         }
@@ -104,9 +112,10 @@ impl CantusApp {
             self.toggle_playing(!self.playback.playing);
         } else if let Some((track_id, (track_range_a, track_range_b))) =
             self.playback.queue.iter().rev().find_map(|track| {
-                let rect = track.runtime.rect(self.config.height)?;
                 let range = track.natural_x_range(timeline.playhead_x, timeline.px_per_ms);
-                rect.contains(mouse_pos).then_some((track.id, range))
+                track
+                    .contains(mouse_pos, self.config.height)
+                    .then_some((track.id, range))
             })
         {
             // Seek track

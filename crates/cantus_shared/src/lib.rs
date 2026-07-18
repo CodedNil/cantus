@@ -1,6 +1,6 @@
 #![no_std]
 
-use glam::{Vec2, Vec4};
+use glam::Vec2;
 
 #[repr(C)]
 #[derive(Copy, Clone, Default)]
@@ -32,7 +32,7 @@ pub struct TrackPill {
     pub x: f32,
     pub width: f32,
     pub colors: [u32; 4],
-    pub alpha: f32,
+    pub visibility: f32,
     pub image_index: i32,
     pub rating: i32,
     pub primary_playlist_count: u32,
@@ -60,17 +60,40 @@ pub struct WeatherPill {
     pub x: f32,
     pub width: f32,
     pub sun: [f32; 2],
+    pub today: Vec2,
+    pub calendar_expansion: f32,
     pub conditions: [WeatherCondition; 3],
+    /// Pads the storage-buffer array stride to the eight-byte alignment required by `today`.
+    pub padding: f32,
 }
+
+const _: () = assert!(size_of::<WeatherPill>().is_multiple_of(8));
 
 #[repr(C)]
 #[derive(Copy, Clone, Default)]
 #[cfg_attr(feature = "cpu", derive(bytemuck::Pod, bytemuck::Zeroable))]
 pub struct WeatherCondition {
-    /// cloud, fog, wind, lightning
-    pub atmosphere: Vec4,
-    /// rain, showers, snow, hail
-    pub precipitation: Vec4,
+    pub cloud: f32,
+    pub fog: f32,
+    pub lightning: f32,
+    pub rain: f32,
+    pub snow: f32,
+    pub hail: f32,
+}
+
+impl WeatherCondition {
+    #[must_use]
+    pub fn lerp(self, other: Self, amount: f32) -> Self {
+        let lerp = |from, to| from + (to - from) * amount;
+        Self {
+            cloud: lerp(self.cloud, other.cloud),
+            fog: lerp(self.fog, other.fog),
+            lightning: lerp(self.lightning, other.lightning),
+            rain: lerp(self.rain, other.rain),
+            snow: lerp(self.snow, other.snow),
+            hail: lerp(self.hail, other.hail),
+        }
+    }
 }
 
 #[repr(C)]
@@ -135,6 +158,15 @@ pub const ICON_WIDTH: f32 = 21.6;
 
 /// Center-to-center icon spacing for rating stars and playlist artwork.
 pub const ICON_SPACING: f32 = 18.0;
+
+/// Total distance added below the weather pill while the calendar is open.
+pub const WEATHER_CALENDAR_EXTENSION: f32 = 246.0;
+/// Calendar title and arrow center, relative to the submenu's top edge.
+pub const WEATHER_CALENDAR_TITLE_Y: f32 = 38.0;
+/// Horizontal inset of each calendar arrow's center.
+pub const WEATHER_CALENDAR_ARROW_X: f32 = 28.0;
+/// Visual and clickable radius of the calendar arrow buttons.
+pub const WEATHER_CALENDAR_ARROW_RADIUS: f32 = 20.0;
 
 impl TrackPill {
     pub const fn star_count(&self) -> f32 {

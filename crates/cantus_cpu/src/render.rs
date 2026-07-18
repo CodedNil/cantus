@@ -418,26 +418,40 @@ impl CantusApp {
         self.render.uniforms.screen_size = vec2(screen_width, screen_height);
         self.render.uniforms.bar_height = vec2(PANEL_START, self.config.height);
         self.render.status = self.status.pill(screen_width);
-        let weather_x = weather::rect(self.render.status, self.config.height).x0;
-        let (weather, weather_label) = self.weather.scene(weather_x);
+        let (weather, weather_label) = self.weather.scene(
+            self.render.status,
+            self.config.height,
+            self.render.uniforms.mouse_pos,
+            self.interaction.mouse_pressure > 0.0,
+            dt,
+        );
         let scale = self.render.scale;
+        let label_y = PANEL_START + self.config.height * 0.46;
         let gpu = self.render.gpu.as_mut().unwrap();
         gpu.text_renderer.render_centered_label(
             &gpu.queue,
             &weather_label,
-            weather_x,
-            weather::WIDTH,
+            vec2(weather.x + weather::WIDTH * 0.5, label_y),
             TextStyle::WEATHER,
+            1.0,
             scale,
         );
+        self.weather.calendar_labels(
+            self.render.status,
+            self.config.height,
+            |text, position, alpha, style| {
+                gpu.text_renderer
+                    .render_centered_label(&gpu.queue, text, position, style, alpha, scale);
+            },
+        );
         let weather_glyph_end = gpu.text_renderer.glyphs.len() as u32;
-        self.status.labels(self.render.status, |text, x, width| {
+        self.status.labels(self.render.status, |text, center_x| {
             gpu.text_renderer.render_centered_label(
                 &gpu.queue,
                 text,
-                x,
-                width,
+                vec2(center_x, label_y),
                 TextStyle::PRIMARY,
+                1.0,
                 scale,
             );
         });
@@ -546,11 +560,11 @@ impl CantusApp {
 
     fn hovered_track(&self, queue: &[Track]) -> Option<usize> {
         let mouse_pos = self.render.uniforms.mouse_pos;
+        if self.overlay_contains(mouse_pos) || self.playhead_rect().contains(mouse_pos) {
+            return None;
+        }
         let in_track = |track: &Track| {
-            track
-                .runtime
-                .rect(self.config.height)
-                .is_some_and(|rect| rect.contains(mouse_pos))
+            track.contains(mouse_pos, self.config.height)
                 || self
                     .icon_row_rects(track)
                     .into_iter()
@@ -581,7 +595,7 @@ impl CantusApp {
         playlists: &[CondensedPlaylist],
     ) {
         let glyph_start = self.render.gpu.as_ref().unwrap().text_renderer.glyphs.len() as u32;
-        let width = track.runtime.width;
+        let layout_width = track.runtime.width;
         let start_x = track.runtime.start_x;
         let origin_x = timeline.playhead_x;
         // If dragging, set the drag target to this track, and the position within the track
@@ -593,10 +607,10 @@ impl CantusApp {
             ));
         }
 
-        let show_details = width > self.config.height;
+        let show_details = layout_width > self.config.height;
         approach(
             &mut track.runtime.detail_alpha,
-            flag(width >= self.config.height),
+            flag(show_details),
             dt / DETAIL_FADE_DURATION,
         );
         let detail_alpha = track.runtime.detail_alpha;
@@ -608,9 +622,9 @@ impl CantusApp {
         let playlist_expansion = track.runtime.playlist_expansion;
         let mut pill = TrackPill {
             x: start_x,
-            width,
+            width: layout_width.max(self.config.height),
             colors: track.palette(),
-            alpha: detail_alpha,
+            visibility: detail_alpha.max(f32::from(track.runtime.start_ms <= 0.0)),
             image_index: self.get_image_index(&track.art),
             rating: -1,
             audio_features: track.audio_features.unwrap_or(DEFAULT_AUDIO_FEATURES),
@@ -647,7 +661,8 @@ impl CantusApp {
             &mut track.runtime.primary_icon_alpha,
             flag(
                 primary_icons > 0.0
-                    && (playlist_expansion > 0.0 || width >= ICON_SPACING * 1.05 * primary_icons),
+                    && (playlist_expansion > 0.0
+                        || layout_width >= ICON_SPACING * 1.05 * primary_icons),
             ),
             dt / DETAIL_FADE_DURATION,
         );
