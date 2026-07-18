@@ -1,4 +1,5 @@
 use crate::{AppUpdater, model::Rect, send_update, status::GAP, text_render::TextStyle};
+use arrayvec::ArrayString;
 use cantus_shared::{
     StatusPill, WEATHER_CALENDAR_ARROW_RADIUS, WEATHER_CALENDAR_ARROW_X,
     WEATHER_CALENDAR_EXTENSION, WEATHER_CALENDAR_TITLE_Y, WeatherCondition, WeatherPill, approach,
@@ -7,7 +8,7 @@ use cantus_shared::{
 use glam::{Vec2, vec2};
 use jiff::{Span, Zoned, civil::DateTime};
 use serde::Deserialize;
-use std::{error::Error, f32::consts::PI, thread, time::Duration};
+use std::{error::Error, f32::consts::PI, fmt::Write, thread, time::Duration};
 use tracing::warn;
 
 pub const WIDTH: f32 = 310.0;
@@ -35,12 +36,11 @@ fn sun_position(hour: f32, [sunrise, sunset]: [f32; 2]) -> [f32; 2] {
         let phase = (hour - sunrise) / daylight;
         [phase, (phase * PI).sin()]
     } else {
-        let night_hour = if hour < sunrise {
+        let phase = (if hour < sunrise {
             hour + 24.0 - sunset
         } else {
             hour - sunset
-        };
-        let phase = night_hour / (24.0 - daylight);
+        }) / (24.0 - daylight);
         [f32::from(hour >= sunset), -(phase * PI).sin()]
     }
 }
@@ -98,7 +98,7 @@ impl Weather {
         mouse: Vec2,
         mouse_active: bool,
         dt: f32,
-    ) -> (WeatherPill, String) {
+    ) -> (WeatherPill, ArrayString<64>) {
         let panel = rect(status, height);
         let hovered = self.interaction_rect(status, height).contains(mouse);
         approach(
@@ -128,14 +128,14 @@ impl Weather {
             conditions: self.conditions,
             padding: 0.0,
         };
-        (pill, format!("{}   {clock}", self.temperature))
+        let mut label = ArrayString::new();
+        write!(label, "{}   {clock}", self.temperature).unwrap();
+        (pill, label)
     }
 
     pub fn interaction_rect(&self, status: StatusPill, height: f32) -> Rect {
         let mut area = rect(status, height);
-        if self.calendar_expansion > 0.0 {
-            area.y1 = calendar_rect(status, height).y1;
-        }
+        area.y1 += WEATHER_CALENDAR_EXTENSION * f32::from(self.calendar_expansion > 0.0);
         area
     }
 
@@ -195,7 +195,8 @@ impl Weather {
             TextStyle::DETAILS,
         );
 
-        let title = month.strftime("%B %Y").to_string();
+        let mut title = ArrayString::<32>::new();
+        write!(title, "{}", month.strftime("%B %Y")).unwrap();
         for (text, x) in [
             ("‹", calendar.x0 + WEATHER_CALENDAR_ARROW_X),
             (title.as_str(), center_x),
@@ -217,7 +218,8 @@ impl Weather {
 
         for cell in 0..42 {
             let date = grid_start.saturating_add(Span::new().days(cell as i64));
-            let text = date.day().to_string();
+            let mut text = ArrayString::<2>::new();
+            write!(text, "{}", date.day()).unwrap();
             let alpha = 0.32 + f32::from(date.month() == month.month()) * 0.68;
             let position = calendar_cell(cell);
             let style = if date == today {
@@ -235,13 +237,14 @@ impl Weather {
     }
 
     fn apply_forecast(&mut self, forecast: &Forecast) {
-        let raw = forecast.current;
+        let raw = &forecast.current;
         self.temperature = format!("{:.1}°C", raw.temperature_2m);
-        self.sun_hours = [forecast.daily.sunrise[0], forecast.daily.sunset[0]].map(hour);
+        self.sun_hours = [forecast.daily.sunrise[0], forecast.daily.sunset[0]]
+            .map(|time| f32::from(time.hour()) + f32::from(time.minute()) / 60.0);
         self.conditions = [
-            conditions(raw.conditions),
-            conditions(forecast.hourly.at(3)),
-            conditions(forecast.hourly.at(6)),
+            conditions(&raw.conditions),
+            conditions(&forecast.hourly.at(3)),
+            conditions(&forecast.hourly.at(6)),
         ];
         self.details = format!(
             "{} · Humidity {}% · Wind {:.0} km/h",
@@ -278,7 +281,7 @@ struct Forecast {
     daily: Daily,
 }
 
-#[derive(Clone, Copy, Deserialize)]
+#[derive(Deserialize)]
 struct Current {
     temperature_2m: f32,
     relative_humidity_2m: u8,
@@ -287,7 +290,7 @@ struct Current {
     conditions: RawConditions<f32, u8>,
 }
 
-#[derive(Clone, Copy, Deserialize)]
+#[derive(Deserialize)]
 struct RawConditions<T, C> {
     cloud_cover: T,
     visibility: T,
@@ -318,11 +321,7 @@ struct Daily {
     sunset: [DateTime; 1],
 }
 
-fn hour(time: DateTime) -> f32 {
-    f32::from(time.hour()) + f32::from(time.minute()) / 60.0
-}
-
-fn conditions(raw: RawConditions<f32, u8>) -> WeatherCondition {
+fn conditions(raw: &RawConditions<f32, u8>) -> WeatherCondition {
     let code = raw.weather_code;
     let intensity = match code {
         51 | 56 | 61 | 66 | 71 | 80 | 85 | 95 | 96 => 0.3,

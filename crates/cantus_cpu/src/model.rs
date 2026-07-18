@@ -56,11 +56,7 @@ impl PlaybackState {
 
     pub fn estimated_progress(&self) -> f32 {
         self.progress as f32
-            + if self.playing {
-                self.last_progress_update.elapsed().as_millis() as f32
-            } else {
-                0.0
-            }
+            + self.last_progress_update.elapsed().as_millis() as f32 * f32::from(self.playing)
     }
 
     pub fn replace_queue(
@@ -87,7 +83,7 @@ impl PlaybackState {
                 .iter()
                 .chain(&old_queue)
                 .chain(&reconciled)
-                .find_map(|old| (old.album.image == track.album.image).then_some(&old.art))
+                .find_map(|old| (old.album_image == track.album_image).then_some(&old.art))
                 && let ArtState::Ready(art) = art
             {
                 track.art = ArtState::Ready(Arc::clone(art));
@@ -102,9 +98,10 @@ impl PlaybackState {
 pub struct Track {
     pub id: Option<TrackId>,
     pub name: String,
-    pub album: Album,
+    #[serde(deserialize_with = "deserialize_album_image", rename = "album")]
+    pub album_image: Option<String>,
     #[serde(deserialize_with = "deserialize_first_artist", rename = "artists")]
-    pub artist: Artist,
+    pub artist: String,
     pub duration_ms: u32,
     #[serde(skip)]
     pub art: ArtState,
@@ -155,28 +152,13 @@ impl Track {
 }
 
 impl TrackRuntime {
-    pub fn end_x(&self) -> f32 {
-        self.start_x + self.width
-    }
-
     pub fn rect(&self, height: f32) -> Option<Rect> {
-        (self.width > 0.0 && self.end_x() > 0.0).then_some(Rect::pill(
+        (self.width > 0.0 && self.start_x + self.width > 0.0).then_some(Rect::pill(
             self.start_x,
             self.width,
             height,
         ))
     }
-}
-
-#[derive(Deserialize)]
-pub struct Album {
-    #[serde(default, deserialize_with = "deserialize_images", rename = "images")]
-    pub image: Option<String>,
-}
-
-#[derive(Deserialize)]
-pub struct Artist {
-    pub name: String,
 }
 
 pub struct CondensedPlaylist {
@@ -207,12 +189,6 @@ pub fn playlist_icons(
     playlists.iter().filter(move |playlist| {
         playlist.rating_index.is_none() && playlist.tracks.contains(&track_id) == contains_track
     })
-}
-
-#[derive(Deserialize)]
-struct Image {
-    url: String,
-    width: Option<u32>,
 }
 
 #[derive(Copy, Clone)]
@@ -250,19 +226,44 @@ pub fn deserialize_images<'de, D>(deserializer: D) -> Result<Option<String>, D::
 where
     D: Deserializer<'de>,
 {
+    #[derive(Deserialize)]
+    struct Image {
+        url: String,
+        width: Option<u32>,
+    }
+
     Ok(Vec::<Image>::deserialize(deserializer)?
         .into_iter()
         .min_by_key(|image| image.width.unwrap_or(u32::MAX))
         .map(|image| image.url))
 }
 
-fn deserialize_first_artist<'de, D>(deserializer: D) -> Result<Artist, D::Error>
+fn deserialize_album_image<'de, D>(deserializer: D) -> Result<Option<String>, D::Error>
 where
     D: Deserializer<'de>,
 {
+    #[derive(Deserialize)]
+    struct Album {
+        #[serde(default, deserialize_with = "deserialize_images", rename = "images")]
+        image: Option<String>,
+    }
+
+    Ok(Album::deserialize(deserializer)?.image)
+}
+
+fn deserialize_first_artist<'de, D>(deserializer: D) -> Result<String, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    #[derive(Deserialize)]
+    struct Artist {
+        name: String,
+    }
+
     Vec::<Artist>::deserialize(deserializer)?
         .into_iter()
         .next()
+        .map(|artist| artist.name)
         .ok_or_else(|| de::Error::custom("artists array is empty"))
 }
 

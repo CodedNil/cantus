@@ -14,20 +14,22 @@ use cantus_shared::{
     PlayheadUniforms, StatusPill, TrackPill, WeatherPill, approach,
 };
 use glam::{FloatExt, Vec2, vec2};
-use std::{f32::consts::TAU, mem, ops::Range, sync::Arc, time::Instant};
+use std::{
+    f32::consts::TAU,
+    mem,
+    ops::Range,
+    sync::{Arc, Weak},
+    time::Instant,
+};
 use wgpu::{
     BindGroup, Buffer, Color, CommandEncoderDescriptor, CurrentSurfaceTexture, Device, Instance,
     LoadOp, Operations, Queue, RenderPass, RenderPassColorAttachment, RenderPassDescriptor,
     RenderPipeline, StoreOp, Surface, SurfaceConfiguration, Texture, TextureViewDescriptor,
 };
 
-/// Particles emitted per second when playback is active.
 const SPARK_EMISSION: f32 = 20.0;
-/// Horizontal velocity range applied at spawn.
 const SPARK_VELOCITY_X: Range<usize> = 40..60;
-/// Vertical velocity range applied at spawn.
 const SPARK_VELOCITY_Y: f32 = 5.0;
-/// Lifetime range for individual particles, in seconds.
 const SPARK_LIFETIME: Range<f32> = 1.2..1.5;
 
 const DEFAULT_AUDIO_FEATURES: AudioFeatures = AudioFeatures {
@@ -43,10 +45,6 @@ const DEFAULT_AUDIO_FEATURES: AudioFeatures = AudioFeatures {
 const PLAYHEAD_START_DURATION: f32 = 0.7;
 const PLAYHEAD_TRANSITION_SPEED: f32 = 5.5;
 const DETAIL_FADE_DURATION: f32 = 0.2;
-
-const fn flag(value: bool) -> f32 {
-    if value { 1.0 } else { 0.0 }
-}
 
 #[derive(Clone, Copy)]
 pub struct Timeline {
@@ -125,10 +123,6 @@ fn upload<T: bytemuck::NoUninit>(queue: &Queue, buffer: &Buffer, data: &T) {
 }
 
 impl GpuPass {
-    fn draw<'pass>(&'pass self, pass: &mut RenderPass<'pass>, instances: u32) {
-        self.draw_range(pass, 0..instances);
-    }
-
     fn draw_range<'pass>(&'pass self, pass: &mut RenderPass<'pass>, instances: Range<u32>) {
         if instances.is_empty() {
             return;
@@ -146,22 +140,18 @@ impl GpuPass {
 }
 
 impl GpuResources {
-    pub fn configure_surface(&self) {
-        self.surface.configure(&self.device, &self.surface_config);
-    }
-
     pub fn resize_surface(&mut self, width: u32, height: u32) {
         if (self.surface_config.width, self.surface_config.height) != (width, height) {
             self.surface_config.width = width;
             self.surface_config.height = height;
-            self.configure_surface();
+            self.surface.configure(&self.device, &self.surface_config);
         }
     }
 }
 
 pub struct ImageAtlas {
     pub texture: Texture,
-    pub slots: [Option<Arc<AlbumArt>>; MAX_TEXTURE_IMAGES as usize],
+    pub slots: [Weak<AlbumArt>; MAX_TEXTURE_IMAGES as usize],
     pub used: u32,
 }
 
@@ -170,7 +160,7 @@ impl ImageAtlas {
         if let Some(index) = self
             .slots
             .iter()
-            .position(|slot| slot.as_ref().is_some_and(|slot| Arc::ptr_eq(slot, art)))
+            .position(|slot| slot.as_ptr() == Arc::as_ptr(art))
         {
             self.used |= 1 << index;
             return index as i32;
@@ -204,7 +194,7 @@ impl ImageAtlas {
                 depth_or_array_layers: 1,
             },
         );
-        self.slots[index as usize] = Some(Arc::clone(art));
+        self.slots[index as usize] = Arc::downgrade(art);
         index as i32
     }
 }
@@ -321,7 +311,7 @@ impl CantusApp {
             CurrentSurfaceTexture::Suboptimal(texture) => (texture, true),
             CurrentSurfaceTexture::Timeout | CurrentSurfaceTexture::Occluded => return,
             CurrentSurfaceTexture::Outdated | CurrentSurfaceTexture::Lost => {
-                gpu.configure_surface();
+                gpu.surface.configure(&gpu.device, &gpu.surface_config);
                 return;
             }
             CurrentSurfaceTexture::Validation => {
@@ -377,23 +367,24 @@ impl CantusApp {
                 gpu.track.draw_range(&mut pass, index..index + 1);
                 gpu.text.draw_range(&mut pass, glyphs.clone());
             }
-            gpu.weather.draw(&mut pass, 1);
+            gpu.weather.draw_range(&mut pass, 0..1);
             gpu.text.draw_range(&mut pass, 0..weather_glyph_end);
             if let Some(glyphs) = self.render.track_glyphs.get(foreground) {
                 let foreground = foreground as u32;
                 gpu.track.draw_range(&mut pass, foreground..foreground + 1);
                 gpu.text.draw_range(&mut pass, glyphs.clone());
             }
-            gpu.status.draw(&mut pass, 1);
+            gpu.status.draw_range(&mut pass, 0..1);
             gpu.text.draw_range(&mut pass, weather_glyph_end..label_end);
-            gpu.particles.draw(&mut pass, PARTICLE_COUNT as u32);
-            gpu.playhead.draw(&mut pass, 1);
+            gpu.particles
+                .draw_range(&mut pass, 0..PARTICLE_COUNT as u32);
+            gpu.playhead.draw_range(&mut pass, 0..1);
         }
 
         gpu.queue.submit([encoder.finish()]);
         gpu.queue.present(surface_texture);
         if reconfigure_after_present {
-            gpu.configure_surface();
+            gpu.surface.configure(&gpu.device, &gpu.surface_config);
         }
     }
 
@@ -473,17 +464,11 @@ impl CantusApp {
         let queue = &mut playback_state.queue;
 
         let drag_offset_ms = if self.interaction.dragging {
-            self.interaction.drag_origin.map_or(0.0, |origin| {
-                (self.render.uniforms.mouse_pos.x - origin.x) / px_per_ms
-            })
+            (self.render.uniforms.mouse_pos.x - self.interaction.press_origin.x) / px_per_ms
         } else {
             0.0
         };
         let cur_idx = playback_state.queue_index.min(queue.len() - 1);
-
-        if self.interaction.dragging {
-            self.interaction.drag_track = None;
-        }
 
         let mut current_ms = -playback_elapsed
             - queue[..cur_idx]
@@ -543,15 +528,13 @@ impl CantusApp {
             let track = &mut queue[queue_index];
             if track.runtime.rect(self.config.height).is_some() {
                 let hovered = Some(queue_index) == hovered_track;
-                self.draw_track(track, timeline, hovered, dt, playlists);
+                self.draw_track(track, hovered, dt, playlists);
             }
         }
 
         self.render_playhead_particles(
             dt,
             &queue[current_track.unwrap_or(cur_idx)],
-            playhead_x,
-            self.render.movement_speed,
             playback_state.playing,
         );
         self.playback = playback_state;
@@ -589,7 +572,6 @@ impl CantusApp {
     fn draw_track(
         &mut self,
         track: &mut Track,
-        timeline: Timeline,
         hovered: bool,
         dt: f32,
         playlists: &[CondensedPlaylist],
@@ -597,26 +579,17 @@ impl CantusApp {
         let glyph_start = self.render.gpu.as_ref().unwrap().text_renderer.glyphs.len() as u32;
         let layout_width = track.runtime.width;
         let start_x = track.runtime.start_x;
-        let origin_x = timeline.playhead_x;
-        // If dragging, set the drag target to this track, and the position within the track
-        if self.interaction.dragging && track.is_current() {
-            let (hit_start, hit_end) = track.natural_x_range(origin_x, timeline.px_per_ms);
-            self.interaction.drag_track = Some((
-                track.id,
-                (origin_x.max(start_x) - hit_start) / (hit_end - hit_start),
-            ));
-        }
 
         let show_details = layout_width > self.config.height;
         approach(
             &mut track.runtime.detail_alpha,
-            flag(show_details),
+            f32::from(show_details),
             dt / DETAIL_FADE_DURATION,
         );
         let detail_alpha = track.runtime.detail_alpha;
         approach(
             &mut track.runtime.playlist_expansion,
-            flag(hovered && show_details && detail_alpha >= 1.0),
+            f32::from(hovered && show_details && detail_alpha >= 1.0),
             dt.min(0.1) * 6.0,
         );
         let playlist_expansion = track.runtime.playlist_expansion;
@@ -642,7 +615,7 @@ impl CantusApp {
 
         // Expand the hitbox vertically so it includes the playlist buttons
         if show_details {
-            self.populate_playlist_buttons(track, playlist_expansion, playlists, &mut pill);
+            self.populate_playlist_buttons(track, playlists, &mut pill);
         }
         if hovered
             && pill.rating >= 0
@@ -659,7 +632,7 @@ impl CantusApp {
         let primary_icons = pill.star_count() + pill.primary_playlist_count as f32;
         approach(
             &mut track.runtime.primary_icon_alpha,
-            flag(
+            f32::from(
                 primary_icons > 0.0
                     && (playlist_expansion > 0.0
                         || layout_width >= ICON_SPACING * 1.05 * primary_icons),
@@ -676,7 +649,6 @@ impl CantusApp {
     fn populate_playlist_buttons(
         &mut self,
         track: &Track,
-        secondary_expansion: f32,
         playlists: &[CondensedPlaylist],
         pill: &mut TrackPill,
     ) {
@@ -684,7 +656,8 @@ impl CantusApp {
             return;
         };
         let icons = playlist_icons(track_id, playlists, true).chain(
-            playlist_icons(track_id, playlists, false).filter(|_| secondary_expansion > 0.0),
+            playlist_icons(track_id, playlists, false)
+                .filter(|_| track.runtime.playlist_expansion > 0.0),
         );
         for (slot, playlist) in pill.playlist_images.iter_mut().zip(icons) {
             *slot = self.get_image_index(&playlist.art);
@@ -709,15 +682,10 @@ impl CantusApp {
         };
     }
 
-    fn render_playhead_particles(
-        &mut self,
-        dt: f32,
-        track: &Track,
-        playhead_x: f32,
-        avg_speed: f32,
-        playing: bool,
-    ) {
+    fn render_playhead_particles(&mut self, dt: f32, track: &Track, playing: bool) {
         let palette = track.palette();
+        let playhead_x = self.render.uniforms.playhead_x;
+        let avg_speed = self.render.movement_speed;
 
         // Emit new particles while playing
         let emit_count = if avg_speed.abs() > 0.00001 {
@@ -770,8 +738,8 @@ impl CantusApp {
             self.render.playhead.icon_presence = 1.0 - last_toggle;
             approach(&mut self.render.playhead.icon_morph, 1.0, speed * 1.5);
         } else {
-            let show_icon = flag(playhead_hovered || !playing);
-            let play_icon = flag(playhead_hovered && !playing);
+            let show_icon = f32::from(playhead_hovered || !playing);
+            let play_icon = f32::from(playhead_hovered && !playing);
             approach(&mut self.render.playhead.bar_split, show_icon, speed);
             if show_icon > self.render.playhead.icon_presence {
                 self.render.playhead.icon_presence = show_icon;

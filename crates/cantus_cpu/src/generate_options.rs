@@ -11,19 +11,17 @@ fn main() {
     let schema = schemars::schema_for!(config::Config);
     let schema = schema.as_value();
     let properties = schema["properties"].as_object().unwrap();
-    let options = properties
-        .iter()
-        .fold(String::new(), |mut options, (name, property)| {
-            writeln!(
-                options,
-                "{name}=lib.mkOption{{type={};default={};description={};}};",
-                nix_type(property, schema),
-                nix_value(&property["default"]),
-                nix_string(property["description"].as_str().unwrap()),
-            )
-            .unwrap();
-            options
-        });
+    let mut options = String::new();
+    for (name, property) in properties {
+        writeln!(
+            options,
+            "{name}=lib.mkOption{{type={};default={};description={};}};",
+            nix_type(property, schema),
+            nix_value(&property["default"]),
+            nix_string(property["description"].as_str().unwrap()),
+        )
+        .unwrap();
+    }
     let output = format!("{HEADER}{options}}}\n");
 
     fs::write(OUTPUT, output).unwrap();

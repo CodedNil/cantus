@@ -21,6 +21,7 @@ use std::{
     fmt::Display,
     fs,
     io::{self, BufRead, BufReader, Write},
+    iter::once,
     mem,
     net::TcpListener,
     path::{Path, PathBuf},
@@ -34,8 +35,9 @@ use std::{
 };
 use tracing::{error, info, warn};
 use ureq::{
-    Agent, Body,
+    Agent, Body, RequestBuilder,
     http::{Method, Request, Response, StatusCode},
+    typestate::WithoutBody,
 };
 
 const API_BASE: &str = "https://api.spotify.com/v1";
@@ -145,8 +147,12 @@ fn response_json<T: DeserializeOwned>(mut response: Response<Body>) -> ClientRes
     serde_json::from_reader(response.body_mut().as_reader()).map_err(Into::into)
 }
 
+fn request_json<T: DeserializeOwned>(request: RequestBuilder<WithoutBody>) -> ClientResult<T> {
+    response_json(request.call()?)
+}
+
 fn write_json(path: &Path, value: &impl Serialize) -> ClientResult<()> {
-    fs::write(path, serde_json::to_vec(value)?).map_err(Into::into)
+    serde_json::to_writer(fs::File::create(path)?, value).map_err(Into::into)
 }
 
 fn read_token_cache(cache_path: &Path, scopes: &str) -> ClientResult<Option<OAuthCredentials>> {
@@ -264,11 +270,12 @@ impl SpotifyClient {
         label: &str,
     ) -> Option<T> {
         let authorization = self.authorization().ok()?;
-        let response = self
+        let request = self
             .http
             .get(format!("{API_BASE}/{url}"))
             .header("authorization", authorization)
-            .query_pairs(payload.iter().copied())
+            .query_pairs(payload.iter().copied());
+        let response = request
             .call()
             .inspect_err(|e| error!("Failed to fetch {label}: {e}"))
             .ok()?;
@@ -280,10 +287,10 @@ impl SpotifyClient {
             .ok()
     }
 
-    fn run_request(&mut self, method: &Method, path: &str, json: Option<&str>) {
+    fn run_request(&mut self, method: Method, path: &str, json: Option<&str>) {
         let result: ClientResult<()> = (|| {
             let request = Request::builder()
-                .method(method.clone())
+                .method(method)
                 .uri(format!("{API_BASE}/{path}"))
                 .header("authorization", self.authorization()?);
             let request = match json {
@@ -353,10 +360,6 @@ fn client_error(message: &'static str) -> Box<dyn Error + Send + Sync> {
     io::Error::other(message).into()
 }
 
-fn boxed_error(error: impl Error + Send + Sync + 'static) -> Box<dyn Error + Send + Sync> {
-    Box::new(error)
-}
-
 fn config_path(file: &str) -> PathBuf {
     config::directory().join(file)
 }
@@ -385,9 +388,9 @@ pub struct SpotifyBackend {
 }
 
 impl SpotifyBackend {
-    pub fn new(config: &Config, updater: AppUpdater) -> Self {
+    pub fn new(config: &mut Config, updater: AppUpdater) -> Self {
         fs::create_dir_all(config::directory()).expect("Failed to create Cantus config directory");
-        let client_id = config.spotify_client_id.clone().expect(
+        let client_id = config.spotify_client_id.take().expect(
             "Spotify client ID not set, set it in the config file under key `spotify_client_id`.",
         );
         let client = SpotifyClient::new(client_id, SCOPES, config_path(SPOTIFY_TOKEN_CACHE))
@@ -395,15 +398,14 @@ impl SpotifyBackend {
         let (commands, receiver) = mpsc::channel();
         let http = client.http.clone();
         let features = audio_features_backend(http.clone(), updater.clone());
-        let now = Instant::now();
         let worker = SpotifyWorker {
             client,
             updater: updater.clone(),
             features,
             current_context: None,
             context_updated: false,
-            last_grabbed_queue: now.checked_sub(Duration::from_mins(1)).unwrap_or(now),
-            playlist_targets: config.playlists.clone(),
+            last_grabbed_queue: None,
+            playlist_targets: mem::take(&mut config.playlists),
             playlist_snapshots: HashMap::new(),
             playlist_cache: fs::read(config_path(PLAYLIST_TRACKS_CACHE))
                 .ok()
@@ -431,7 +433,7 @@ impl SpotifyBackend {
                 "me/player/previous"
             };
             for _ in 0..count {
-                client.run_request(&Method::POST, path, None);
+                client.run_request(Method::POST, path, None);
             }
         });
     }
@@ -461,10 +463,10 @@ impl SpotifyBackend {
         let updater = self.updater.clone();
         let http = self.http.clone();
         spawn(move || {
-            let result = http
+            let result: ClientResult<_> = http
                 .get(&url)
                 .call()
-                .map_err(boxed_error)
+                .map_err(Into::into)
                 .and_then(|mut response| Ok(response.body_mut().read_to_vec()?))
                 .and_then(|bytes| image::load_from_memory(&bytes).map_err(Into::into))
                 .map(|image| Arc::new(art::prepare(&image)));
@@ -482,7 +484,7 @@ impl SpotifyBackend {
     fn request(&self, method: Method, path: impl Into<String>) {
         let path = path.into();
         send_update(&self.commands, move |client| {
-            client.run_request(&method, &path, None);
+            client.run_request(method, &path, None);
         });
     }
 
@@ -500,7 +502,7 @@ struct SpotifyWorker {
     features: Sender<Vec<TrackId>>,
     current_context: Option<String>,
     context_updated: bool,
-    last_grabbed_queue: Instant,
+    last_grabbed_queue: Option<Instant>,
     playlist_targets: ArrayVec<String, MAX_PILL_PLAYLIST_ICONS>,
     playlist_snapshots: HashMap<PlaylistId, ArrayString<32>>,
     playlist_cache: PlaylistCache,
@@ -514,12 +516,12 @@ impl SpotifyWorker {
         loop {
             let now = Instant::now();
             if now >= next_playback {
-                self.poll_playback();
-                self.poll_queue();
+                let _ = self.poll_playback();
+                let _ = self.poll_queue();
                 next_playback = Instant::now() + Duration::from_secs(1);
             }
             if now >= next_playlists {
-                self.poll_playlists();
+                let _ = self.poll_playlists();
                 next_playlists = Instant::now() + Duration::from_secs(20);
             }
             let timeout = next_playback
@@ -547,7 +549,7 @@ fn set_playlist_membership(
         (Method::DELETE, json!({ "items": [{ "uri": track_uri }] }))
     };
     let path = format!("playlists/{playlist_id}/items");
-    client.run_request(&method, &path, Some(&body.to_string()));
+    client.run_request(method, &path, Some(&body.to_string()));
 }
 
 fn set_liked_state(client: &mut SpotifyClient, track_id: TrackId, should_like: bool) {
@@ -566,7 +568,7 @@ fn set_liked_state(client: &mut SpotifyClient, track_id: TrackId, should_like: b
         let path = form_urlencoded::Serializer::new(String::from("me/library?"))
             .append_pair("uris", &track_uri)
             .finish();
-        client.run_request(&method, &path, None);
+        client.run_request(method, &path, None);
     }
 }
 
@@ -576,20 +578,17 @@ impl SpotifyWorker {
     /// Uses Spotify's [Get Playback State] endpoint.
     ///
     /// [Get Playback State]: https://developer.spotify.com/documentation/web-api/reference/get-information-about-the-users-current-playback
-    fn poll_playback(&mut self) {
-        let Some(current_playback) =
+    fn poll_playback(&mut self) -> Option<()> {
+        let mut current_playback =
             self.client
-                .api_json_payload::<CurrentPlaybackContext>("me/player", &[], "playback")
-        else {
-            return;
-        };
+                .api_json_payload::<CurrentPlaybackContext>("me/player", &[], "playback")?;
 
         let now = Instant::now();
-        let new_context = current_playback.context.as_ref().map(|c| &c.uri);
-        if self.current_context.as_ref() != new_context {
+        let new_context = current_playback.context.take().map(|context| context.uri);
+        if self.current_context != new_context {
             self.context_updated = true;
-            self.current_context = new_context.map(String::from);
-            self.last_grabbed_queue = now.checked_sub(Duration::from_mins(1)).unwrap_or(now);
+            self.current_context = new_context;
+            self.last_grabbed_queue = None;
         }
         send_update(&self.updater, move |app| {
             let state = &mut app.playback;
@@ -608,6 +607,7 @@ impl SpotifyWorker {
                 state.last_progress_update = now;
             }
         });
+        Some(())
     }
 
     /// Refreshes the current and upcoming tracks while preserving local runtime state and history.
@@ -615,32 +615,28 @@ impl SpotifyWorker {
     /// Uses Spotify's [Get the User's Queue] endpoint.
     ///
     /// [Get the User's Queue]: https://developer.spotify.com/documentation/web-api/reference/get-queue
-    fn poll_queue(&mut self) {
+    fn poll_queue(&mut self) -> Option<()> {
         let now = Instant::now();
-        if now < self.last_grabbed_queue + Duration::from_secs(15) {
-            return;
+        if self
+            .last_grabbed_queue
+            .is_some_and(|last| now < last + Duration::from_secs(15))
+        {
+            return None;
         }
 
-        let Some(q) =
+        let q =
             self.client
-                .api_json_payload::<CurrentUserQueue>("me/player/queue", &[], "queue")
-        else {
-            return;
-        };
-        let Some(PlaybackItem::Track(currently_playing)) = q.currently_playing else {
-            // Nothing is currently playing
-            return;
+                .api_json_payload::<CurrentUserQueue>("me/player/queue", &[], "queue")?;
+        let PlaybackItem::Track(currently_playing) = q.currently_playing? else {
+            return None;
         };
         let current_track_id = currently_playing.id;
-        let mut new_queue = q
-            .queue
-            .into_iter()
-            .filter_map(|item| match item {
+        let new_queue = once(currently_playing)
+            .chain(q.queue.into_iter().filter_map(|item| match item {
                 PlaybackItem::Track(track) => Some(track),
                 PlaybackItem::Other => None,
-            })
+            }))
             .collect::<Vec<_>>();
-        new_queue.insert(0, currently_playing);
         let feature_ids = new_queue
             .iter()
             .filter_map(|track| track.id)
@@ -648,7 +644,7 @@ impl SpotifyWorker {
 
         let context_updated = self.context_updated;
         self.context_updated = false;
-        self.last_grabbed_queue = Instant::now();
+        self.last_grabbed_queue = Some(Instant::now());
         send_update(&self.updater, move |app| {
             app.playback
                 .replace_queue(new_queue, current_track_id, context_updated);
@@ -657,6 +653,7 @@ impl SpotifyWorker {
         if self.features.send(feature_ids).is_err() {
             warn!("Discarded audio-feature request after its worker stopped");
         }
+        Some(())
     }
 }
 
@@ -685,6 +682,9 @@ fn resolve_audio_features(
     track_ids: &[TrackId],
     cache: &mut HashMap<TrackId, AudioFeatures>,
 ) {
+    if cache.len() > 1024 {
+        cache.retain(|id, _| track_ids.contains(id));
+    }
     let mut missing = track_ids
         .iter()
         .copied()
@@ -694,15 +694,14 @@ fn resolve_audio_features(
     if missing.is_empty() {
         return;
     }
-    let Ok(page) = http
-        .get(RECCO_TRACK_URL)
-        .query("size", "50")
-        .query_pairs(missing.iter().map(|id| ("ids", id.as_str())))
-        .call()
-        .map_err(boxed_error)
-        .and_then(response_json::<Page<ReccoTrack>>)
-        .inspect_err(|err| warn!("Failed to resolve Spotify tracks with ReccoBeats: {err}"))
-    else {
+    let page = request_json::<Page<ReccoTrack>>(
+        http.get(RECCO_TRACK_URL)
+            .query("size", "50")
+            .query_pairs(missing.iter().map(|id| ("ids", id.as_str()))),
+    );
+    let Ok(page) = page.inspect_err(|err| {
+        warn!("Failed to resolve Spotify tracks with ReccoBeats: {err}");
+    }) else {
         return;
     };
     for recco_track in page.items {
@@ -716,13 +715,10 @@ fn resolve_audio_features(
             continue;
         };
         let url = format!("{RECCO_TRACK_URL}/{}/audio-features", recco_track.id);
-        if let Ok(features) = http
-            .get(url)
-            .call()
-            .map_err(boxed_error)
-            .and_then(response_json)
-            .inspect_err(|err| warn!("Failed to fetch ReccoBeats features for {spotify_id}: {err}"))
-        {
+        let features = request_json::<AudioFeatures>(http.get(url));
+        if let Ok(features) = features.inspect_err(|err| {
+            warn!("Failed to fetch ReccoBeats features for {spotify_id}: {err}");
+        }) {
             cache.insert(spotify_id, features);
         }
     }
@@ -735,15 +731,14 @@ impl SpotifyWorker {
     /// contents to [`fetch_playlist_tracks`].
     ///
     /// [Get Current User's Playlists]: https://developer.spotify.com/documentation/web-api/reference/get-a-list-of-current-users-playlists
-    fn poll_playlists(&mut self) {
-        let Some(playlists) = self.client.api_json_payload::<Page<Option<Playlist>>>(
+    fn poll_playlists(&mut self) -> Option<()> {
+        let playlists = self.client.api_json_payload::<Page<Option<Playlist>>>(
             "me/playlists",
             &[("limit", "50")],
             "playlists",
-        ) else {
-            return;
-        };
+        )?;
 
+        let mut cache_changed = false;
         for playlist in playlists.items.into_iter().flatten() {
             let rating_index = rating_index(self.ratings_enabled, &playlist.name);
             if !self.playlist_targets.contains(&playlist.name) && rating_index.is_none() {
@@ -764,11 +759,7 @@ impl SpotifyWorker {
                 };
                 self.playlist_cache
                     .insert(playlist.id, (playlist.snapshot_id, Arc::clone(&tracks)));
-                if let Err(err) =
-                    write_json(&config_path(PLAYLIST_TRACKS_CACHE), &self.playlist_cache)
-                {
-                    warn!("Failed to persist playlist cache: {err}");
-                }
+                cache_changed = true;
                 tracks
             };
             self.playlist_snapshots
@@ -797,14 +788,19 @@ impl SpotifyWorker {
                 playlists.sort_unstable_by(|a, b| a.name.cmp(&b.name));
             });
         }
+        if cache_changed
+            && let Err(err) = write_json(&config_path(PLAYLIST_TRACKS_CACHE), &self.playlist_cache)
+        {
+            warn!("Failed to persist playlist cache: {err}");
+        }
+        Some(())
     }
 }
 
 fn rating_index(enabled: bool, name: &str) -> Option<u8> {
-    enabled.then_some(())?;
     RATING_PLAYLISTS
         .iter()
-        .position(|&playlist| playlist == name)
+        .position(|&playlist| enabled && playlist == name)
         .map(|index| index as u8)
 }
 

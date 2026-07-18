@@ -7,7 +7,10 @@ use cantus_shared::{
     GlobalUniforms, GlyphInstance, MAX_GLYPH_INSTANCES, Particle, PlayheadUniforms, StatusPill,
     TrackPill, WeatherPill,
 };
-use std::{mem::size_of, sync::Arc};
+use std::{
+    mem::size_of,
+    sync::{Arc, Weak},
+};
 use wgpu::{
     BindGroupDescriptor, BindGroupEntry, BindingResource, BlendState, BufferDescriptor,
     BufferUsages, ColorTargetState, ColorWrites, CompositeAlphaMode, Device, DeviceDescriptor,
@@ -238,7 +241,7 @@ impl CantusApp {
             particles,
             images: ImageAtlas {
                 texture: texture_array,
-                slots: [const { None }; MAX_TEXTURE_IMAGES as usize],
+                slots: [const { Weak::new() }; MAX_TEXTURE_IMAGES as usize],
                 used: 0,
             },
             text_renderer,

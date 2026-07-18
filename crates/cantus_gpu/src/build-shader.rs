@@ -1,6 +1,5 @@
 use spirv_builder::{SpirvBuilder, SpirvMetadata};
-use std::fs;
-use std::path::PathBuf;
+use std::{fs, path::PathBuf};
 
 fn main() {
     let manifest_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"));

@@ -49,8 +49,10 @@ pub struct TrackPill {
 pub struct StatusPill {
     pub x: f32,
     pub width: f32,
-    pub battery: [f32; 2],
-    pub volume: [f32; 2],
+    pub battery_level: f32,
+    pub battery_present: f32,
+    pub volume: f32,
+    pub muted: f32,
 }
 
 #[repr(C)]
@@ -63,7 +65,6 @@ pub struct WeatherPill {
     pub today: Vec2,
     pub calendar_expansion: f32,
     pub conditions: [WeatherCondition; 3],
-    /// Pads the storage-buffer array stride to the eight-byte alignment required by `today`.
     pub padding: f32,
 }
 
@@ -122,7 +123,6 @@ pub struct Particle {
     pub color: u32,
 }
 
-/// Maximum number of glyph instances that can be drawn in a single frame.
 pub const MAX_GLYPH_INSTANCES: usize = 2048;
 
 #[repr(C)]

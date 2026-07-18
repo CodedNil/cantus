@@ -52,13 +52,13 @@ struct CantusApp {
 impl Default for CantusApp {
     fn default() -> Self {
         let (updater, app_updates) = mpsc::channel();
-        let config = config::load();
+        let mut config = config::load();
         Self {
             render: RenderState::default(),
             interaction: InteractionState::default(),
             playback: PlaybackState::default(),
             app_updates,
-            spotify: spotify::SpotifyBackend::new(&config, updater.clone()),
+            spotify: spotify::SpotifyBackend::new(&mut config, updater.clone()),
             status: Status::new(updater.clone()),
             weather: Weather::new(config.location, updater),
             config,

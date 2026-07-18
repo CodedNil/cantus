@@ -22,25 +22,22 @@ pub struct InteractionState {
     pub mouse_pressure: f32, // 0 not hovered - 1 hovered - 2 mouse down
     pub hovered_track: Option<usize>,
     pub dragging: bool,
+    pub drag_enabled: bool,
     pub press_origin: Vec2,
-    pub drag_origin: Option<Vec2>,
-    pub drag_track: Option<(Option<TrackId>, f32)>,
 }
 
 impl CantusApp {
     pub fn left_click(&mut self) {
         let mouse_pos = self.render.uniforms.mouse_pos;
-        let drag_origin = self
+        let drag_enabled = self
             .interaction
             .hovered_track
             .and_then(|index| self.playback.queue.get(index))
-            .is_some_and(|track| track.contains(mouse_pos, self.config.height))
-            .then_some(mouse_pos);
+            .is_some_and(|track| track.contains(mouse_pos, self.config.height));
         let interaction = &mut self.interaction;
         interaction.mouse_pressure = 2.0;
         interaction.press_origin = mouse_pos;
-        interaction.drag_origin = drag_origin;
-        interaction.drag_track = None;
+        interaction.drag_enabled = drag_enabled;
         interaction.dragging = false;
     }
 
@@ -53,18 +50,16 @@ impl CantusApp {
         if same_spot && !self.interaction.dragging && self.interaction.mouse_pressure > 1.0 {
             self.handle_click();
         }
-        if let Some((track_id, position)) = self.interaction.drag_track.take() {
-            // Get the x position of the playhead, run an expansion animation there
+        if self.interaction.dragging
+            && let Some(track) = self.playback.queue.iter().find(|track| track.is_current())
+            && let Some(track_id) = track.id
+        {
+            let timeline = self.timeline();
+            let (start, end) = track.natural_x_range(timeline.playhead_x, timeline.px_per_ms);
+            let position = (timeline.playhead_x.max(track.runtime.start_x) - start) / (end - start);
             self.pulse_at_playhead();
-            if let Some(track_id) = track_id {
-                self.skip_to_track(track_id, position);
-            }
+            self.skip_to_track(track_id, position);
         }
-        self.cancel_drag();
-        self.interaction.mouse_pressure = 1.0;
-    }
-
-    pub const fn right_click(&mut self) {
         self.cancel_drag();
         self.interaction.mouse_pressure = 1.0;
     }
@@ -148,10 +143,10 @@ impl CantusApp {
     /// Drag across the progress bar to seek.
     pub fn handle_mouse_drag(&mut self) {
         let interaction = &mut self.interaction;
-        let Some(origin) = interaction.drag_origin else {
+        if !interaction.drag_enabled {
             return;
-        };
-        let delta = (self.render.uniforms.mouse_pos - origin).abs();
+        }
+        let delta = (self.render.uniforms.mouse_pos - interaction.press_origin).abs();
         interaction.dragging |= delta.x >= 2.0 || delta.y >= 2.0;
     }
 
@@ -173,8 +168,7 @@ impl CantusApp {
 
     pub const fn cancel_drag(&mut self) {
         let interaction = &mut self.interaction;
-        interaction.drag_track = None;
-        interaction.drag_origin = None;
+        interaction.drag_enabled = false;
         interaction.dragging = false;
     }
 

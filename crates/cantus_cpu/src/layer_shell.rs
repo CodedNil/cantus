@@ -2,7 +2,6 @@ use crate::{
     CantusApp, PANEL_START,
     config::{Layer as ConfigLayer, LayerAnchor as ConfigLayerAnchor},
     model::Rect,
-    status::Status,
 };
 use glam::vec2;
 use std::{
@@ -78,12 +77,9 @@ pub fn run() {
         .monitor
         .as_ref()
         .and_then(|target| {
-            app.outputs.iter().position(|info| {
-                info.identifiers
-                    .iter()
-                    .flatten()
-                    .any(|value| value.contains(target))
-            })
+            app.outputs
+                .iter()
+                .position(|info| info.identifiers.contains(target))
         })
         .unwrap_or(0);
 
@@ -129,13 +125,9 @@ fn region_rect(rect: Rect) -> [i32; 4] {
     [rect.x0, rect.y0, rect.x1 - rect.x0, rect.y1 - rect.y0].map(|value| value.round() as i32)
 }
 
-fn add_rect(region: &WlRegion, [x, y, width, height]: [i32; 4]) {
-    region.add(x, y, width, height);
-}
-
 struct OutputInfo {
     handle: WlOutput,
-    identifiers: [Option<String>; 3],
+    identifiers: String,
 }
 
 #[derive(Default)]
@@ -177,38 +169,23 @@ macro_rules! dispatch {
 }
 
 impl LayerShellApp {
-    fn request_frame(&mut self, qhandle: &QueueHandle<Self>) {
-        if self.frame_callback.is_none()
-            && let Some(surface) = &self.wl_surface
-        {
-            self.frame_callback = Some(surface.frame(qhandle, ()));
-        }
-    }
-
-    fn ensure_surface(&mut self, width: u32, height: u32) {
-        if width == 0 || height == 0 || !self.is_configured {
-            return;
-        }
-
-        if let Some(gpu) = &mut self.cantus.render.gpu {
-            gpu.resize_surface(width, height);
-            return;
-        }
-
-        let Some(surface) = self.pending_surface.take() else {
-            return;
-        };
-        self.cantus.configure_render_surface(surface, width, height);
-    }
-
     fn try_render_frame(&mut self, qhandle: &QueueHandle<Self>) {
         let (buffer_width, buffer_height) = self.cantus.buffer_size();
-        self.ensure_surface(buffer_width, buffer_height);
+        if buffer_width > 0 && buffer_height > 0 && self.is_configured {
+            if let Some(gpu) = &mut self.cantus.render.gpu {
+                gpu.resize_surface(buffer_width, buffer_height);
+            } else if let Some(surface) = self.pending_surface.take() {
+                self.cantus
+                    .configure_render_surface(surface, buffer_width, buffer_height);
+            }
+        }
 
         self.cantus.render();
         self.update_input_region(qhandle);
-        self.request_frame(qhandle);
         if let Some(surface) = &self.wl_surface {
+            if self.frame_callback.is_none() {
+                self.frame_callback = Some(surface.frame(qhandle, ()));
+            }
             surface.commit();
         }
     }
@@ -242,7 +219,8 @@ impl LayerShellApp {
         if hash != self.last_hitbox_hash {
             let region = compositor.create_region(qhandle, ());
             for rect in self.cantus.input_rects() {
-                add_rect(&region, region_rect(rect));
+                let [x, y, width, height] = region_rect(rect);
+                region.add(x, y, width, height);
             }
             wl_surface.set_input_region(Some(&region));
             region.destroy();
@@ -256,7 +234,11 @@ impl CantusApp {
         [
             self.weather
                 .interaction_rect(self.render.status, self.config.height),
-            Status::rect(self.render.status, self.config.height),
+            Rect::pill(
+                self.render.status.x,
+                self.render.status.width,
+                self.config.height,
+            ),
         ]
     }
 
@@ -317,16 +299,16 @@ dispatch!(WlCallback, |state, _proxy, event, qhandle| {
 dispatch!(WlOutput, |state, proxy, event, _qhandle| {
     let id = proxy.id();
     if let Some(info) = state.outputs.iter_mut().find(|info| info.handle.id() == id) {
-        match event {
-            wl_output::Event::Geometry { make, model, .. } => {
-                info.identifiers[2] = Some(format!("{make} {model}"));
-            }
-            wl_output::Event::Name { name } => info.identifiers[0] = Some(name),
-            wl_output::Event::Description { description } => {
-                info.identifiers[1] = Some(description);
-            }
-            _ => {}
+        let identifier = match event {
+            wl_output::Event::Geometry { make, model, .. } => format!("{make} {model}"),
+            wl_output::Event::Name { name }
+            | wl_output::Event::Description { description: name } => name,
+            _ => return,
+        };
+        if !info.identifiers.is_empty() {
+            info.identifiers.push(' ');
         }
+        info.identifiers.push_str(&identifier);
     }
 });
 
@@ -381,7 +363,8 @@ dispatch!(WlPointer, |state, _proxy, event, _qhandle| {
                 cantus.left_click_released();
             }
             (0x111, WEnum::Value(wl_pointer::ButtonState::Pressed)) if interaction.dragging => {
-                cantus.right_click();
+                cantus.cancel_drag();
+                cantus.interaction.mouse_pressure = 1.0;
             }
             _ => {}
         },
@@ -422,7 +405,7 @@ dispatch!(WlRegistry, |state, proxy, event, qhandle| {
             "wl_output" => {
                 state.outputs.push(OutputInfo {
                     handle: bind!(WlOutput, version.min(4)),
-                    identifiers: [None, None, None],
+                    identifiers: String::new(),
                 });
             }
             _ => {}

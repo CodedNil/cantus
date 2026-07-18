@@ -169,17 +169,8 @@ fn scene(
         * weather.rain;
     color += vec3(0.52, 0.72, 0.9) * rain * 0.42;
 
-    let mut flakes = 0.0;
-    for layer in 0..2 {
-        let depth = layer as f32;
-        flakes += particles(
-            p + depth * 31.0,
-            vec2(time * (6.0 - depth * 2.0), time * (15.0 - depth * 5.0)),
-            18.0 + depth * 7.0,
-            1.0 + depth * 0.3,
-            0.72 - depth * 0.07,
-        );
-    }
+    let flakes = particles(p, vec2(time * 6.0, time * 15.0), 18.0, 1.0, 0.72)
+        + particles(p + 31.0, vec2(time * 4.0, time * 10.0), 25.0, 1.3, 0.65);
     let snow = flakes * weather.snow;
     color = color.lerp(Vec3::splat(0.96), snow.clamp(0.0, 0.92));
 
@@ -196,11 +187,9 @@ fn scene(
 
 fn forecast(conditions: [Condition; 3], edge: f32) -> Condition {
     let position = ((edge - 0.6) / 0.2).clamp(0.0, 2.0);
-    let from = (position.floor() as usize).min(1);
-    conditions[from].lerp(
-        conditions[from + 1],
-        smoothstep(0.0, 1.0, position - from as f32),
-    )
+    conditions[0]
+        .lerp(conditions[1], smoothstep(0.0, 1.0, position))
+        .lerp(conditions[2], smoothstep(1.0, 2.0, position))
 }
 
 #[spirv(vertex)]
@@ -212,12 +201,11 @@ pub fn vs_weather(
     #[spirv(location = 0)] out_pixel: &mut Vec2,
 ) {
     let pill = weather[0];
-    (*out_pos, *out_pixel) = pill_vertex(
-        vertex,
-        global,
-        pill.x,
-        vec2(pill.width, WEATHER_CALENDAR_EXTENSION),
+    let size = vec2(
+        pill.width,
+        WEATHER_CALENDAR_EXTENSION * pill.calendar_expansion,
     );
+    (*out_pos, *out_pixel) = pill_vertex(vertex, global, pill.x, size);
 }
 
 #[spirv(fragment)]

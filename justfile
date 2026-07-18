@@ -12,6 +12,7 @@ fmt:
 update:
     cargo update
     cargo update --manifest-path crates/cantus_gpu/Cargo.toml
+u: update
 
 options:
     @if [ ! -f "{{ options_output }}" ] || [ "{{ options_input }}" -nt "{{ options_output }}" ]; then \

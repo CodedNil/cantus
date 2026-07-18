@@ -1,4 +1,4 @@
-use crate::{AppUpdater, model::Rect, send_update};
+use crate::{AppUpdater, send_update};
 use cantus_shared::StatusPill;
 use std::path::{Path, PathBuf};
 use std::{fs, process::Command, thread, time::Duration};
@@ -13,7 +13,8 @@ const SENSORS: [&str; 2] = ["k10temp", "amdgpu"];
 pub struct Status {
     labels: [String; 4],
     battery: Option<f32>,
-    volume: [f32; 2],
+    volume: f32,
+    muted: bool,
 }
 
 impl Status {
@@ -26,8 +27,10 @@ impl Status {
         StatusPill {
             x: screen_width - WIDTH - GAP,
             width: WIDTH,
-            battery: self.battery.map_or([0.0; 2], |level| [level, 1.0]),
+            battery_level: self.battery.unwrap_or_default(),
+            battery_present: f32::from(self.battery.is_some()),
             volume: self.volume,
+            muted: f32::from(self.muted),
         }
     }
 
@@ -40,7 +43,7 @@ impl Status {
             draw(&percent(level), controls_x + 49.5);
         }
         let volume_x = controls_x + if self.battery.is_some() { 111.0 } else { 51.0 };
-        draw(&percent(self.volume[0]), volume_x);
+        draw(&percent(self.volume), volume_x);
     }
 
     pub fn run_power_action(position: glam::Vec2, pill: StatusPill) -> bool {
@@ -53,10 +56,6 @@ impl Status {
             warn!(%error, %action, "Failed to run power action");
         }
         true
-    }
-
-    pub const fn rect(pill: StatusPill, height: f32) -> Rect {
-        Rect::pill(pill.x, pill.width, height)
     }
 }
 
@@ -71,6 +70,7 @@ fn monitor(updater: &AppUpdater) {
         );
         let [cpu_temp, gpu_temp] = sensors.each_ref().map(|path| number(path) as f32 / 1000.0);
         let with_temp = |usage, temp| format!("{} {temp:.0}°", percent(usage));
+        let (volume, muted) = volume().unwrap_or_default();
         let metrics = Status {
             labels: [
                 with_temp(cpu_usage(&mut previous_cpu), cpu_temp),
@@ -79,7 +79,8 @@ fn monitor(updater: &AppUpdater) {
                 percent(vram),
             ],
             battery: battery_level().filter(|level| *level < 0.995),
-            volume: volume().unwrap_or_default(),
+            volume,
+            muted,
         };
         if !send_update(updater, move |app| app.status = metrics) {
             break;
@@ -148,14 +149,14 @@ fn battery_level() -> Option<f32> {
         .map(|path| number(path) as f32 / 100.0)
 }
 
-fn volume() -> Option<[f32; 2]> {
+fn volume() -> Option<(f32, bool)> {
     let output = Command::new("wpctl")
         .args(["get-volume", "@DEFAULT_AUDIO_SINK@"])
         .output()
         .ok()?;
     let text = String::from_utf8(output.stdout).ok()?;
-    Some([
+    Some((
         text.split_whitespace().nth(1)?.parse().ok()?,
-        f32::from(text.contains("MUTED")),
-    ])
+        text.contains("MUTED"),
+    ))
 }

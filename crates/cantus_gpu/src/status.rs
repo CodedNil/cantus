@@ -40,23 +40,27 @@ fn system(p: Vec2, size: Vec2) -> Vec3 {
 fn controls(p: Vec2, size: Vec2, pill: StatusPill) -> Vec3 {
     let mut color = Vec3::ZERO;
 
-    if pill.battery[1] > 0.5 {
+    if pill.battery_present > 0.5 {
         let center = vec2(23.0, size.y * 0.5);
         let shell = sd_rounded_box(p - center, vec2(13.0, 8.0), 3.0);
-        let level = pill.battery[0] * 22.0;
+        let level = pill.battery_level * 22.0;
         let fill = smoothstep(level, level - 2.0, p.x - 12.0) * smoothstep(0.0, -1.0, shell);
         color += vec3(0.25, 0.95, 0.58) * fill * 0.65
             + Vec3::splat(smoothstep(1.2, 0.0, shell.abs()) * 0.45);
     }
 
-    let volume_x = if pill.battery[1] > 0.5 { 82.0 } else { 18.0 };
+    let volume_x = if pill.battery_present > 0.5 {
+        82.0
+    } else {
+        18.0
+    };
     color += vec3(0.26, 0.66, 1.0)
         * smoothstep(
             1.8,
             0.0,
-            ((p - vec2(volume_x, size.y * 0.5)).length() - 8.0 - pill.volume[0] * 8.0).abs(),
+            ((p - vec2(volume_x, size.y * 0.5)).length() - 8.0 - pill.volume * 8.0).abs(),
         )
-        * (1.0 - pill.volume[1] * 0.75);
+        * (1.0 - pill.muted * 0.75);
 
     let y = size.y * 0.5;
     color += vec3(1.0, 0.42, 0.45) * control_icon(p, vec2(size.x - 54.0, y)) * 0.9;
@@ -89,9 +93,8 @@ pub fn fs_status(
     if alpha <= 0.0 {
         kill();
     }
-    let controls_x = size.x - 190.0;
-    let color =
-        system(local, size) + controls(local - vec2(controls_x, 0.0), vec2(190.0, size.y), pill);
+    let color = system(local, size)
+        + controls(local - vec2(size.x - 190.0, 0.0), vec2(190.0, size.y), pill);
     let color = color + (1.0 - smoothstep(0.0, -3.0, dist)) * 0.08;
     *out_color = (color * mask).extend(alpha);
 }

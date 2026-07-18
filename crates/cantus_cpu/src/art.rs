@@ -38,7 +38,7 @@ impl CantusApp {
             .playback
             .queue
             .iter()
-            .find_map(|track| art_request(&track.art, track.album.image.as_deref(), now))
+            .find_map(|track| art_request(&track.art, track.album_image.as_deref(), now))
             .or_else(|| {
                 self.playback.playlists.iter().find_map(|playlist| {
                     art_request(&playlist.art, playlist.image_url.as_deref(), now)
@@ -52,7 +52,7 @@ impl CantusApp {
 
     pub fn set_art_state(&mut self, url: &str, state: &ArtState) {
         for track in &mut self.playback.queue {
-            if track.album.image.as_deref() == Some(url) {
+            if track.album_image.as_deref() == Some(url) {
                 track.art = state.clone();
             }
         }
@@ -65,10 +65,10 @@ impl CantusApp {
 }
 
 fn art_request(state: &ArtState, url: Option<&str>, now: Instant) -> Option<String> {
-    (matches!(state, ArtState::Missing) || matches!(state, ArtState::RetryAt(at) if *at <= now))
-        .then_some(url)
-        .flatten()
-        .map(str::to_owned)
+    url.filter(|_| {
+        matches!(state, ArtState::Missing) || matches!(state, ArtState::RetryAt(at) if *at <= now)
+    })
+    .map(str::to_owned)
 }
 
 fn complete_palette(colors: &mut ArrayVec<(Lch, f32), NUM_SWATCHES>) {

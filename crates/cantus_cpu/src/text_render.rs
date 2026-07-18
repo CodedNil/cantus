@@ -87,7 +87,7 @@ impl TextRenderer {
             atlas,
             atlas_cache: HashMap::new(),
             atlas_cursor: (0, 0, 0),
-            shaped: Vec::new(),
+            shaped: Vec::with_capacity(128),
             glyphs: Vec::with_capacity(MAX_GLYPH_INSTANCES),
         }
     }
@@ -190,7 +190,7 @@ impl TextRenderer {
 
     pub fn render(&mut self, queue: &Queue, track: &Track, alpha: f32, render_scale: f32) {
         let left = track.runtime.start_x + 12.0;
-        let right = track.runtime.end_x() - self.panel_height - 8.0;
+        let right = track.runtime.start_x + track.runtime.width - self.panel_height - 8.0;
         let available_width = right - left;
         if available_width <= 0.0 {
             return;
@@ -310,5 +310,5 @@ fn track_details(track: &Track) -> String {
     } else {
         format!("{}s", seconds.round())
     };
-    format!("{time}\u{2004}•\u{2004}{}", track.artist.name)
+    format!("{time}\u{2004}•\u{2004}{}", track.artist)
 }
