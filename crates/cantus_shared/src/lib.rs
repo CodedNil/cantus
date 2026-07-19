@@ -2,6 +2,68 @@
 
 use glam::Vec2;
 
+pub const STATUS_HISTORY_SAMPLES: usize = 40;
+pub const RIPPLE_COUNT: usize = 8;
+const STATUS_HISTORY_PACKS: usize = STATUS_HISTORY_SAMPLES / 4;
+const STATUS_GAP: f32 = 8.0;
+const STATUS_PADDING: f32 = 12.0;
+const STATUS_WIDTHS: [f32; 6] = [60.0, 60.0, 32.0, 32.0, 24.0, 24.0];
+const STATUS_CENTERS: [f32; 6] = [42.0, 110.0, 164.0, 164.0, 200.0, 232.0];
+const BATTERY_SLOT: u32 = 2;
+
+#[derive(Copy, Clone)]
+pub struct StatusLayout {
+    battery: bool,
+}
+
+impl StatusLayout {
+    pub const fn new(battery: bool) -> Self {
+        Self { battery }
+    }
+
+    pub const fn center(self, slot: u32) -> f32 {
+        STATUS_CENTERS[slot as usize]
+            + if self.battery && slot > BATTERY_SLOT {
+                STATUS_WIDTHS[BATTERY_SLOT as usize] + STATUS_GAP
+            } else {
+                0.0
+            }
+    }
+
+    pub const fn width(self) -> f32 {
+        self.center(5) + STATUS_WIDTHS[5] * 0.5 + STATUS_PADDING
+    }
+
+    pub const fn bounds(self, first: u32, last: u32) -> (f32, f32) {
+        (
+            self.center(first) - (STATUS_WIDTHS[first as usize] + STATUS_GAP) * 0.5,
+            self.center(last) + (STATUS_WIDTHS[last as usize] + STATUS_GAP) * 0.5,
+        )
+    }
+
+    pub fn section(self, x: f32) -> u32 {
+        let mut slot = 0;
+        while slot < 5 {
+            if (slot != BATTERY_SLOT || self.battery)
+                && x < self.center(slot) + (STATUS_WIDTHS[slot as usize] + STATUS_GAP) * 0.5
+            {
+                return slot;
+            }
+            slot += 1;
+        }
+        5
+    }
+}
+
+#[repr(C)]
+#[derive(Copy, Clone, Default)]
+#[cfg_attr(feature = "cpu", derive(bytemuck::Pod, bytemuck::Zeroable))]
+pub struct RipplePulse {
+    pub origin: Vec2,
+    /// Start time and visual strength. A zero strength marks an unused slot.
+    pub animation: Vec2,
+}
+
 #[repr(C)]
 #[derive(Copy, Clone, Default)]
 #[cfg_attr(feature = "cpu", derive(bytemuck::Pod, bytemuck::Zeroable))]
@@ -11,9 +73,11 @@ pub struct GlobalUniforms {
     pub mouse_pos: Vec2,
     pub mouse_pressure: f32,
     pub playhead_x: f32,
-    pub expansion_xy: Vec2,
-    pub expansion_time: f32,
     pub time: f32,
+    _padding_0: f32,
+    _padding_1: f32,
+    _padding_2: f32,
+    pub ripples: [RipplePulse; RIPPLE_COUNT],
 }
 
 #[repr(C)]
@@ -46,14 +110,62 @@ pub struct TrackPill {
 #[repr(C)]
 #[derive(Copy, Clone, Default)]
 #[cfg_attr(feature = "cpu", derive(bytemuck::Pod, bytemuck::Zeroable))]
+pub struct UsageHistory {
+    samples: [u32; STATUS_HISTORY_PACKS],
+}
+
+impl UsageHistory {
+    pub const fn get(&self, index: usize) -> f32 {
+        let shift = ((index & 3) * 8) as u32;
+        ((self.samples[index / 4] >> shift) & 0xff) as f32 / 255.0
+    }
+
+    #[cfg(feature = "cpu")]
+    pub fn push(&mut self, value: f32) {
+        for index in 0..STATUS_HISTORY_PACKS {
+            let carry = self.samples.get(index + 1).map_or(0, |next| next & 0xff);
+            self.samples[index] = self.samples[index] >> 8 | carry << 24;
+        }
+        self.samples[STATUS_HISTORY_PACKS - 1] |=
+            ((value.clamp(0.0, 1.0) * 255.0 + 0.5) as u32) << 24;
+    }
+}
+
+#[repr(C)]
+#[derive(Copy, Clone, Default)]
+#[cfg_attr(feature = "cpu", derive(bytemuck::Pod, bytemuck::Zeroable))]
+pub struct ProcessorStatus {
+    pub temperature: f32,
+    pub usage: UsageHistory,
+    pub memory: UsageHistory,
+}
+
+#[repr(C)]
+#[derive(Copy, Clone, Default)]
+#[cfg_attr(feature = "cpu", derive(bytemuck::Pod, bytemuck::Zeroable))]
 pub struct StatusPill {
     pub x: f32,
     pub width: f32,
     pub battery_level: f32,
     pub battery_present: f32,
+    pub battery_charging: f32,
     pub volume: f32,
     pub muted: f32,
+    /// RMS level sampled from the system audio monitor stream.
+    pub audio_activity: f32,
+    /// Global shader time at which the newest history samples arrived.
+    pub sample_time: f32,
+    pub cpu: ProcessorStatus,
+    pub gpu: ProcessorStatus,
+    /// 0 means idle, 1 means power off, and 2 means reboot.
+    pub power_action: f32,
+    pub power_progress: f32,
+    /// Sky state copied from the weather pill.
+    pub sun: [f32; 2],
+    pub conditions: [WeatherCondition; 3],
 }
+
+const _: () = assert!(size_of::<StatusPill>() == 292);
 
 #[repr(C)]
 #[derive(Copy, Clone, Default)]
@@ -67,8 +179,6 @@ pub struct WeatherPill {
     pub conditions: [WeatherCondition; 3],
     pub padding: f32,
 }
-
-const _: () = assert!(size_of::<WeatherPill>().is_multiple_of(8));
 
 #[repr(C)]
 #[derive(Copy, Clone, Default)]

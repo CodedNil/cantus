@@ -1,9 +1,11 @@
 use crate::{
     CantusApp, PANEL_START,
     model::{CondensedPlaylist, PlaylistId, Rect, Track, TrackId, playlist_icons},
-    status::Status,
+    status::{PowerAction, Status},
 };
-use cantus_shared::{ICON_WIDTH, PillIconRow, pill_icon_primary_center_y, pill_icon_rows};
+use cantus_shared::{
+    ICON_WIDTH, PillIconRow, RIPPLE_COUNT, RipplePulse, pill_icon_primary_center_y, pill_icon_rows,
+};
 use glam::{Vec2, vec2};
 use std::time::{Duration, Instant};
 use tracing::{info, warn};
@@ -11,6 +13,16 @@ use tracing::{info, warn};
 enum IconAction {
     Rate(u8),
     TogglePlaylist(PlaylistId),
+}
+
+const POWER_HOLD_DURATION: Duration = Duration::from_millis(1_500);
+const POWER_PULSE_INTERVAL: Duration = Duration::from_millis(420);
+
+#[derive(Clone, Copy)]
+struct PowerHold {
+    action: PowerAction,
+    started: Instant,
+    last_pulse: Instant,
 }
 
 fn row_rect(row: PillIconRow) -> Rect {
@@ -24,6 +36,8 @@ pub struct InteractionState {
     pub dragging: bool,
     pub drag_enabled: bool,
     pub press_origin: Vec2,
+    power_hold: Option<PowerHold>,
+    ripple_cursor: usize,
 }
 
 impl CantusApp {
@@ -34,20 +48,39 @@ impl CantusApp {
             .hovered_track
             .and_then(|index| self.playback.queue.get(index))
             .is_some_and(|track| track.contains(mouse_pos, self.config.height));
-        let interaction = &mut self.interaction;
-        interaction.mouse_pressure = 2.0;
-        interaction.press_origin = mouse_pos;
-        interaction.drag_enabled = drag_enabled;
-        interaction.dragging = false;
+        let power_action =
+            Status::power_action_at(mouse_pos, &self.render.status, self.config.height);
+        let now = Instant::now();
+        self.interaction.mouse_pressure = 2.0;
+        self.interaction.press_origin = mouse_pos;
+        self.interaction.drag_enabled = drag_enabled;
+        self.interaction.dragging = false;
+        self.interaction.power_hold = power_action.map(|action| PowerHold {
+            action,
+            started: now,
+            last_pulse: now,
+        });
+        if let Some(action) = power_action {
+            self.pulse_at(Status::power_action_center(
+                action,
+                &self.render.status,
+                self.config.height,
+            ));
+        }
     }
 
     pub fn left_click_released(&mut self) {
+        let held_power_action = self.interaction.power_hold.take().is_some();
         let same_spot = self
             .interaction
             .press_origin
             .distance(self.render.uniforms.mouse_pos)
             < 2.0;
-        if same_spot && !self.interaction.dragging && self.interaction.mouse_pressure > 1.0 {
+        if !held_power_action
+            && same_spot
+            && !self.interaction.dragging
+            && self.interaction.mouse_pressure > 1.0
+        {
             self.handle_click();
         }
         if self.interaction.dragging
@@ -68,12 +101,9 @@ impl CantusApp {
     fn handle_click(&mut self) {
         let mouse_pos = self.render.uniforms.mouse_pos;
         let timeline = self.timeline();
-        if Status::run_power_action(mouse_pos, self.render.status) {
-            return;
-        }
         if self
             .weather
-            .navigate_calendar(mouse_pos, self.render.status, self.config.height)
+            .navigate_calendar(mouse_pos, &self.render.status, self.config.height)
         {
             self.pulse_at(mouse_pos);
             return;
@@ -129,8 +159,16 @@ impl CantusApp {
     }
 
     fn pulse_at(&mut self, pos: Vec2) {
-        self.render.uniforms.expansion_xy = pos;
-        self.render.uniforms.expansion_time = self.render.start_time.elapsed().as_secs_f32();
+        self.pulse(pos, 1.0);
+    }
+
+    fn pulse(&mut self, pos: Vec2, strength: f32) {
+        let cursor = self.interaction.ripple_cursor;
+        self.render.uniforms.ripples[cursor] = RipplePulse {
+            origin: pos,
+            animation: vec2(self.render.start_time.elapsed().as_secs_f32(), strength),
+        };
+        self.interaction.ripple_cursor = (cursor + 1) % RIPPLE_COUNT;
     }
 
     fn pulse_at_playhead(&mut self) {
@@ -156,6 +194,14 @@ impl CantusApp {
         if scroll_direction == 0 {
             return;
         }
+        if Status::audio_at(
+            self.render.uniforms.mouse_pos,
+            &self.render.status,
+            self.config.height,
+        ) {
+            self.status.adjust_volume(scroll_direction);
+            return;
+        }
         if let Some(volume) = &mut self.playback.volume {
             *volume = volume
                 .saturating_add_signed(if scroll_direction < 0 { 5 } else { -5 })
@@ -167,9 +213,42 @@ impl CantusApp {
     }
 
     pub const fn cancel_drag(&mut self) {
-        let interaction = &mut self.interaction;
-        interaction.drag_enabled = false;
-        interaction.dragging = false;
+        self.interaction.drag_enabled = false;
+        self.interaction.dragging = false;
+    }
+
+    pub fn power_hold_scene(&mut self) -> (Option<PowerAction>, f32) {
+        let Some(mut hold) = self.interaction.power_hold else {
+            return (None, 0.0);
+        };
+        let still_over_action = Status::power_action_at(
+            self.render.uniforms.mouse_pos,
+            &self.render.status,
+            self.config.height,
+        ) == Some(hold.action);
+        if self.interaction.mouse_pressure <= 1.0 || !still_over_action {
+            self.interaction.power_hold = None;
+            return (None, 0.0);
+        }
+
+        let now = Instant::now();
+        let progress =
+            now.duration_since(hold.started).as_secs_f32() / POWER_HOLD_DURATION.as_secs_f32();
+        let pulse_interval = POWER_PULSE_INTERVAL.mul_f32(1.0 - progress.min(1.0) * 0.65);
+        if now.duration_since(hold.last_pulse) >= pulse_interval {
+            let center =
+                Status::power_action_center(hold.action, &self.render.status, self.config.height);
+            self.pulse(center, 1.0 + progress.min(1.0).powi(2) * 2.0);
+            hold.last_pulse = now;
+            self.interaction.power_hold = Some(hold);
+        }
+
+        if progress >= 1.0 {
+            self.interaction.power_hold = None;
+            Status::run_power_action(hold.action);
+            return (Some(hold.action), 1.0);
+        }
+        (Some(hold.action), progress)
     }
 
     fn icon_layout(&self, track: &Track) -> Option<(TrackId, usize, PillIconRow, PillIconRow)> {

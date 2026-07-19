@@ -216,6 +216,8 @@ pub struct RenderState {
     pub track_pills: Vec<TrackPill>,
     pub track_glyphs: Vec<Range<u32>>,
     pub status: StatusPill,
+    pub status_audio_level: f32,
+    pub status_temperatures: [f32; 2],
     pub playhead: PlayheadUniforms,
 }
 impl Default for RenderState {
@@ -237,9 +239,27 @@ impl Default for RenderState {
             track_pills: Vec::with_capacity(MAX_RENDER_INSTANCES),
             track_glyphs: Vec::with_capacity(MAX_RENDER_INSTANCES),
             status: StatusPill::default(),
+            status_audio_level: 0.0,
+            status_temperatures: [0.0; 2],
             playhead: PlayheadUniforms::default(),
         }
     }
+}
+
+impl RenderState {
+    fn expired_particles(&mut self, time: f32) -> impl Iterator<Item = &mut Particle> {
+        self.particles
+            .iter_mut()
+            .filter(move |particle| time > particle.end_time)
+    }
+}
+
+fn particle_color(rgb: u32, duration: f32) -> u32 {
+    (rgb & 0x00FF_FFFF) | (u32::from((duration * 100.0).min(255.0) as u8) << 24)
+}
+
+fn damp(value: &mut f32, target: f32, response: f32, dt: f32) {
+    *value += (target - *value) * (1.0 - (-response * dt).exp());
 }
 
 impl CantusApp {
@@ -256,20 +276,13 @@ impl CantusApp {
 
     pub fn emit_click_particles(&mut self, position: Vec2) {
         let time = self.render.start_time.elapsed().as_secs_f32();
-        for particle in self
-            .render
-            .particles
-            .iter_mut()
-            .filter(|particle| time > particle.end_time)
-            .take(20)
-        {
+        for particle in self.render.expired_particles(time).take(20) {
             let angle = fastrand::f32() * TAU;
             let speed = 30.0 + fastrand::f32() * 20.0;
             let duration = 0.5.lerp(1.5, fastrand::f32());
             particle.spawn_pos = position;
             particle.spawn_vel = Vec2::from_angle(angle) * speed;
-            particle.color =
-                u32::from_le_bytes([255, 215, 50, (duration * 100.0).min(255.0) as u8]);
+            particle.color = particle_color(0x32_D7_FF, duration);
             particle.end_time = time + duration;
         }
     }
@@ -323,7 +336,7 @@ impl CantusApp {
         gpu.images.used = 0;
         gpu.text_renderer.glyphs.clear();
         self.render.track_glyphs.clear();
-        let (weather, weather_glyph_end, label_end) = self.create_scene();
+        let (weather, weather_glyph_end) = self.create_scene();
 
         let gpu = self.render.gpu.as_mut().unwrap();
         upload(&gpu.queue, &gpu.uniform_buffer, &self.render.uniforms);
@@ -375,7 +388,6 @@ impl CantusApp {
                 gpu.text.draw_range(&mut pass, glyphs.clone());
             }
             gpu.status.draw_range(&mut pass, 0..1);
-            gpu.text.draw_range(&mut pass, weather_glyph_end..label_end);
             gpu.particles
                 .draw_range(&mut pass, 0..PARTICLE_COUNT as u32);
             gpu.playhead.draw_range(&mut pass, 0..1);
@@ -396,7 +408,7 @@ impl CantusApp {
         gpu.images.image_index(&gpu.queue, art)
     }
 
-    fn create_scene(&mut self) -> (WeatherPill, u32, u32) {
+    fn create_scene(&mut self) -> (WeatherPill, u32) {
         let now = Instant::now();
         let dt = now
             .duration_since(self.render.last_update)
@@ -408,14 +420,49 @@ impl CantusApp {
         let (screen_width, screen_height) = self.logical_surface_size();
         self.render.uniforms.screen_size = vec2(screen_width, screen_height);
         self.render.uniforms.bar_height = vec2(PANEL_START, self.config.height);
-        self.render.status = self.status.pill(screen_width);
+        let (power_action, power_progress) = self.power_hold_scene();
+        let (target_audio_level, target_temperatures) = self.status.render_targets();
+        let response = if target_audio_level > self.render.status_audio_level {
+            12.0
+        } else {
+            7.0
+        };
+        damp(
+            &mut self.render.status_audio_level,
+            target_audio_level,
+            response,
+            dt,
+        );
+        for (temperature, target) in self
+            .render
+            .status_temperatures
+            .iter_mut()
+            .zip(target_temperatures)
+        {
+            if *temperature == 0.0 {
+                *temperature = target;
+            } else {
+                damp(temperature, target, 4.0, dt);
+            }
+        }
+        let [cpu_temperature, gpu_temperature] = self.render.status_temperatures;
+        self.render.status = self.status.pill(
+            screen_width,
+            power_action,
+            power_progress,
+            self.render.status_audio_level,
+            cpu_temperature,
+            gpu_temperature,
+        );
         let (weather, weather_label) = self.weather.scene(
-            self.render.status,
+            &self.render.status,
             self.config.height,
             self.render.uniforms.mouse_pos,
             self.interaction.mouse_pressure > 0.0,
             dt,
         );
+        self.render.status.sun = weather.sun;
+        self.render.status.conditions = weather.conditions;
         let scale = self.render.scale;
         let label_y = PANEL_START + self.config.height * 0.46;
         let gpu = self.render.gpu.as_mut().unwrap();
@@ -428,7 +475,7 @@ impl CantusApp {
             scale,
         );
         self.weather.calendar_labels(
-            self.render.status,
+            &self.render.status,
             self.config.height,
             |text, position, alpha, style| {
                 gpu.text_renderer
@@ -436,17 +483,6 @@ impl CantusApp {
             },
         );
         let weather_glyph_end = gpu.text_renderer.glyphs.len() as u32;
-        self.status.labels(self.render.status, |text, center_x| {
-            gpu.text_renderer.render_centered_label(
-                &gpu.queue,
-                text,
-                vec2(center_x, label_y),
-                TextStyle::PRIMARY,
-                1.0,
-                scale,
-            );
-        });
-        let label_end = gpu.text_renderer.glyphs.len() as u32;
 
         let timeline = self.timeline();
         let px_per_ms = timeline.px_per_ms;
@@ -457,7 +493,7 @@ impl CantusApp {
         if playback_state.queue.is_empty() {
             self.render.track_pills.clear();
             self.playback = playback_state;
-            return (weather, weather_glyph_end, label_end);
+            return (weather, weather_glyph_end);
         }
         // Lerp the progress based on when the data was last updated.
         let playback_elapsed = playback_state.estimated_progress();
@@ -477,10 +513,6 @@ impl CantusApp {
                 .sum::<f32>()
             + drag_offset_ms;
         let diff = current_ms - self.render.track_offset;
-        self.render.uniforms.expansion_xy.x += diff * px_per_ms * dt;
-        if !self.render.uniforms.expansion_xy.x.is_finite() {
-            self.render.uniforms.expansion_xy.x = playhead_x;
-        }
         if !self.interaction.dragging && diff.abs() > 200.0 {
             current_ms = self.render.track_offset + diff * 3.5 * dt;
         }
@@ -538,7 +570,7 @@ impl CantusApp {
             playback_state.playing,
         );
         self.playback = playback_state;
-        (weather, weather_glyph_end, label_end)
+        (weather, weather_glyph_end)
     }
 
     fn hovered_track(&self, queue: &[Track]) -> Option<usize> {
@@ -702,9 +734,7 @@ impl CantusApp {
 
         for particle in self
             .render
-            .particles
-            .iter_mut()
-            .filter(|particle| time > particle.end_time)
+            .expired_particles(time)
             .take(emit_count as usize)
         {
             let y_fraction = fastrand::f32();
@@ -720,8 +750,7 @@ impl CantusApp {
             let duration = SPARK_LIFETIME
                 .start
                 .lerp(SPARK_LIFETIME.end, fastrand::f32());
-            particle.color = (palette[fastrand::usize(0..palette.len())] & 0x00FF_FFFF)
-                | (u32::from((duration * 100.0).min(255.0) as u8) << 24);
+            particle.color = particle_color(palette[fastrand::usize(0..palette.len())], duration);
             particle.end_time = time + duration;
         }
 

@@ -5,12 +5,13 @@ default-members = ["crates/cantus_cpu"]
 exclude = ["crates/cantus_gpu"]
 
 [workspace.dependencies]
-bytemuck = { version = "1.25.1", features = ["derive"] }
+bytemuck = { version = "1.25.2", features = ["derive"] }
 glam = { version = "=0.33.2", default-features = false, features = [
     "bytemuck",
     "libm",
     "u8",
 ] }
+serde = { version = "1.0.229", features = ["derive"] }
 
 [workspace.lints.rust]
 unused_qualifications = "warn"

@@ -100,6 +100,15 @@ enum PlaybackItem {
     Other,
 }
 
+impl PlaybackItem {
+    fn into_track(self) -> Option<Track> {
+        match self {
+            Self::Track(track) => Some(track),
+            Self::Other => None,
+        }
+    }
+}
+
 #[derive(Deserialize)]
 struct CurrentPlaybackContext {
     device: Device,
@@ -592,7 +601,7 @@ impl SpotifyWorker {
         }
         send_update(&self.updater, move |app| {
             let state = &mut app.playback;
-            if let Some(PlaybackItem::Track(track)) = current_playback.item {
+            if let Some(track) = current_playback.item.and_then(PlaybackItem::into_track) {
                 state.queue_index = track_index(&state.queue, track.id, &track.name).unwrap_or(0);
             }
 
@@ -627,24 +636,18 @@ impl SpotifyWorker {
         let q =
             self.client
                 .api_json_payload::<CurrentUserQueue>("me/player/queue", &[], "queue")?;
-        let PlaybackItem::Track(currently_playing) = q.currently_playing? else {
-            return None;
-        };
+        let currently_playing = q.currently_playing?.into_track()?;
         let current_track_id = currently_playing.id;
         let new_queue = once(currently_playing)
-            .chain(q.queue.into_iter().filter_map(|item| match item {
-                PlaybackItem::Track(track) => Some(track),
-                PlaybackItem::Other => None,
-            }))
+            .chain(q.queue.into_iter().filter_map(PlaybackItem::into_track))
             .collect::<Vec<_>>();
         let feature_ids = new_queue
             .iter()
             .filter_map(|track| track.id)
             .collect::<Vec<_>>();
 
-        let context_updated = self.context_updated;
-        self.context_updated = false;
-        self.last_grabbed_queue = Some(Instant::now());
+        let context_updated = mem::take(&mut self.context_updated);
+        self.last_grabbed_queue = Some(now);
         send_update(&self.updater, move |app| {
             app.playback
                 .replace_queue(new_queue, current_track_id, context_updated);

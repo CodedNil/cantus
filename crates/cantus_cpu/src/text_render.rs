@@ -293,8 +293,8 @@ fn song_name(track: &Track) -> &str {
     let name = track
         .name
         .split_once(" -")
-        .map_or(track.name.as_str(), |x| x.0);
-    let name = name.split_once('(').map_or(name, |x| x.0).trim();
+        .map_or(track.name.as_str(), |(name, _)| name);
+    let name = name.split_once('(').map_or(name, |(name, _)| name).trim();
     if name.is_empty() {
         track.name.trim()
     } else {

@@ -1,6 +1,6 @@
 #![no_std]
 
-use cantus_shared::{GlobalUniforms, smoothstep};
+use cantus_shared::{GlobalUniforms, RIPPLE_COUNT, smoothstep};
 use spirv_std::glam::{Vec2, Vec3, Vec4, vec2, vec3, vec4};
 
 pub mod particles;
@@ -83,24 +83,33 @@ impl PillInteraction {
 }
 
 fn pill_interaction(pixel: Vec2, global: &GlobalUniforms) -> PillInteraction {
-    let anim_t = (global.time - global.expansion_time) * 1.2;
-    let (ripple, ripple_flash) = if (-0.02..1.02).contains(&anim_t) {
+    let mut ripple = Vec2::ZERO;
+    let mut ripple_flash = 0.0;
+    #[allow(clippy::needless_range_loop)]
+    for index in 0..RIPPLE_COUNT {
+        let pulse = global.ripples[index];
+        let anim_t = (global.time - pulse.animation.x) * 1.2;
+        if !(-0.02..1.02).contains(&anim_t) {
+            continue;
+        }
         let progress = anim_t.clamp(0.0, 1.0);
-        let (direction, distance) = direction_and_length(pixel - global.expansion_xy);
-        let active = smoothstep(-0.02, 0.0, anim_t) * (1.0 - smoothstep(1.0, 1.02, anim_t));
+        let (direction, distance) = direction_and_length(pixel - pulse.origin);
+        let active = pulse.animation.y
+            * smoothstep(-0.02, 0.0, anim_t)
+            * (1.0 - smoothstep(1.0, 1.02, anim_t));
         let decay = 1.0 - progress;
         let wave = smoothstep(80.0, 0.0, (distance - progress * 600.0).abs()) * active;
         let flash = decay * wave * 0.5;
-        (direction * decay * flash, flash)
-    } else {
-        (Vec2::ZERO, 0.0)
-    };
+        ripple += direction * decay * flash;
+        ripple_flash = (ripple_flash + flash).min(1.0);
+    }
 
     let (mouse, mouse_distance) = if global.mouse_pressure > 0.0 {
-        let (direction, distance) = direction_and_length(pixel - global.mouse_pos);
-        let influence = smoothstep(120.0, 0.0, distance);
+        let offset = pixel - global.mouse_pos;
+        let distance = offset.length();
+        let influence = smoothstep(150.0, 0.0, distance);
         (
-            direction * influence * influence * global.mouse_pressure,
+            offset / 70.0 * influence * influence * global.mouse_pressure,
             distance,
         )
     } else {

@@ -17,13 +17,9 @@ rec {
     let
       inherit (nixpkgs) lib;
       pname = "cantus";
-      supportedSystems = [
-        "x86_64-linux"
-        "aarch64-linux"
-      ];
       forAllSystems =
         f:
-        lib.genAttrs supportedSystems (
+        lib.genAttrs [ "x86_64-linux" "aarch64-linux" ] (
           system:
           f (
             import nixpkgs {
@@ -36,6 +32,11 @@ rec {
         pkgs: with pkgs; [
           wayland
           vulkan-loader
+        ];
+      runtimeTools =
+        pkgs: with pkgs; [
+          pipewire
+          wireplumber
         ];
     in
     {
@@ -57,7 +58,9 @@ rec {
           buildInputs = runtimeLibraries pkgs;
 
           postInstall = ''
-            wrapProgram "$out/bin/${pname}" --set LD_LIBRARY_PATH "${lib.makeLibraryPath (runtimeLibraries pkgs)}"
+            wrapProgram "$out/bin/${pname}" \
+              --set LD_LIBRARY_PATH "${lib.makeLibraryPath (runtimeLibraries pkgs)}" \
+              --prefix PATH : "${lib.makeBinPath (runtimeTools pkgs)}"
           '';
 
           meta = {
@@ -92,6 +95,8 @@ rec {
               mold
               pkg-config
               just
+              pipewire
+              wireplumber
             ];
             buildInputs = runtimeLibraries pkgs;
             CANTUS_SHADER_RUST = shaderRust;

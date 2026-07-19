@@ -45,11 +45,11 @@ fn sun_position(hour: f32, [sunrise, sunset]: [f32; 2]) -> [f32; 2] {
     }
 }
 
-pub fn rect(status: StatusPill, height: f32) -> Rect {
+pub fn rect(status: &StatusPill, height: f32) -> Rect {
     Rect::pill(status.x - WIDTH - GAP, WIDTH, height)
 }
 
-fn calendar_rect(status: StatusPill, height: f32) -> Rect {
+fn calendar_rect(status: &StatusPill, height: f32) -> Rect {
     let mut calendar = rect(status, height);
     calendar.y0 = calendar.y1;
     calendar.y1 += WEATHER_CALENDAR_EXTENSION;
@@ -93,7 +93,7 @@ impl Weather {
 
     pub fn scene(
         &mut self,
-        status: StatusPill,
+        status: &StatusPill,
         height: f32,
         mouse: Vec2,
         mouse_active: bool,
@@ -133,13 +133,13 @@ impl Weather {
         (pill, label)
     }
 
-    pub fn interaction_rect(&self, status: StatusPill, height: f32) -> Rect {
+    pub fn interaction_rect(&self, status: &StatusPill, height: f32) -> Rect {
         let mut area = rect(status, height);
         area.y1 += WEATHER_CALENDAR_EXTENSION * f32::from(self.calendar_expansion > 0.0);
         area
     }
 
-    pub fn navigate_calendar(&mut self, position: Vec2, status: StatusPill, height: f32) -> bool {
+    pub fn navigate_calendar(&mut self, position: Vec2, status: &StatusPill, height: f32) -> bool {
         if self.calendar_expansion < 0.5 {
             return false;
         }
@@ -169,7 +169,7 @@ impl Weather {
 
     pub fn calendar_labels(
         &self,
-        status: StatusPill,
+        status: &StatusPill,
         height: f32,
         mut draw: impl FnMut(&str, Vec2, f32, TextStyle),
     ) {

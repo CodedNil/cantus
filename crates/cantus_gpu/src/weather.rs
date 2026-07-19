@@ -106,16 +106,16 @@ fn rain_layer(p: Vec2, time: f32, depth: f32, offset: f32) -> f32 {
         * smoothstep(0.64 - depth * 0.16, 1.0, hash(cell + 31.7).x)
 }
 
-fn scene(
+pub(crate) fn scene(
     p: Vec2,
     size: Vec2,
     cloud_scale: f32,
-    pill: WeatherPill,
+    [sun_x, sun_y]: [f32; 2],
     weather: Condition,
     time: f32,
+    sun_presence: f32,
 ) -> Vec3 {
     let uv = p / size;
-    let [sun_x, sun_y] = pill.sun;
     let daylight = smoothstep(-0.02, 0.12, sun_y);
     let twilight = smoothstep(0.18, 0.0, sun_y) * smoothstep(-0.45, -0.05, sun_y);
     let vertical = smoothstep(1.0, 0.0, uv.y);
@@ -139,7 +139,7 @@ fn scene(
     let sun_color = vec3(0.96, 0.98, 1.0).lerp(vec3(0.98, 0.74, 0.66), low_sun);
     let sun_distance = p.distance(sun);
     let sun_cloud = smoothstep(0.43, 0.69, cloud_mass(sun, cloud_scale, time)) * weather.cloud;
-    let sun_clear = sun_visibility * (1.0 - sun_cloud * 0.82);
+    let sun_clear = sun_visibility * (1.0 - sun_cloud * 0.82) * sun_presence;
     let sun_halo = smoothstep(62.0, 4.0, sun_distance) * sun_clear;
     let sun_core = smoothstep(11.0, 1.0, sun_distance) * sun_clear;
     color = color.lerp(sun_color, sun_halo * 0.24 + sun_core * 0.7);
@@ -185,7 +185,7 @@ fn scene(
     color.lerp(vec3(0.63, 0.69, 0.73), fog_density)
 }
 
-fn forecast(conditions: [Condition; 3], edge: f32) -> Condition {
+pub(crate) fn forecast(conditions: [Condition; 3], edge: f32) -> Condition {
     let position = ((edge - 0.6) / 0.2).clamp(0.0, 2.0);
     conditions[0]
         .lerp(conditions[1], smoothstep(0.0, 1.0, position))
@@ -248,9 +248,10 @@ pub fn fs_weather(
         refracted * size,
         size,
         pill_size.y,
-        pill,
+        pill.sun,
         forecast(pill.conditions, edge),
         global.time,
+        1.0,
     ) + pill_sheen(refracted.y, dist, interaction);
     let today_presence = smoothstep(0.0, 12.0, pill.today.y);
     let today_distance = calendar_local.distance(pill.today);

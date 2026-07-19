@@ -233,7 +233,7 @@ impl CantusApp {
     pub(crate) fn overlay_rects(&self) -> [Rect; 2] {
         [
             self.weather
-                .interaction_rect(self.render.status, self.config.height),
+                .interaction_rect(&self.render.status, self.config.height),
             Rect::pill(
                 self.render.status.x,
                 self.render.status.width,
