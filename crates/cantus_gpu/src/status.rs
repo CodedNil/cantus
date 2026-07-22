@@ -1,12 +1,14 @@
-use crate::{pill_fragment, pill_sheen, pill_vertex, sd_capsule_box, sd_rounded_box};
+use crate::{
+    fill, pill_fragment, pill_vertex, sd_capsule_box, sd_chevron, sd_rounded_box, segment_distance,
+    stroke, weather::sky_background,
+};
 use cantus_shared::{
-    GlobalUniforms, ProcessorStatus, STATUS_HISTORY_SAMPLES, StatusLayout, StatusPill,
-    UsageHistory, smoothstep,
+    GlobalUniforms, ProcessorStatus, STATUS_HISTORY_SAMPLES, StatusPill, UsageHistory, smoothstep,
 };
 use core::f32::consts::TAU;
 use spirv_std::{
     arch::kill,
-    glam::{Vec2, Vec3, Vec4, vec2, vec3},
+    glam::{FloatExt, Vec2, Vec3, Vec4, vec2, vec3},
     spirv,
 };
 
@@ -14,29 +16,19 @@ use spirv_std::{
 use spirv_std::num_traits::Float;
 
 const CHART_SIZE: Vec2 = Vec2::new(21.0, 9.2);
+const CHART_LINE_WIDTH: f32 = 0.72;
+const USAGE_COLOR: Vec3 = Vec3::new(0.32, 0.68, 1.0);
+const MEMORY_COLOR: Vec3 = Vec3::new(0.78, 0.3, 1.0);
+const MUTED_COLOR: Vec3 = Vec3::new(1.0, 0.24, 0.3);
+const HISTORY_END: usize = STATUS_HISTORY_SAMPLES - 1;
+const HISTORY_STEP: f32 = CHART_SIZE.x * 2.0 / HISTORY_END as f32;
 
 fn fill_box(point: Vec2, half_size: Vec2, radius: f32) -> f32 {
     fill(sd_rounded_box(point, half_size, radius))
 }
 
-fn fill_capsule(point: Vec2, half_size: Vec2) -> f32 {
-    fill(sd_capsule_box(
-        point,
-        half_size.x - half_size.y,
-        half_size.y,
-    ))
-}
-
-fn fill(distance: f32) -> f32 {
-    smoothstep(0.8, -0.8, distance)
-}
-
 fn ring(point: Vec2, radius: f32, width: f32) -> f32 {
     stroke(point.length() - radius, width)
-}
-
-fn stroke(distance: f32, width: f32) -> f32 {
-    smoothstep(width + 0.7, width - 0.7, distance.abs())
 }
 
 fn heat_color(temperature: f32) -> Vec3 {
@@ -61,11 +53,9 @@ fn thermal_wisps(point: Vec2, time: f32, temperature: f32) -> Vec3 {
             + (altitude * 0.16 - time * 0.7 + seed).sin() * 0.7;
         let strand = smoothstep(2.0, 0.25, (point.x - source_x - curl).abs());
         let packet = smoothstep(5.5, 0.0, (altitude - travel).abs());
-        let wisp = strand * packet * vertical_fade;
-        vapor = vapor.max(wisp);
+        vapor = vapor.max(strand * packet * vertical_fade);
     }
-    let color = heat_color(temperature).lerp(Vec3::ONE, 0.58);
-    color * vapor * amount * 0.22
+    heat_color(temperature).lerp(Vec3::ONE, 0.58) * vapor * amount * 0.22
 }
 
 fn history_curve(
@@ -74,31 +64,32 @@ fn history_curve(
     color: Vec3,
     fill_strength: f32,
     scroll: f32,
+    inside: f32,
 ) -> Vec3 {
-    let inside = fill_capsule(point, CHART_SIZE);
-    let u = ((point.x + CHART_SIZE.x) / (CHART_SIZE.x * 2.0)).clamp(0.0, 0.999);
-    let sample =
-        (u * (STATUS_HISTORY_SAMPLES - 1) as f32 + scroll).min((STATUS_HISTORY_SAMPLES - 1) as f32);
+    let sample = ((point.x + CHART_SIZE.x) / HISTORY_STEP + scroll).clamp(0.0, HISTORY_END as f32);
     let index = sample.floor() as usize;
-    let p1 = smooth_history_sample(history, index);
-    let p2 = smooth_history_sample(history, (index + 1).min(STATUS_HISTORY_SAMPLES - 1));
-    let t = sample.fract();
-    let value = p1 + (p2 - p1) * smoothstep(0.0, 1.0, t);
-    let derivative = (p2 - p1) * 6.0 * t * (1.0 - t);
-    let graph_y = CHART_SIZE.y - value.clamp(0.0, 1.0) * CHART_SIZE.y * 2.0;
-    let slope = -CHART_SIZE.y * derivative * (STATUS_HISTORY_SAMPLES - 1) as f32 / CHART_SIZE.x;
-    let line_distance = (point.y - graph_y).abs() / (1.0 + slope * slope).sqrt();
-    let glow = inside * smoothstep(3.4, 0.2, line_distance);
-    let line = inside * smoothstep(1.25, 0.18, line_distance);
-    let area = inside * smoothstep(graph_y - 0.6, graph_y + 0.6, point.y);
-    color * (area * fill_strength + glow * 0.16 + line * 1.08)
+    let start = history_point(history, index, scroll);
+    let end = history_point(history, index + 1, scroll);
+    let graph_y = start.y + (end.y - start.y) * sample.fract();
+    let first = if index > 0 { index - 1 } else { 0 };
+    let mut line_distance = f32::MAX;
+    for offset in 0..3 {
+        let segment = (first + offset).min(HISTORY_END);
+        line_distance = line_distance.min(segment_distance(
+            point,
+            history_point(history, segment, scroll),
+            history_point(history, segment + 1, scroll),
+        ));
+    }
+    let line = inside * stroke(line_distance, CHART_LINE_WIDTH);
+    let area = inside * fill(graph_y - point.y);
+    color * (area * fill_strength + line)
 }
 
-fn smooth_history_sample(history: &UsageHistory, index: usize) -> f32 {
-    (history.get(if index > 0 { index - 1 } else { 0 })
-        + history.get(index) * 2.0
-        + history.get((index + 1).min(STATUS_HISTORY_SAMPLES - 1)))
-        * 0.25
+fn history_point(history: &UsageHistory, index: usize, scroll: f32) -> Vec2 {
+    let sample = index.min(HISTORY_END);
+    let x = (-CHART_SIZE.x + (index as f32 - scroll) * HISTORY_STEP).min(CHART_SIZE.x);
+    vec2(x, CHART_SIZE.y * (1.0 - history.get(sample) * 2.0))
 }
 
 fn grid_line(value: f32, offset: f32, spacing: f32, edge: f32) -> f32 {
@@ -119,23 +110,26 @@ fn processor_monitor(
     let body_distance = sd_capsule_box(point, 13.0, 13.0);
     let body = fill(body_distance);
     let hardware = stroke(body_distance, 1.55);
-    let usage_color = vec3(0.32, 0.68, 1.0);
-    let usage = history_curve(point, &processor.usage, usage_color, 0.13, scroll);
-    let memory = history_curve(point, &processor.memory, vec3(0.78, 0.3, 1.0), 0.07, scroll);
-    let chart = fill_capsule(point, CHART_SIZE);
+    let chart = fill(sd_capsule_box(
+        point,
+        CHART_SIZE.x - CHART_SIZE.y,
+        CHART_SIZE.y,
+    ));
+    let usage = history_curve(point, &processor.usage, USAGE_COLOR, 0.13, scroll, chart);
+    let memory = history_curve(point, &processor.memory, MEMORY_COLOR, 0.07, scroll, chart);
     let grid_x = grid_line(point.x, CHART_SIZE.x, 7.0, 0.46);
     let grid_y = grid_line(point.y, CHART_SIZE.y, 6.1, 0.45);
-    let grid = chart * grid_x.max(grid_y) * 0.045;
-    let glass = body * 0.82;
-    let load = processor.usage.get(STATUS_HISTORY_SAMPLES - 1);
-    let thermal = smoothstep(60.0, 86.0, processor.temperature);
+    let grid = grid_x.max(grid_y);
     let frame_color = vec3(0.025, 0.09, 0.15)
-        .lerp(usage_color, 0.18 + load * 0.24)
-        .lerp(heat_color(processor.temperature), thermal * 0.9);
+        .lerp(USAGE_COLOR, 0.18 + processor.usage.get(HISTORY_END) * 0.24)
+        .lerp(
+            heat_color(processor.temperature),
+            smoothstep(60.0, 86.0, processor.temperature) * 0.9,
+        );
     background
-        .lerp(vec3(0.004, 0.012, 0.026), glass)
+        .lerp(vec3(0.004, 0.012, 0.026), body * 0.82)
         .lerp(frame_color, hardware * 0.92)
-        + Vec3::splat(grid)
+        + Vec3::splat(chart * grid * 0.045)
         + usage
         + memory
         + thermal_wisps(point, time, processor.temperature)
@@ -151,15 +145,16 @@ fn battery_icon(point: Vec2, time: f32, pill: &StatusPill) -> Vec3 {
     );
     let terminal = fill_box(point - vec2(0.0, -15.6), vec2(4.0, 1.8), 0.8);
     let inside = fill_box(point - vec2(0.0, 1.0), vec2(8.5, 12.0), 1.7);
-    let level = 12.0 - battery_level.clamp(0.0, 1.0) * 24.0;
+    let level = 12.0 - battery_level.saturate() * 24.0;
     let wave = (point.x * 0.62 + time * (1.4 + charging * 1.2)).sin() * 1.15
         + (point.x * 0.27 - time * 0.8).sin() * 0.45;
     let liquid = inside * smoothstep(level + wave - 0.7, level + wave + 0.7, point.y - 1.0);
-    let low = smoothstep(0.28, 0.08, battery_level);
-    let full = smoothstep(0.18, 0.72, battery_level);
     let liquid_color = vec3(1.0, 0.18, 0.10)
-        .lerp(vec3(1.0, 0.72, 0.12), 1.0 - low)
-        .lerp(vec3(0.22, 0.95, 0.55), full);
+        .lerp(vec3(1.0, 0.72, 0.12), smoothstep(0.08, 0.28, battery_level))
+        .lerp(
+            vec3(0.22, 0.95, 0.55),
+            smoothstep(0.18, 0.72, battery_level),
+        );
 
     let mut bubbles: f32 = 0.0;
     #[allow(clippy::needless_range_loop)]
@@ -183,12 +178,11 @@ fn audio_icon(point: Vec2, time: f32, pill: &StatusPill) -> Vec3 {
     #[allow(clippy::needless_range_loop)]
     for index in 0..7 {
         let seed = index as f32;
-        let x = -12.0 + seed * 4.0;
         let envelope = 1.0 - (seed - 3.0).abs() * 0.16;
         let pulse = ((time * (3.2 + seed * 0.17) + seed * 1.71).sin() * 0.5 + 0.5)
             * ((time * 1.37 - seed * 0.83).sin() * 0.18 + 0.82);
         let height = 1.2 + volume * (2.2 + envelope * 5.5) * (0.46 + pulse * 0.54) * active;
-        let bar_point = point - vec2(x, -1.5);
+        let bar_point = point - vec2(-12.0 + seed * 4.0, -1.5);
         let distance = sd_rounded_box(bar_point, vec2(1.25, height), 1.25);
         bars = bars.max(smoothstep(0.7, -0.7, distance));
         glow = glow.max(smoothstep(3.2, 0.0, distance));
@@ -196,22 +190,14 @@ fn audio_icon(point: Vec2, time: f32, pill: &StatusPill) -> Vec3 {
 
     let rail_point = point - vec2(0.0, 11.5);
     let rail = fill_box(rail_point, vec2(14.0, 1.25), 1.25);
-    let level_edge = -14.0 + volume.clamp(0.0, 1.0) * 28.0;
+    let level_edge = -14.0 + volume.saturate() * 28.0;
     let level = rail * smoothstep(level_edge + 0.8, level_edge - 0.8, rail_point.x);
     let idle = rail * (1.0 - level) * 0.22;
 
-    let diagonal = vec2(point.x + point.y, point.y - point.x) * 0.707;
-    let cross_a = fill_box(diagonal, vec2(8.0, 0.85), 0.85);
-    let cross_b = fill_box(vec2(-diagonal.y, diagonal.x), vec2(8.0, 0.85), 0.85);
     let audio_color = vec3(0.08, 0.88, 1.0).lerp(vec3(0.65, 0.34, 1.0), volume * 0.65);
-    audio_color * (bars * (0.58 + active * 0.35) + glow * active * 0.12 + level)
-        + Vec3::splat(idle)
-        + vec3(1.0, 0.24, 0.3) * cross_a.max(cross_b) * muted * 0.85
-}
-
-fn arrow_segment(point: Vec2, end: Vec2) -> f32 {
-    let along = (point.dot(end) / end.dot(end)).clamp(0.0, 1.0);
-    smoothstep(0.7, -0.7, (point - end * along).length() - 1.0)
+    let rail_color = audio_color.lerp(MUTED_COLOR, muted);
+    audio_color * (bars * (0.58 + active * 0.35) + glow * active * 0.12)
+        + rail_color * (level + idle)
 }
 
 fn power_icon(point: Vec2, time: f32, charge: f32) -> f32 {
@@ -243,17 +229,16 @@ fn reboot_icon(point: Vec2, progress: f32) -> f32 {
 
     let phase = ((point.y.atan2(point.x) - START) / TAU + 1.0).fract();
     let arc_end = (progress * SWEEP_FRACTION - ARROW_CLEARANCE).max(0.0);
-    let revealed =
-        smoothstep(arc_end + 0.008, arc_end - 0.008, phase) * smoothstep(0.0, 0.02, progress);
-    let arc = ring(point, 7.1, 1.05) * revealed;
+    let arc = ring(point, 7.1, 1.05)
+        * smoothstep(arc_end + 0.008, arc_end - 0.008, phase)
+        * smoothstep(0.0, 0.02, progress);
 
     let angle = START + SWEEP * progress;
     let direction = vec2(angle.cos(), angle.sin());
     let tangent = vec2(-direction.y, direction.x);
     let arrow_point = point - direction * 7.1;
     let arrow_point = vec2(arrow_point.dot(tangent), arrow_point.dot(direction));
-    let arrow = arrow_segment(arrow_point, vec2(-3.2, -2.1))
-        .max(arrow_segment(arrow_point, vec2(-3.2, 2.1)));
+    let arrow = smoothstep(0.7, -0.7, sd_chevron(arrow_point, vec2(-3.2, 2.1)) - 1.0);
     arc.max(arrow)
 }
 
@@ -261,8 +246,7 @@ fn action_icon(point: Vec2, time: f32, action: f32, hover: f32, pill: &StatusPil
     let selected = smoothstep(0.4, 0.05, (pill.power_action - action - 1.0).abs());
     let charge = pill.power_progress * selected;
     let icon = if action < 0.5 {
-        let motion = charge + hover * (1.0 - charge) * 0.1;
-        power_icon(point, time, motion)
+        power_icon(point, time, charge + hover * (1.0 - charge) * 0.1)
     } else {
         reboot_icon(point, 1.0 - selected + charge)
     };
@@ -280,8 +264,8 @@ fn status_sections(
     global: &GlobalUniforms,
 ) -> Vec3 {
     let time = global.time;
-    let scroll = ((time - pill.sample_time) / 0.5).clamp(0.0, 1.0);
-    let layout = StatusLayout::new(pill.battery_present > 0.5);
+    let scroll = ((time - pill.sample_time) / 0.5).saturate();
+    let layout = pill.layout();
     let section = layout.section(local.x);
     let center = vec2(layout.center(section), size.y * 0.5);
     let point = local - center;
@@ -292,8 +276,8 @@ fn status_sections(
         3 => background + audio_icon(point, time, pill),
         _ => {
             let mouse = global.mouse_pos - vec2(pill.x, global.bar_height.x);
-            let hover = smoothstep(20.0, 4.0, (mouse - center).length())
-                * global.mouse_pressure.clamp(0.0, 1.0);
+            let hover =
+                smoothstep(20.0, 4.0, (mouse - center).length()) * global.mouse_pressure.saturate();
             background + action_icon(point, time, (5 - section) as f32, hover, pill)
         }
     }
@@ -302,7 +286,7 @@ fn status_sections(
 #[spirv(vertex)]
 pub fn vs_status(
     #[spirv(vertex_index)] vertex: u32,
-    #[spirv(uniform, descriptor_set = 0, binding = 0)] global: &GlobalUniforms,
+    #[spirv(storage_buffer, descriptor_set = 0, binding = 0)] global: &GlobalUniforms,
     #[spirv(storage_buffer, descriptor_set = 0, binding = 1)] status: &[StatusPill],
     #[spirv(position)] out_pos: &mut Vec4,
     #[spirv(location = 0)] out_pixel: &mut Vec2,
@@ -314,7 +298,7 @@ pub fn vs_status(
 #[spirv(fragment)]
 pub fn fs_status(
     #[spirv(location = 0)] pixel: Vec2,
-    #[spirv(uniform, descriptor_set = 0, binding = 0)] global: &GlobalUniforms,
+    #[spirv(storage_buffer, descriptor_set = 0, binding = 0)] global: &GlobalUniforms,
     #[spirv(storage_buffer, descriptor_set = 0, binding = 1)] status: &[StatusPill],
     #[spirv(location = 0)] out_color: &mut Vec4,
 ) {
@@ -324,18 +308,17 @@ pub fn fs_status(
     if alpha <= 0.0 {
         kill();
     }
-    let refracted = interaction.refract(local, size, dist);
-    let edge = (local.x / pill.width - 0.5).abs() * 2.0;
-    let background = crate::weather::scene(
-        refracted * size,
+    let (background, refracted) = sky_background(
+        global,
+        interaction,
+        local,
         size,
-        size.y,
+        dist,
         pill.sun,
-        crate::weather::forecast(pill.conditions, edge),
-        global.time,
+        pill.conditions,
         0.0,
-    ) + pill_sheen(refracted.y, dist, interaction);
-    let color = status_sections(refracted * size, size, &pill, background, global)
+    );
+    let color = status_sections(refracted, size, &pill, background, global)
         .lerp(Vec3::splat(0.95), interaction.ripple_flash * 0.35);
     *out_color = (color * mask).extend(alpha);
 }

@@ -1,7 +1,10 @@
 #![no_std]
 
 use cantus_shared::{GlobalUniforms, RIPPLE_COUNT, smoothstep};
-use spirv_std::glam::{Vec2, Vec3, Vec4, vec2, vec3, vec4};
+use spirv_std::glam::{FloatExt, Vec2, Vec3, Vec4, vec2, vec3, vec4};
+
+#[cfg(target_arch = "spirv")]
+use spirv_std::num_traits::Float;
 
 pub mod particles;
 pub mod playhead;
@@ -69,8 +72,8 @@ impl PillInteraction {
     /// Return the expanded distance, fill coverage, and combined fill/shadow alpha.
     pub fn surface(self, distance: f32) -> (f32, f32, f32) {
         let distance = self.expand(distance);
-        let mask = (0.5 - distance).clamp(0.0, 1.0);
-        let shadow = (1.0 - smoothstep(0.0, 14.0, distance)) * 0.16;
+        let mask = (0.5 - distance).saturate();
+        let shadow = (-distance * 0.3).exp() * 0.16;
         (distance, mask, mask.max(shadow))
     }
 
@@ -92,7 +95,7 @@ fn pill_interaction(pixel: Vec2, global: &GlobalUniforms) -> PillInteraction {
         if !(-0.02..1.02).contains(&anim_t) {
             continue;
         }
-        let progress = anim_t.clamp(0.0, 1.0);
+        let progress = anim_t.saturate();
         let (direction, distance) = direction_and_length(pixel - pulse.origin);
         let active = pulse.animation.y
             * smoothstep(-0.02, 0.0, anim_t)
@@ -150,7 +153,7 @@ pub fn sd_star(point: Vec2, radius: f32, indent: f32) -> f32 {
     point.x = point.x.abs();
     point.y -= radius;
     let edge = indent * vec2(-k1.y, k1.x) - vec2(0.0, radius);
-    let edge_t = (point.dot(edge) / edge.dot(edge)).clamp(0.0, 1.0);
+    let edge_t = (point.dot(edge) / edge.dot(edge)).saturate();
     let cross = point.y * edge.x - point.x * edge.y;
     (point - edge * edge_t).length() * if cross < 0.0 { -1.0 } else { 1.0 }
 }
@@ -170,8 +173,40 @@ pub fn sd_rounded_triangle(point: Vec2, side_len: f32, radius: f32) -> f32 {
     point.length() * if point.y > 0.0 { -1.0 } else { 1.0 } - radius
 }
 
+/// Shortest distance from `point` to the line segment between `start` and `end`.
+pub fn segment_distance(point: Vec2, start: Vec2, end: Vec2) -> f32 {
+    let segment = end - start;
+    let along = ((point - start).dot(segment) / segment.dot(segment).max(0.001)).saturate();
+    (point - start - segment * along).length()
+}
+
+const ANTIALIAS_WIDTH: f32 = 0.55;
+
+/// Antialiased coverage of the outline of a shape at the given signed `distance`, `width` pixels wide.
+pub fn stroke(distance: f32, width: f32) -> f32 {
+    smoothstep(
+        width + ANTIALIAS_WIDTH,
+        width - ANTIALIAS_WIDTH,
+        distance.abs(),
+    )
+}
+
+/// Antialiased coverage of the inside of a shape at the given signed `distance`.
+pub fn fill(distance: f32) -> f32 {
+    smoothstep(ANTIALIAS_WIDTH, -ANTIALIAS_WIDTH, distance)
+}
+
+/// "‹" chevron with its tip at the origin, spanning to `extent` and its mirror; negate `extent.x` for a "›".
+pub fn sd_chevron(point: Vec2, extent: Vec2) -> f32 {
+    segment_distance(point, Vec2::ZERO, extent).min(segment_distance(
+        point,
+        Vec2::ZERO,
+        vec2(extent.x, -extent.y),
+    ))
+}
+
 pub fn smooth_union(base: f32, shape: f32, smoothing: f32, amount: f32) -> f32 {
-    let blend = (0.5 + 0.5 * (shape - base) / smoothing).clamp(0.0, 1.0);
+    let blend = (0.5 + 0.5 * (shape - base) / smoothing).saturate();
     let union = shape + (base - shape) * blend - smoothing * blend * (1.0 - blend);
     base + (union - base) * amount
 }

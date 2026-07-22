@@ -9,7 +9,7 @@ use core::f32::consts::{FRAC_PI_2, TAU};
 use spirv_std::{
     Sampler,
     arch::{Derivative, kill},
-    glam::{Vec2, Vec3, Vec4, vec2, vec3},
+    glam::{FloatExt, Vec2, Vec3, Vec4, vec2, vec3},
     image::Image2dArray,
     spirv,
 };
@@ -72,8 +72,8 @@ fn near_icon(pixel_pos: Vec2, center: Vec2) -> bool {
 }
 
 fn over_icon(base: Vec4, color: Vec3, dist: f32, alpha: f32) -> Vec4 {
-    let mask = (0.5 - dist).clamp(0.0, 1.0);
-    let shadow = 1.0 - smoothstep(0.0, 6.0, dist);
+    let mask = (0.5 - dist).saturate();
+    let shadow = (-dist.max(0.0) * 0.5).exp();
     let bevel = 1.0 - smoothstep(0.0, -5.0, dist);
     let overlay = ((color + bevel * bevel * 0.045) * mask * alpha)
         .extend(mask.max(shadow * shadow * 0.2) * alpha);
@@ -84,7 +84,7 @@ fn over_icon(base: Vec4, color: Vec3, dist: f32, alpha: f32) -> Vec4 {
 pub fn vs_track(
     #[spirv(vertex_index)] v_idx: u32,
     #[spirv(instance_index)] i_idx: u32,
-    #[spirv(uniform, descriptor_set = 0, binding = 0)] global: &GlobalUniforms,
+    #[spirv(storage_buffer, descriptor_set = 0, binding = 0)] global: &GlobalUniforms,
     #[spirv(storage_buffer, descriptor_set = 0, binding = 1)] pills: &[TrackPill],
     #[spirv(position)] out_pos: &mut Vec4,
     #[spirv(location = 0)] out_pixel_pos: &mut Vec2,
@@ -119,7 +119,7 @@ pub fn vs_track(
 pub fn fs_track(
     #[spirv(location = 0)] pixel_pos: Vec2,
     #[spirv(location = 1, flat)] pill_idx: u32,
-    #[spirv(uniform, descriptor_set = 0, binding = 0)] global: &GlobalUniforms,
+    #[spirv(storage_buffer, descriptor_set = 0, binding = 0)] global: &GlobalUniforms,
     #[spirv(storage_buffer, descriptor_set = 0, binding = 1)] pills: &[TrackPill],
     #[spirv(descriptor_set = 0, binding = 2)] images: &Image2dArray,
     #[spirv(descriptor_set = 0, binding = 3)] sampler: &Sampler,
@@ -164,12 +164,12 @@ pub fn fs_track(
         audio.energy * 0.55 + audio.danceability * 0.25 + (audio.loudness + 60.0) / 60.0 * 0.2;
     let beat = (global.time * audio.tempo * (TAU / 60.0)).sin() * 0.5 + 0.5;
     let beat = beat * beat * audio.danceability * (0.025 + audio.energy * 0.055);
-    let lens_warp = (1.0 + dist.min(0.0) / 120.0).clamp(0.0, 1.0);
+    let lens_warp = (1.0 + dist.min(0.0) / 120.0).saturate();
     let deformation = local_centered * lens_warp * lens_warp * 0.6
         + interaction.ripple
         + interaction.mouse * 0.03;
     let flow_time = global.time
-        * (0.12 + audio.energy * 0.25 + ((audio.tempo - 60.0) / 120.0).clamp(0.0, 1.0) * 0.12)
+        * (0.12 + audio.energy * 0.25 + ((audio.tempo - 60.0) / 120.0).saturate() * 0.12)
         + seed;
     let frequency =
         (pill_size.x / pill_size.y * (0.5 + seed.fract() * 0.12 + turbulence * 0.18)).max(1.7);
@@ -181,22 +181,24 @@ pub fn fs_track(
             (field_uv.x * 2.3 - flow_time * 0.8).cos() + (field_uv.y * 1.7 + flow_time * 0.6).sin(),
         ) * (0.14 + turbulence * 0.2 + beat);
     let phase = seed + FRAC_PI_2;
-    let weighted = plasma_field(warped_uv, pill.colors[0], 2.1, 0.7, flow_time)
-        + plasma_field(
+    let fields = [
+        (2.1, 0.7, 1.0, 0.0),
+        (0.6, -2.4, -0.8, phase),
+        (-1.5, 1.9, 0.65, 2.0),
+        (2.4, 1.6, -0.55, phase),
+    ];
+    let mut weighted = Vec4::ZERO;
+    #[allow(clippy::needless_range_loop)]
+    for index in 0..fields.len() {
+        let (x, y, rate, offset) = fields[index];
+        weighted += plasma_field(
             warped_uv,
-            pill.colors[1],
-            0.6,
-            -2.4,
-            flow_time * -0.8 + phase,
-        )
-        + plasma_field(warped_uv, pill.colors[2], -1.5, 1.9, flow_time * 0.65 + 2.0)
-        + plasma_field(
-            warped_uv,
-            pill.colors[3],
-            2.4,
-            1.6,
-            flow_time * -0.55 + phase,
+            pill.colors[index],
+            x,
+            y,
+            flow_time * rate + offset,
         );
+    }
     let mut color = weighted.truncate() / weighted.w;
 
     let luma = color.dot(vec3(0.2126, 0.7152, 0.0722));
@@ -233,7 +235,7 @@ pub fn fs_track(
 
     if pill.rating >= 0 && pill.primary_alpha > 0.0 {
         for index in 0..5 {
-            let fill = ((pill.rating as f32 - index as f32 * 2.0) * 0.5).clamp(0.0, 1.0);
+            let fill = ((pill.rating as f32 - index as f32 * 2.0) * 0.5).saturate();
             let center = primary_row.icon_center(index as f32);
             if !near_icon(pixel_pos, center) {
                 continue;
@@ -242,7 +244,7 @@ pub fn fs_track(
             let dist =
                 sd_star(local_pixel, pixel_radius * 0.5, pixel_radius * 0.32) - pixel_radius * 0.1;
             let split_line = local_uv.x - fill;
-            let selection_mask = (split_line / split_line.fwidth() + 0.5).clamp(0.0, 1.0);
+            let selection_mask = (split_line / split_line.fwidth() + 0.5).saturate();
             let color = vec3(1.0, 0.85, 0.2).lerp(vec3(0.33, 0.33, 0.33), selection_mask);
             output = over_icon(output, color, dist, pill.primary_alpha);
         }

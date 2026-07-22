@@ -1,7 +1,7 @@
 use crate::{
-    CantusApp, PANEL_START,
-    model::{CondensedPlaylist, PlaylistId, Rect, Track, TrackId, playlist_icons},
-    status::{PowerAction, Status},
+    CantusApp, PANEL_START, Rect,
+    render::status::{PowerAction, Status},
+    spotify::{CondensedPlaylist, PlaylistId, Track, TrackId, playlist_icons},
 };
 use cantus_shared::{
     ICON_WIDTH, PillIconRow, RIPPLE_COUNT, RipplePulse, pill_icon_primary_center_y, pill_icon_rows,
@@ -17,6 +17,7 @@ enum IconAction {
 
 const POWER_HOLD_DURATION: Duration = Duration::from_millis(1_500);
 const POWER_PULSE_INTERVAL: Duration = Duration::from_millis(420);
+const VOLUME_SCROLL_RANGE: f32 = 100.0;
 
 #[derive(Clone, Copy)]
 struct PowerHold {
@@ -25,16 +26,12 @@ struct PowerHold {
     last_pulse: Instant,
 }
 
-fn row_rect(row: PillIconRow) -> Rect {
-    Rect::from_center(row.center, row.half_size(9.0 + ICON_WIDTH / 3.0))
-}
-
 #[derive(Default)]
 pub struct InteractionState {
     pub mouse_pressure: f32, // 0 not hovered - 1 hovered - 2 mouse down
     pub hovered_track: Option<usize>,
     pub dragging: bool,
-    pub drag_enabled: bool,
+    drag_enabled: bool,
     pub press_origin: Vec2,
     power_hold: Option<PowerHold>,
     ripple_cursor: usize,
@@ -55,18 +52,16 @@ impl CantusApp {
         self.interaction.press_origin = mouse_pos;
         self.interaction.drag_enabled = drag_enabled;
         self.interaction.dragging = false;
-        self.interaction.power_hold = power_action.map(|action| PowerHold {
-            action,
-            started: now,
-            last_pulse: now,
-        });
-        if let Some(action) = power_action {
-            self.pulse_at(Status::power_action_center(
+        self.interaction.power_hold = power_action.map(|action| {
+            let center =
+                Status::power_action_center(action, &self.render.status, self.config.height);
+            self.pulse(center, 1.0);
+            PowerHold {
                 action,
-                &self.render.status,
-                self.config.height,
-            ));
-        }
+                started: now,
+                last_pulse: now,
+            }
+        });
     }
 
     pub fn left_click_released(&mut self) {
@@ -105,11 +100,11 @@ impl CantusApp {
             .weather
             .navigate_calendar(mouse_pos, &self.render.status, self.config.height)
         {
-            self.pulse_at(mouse_pos);
+            self.pulse(mouse_pos, 1.0);
             return;
         }
         if self.overlay_contains(mouse_pos) {
-            self.pulse_at(mouse_pos);
+            self.pulse(mouse_pos, 1.0);
             return;
         }
         let icon_click = |track: &Track| self.icon_at(track, &self.playback.playlists);
@@ -144,7 +139,7 @@ impl CantusApp {
             })
         {
             // Seek track
-            self.pulse_at(mouse_pos);
+            self.pulse(mouse_pos, 1.0);
 
             // If click is near the very left, reset to the start of the song, else seek to clicked position
             let position = if mouse_pos.x < self.config.history_width + 40.0 {
@@ -158,10 +153,6 @@ impl CantusApp {
         }
     }
 
-    fn pulse_at(&mut self, pos: Vec2) {
-        self.pulse(pos, 1.0);
-    }
-
     fn pulse(&mut self, pos: Vec2, strength: f32) {
         let cursor = self.interaction.ripple_cursor;
         self.render.uniforms.ripples[cursor] = RipplePulse {
@@ -172,10 +163,11 @@ impl CantusApp {
     }
 
     fn pulse_at_playhead(&mut self) {
-        self.pulse_at(vec2(
+        let center = vec2(
             self.timeline().playhead_x,
             PANEL_START + self.config.height * 0.5,
-        ));
+        );
+        self.pulse(center, 1.0);
     }
 
     /// Drag across the progress bar to seek.
@@ -188,23 +180,24 @@ impl CantusApp {
         interaction.dragging |= delta.x >= 2.0 || delta.y >= 2.0;
     }
 
-    /// Handle scrolling events to adjust volume.
-    pub fn handle_scroll(&mut self, delta: i32) {
-        let scroll_direction = delta.signum();
-        if scroll_direction == 0 {
-            return;
-        }
+    /// Handle scrolling events to adjust volume. `direction` must be -1 or 1.
+    pub fn handle_scroll(&mut self, direction: i32) {
         if Status::audio_at(
             self.render.uniforms.mouse_pos,
             &self.render.status,
             self.config.height,
         ) {
-            self.status.adjust_volume(scroll_direction);
+            self.status.adjust_volume(direction);
+            return;
+        }
+        let near_playhead = (self.render.uniforms.mouse_pos.x - self.timeline().playhead_x).abs()
+            <= VOLUME_SCROLL_RANGE;
+        if !near_playhead {
             return;
         }
         if let Some(volume) = &mut self.playback.volume {
             *volume = volume
-                .saturating_add_signed(if scroll_direction < 0 { 5 } else { -5 })
+                .saturating_add_signed(if direction < 0 { 5 } else { -5 })
                 .min(100);
             info!("Setting volume to {volume}%");
             self.spotify
@@ -272,7 +265,10 @@ impl CantusApp {
             (primary_row, track.runtime.primary_icon_alpha),
             (secondary_row, secondary_row.expansion),
         ]
-        .map(|(row, alpha)| (row.count > 0.0 && alpha > 0.0).then(|| row_rect(row)))
+        .map(|(row, alpha)| {
+            (row.count > 0.0 && alpha > 0.0)
+                .then(|| Rect::from_center(row.center, row.half_size(9.0 + ICON_WIDTH / 3.0)))
+        })
     }
 
     fn icon_at(
@@ -330,13 +326,12 @@ impl CantusApp {
             self.spotify
                 .skip(queue_index < position_in_queue, skip_count.min(10));
         }
-        state.defer_remote_updates(Duration::from_secs(2));
+        // Ignore remote playback updates briefly so they don't fight the local seek.
+        state.last_interaction = Instant::now() + Duration::from_secs(2);
     }
 
     /// Update Spotify rating playlists for the given track.
     fn update_star_rating(&mut self, track_id: TrackId, rating_slot: u8) {
-        self.playback
-            .defer_remote_updates(Duration::from_millis(500));
         let changes = self
             .playback
             .playlists
@@ -367,9 +362,6 @@ impl CantusApp {
         };
         let add = !playlist.tracks.contains(&track_id);
         playlist.set_membership(track_id, add);
-        self.playback
-            .defer_remote_updates(Duration::from_millis(500));
-
         self.spotify
             .update_library(track_id, vec![(playlist_id, add)], None);
     }

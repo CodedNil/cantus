@@ -2,6 +2,9 @@
   "lsp": {
     "rust-analyzer": {
       "initialization_options": {
+        "check": {
+          "command": "clippy"
+        },
         "linkedProjects": [
           "./Cargo.toml",
           "./crates/cantus_gpu/Cargo.toml"

@@ -1,9 +1,11 @@
-use crate::{CantusApp, model::NUM_SWATCHES, pipelines::IMAGE_SIZE};
+use crate::{CantusApp, render::pipelines::IMAGE_SIZE};
 use arrayvec::ArrayVec;
 use image::{DynamicImage, RgbaImage, imageops};
 use kmeans_colors::Sort;
 use palette::{Clamp, IntoColor, Lch, color_theory::Analogous};
 use std::{array, sync::Arc, time::Instant};
+
+const NUM_SWATCHES: usize = 4;
 
 #[derive(Clone, Default)]
 pub enum ArtState {
@@ -18,57 +20,76 @@ pub struct AlbumArt {
     /// RGBA image pixels.
     pub pixels: Box<[u8]>,
     /// RGB swatches with their relative influence packed into alpha.
-    pub palette: [u32; NUM_SWATCHES],
+    palette: [u32; NUM_SWATCHES],
 }
 
 pub fn prepare(image: &DynamicImage) -> AlbumArt {
-    let image = image.resize_to_fill(IMAGE_SIZE, IMAGE_SIZE, imageops::FilterType::Lanczos3);
-    let image = image.to_rgba8();
-    let palette = image_palette(&image);
+    let image = image
+        .resize_to_fill(IMAGE_SIZE, IMAGE_SIZE, imageops::FilterType::Lanczos3)
+        .to_rgba8();
     AlbumArt {
+        palette: image_palette(&image),
         pixels: image.into_raw().into_boxed_slice(),
-        palette,
+    }
+}
+
+impl ArtState {
+    pub const fn ready(&self) -> Option<&Arc<AlbumArt>> {
+        match self {
+            Self::Ready(art) => Some(art),
+            _ => None,
+        }
+    }
+
+    pub fn palette(&self) -> [u32; NUM_SWATCHES] {
+        self.ready().map_or([0; NUM_SWATCHES], |art| art.palette)
+    }
+
+    fn needs_fetch(&self, now: Instant) -> bool {
+        matches!(self, Self::Missing) || matches!(self, Self::RetryAt(at) if *at <= now)
     }
 }
 
 impl CantusApp {
+    /// Every art slot in the queue and playlists, with the URL it wants.
+    fn art_slots(&mut self) -> impl Iterator<Item = (&str, &mut ArtState)> {
+        let tracks = self.playback.queue.iter_mut();
+        let playlists = self.playback.playlists.iter_mut();
+        tracks
+            .filter_map(|track| Some((track.album.image.as_deref()?, &mut track.runtime.art)))
+            .chain(
+                playlists.filter_map(|playlist| {
+                    Some((playlist.image_url.as_deref()?, &mut playlist.art))
+                }),
+            )
+    }
+
     pub fn start_missing_art_downloads(&mut self) {
         let now = Instant::now();
-        while let Some(url) = self
-            .playback
-            .queue
-            .iter()
-            .find_map(|track| art_request(&track.art, track.album_image.as_deref(), now))
-            .or_else(|| {
-                self.playback.playlists.iter().find_map(|playlist| {
-                    art_request(&playlist.art, playlist.image_url.as_deref(), now)
-                })
-            })
-        {
-            self.set_art_state(&url, &ArtState::Fetching);
-            self.spotify.download_image(url);
+        loop {
+            let url = self
+                .art_slots()
+                .find_map(|(url, state)| state.needs_fetch(now).then(|| url.to_owned()));
+            let Some(url) = url else { break };
+            // Share art another slot already holds for the same URL, else fetch it.
+            let existing = self
+                .art_slots()
+                .find_map(|(other, state)| (other == url).then(|| state.ready().cloned())?);
+            let state = if let Some(art) = existing {
+                ArtState::Ready(art)
+            } else {
+                self.spotify.download_image(url.clone());
+                ArtState::Fetching
+            };
+            self.set_art_state(&url, &state);
         }
     }
 
     pub fn set_art_state(&mut self, url: &str, state: &ArtState) {
-        for track in &mut self.playback.queue {
-            if track.album_image.as_deref() == Some(url) {
-                track.art = state.clone();
-            }
-        }
-        for playlist in &mut self.playback.playlists {
-            if playlist.image_url.as_deref() == Some(url) {
-                playlist.art = state.clone();
-            }
-        }
+        self.art_slots()
+            .filter(|(slot_url, _)| *slot_url == url)
+            .for_each(|(_, slot)| *slot = state.clone());
     }
-}
-
-fn art_request(state: &ArtState, url: Option<&str>, now: Instant) -> Option<String> {
-    url.filter(|_| {
-        matches!(state, ArtState::Missing) || matches!(state, ArtState::RetryAt(at) if *at <= now)
-    })
-    .map(str::to_owned)
 }
 
 fn complete_palette(colors: &mut ArrayVec<(Lch, f32), NUM_SWATCHES>) {

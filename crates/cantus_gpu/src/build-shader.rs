@@ -1,3 +1,7 @@
+use naga::{
+    front::spv::{Options, parse_u8_slice},
+    valid::{Capabilities, ValidationFlags, Validator},
+};
 use spirv_builder::{SpirvBuilder, SpirvMetadata};
 use std::{fs, path::PathBuf};
 
@@ -12,7 +16,15 @@ fn main() {
         .scalar_block_layout(true)
         .build()
         .expect("failed to build Rust-GPU shaders");
+    let spirv_path = result.module.unwrap_single();
 
-    fs::copy(result.module.unwrap_single(), &shader_path).expect("failed to write shader artifact");
+    let bytes = fs::read(spirv_path).expect("failed to read built shader");
+    let module =
+        parse_u8_slice(&bytes, &Options::default()).expect("naga failed to parse the built shader");
+    Validator::new(ValidationFlags::all(), Capabilities::all())
+        .validate(&module)
+        .expect("naga rejected the built shader");
+
+    fs::copy(spirv_path, &shader_path).expect("failed to write shader artifact");
     println!("wrote {}", shader_path.display());
 }

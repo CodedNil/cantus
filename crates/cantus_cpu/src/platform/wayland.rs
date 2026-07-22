@@ -1,7 +1,6 @@
 use crate::{
-    CantusApp, PANEL_START,
+    CantusApp, PANEL_START, Rect,
     config::{Layer as ConfigLayer, LayerAnchor as ConfigLayerAnchor},
-    model::Rect,
 };
 use glam::vec2;
 use std::{
@@ -50,7 +49,7 @@ pub fn run() {
     event_queue
         .roundtrip(&mut app)
         .expect("Initial roundtrip failed");
-    let compositor = app.compositor.take().expect("Missing compositor");
+    let compositor = app.compositor.clone().expect("Missing compositor");
     let layer_shell = app.layer_shell.take().expect("Missing layer shell");
     assert!(!app.outputs.is_empty(), "No Wayland outputs found");
 
@@ -101,8 +100,7 @@ pub fn run() {
         &qhandle,
         (),
     );
-    let (_, total_height) = app.cantus.logical_surface_size();
-    layer_surface.set_size(0, total_height as u32);
+    layer_surface.set_size(0, app.cantus.logical_surface_size().1 as u32);
     layer_surface.set_anchor(match app.cantus.config.layer_anchor {
         ConfigLayerAnchor::Top => LayerAnchor::Top | LayerAnchor::Left | LayerAnchor::Right,
         ConfigLayerAnchor::Bottom => LayerAnchor::Bottom | LayerAnchor::Left | LayerAnchor::Right,
@@ -111,8 +109,6 @@ pub fn run() {
 
     surface.commit();
     connection.flush().expect("Failed to flush initial commit");
-
-    app.compositor = Some(compositor);
 
     while !app.should_exit {
         event_queue
@@ -131,15 +127,14 @@ struct OutputInfo {
 }
 
 #[derive(Default)]
-pub struct LayerShellApp {
-    pub cantus: CantusApp,
+struct LayerShellApp {
+    cantus: CantusApp,
 
     is_configured: bool,
     should_exit: bool,
 
     compositor: Option<WlCompositor>,
     layer_shell: Option<ZwlrLayerShellV1>,
-    seat: Option<WlSeat>,
     pointer: Option<WlPointer>,
     outputs: Vec<OutputInfo>,
     last_hitbox_hash: u64,
@@ -173,7 +168,13 @@ impl LayerShellApp {
         let (buffer_width, buffer_height) = self.cantus.buffer_size();
         if buffer_width > 0 && buffer_height > 0 && self.is_configured {
             if let Some(gpu) = &mut self.cantus.render.gpu {
-                gpu.resize_surface(buffer_width, buffer_height);
+                if (gpu.surface_config.width, gpu.surface_config.height)
+                    != (buffer_width, buffer_height)
+                {
+                    gpu.surface_config.width = buffer_width;
+                    gpu.surface_config.height = buffer_height;
+                    gpu.surface.configure(&gpu.device, &gpu.surface_config);
+                }
             } else if let Some(surface) = self.pending_surface.take() {
                 self.cantus
                     .configure_render_surface(surface, buffer_width, buffer_height);
@@ -210,16 +211,14 @@ impl LayerShellApp {
         let (Some(wl_surface), Some(compositor)) = (&self.wl_surface, &self.compositor) else {
             return;
         };
+        let rects: Vec<_> = self.cantus.input_rects().map(region_rect).collect();
         let mut hasher = DefaultHasher::new();
-        for rect in self.cantus.input_rects().map(region_rect) {
-            rect.hash(&mut hasher);
-        }
+        rects.hash(&mut hasher);
         let hash = hasher.finish();
 
         if hash != self.last_hitbox_hash {
             let region = compositor.create_region(qhandle, ());
-            for rect in self.cantus.input_rects() {
-                let [x, y, width, height] = region_rect(rect);
+            for [x, y, width, height] in rects {
                 region.add(x, y, width, height);
             }
             wl_surface.set_input_region(Some(&region));
@@ -230,7 +229,7 @@ impl LayerShellApp {
 }
 
 impl CantusApp {
-    pub(crate) fn overlay_rects(&self) -> [Rect; 2] {
+    fn overlay_rects(&self) -> [Rect; 2] {
         [
             self.weather
                 .interaction_rect(&self.render.status, self.config.height),
@@ -242,7 +241,7 @@ impl CantusApp {
         ]
     }
 
-    pub(crate) fn overlay_contains(&self, point: glam::Vec2) -> bool {
+    pub fn overlay_contains(&self, point: glam::Vec2) -> bool {
         self.overlay_rects()
             .into_iter()
             .any(|rect| rect.contains(point))
@@ -377,7 +376,7 @@ dispatch!(WlPointer, |state, _proxy, event, _qhandle| {
             axis: WEnum::Value(wl_pointer::Axis::VerticalScroll),
             value120: discrete,
             ..
-        } => state.cantus.handle_scroll(discrete.signum()),
+        } if discrete != 0 => state.cantus.handle_scroll(discrete.signum()),
         _ => {}
     }
 });
@@ -401,7 +400,7 @@ dispatch!(WlRegistry, |state, proxy, event, qhandle| {
             "wp_fractional_scale_manager_v1" => {
                 state.fractional_manager = Some(bind!(WpFractionalScaleManagerV1, 1));
             }
-            "wl_seat" => state.seat = Some(bind!(WlSeat, version.min(7))),
+            "wl_seat" => drop(bind!(WlSeat, version.min(7))),
             "wl_output" => {
                 state.outputs.push(OutputInfo {
                     handle: bind!(WlOutput, version.min(4)),

@@ -1,6 +1,6 @@
 #![no_std]
 
-use glam::Vec2;
+use glam::{FloatExt, Vec2};
 
 pub const STATUS_HISTORY_SAMPLES: usize = 40;
 pub const RIPPLE_COUNT: usize = 8;
@@ -42,16 +42,12 @@ impl StatusLayout {
     }
 
     pub fn section(self, x: f32) -> u32 {
-        let mut slot = 0;
-        while slot < 5 {
-            if (slot != BATTERY_SLOT || self.battery)
-                && x < self.center(slot) + (STATUS_WIDTHS[slot as usize] + STATUS_GAP) * 0.5
-            {
-                return slot;
-            }
-            slot += 1;
-        }
-        5
+        (0..5)
+            .find(|&slot| {
+                (slot != BATTERY_SLOT || self.battery)
+                    && x < self.center(slot) + (STATUS_WIDTHS[slot as usize] + STATUS_GAP) * 0.5
+            })
+            .unwrap_or(5)
     }
 }
 
@@ -74,9 +70,7 @@ pub struct GlobalUniforms {
     pub mouse_pressure: f32,
     pub playhead_x: f32,
     pub time: f32,
-    _padding_0: f32,
-    _padding_1: f32,
-    _padding_2: f32,
+    _padding: f32,
     pub ripples: [RipplePulse; RIPPLE_COUNT],
 }
 
@@ -126,8 +120,7 @@ impl UsageHistory {
             let carry = self.samples.get(index + 1).map_or(0, |next| next & 0xff);
             self.samples[index] = self.samples[index] >> 8 | carry << 24;
         }
-        self.samples[STATUS_HISTORY_PACKS - 1] |=
-            ((value.clamp(0.0, 1.0) * 255.0 + 0.5) as u32) << 24;
+        self.samples[STATUS_HISTORY_PACKS - 1] |= ((value.saturate() * 255.0 + 0.5) as u32) << 24;
     }
 }
 
@@ -165,7 +158,11 @@ pub struct StatusPill {
     pub conditions: [WeatherCondition; 3],
 }
 
-const _: () = assert!(size_of::<StatusPill>() == 292);
+impl StatusPill {
+    pub const fn layout(&self) -> StatusLayout {
+        StatusLayout::new(self.battery_present > 0.5)
+    }
+}
 
 #[repr(C)]
 #[derive(Copy, Clone, Default)]
@@ -269,14 +266,26 @@ pub const ICON_WIDTH: f32 = 21.6;
 /// Center-to-center icon spacing for rating stars and playlist artwork.
 pub const ICON_SPACING: f32 = 18.0;
 
-/// Total distance added below the weather pill while the calendar is open.
-pub const WEATHER_CALENDAR_EXTENSION: f32 = 246.0;
 /// Calendar title and arrow center, relative to the submenu's top edge.
 pub const WEATHER_CALENDAR_TITLE_Y: f32 = 38.0;
 /// Horizontal inset of each calendar arrow's center.
 pub const WEATHER_CALENDAR_ARROW_X: f32 = 28.0;
 /// Visual and clickable radius of the calendar arrow buttons.
 pub const WEATHER_CALENDAR_ARROW_RADIUS: f32 = 20.0;
+
+/// Y of the first day-grid row, relative to the submenu's top edge.
+pub const WEATHER_CALENDAR_GRID_TOP: f32 = 96.0;
+/// Center-to-center spacing between day-grid rows.
+pub const WEATHER_CALENDAR_ROW_HEIGHT: f32 = 23.0;
+/// The day grid always spans 6 rows (42 cells / 7 days).
+const WEATHER_CALENDAR_ROWS: f32 = 6.0;
+/// Breathing room below the last day-grid row.
+const WEATHER_CALENDAR_BOTTOM_MARGIN: f32 = 20.0;
+
+/// Total distance added below the weather pill while the calendar is open.
+pub const WEATHER_CALENDAR_EXTENSION: f32 = WEATHER_CALENDAR_GRID_TOP
+    + (WEATHER_CALENDAR_ROWS - 1.0) * WEATHER_CALENDAR_ROW_HEIGHT
+    + WEATHER_CALENDAR_BOTTOM_MARGIN;
 
 impl TrackPill {
     pub const fn star_count(&self) -> f32 {
@@ -324,8 +333,7 @@ impl PillIconRow {
     }
 
     pub fn half_span(self) -> f32 {
-        let icon_span = (self.count - 1.0).max(0.0) * ICON_SPACING * self.expansion;
-        icon_span * 0.5
+        (self.count - 1.0).max(0.0) * ICON_SPACING * self.expansion * 0.5
     }
 
     pub fn half_size(self, radius: f32) -> Vec2 {
@@ -370,7 +378,7 @@ pub fn pill_icon_rows(
 }
 
 pub fn smoothstep(edge0: f32, edge1: f32, x: f32) -> f32 {
-    let t = ((x - edge0) / (edge1 - edge0)).clamp(0.0, 1.0);
+    let t = ((x - edge0) / (edge1 - edge0)).saturate();
     t * t * (3.0 - 2.0 * t)
 }
 

@@ -1,14 +1,17 @@
-use crate::{AppUpdater, model::Rect, send_update, status::GAP, text_render::TextStyle};
+use crate::{
+    AppUpdater, Rect, send_update,
+    render::{status::GAP, text_render::TextStyle},
+};
 use arrayvec::ArrayString;
 use cantus_shared::{
     StatusPill, WEATHER_CALENDAR_ARROW_RADIUS, WEATHER_CALENDAR_ARROW_X,
-    WEATHER_CALENDAR_EXTENSION, WEATHER_CALENDAR_TITLE_Y, WeatherCondition, WeatherPill, approach,
-    smoothstep,
+    WEATHER_CALENDAR_EXTENSION, WEATHER_CALENDAR_GRID_TOP, WEATHER_CALENDAR_ROW_HEIGHT,
+    WEATHER_CALENDAR_TITLE_Y, WeatherCondition, WeatherPill, approach, smoothstep,
 };
-use glam::{Vec2, vec2};
+use glam::{FloatExt, Vec2, vec2};
 use jiff::{Span, Zoned, civil::DateTime};
 use serde::Deserialize;
-use std::{error::Error, f32::consts::PI, fmt::Write, thread, time::Duration};
+use std::{f32::consts::PI, fmt::Write, thread, time::Duration};
 use tracing::warn;
 
 pub const WIDTH: f32 = 310.0;
@@ -26,7 +29,7 @@ fn calendar_cell(cell: usize) -> Vec2 {
     let row = (cell / 7) as f32;
     vec2(
         (cell % 7) as f32 * WIDTH / 7.0 + WIDTH / 14.0,
-        96.0 + row * 23.0,
+        WEATHER_CALENDAR_GRID_TOP + row * WEATHER_CALENDAR_ROW_HEIGHT,
     )
 }
 
@@ -36,16 +39,17 @@ fn sun_position(hour: f32, [sunrise, sunset]: [f32; 2]) -> [f32; 2] {
         let phase = (hour - sunrise) / daylight;
         [phase, (phase * PI).sin()]
     } else {
-        let phase = (if hour < sunrise {
-            hour + 24.0 - sunset
+        let night = 24.0 - daylight;
+        let phase = if hour < sunrise {
+            (hour + 24.0 - sunset) / night
         } else {
-            hour - sunset
-        }) / (24.0 - daylight);
+            (hour - sunset) / night
+        };
         [f32::from(hour >= sunset), -(phase * PI).sin()]
     }
 }
 
-pub fn rect(status: &StatusPill, height: f32) -> Rect {
+fn rect(status: &StatusPill, height: f32) -> Rect {
     Rect::pill(status.x - WIDTH - GAP, WIDTH, height)
 }
 
@@ -66,9 +70,18 @@ pub struct Weather {
 }
 
 impl Weather {
-    pub fn new(location: [f32; 2], updater: AppUpdater) -> Self {
+    pub fn new([latitude, longitude]: [f32; 2], updater: AppUpdater) -> Self {
         thread::spawn(move || {
-            while fetch(location).map_or_else(
+            while ureq::get(format!(
+                "https://api.open-meteo.com/v1/forecast?latitude={latitude}&longitude={longitude}&current=temperature_2m,relative_humidity_2m,wind_speed_10m,{WEATHER_FIELDS}&hourly={WEATHER_FIELDS}&forecast_hours=7&daily=sunrise,sunset&temperature_unit=celsius&timezone=auto&forecast_days=1"
+            ))
+            .call()
+            .map_err(|error| error.to_string())
+            .and_then(|mut response| {
+                serde_json::from_reader::<_, Forecast>(response.body_mut().as_reader())
+                    .map_err(|error| error.to_string())
+            })
+            .map_or_else(
                 |error| {
                     warn!(%error, "Failed to refresh weather");
                     true
@@ -99,7 +112,6 @@ impl Weather {
         mouse_active: bool,
         dt: f32,
     ) -> (WeatherPill, ArrayString<64>) {
-        let panel = rect(status, height);
         let hovered = self.interaction_rect(status, height).contains(mouse);
         approach(
             &mut self.calendar_expansion,
@@ -111,7 +123,6 @@ impl Weather {
         let hour = f32::from(time.hour())
             + f32::from(time.minute()) / 60.0
             + f32::from(time.second()) / 3600.0;
-        let clock = time.strftime("%a %d %b  %H:%M:%S");
         let today = time.date();
         let cell = today.first_of_month().weekday().to_monday_zero_offset() as usize
             + today.day() as usize
@@ -120,7 +131,7 @@ impl Weather {
         let marker_reveal =
             reveal_progress(self.calendar_expansion, marker.y) * f32::from(self.month_offset == 0);
         let pill = WeatherPill {
-            x: panel.x0,
+            x: rect(status, height).x0,
             width: WIDTH,
             sun: sun_position(hour, self.sun_hours),
             today: vec2(WIDTH * 0.5, 0.0).lerp(marker, marker_reveal),
@@ -128,6 +139,7 @@ impl Weather {
             conditions: self.conditions,
             padding: 0.0,
         };
+        let clock = time.strftime("%a %d %b  %H:%M:%S");
         let mut label = ArrayString::new();
         write!(label, "{}   {clock}", self.temperature).unwrap();
         (pill, label)
@@ -145,24 +157,18 @@ impl Weather {
         }
         let calendar = calendar_rect(status, height);
         let center_x = (calendar.x0 + calendar.x1) * 0.5;
-        let hit = |x, size| {
-            Rect::from_center(vec2(x, calendar.y0 + WEATHER_CALENDAR_TITLE_Y), size)
-                .contains(position)
-        };
+        let title_y = calendar.y0 + WEATHER_CALENDAR_TITLE_Y;
+        let hit = |x, size| Rect::from_center(vec2(x, title_y), size).contains(position);
         let arrow = Vec2::splat(WEATHER_CALENDAR_ARROW_RADIUS);
-        let direction = if hit(center_x, vec2(90.0, 16.0)) {
+
+        self.month_offset = if hit(center_x, vec2(90.0, 16.0)) {
             0
         } else if hit(calendar.x0 + WEATHER_CALENDAR_ARROW_X, arrow) {
-            -1
+            (self.month_offset - 1).clamp(-1200, 1200)
         } else if hit(calendar.x1 - WEATHER_CALENDAR_ARROW_X, arrow) {
-            1
+            (self.month_offset + 1).clamp(-1200, 1200)
         } else {
             return false;
-        };
-        self.month_offset = if direction == 0 {
-            0
-        } else {
-            (self.month_offset + direction).clamp(-1200, 1200)
         };
         true
     }
@@ -182,7 +188,6 @@ impl Weather {
             .saturating_add(Span::new().months(self.month_offset));
         let calendar = calendar_rect(status, height);
         let center_x = (calendar.x0 + calendar.x1) * 0.5;
-        let column_width = (calendar.x1 - calendar.x0) / 7.0;
         let origin = vec2(center_x, calendar.y0);
         let mut label = |text: &str, target: Vec2, alpha, style| {
             let eased = reveal_progress(self.calendar_expansion, target.y - calendar.y0);
@@ -191,28 +196,18 @@ impl Weather {
         label(
             &self.details,
             origin + vec2(0.0, 9.0),
-            0.82,
+            1.0,
             TextStyle::DETAILS,
         );
 
-        let mut title = ArrayString::<32>::new();
-        write!(title, "{}", month.strftime("%B %Y")).unwrap();
-        for (text, x) in [
-            ("‹", calendar.x0 + WEATHER_CALENDAR_ARROW_X),
-            (title.as_str(), center_x),
-            ("›", calendar.x1 - WEATHER_CALENDAR_ARROW_X),
-        ] {
-            let position = vec2(x, calendar.y0 + WEATHER_CALENDAR_TITLE_Y);
-            label(text, position, 1.0, TextStyle::PRIMARY);
-        }
+        let title = month.strftime("%B %Y").to_string();
+        let title_position = vec2(center_x, calendar.y0 + WEATHER_CALENDAR_TITLE_Y);
+        label(&title, title_position, 1.0, TextStyle::PRIMARY);
 
         let grid_start =
             month.saturating_sub(Span::new().days(month.weekday().to_monday_zero_offset()));
         for (column, weekday) in WEEKDAYS.into_iter().enumerate() {
-            let position = vec2(
-                calendar.x0 + (column as f32 + 0.5) * column_width,
-                calendar.y0 + 69.0,
-            );
+            let position = vec2(calendar.x0 + calendar_cell(column).x, calendar.y0 + 69.0);
             label(weekday, position, 0.75, TextStyle::DETAILS);
         }
 
@@ -221,18 +216,13 @@ impl Weather {
             let mut text = ArrayString::<2>::new();
             write!(text, "{}", date.day()).unwrap();
             let alpha = 0.32 + f32::from(date.month() == month.month()) * 0.68;
-            let position = calendar_cell(cell);
             let style = if date == today {
                 TextStyle::TODAY
             } else {
                 TextStyle::PRIMARY
             };
-            label(
-                &text,
-                vec2(calendar.x0, calendar.y0) + position,
-                alpha,
-                style,
-            );
+            let position = vec2(calendar.x0, calendar.y0) + calendar_cell(cell);
+            label(&text, position, alpha, style);
         }
     }
 
@@ -332,13 +322,13 @@ fn conditions(raw: &RawConditions<f32, u8>) -> WeatherCondition {
         / 100.0;
     let amount = |value: f32, scale: f32, expected| {
         (value / scale)
-            .clamp(0.0, 1.0)
+            .saturate()
             .max(intensity * f32::from(expected))
     };
     WeatherCondition {
         cloud: raw.cloud_cover / 100.0,
         fog: (1.0 - raw.visibility / 10_000.0)
-            .clamp(0.0, 1.0)
+            .saturate()
             .max(f32::from(matches!(code, 45 | 48))),
         lightning: f32::from(matches!(code, 95..=99)),
         rain: amount(
@@ -349,12 +339,4 @@ fn conditions(raw: &RawConditions<f32, u8>) -> WeatherCondition {
         snow: amount(raw.snowfall, 2.0, matches!(code, 71..=77 | 85..=86)),
         hail: intensity * f32::from(matches!(code, 56 | 57 | 66 | 67 | 96 | 99)),
     }
-}
-
-fn fetch([latitude, longitude]: [f32; 2]) -> Result<Forecast, Box<dyn Error>> {
-    let url = format!(
-        "https://api.open-meteo.com/v1/forecast?latitude={latitude}&longitude={longitude}&current=temperature_2m,relative_humidity_2m,wind_speed_10m,{WEATHER_FIELDS}&hourly={WEATHER_FIELDS}&forecast_hours=7&daily=sunrise,sunset&temperature_unit=celsius&timezone=auto&forecast_days=1"
-    );
-    let mut response = ureq::get(url).call()?;
-    Ok(serde_json::from_reader(response.body_mut().as_reader())?)
 }

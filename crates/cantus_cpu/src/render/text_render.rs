@@ -1,7 +1,7 @@
-use crate::{PANEL_START, model::Track};
+use crate::{PANEL_START, render::pipelines::write_texture_region, spotify::Track};
 use cantus_shared::{GLYPH_ATLAS_SIZE, GlyphInstance, MAX_GLYPH_INSTANCES, pack_u16x2};
 use glam::{Vec2, vec2};
-use std::collections::HashMap;
+use std::{collections::HashMap, f32::consts::TAU};
 use swash::{
     FontRef, GlyphId,
     scale::{Render, ScaleContext, Source},
@@ -9,15 +9,21 @@ use swash::{
 };
 use wgpu::{
     Device, Extent3d, Queue, Texture, TextureDescriptor, TextureDimension, TextureFormat,
-    TextureUsages, TextureView, TextureViewDescriptor,
+    TextureUsages,
 };
 
-const FONT_DATA: &[u8] = include_bytes!("../../../assets/NotoSans-Variable.ttf");
+const FONT_DATA: &[u8] =
+    include_bytes!(concat!(env!("CARGO_MANIFEST_DIR"), "/../../assets/NotoSans-Variable.ttf"));
 
 /// Size of the glyph atlas texture (square, in pixels).
 const ATLAS_PADDING: u32 = 2;
 const RASTER_OVERSAMPLE: f32 = 2.5;
 const SCALE_STEPS: f32 = 4.0;
+
+/// Soft blurred shadow behind text
+const LABEL_SHADOW_RING: usize = 8;
+const LABEL_SHADOW_RADIUS: f32 = 1.8;
+const LABEL_SHADOW_STRENGTH: f32 = 0.05;
 
 #[derive(Clone, Copy)]
 pub struct TextStyle {
@@ -50,7 +56,7 @@ pub struct TextRenderer {
     scale_context: ScaleContext,
     shape_context: ShapeContext,
     /// Glyph atlas texture.
-    atlas: Texture,
+    pub atlas: Texture,
     /// Packed glyph data keyed by glyph ID and raster size.
     atlas_cache: HashMap<(u16, GlyphId, u16), AtlasEntry>,
     /// Current write cursor in the atlas (x, y, `row_height`).
@@ -90,10 +96,6 @@ impl TextRenderer {
             shaped: Vec::with_capacity(128),
             glyphs: Vec::with_capacity(MAX_GLYPH_INSTANCES),
         }
-    }
-
-    pub fn atlas_view(&self) -> TextureView {
-        self.atlas.create_view(&TextureViewDescriptor::default())
     }
 
     pub fn track_width(&mut self, track: &Track) -> f32 {
@@ -159,24 +161,12 @@ impl TextRenderer {
         let row_h = row_h.max(height + ATLAS_PADDING * 2);
         self.atlas_cursor = (cx + width + ATLAS_PADDING * 2, cy, row_h);
 
-        queue.write_texture(
-            wgpu::TexelCopyTextureInfo {
-                texture: &self.atlas,
-                mip_level: 0,
-                aspect: wgpu::TextureAspect::All,
-                origin: wgpu::Origin3d { x: gx, y: gy, z: 0 },
-            },
+        write_texture_region(
+            queue,
+            &self.atlas,
+            [gx, gy, 0],
+            [width, height],
             &image.data,
-            wgpu::TexelCopyBufferLayout {
-                offset: 0,
-                bytes_per_row: Some(width),
-                rows_per_image: Some(height),
-            },
-            Extent3d {
-                width,
-                height,
-                depth_or_array_layers: 1,
-            },
         );
 
         let entry = AtlasEntry {
@@ -196,7 +186,6 @@ impl TextRenderer {
             return;
         }
 
-        let alpha = alpha.clamp(0.0, 1.0);
         let top = PANEL_START + (self.panel_height * 0.26).floor();
         let bottom = PANEL_START + (self.panel_height * 0.57).floor();
         let mut line = |text: &str, y, style| {
@@ -223,6 +212,7 @@ impl TextRenderer {
         line(&track_details(track), bottom, TextStyle::DETAILS);
     }
 
+    /// Renders `text` centered on `position`, with a soft dropped shadow
     pub fn render_centered_label(
         &mut self,
         queue: &Queue,
@@ -233,15 +223,25 @@ impl TextRenderer {
         render_scale: f32,
     ) {
         let (measured, baseline) = self.shape(text, style);
-        self.queue_glyphs(
-            queue,
-            position - vec2(measured * 0.5, 0.0),
-            style,
-            baseline,
-            alpha,
-            f32::MAX,
-            render_scale,
-        );
+        let origin = position - vec2(measured * 0.5, 0.0);
+        let taps = (0..LABEL_SHADOW_RING)
+            .map(|i| {
+                let angle = i as f32 / LABEL_SHADOW_RING as f32 * TAU;
+                let offset = vec2(angle.cos(), angle.sin()) * LABEL_SHADOW_RADIUS;
+                (offset, -alpha * LABEL_SHADOW_STRENGTH)
+            })
+            .chain([(Vec2::ZERO, alpha)]);
+        for (offset, glyph_alpha) in taps {
+            self.queue_glyphs(
+                queue,
+                origin + offset,
+                style,
+                baseline,
+                glyph_alpha,
+                f32::MAX,
+                render_scale,
+            );
+        }
     }
 
     fn queue_glyphs(
@@ -310,5 +310,6 @@ fn track_details(track: &Track) -> String {
     } else {
         format!("{}s", seconds.round())
     };
-    format!("{time}\u{2004}•\u{2004}{}", track.artist)
+    let artist = track.artists.first().map_or("", |artist| &artist.name);
+    format!("{time}\u{2004}•\u{2004}{artist}")
 }

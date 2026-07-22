@@ -2,20 +2,14 @@ use crate::{pixel_to_ndc, quad_coord, sd_rounded_triangle};
 use cantus_shared::{GlobalUniforms, PlayheadUniforms, smoothstep};
 use spirv_std::{
     arch::kill,
-    glam::{Vec2, Vec3, Vec4, vec2, vec3},
+    glam::{FloatExt, Vec2, Vec3, Vec4, vec2, vec3},
     spirv,
 };
-
-fn paired_vertical_segments(point: Vec2, center: Vec2, size: Vec2, radius: f32) -> f32 {
-    let local = (point - center).abs();
-    let offset = vec2(local.x, (local.y - size.x).abs() - size.y);
-    offset.max(Vec2::ZERO).length() - radius
-}
 
 #[spirv(vertex)]
 pub fn vs_playhead(
     #[spirv(vertex_index)] v_idx: u32,
-    #[spirv(uniform, descriptor_set = 0, binding = 0)] global: &GlobalUniforms,
+    #[spirv(storage_buffer, descriptor_set = 0, binding = 0)] global: &GlobalUniforms,
     #[spirv(position)] out_pos: &mut Vec4,
     #[spirv(location = 0)] out_world_pos: &mut Vec2,
 ) {
@@ -33,33 +27,32 @@ pub fn vs_playhead(
 #[spirv(fragment)]
 pub fn fs_playhead(
     #[spirv(location = 0)] world_pos: Vec2,
-    #[spirv(uniform, descriptor_set = 0, binding = 0)] global: &GlobalUniforms,
-    #[spirv(uniform, descriptor_set = 0, binding = 1)] state: &PlayheadUniforms,
+    #[spirv(storage_buffer, descriptor_set = 0, binding = 0)] global: &GlobalUniforms,
+    #[spirv(storage_buffer, descriptor_set = 0, binding = 1)] state: &PlayheadUniforms,
     #[spirv(location = 0)] out_color: &mut Vec4,
 ) {
     let height = global.bar_height.y;
     let center = vec2(global.playhead_x, global.bar_height.x + height * 0.5);
-    let line_thickness = 4.5;
-
-    let bar_len = height * (0.5 - 0.375 * state.bar_split);
-    let dist_bar = paired_vertical_segments(
-        world_pos,
-        center,
-        vec2((height - bar_len) * 0.5, bar_len * 0.5),
-        line_thickness,
-    );
-
-    let icon_alpha = state.icon_presence.clamp(0.0, 1.0);
     let pause = (world_pos - center).abs();
+
+    // Two vertical capsule segments mirrored around the center, splitting apart as the bar does.
+    let bar_len = height * (0.5 - 0.375 * state.bar_split);
+    let segments = vec2(
+        pause.x,
+        (pause.y - (height - bar_len) * 0.5).abs() - bar_len * 0.5,
+    );
+    let dist_bar = segments.max(Vec2::ZERO).length() - 4.5;
+
+    let icon_alpha = state.icon_presence.saturate();
     let dist_pause = vec2(
-        (pause.x - 4.0 * state.bar_split.clamp(0.0, 1.0)).abs(),
+        (pause.x - 4.0 * state.bar_split.saturate()).abs(),
         (pause.y - height * 0.1).max(0.0),
     )
     .length()
         - 3.5;
     let play_scale = height * 0.18 * (1.0 + state.icon_morph * (1.0 - icon_alpha));
     let dist_play = sd_rounded_triangle((world_pos - center).perp(), play_scale, play_scale * 0.5);
-    let dist_icon = dist_pause + (dist_play - dist_pause) * state.icon_morph.clamp(0.0, 1.0);
+    let dist_icon = dist_pause + (dist_play - dist_pause) * state.icon_morph.saturate();
     let bar_mask = 1.0 - smoothstep(-0.8, 0.2, dist_bar);
     let icon_mask = (1.0 - smoothstep(-0.8, 0.2, dist_icon)) * icon_alpha;
     let alpha = icon_mask.max(bar_mask);

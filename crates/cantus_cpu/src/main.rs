@@ -1,8 +1,10 @@
 use crate::{
-    interaction::InteractionState, model::PlaybackState, render::RenderState, status::Status,
-    weather::Weather,
+    interaction::InteractionState,
+    render::{RenderState, status::Status, weather::Weather},
+    spotify::PlaybackState,
 };
 use cantus_shared::WEATHER_CALENDAR_EXTENSION;
+use glam::Vec2;
 use std::{
     io,
     sync::mpsc::{self, Sender},
@@ -10,23 +12,44 @@ use std::{
 use tracing::{Level, level_filters::LevelFilter};
 use tracing_subscriber::{filter::Targets, fmt, layer::SubscriberExt, util::SubscriberInitExt};
 
-mod art;
 mod config;
 mod interaction;
-mod layer_shell;
-mod model;
-mod pipelines;
+mod platform;
 mod render;
 mod spotify;
-mod status;
-mod text_render;
-mod weather;
 
 const PANEL_START: f32 = 6.0;
 const PANEL_EXTENSION: f32 = WEATHER_CALENDAR_EXTENSION + 16.0;
 const PARTICLE_COUNT: usize = 64;
-const MAX_RENDER_INSTANCES: usize = 256;
+const MAX_RENDER_INSTANCES: usize = 64;
 const TRACK_SPACING_MS: f32 = 4000.0;
+
+#[derive(Copy, Clone)]
+struct Rect {
+    x0: f32,
+    y0: f32,
+    x1: f32,
+    y1: f32,
+}
+
+impl Rect {
+    const fn new(x0: f32, y0: f32, x1: f32, y1: f32) -> Self {
+        Self { x0, y0, x1, y1 }
+    }
+
+    const fn pill(x: f32, width: f32, height: f32) -> Self {
+        Self::new(x, PANEL_START, x + width, PANEL_START + height)
+    }
+
+    fn from_center(center: Vec2, half_size: Vec2) -> Self {
+        let (min, max) = (center - half_size, center + half_size);
+        Self::new(min.x, min.y, max.x, max.y)
+    }
+
+    fn contains(self, point: Vec2) -> bool {
+        point.x >= self.x0 && point.x <= self.x1 && point.y >= self.y0 && point.y <= self.y1
+    }
+}
 
 type Update<T> = Box<dyn FnOnce(&mut T) + Send>;
 type AppUpdater = Sender<Update<CantusApp>>;
@@ -77,5 +100,5 @@ fn main() {
         .with(fmt::layer().with_writer(io::stderr))
         .init();
 
-    layer_shell::run();
+    platform::wayland::run();
 }

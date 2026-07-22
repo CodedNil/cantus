@@ -50,7 +50,7 @@ kmeans_colors = { version = "0.7.1", default-features = false, features = [
 palette = { version = "0.7.6", default-features = false, features = ["std"] }
 
 serde = { workspace = true, features = ["rc"] }
-serde_json = "1.0.150"
+serde_json = "1.0.151"
 toml = "1.1.3"
 schemars = { version = "1.2.1", features = ["arrayvec07", "preserve_order"], optional = true }
 
@@ -63,7 +63,7 @@ sha2 = { version = "0.11.0", default-features = false }
 bytemuck = { workspace = true }
 sysinfo = { version = "0.39.6", default-features = false, features = ["component", "system"] }
 ureq = { version = "3.3.0", default-features = false, features = ["rustls"] }
-jiff = { version = "0.2.33", default-features = false, features = [
+jiff = { version = "0.2.34", default-features = false, features = [
     "serde",
     "std",
     "tz-system",

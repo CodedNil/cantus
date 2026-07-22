@@ -10,7 +10,7 @@ use spirv_std::{
 pub fn vs_particles(
     #[spirv(vertex_index)] v_idx: u32,
     #[spirv(instance_index)] i_idx: u32,
-    #[spirv(uniform, descriptor_set = 0, binding = 0)] global: &GlobalUniforms,
+    #[spirv(storage_buffer, descriptor_set = 0, binding = 0)] global: &GlobalUniforms,
     #[spirv(storage_buffer, descriptor_set = 0, binding = 1)] particles: &[Particle],
     #[spirv(position)] out_pos: &mut Vec4,
     #[spirv(location = 0)] out_color: &mut Vec4,

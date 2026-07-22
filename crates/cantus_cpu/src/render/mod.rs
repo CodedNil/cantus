@@ -1,31 +1,37 @@
 use crate::{
-    CantusApp, MAX_RENDER_INSTANCES, PANEL_EXTENSION, PANEL_START, PARTICLE_COUNT,
+    CantusApp, MAX_RENDER_INSTANCES, PANEL_EXTENSION, PANEL_START, PARTICLE_COUNT, Rect,
     TRACK_SPACING_MS,
-    art::{AlbumArt, ArtState},
     config::Config,
-    model::{CondensedPlaylist, Rect, Track, playlist_icons},
-    pipelines::{IMAGE_SIZE, MAX_TEXTURE_IMAGES},
-    status::{self, GAP},
-    text_render::{TextRenderer, TextStyle},
-    weather,
+    spotify::{CondensedPlaylist, Track, playlist_icons},
 };
+use art::{AlbumArt, ArtState};
 use cantus_shared::{
     AudioFeatures, GlobalUniforms, ICON_SPACING, MAX_PILL_PLAYLIST_ICONS, Particle,
     PlayheadUniforms, StatusPill, TrackPill, WeatherPill, approach,
 };
 use glam::{FloatExt, Vec2, vec2};
+use pipelines::{IMAGE_SIZE, MAX_TEXTURE_IMAGES, write_texture_region};
+use status::GAP;
 use std::{
     f32::consts::TAU,
     mem,
     ops::Range,
+    slice,
     sync::{Arc, Weak},
     time::Instant,
 };
+use text_render::{TextRenderer, TextStyle};
 use wgpu::{
     BindGroup, Buffer, Color, CommandEncoderDescriptor, CurrentSurfaceTexture, Device, Instance,
     LoadOp, Operations, Queue, RenderPass, RenderPassColorAttachment, RenderPassDescriptor,
     RenderPipeline, StoreOp, Surface, SurfaceConfiguration, Texture, TextureViewDescriptor,
 };
+
+pub mod art;
+pub mod pipelines;
+pub mod status;
+pub mod text_render;
+pub mod weather;
 
 const SPARK_EMISSION: f32 = 20.0;
 const SPARK_VELOCITY_X: Range<usize> = 40..60;
@@ -71,10 +77,10 @@ fn layout(queue: &mut [Track], config: &Config, timeline: Timeline, current_ms: 
             continue;
         }
 
-        let natural_start = timeline.playhead_x + start_ms * timeline.px_per_ms;
-        let natural_end = natural_start + track.duration_ms as f32 * timeline.px_per_ms;
+        track.runtime.start_ms = start_ms;
+        let (natural_start, natural_end) =
+            track.natural_x_range(timeline.playhead_x, timeline.px_per_ms);
         let runtime = &mut track.runtime;
-        runtime.start_ms = start_ms;
         if natural_end >= history_width + height {
             runtime.start_x = natural_start.max(history_width);
             runtime.width = (natural_end.min(end_x) - runtime.start_x - width_trim).max(0.0);
@@ -101,7 +107,7 @@ pub struct GpuResources {
     pub queue: Queue,
     pub surface: Surface<'static>,
     pub surface_config: SurfaceConfiguration,
-    pub uniform_buffer: Buffer,
+    pub globals: Buffer,
     pub playhead: GpuPass,
     pub track: GpuPass,
     pub weather: GpuPass,
@@ -118,10 +124,6 @@ pub struct GpuPass {
     pub bind_group: BindGroup,
 }
 
-fn upload<T: bytemuck::NoUninit>(queue: &Queue, buffer: &Buffer, data: &T) {
-    queue.write_buffer(buffer, 0, bytemuck::bytes_of(data));
-}
-
 impl GpuPass {
     fn draw_range<'pass>(&'pass self, pass: &mut RenderPass<'pass>, instances: Range<u32>) {
         if instances.is_empty() {
@@ -135,16 +137,6 @@ impl GpuPass {
     fn upload_data<T: bytemuck::NoUninit>(&self, queue: &Queue, data: &[T]) {
         if !data.is_empty() {
             queue.write_buffer(&self.buffer, 0, bytemuck::cast_slice(data));
-        }
-    }
-}
-
-impl GpuResources {
-    pub fn resize_surface(&mut self, width: u32, height: u32) {
-        if (self.surface_config.width, self.surface_config.height) != (width, height) {
-            self.surface_config.width = width;
-            self.surface_config.height = height;
-            self.surface.configure(&self.device, &self.surface_config);
         }
     }
 }
@@ -171,28 +163,12 @@ impl ImageAtlas {
             return -1;
         }
         self.used |= 1 << index;
-        queue.write_texture(
-            wgpu::TexelCopyTextureInfo {
-                texture: &self.texture,
-                mip_level: 0,
-                aspect: wgpu::TextureAspect::All,
-                origin: wgpu::Origin3d {
-                    x: 0,
-                    y: 0,
-                    z: index,
-                },
-            },
+        write_texture_region(
+            queue,
+            &self.texture,
+            [0, 0, index],
+            [IMAGE_SIZE; 2],
             &art.pixels,
-            wgpu::TexelCopyBufferLayout {
-                offset: 0,
-                bytes_per_row: Some(4 * IMAGE_SIZE),
-                rows_per_image: Some(IMAGE_SIZE),
-            },
-            wgpu::Extent3d {
-                width: IMAGE_SIZE,
-                height: IMAGE_SIZE,
-                depth_or_array_layers: 1,
-            },
         );
         self.slots[index as usize] = Arc::downgrade(art);
         index as i32
@@ -203,22 +179,20 @@ pub struct RenderState {
     pub instance: Instance,
     pub gpu: Option<GpuResources>,
     pub start_time: Instant,
-    pub last_update: Instant,
-    pub track_offset: f32,
-    pub movement_speed: f32,
+    last_update: Instant,
+    track_offset: f32,
+    movement_speed: f32,
     pub last_toggle_playing: Instant,
-    pub particles: [Particle; PARTICLE_COUNT],
-    pub particles_accumulator: f32,
+    particles: [Particle; PARTICLE_COUNT],
+    particles_accumulator: f32,
     /// Physical buffer pixels per logical Wayland surface pixel.
     pub scale: f32,
     pub surface_width: Option<f32>,
     pub uniforms: GlobalUniforms,
-    pub track_pills: Vec<TrackPill>,
-    pub track_glyphs: Vec<Range<u32>>,
+    track_pills: Vec<TrackPill>,
+    track_glyphs: Vec<Range<u32>>,
     pub status: StatusPill,
-    pub status_audio_level: f32,
-    pub status_temperatures: [f32; 2],
-    pub playhead: PlayheadUniforms,
+    playhead: PlayheadUniforms,
 }
 impl Default for RenderState {
     fn default() -> Self {
@@ -239,8 +213,6 @@ impl Default for RenderState {
             track_pills: Vec::with_capacity(MAX_RENDER_INSTANCES),
             track_glyphs: Vec::with_capacity(MAX_RENDER_INSTANCES),
             status: StatusPill::default(),
-            status_audio_level: 0.0,
-            status_temperatures: [0.0; 2],
             playhead: PlayheadUniforms::default(),
         }
     }
@@ -252,14 +224,17 @@ impl RenderState {
             .iter_mut()
             .filter(move |particle| time > particle.end_time)
     }
+
+    /// The GPU device and its dependent resources, valid once the Wayland surface is configured.
+    const fn gpu(&mut self) -> &mut GpuResources {
+        self.gpu
+            .as_mut()
+            .expect("render called before gpu configured")
+    }
 }
 
 fn particle_color(rgb: u32, duration: f32) -> u32 {
     (rgb & 0x00FF_FFFF) | (u32::from((duration * 100.0).min(255.0) as u8) << 24)
-}
-
-fn damp(value: &mut f32, target: f32, response: f32, dt: f32) {
-    *value += (target - *value) * (1.0 - (-response * dt).exp());
 }
 
 impl CantusApp {
@@ -277,11 +252,10 @@ impl CantusApp {
     pub fn emit_click_particles(&mut self, position: Vec2) {
         let time = self.render.start_time.elapsed().as_secs_f32();
         for particle in self.render.expired_particles(time).take(20) {
-            let angle = fastrand::f32() * TAU;
-            let speed = 30.0 + fastrand::f32() * 20.0;
             let duration = 0.5.lerp(1.5, fastrand::f32());
             particle.spawn_pos = position;
-            particle.spawn_vel = Vec2::from_angle(angle) * speed;
+            particle.spawn_vel =
+                Vec2::from_angle(fastrand::f32() * TAU) * (30.0 + fastrand::f32() * 20.0);
             particle.color = particle_color(0x32_D7_FF, duration);
             particle.end_time = time + duration;
         }
@@ -339,9 +313,12 @@ impl CantusApp {
         let (weather, weather_glyph_end) = self.create_scene();
 
         let gpu = self.render.gpu.as_mut().unwrap();
-        upload(&gpu.queue, &gpu.uniform_buffer, &self.render.uniforms);
-        upload(&gpu.queue, &gpu.particles.buffer, &self.render.particles);
-        upload(&gpu.queue, &gpu.playhead.buffer, &self.render.playhead);
+        gpu.queue
+            .write_buffer(&gpu.globals, 0, bytemuck::bytes_of(&self.render.uniforms));
+        gpu.particles
+            .upload_data(&gpu.queue, &self.render.particles);
+        gpu.playhead
+            .upload_data(&gpu.queue, slice::from_ref(&self.render.playhead));
         gpu.track.upload_data(&gpu.queue, &self.render.track_pills);
         gpu.text.upload_data(&gpu.queue, &gpu.text_renderer.glyphs);
         gpu.weather.upload_data(&gpu.queue, &[weather]);
@@ -401,59 +378,24 @@ impl CantusApp {
     }
 
     fn get_image_index(&mut self, art: &ArtState) -> i32 {
-        let ArtState::Ready(art) = art else {
+        let Some(art) = art.ready() else {
             return -1;
         };
-        let gpu = self.render.gpu.as_mut().unwrap();
+        let gpu = self.render.gpu();
         gpu.images.image_index(&gpu.queue, art)
     }
 
     fn create_scene(&mut self) -> (WeatherPill, u32) {
-        let now = Instant::now();
-        let dt = now
-            .duration_since(self.render.last_update)
-            .as_secs_f32()
-            .min(0.1);
-        self.render.last_update = now;
+        let dt = self.render.last_update.elapsed().as_secs_f32().min(0.1);
+        self.render.last_update = Instant::now();
 
         self.render.uniforms.time = self.render.start_time.elapsed().as_secs_f32();
         let (screen_width, screen_height) = self.logical_surface_size();
         self.render.uniforms.screen_size = vec2(screen_width, screen_height);
         self.render.uniforms.bar_height = vec2(PANEL_START, self.config.height);
         let (power_action, power_progress) = self.power_hold_scene();
-        let (target_audio_level, target_temperatures) = self.status.render_targets();
-        let response = if target_audio_level > self.render.status_audio_level {
-            12.0
-        } else {
-            7.0
-        };
-        damp(
-            &mut self.render.status_audio_level,
-            target_audio_level,
-            response,
-            dt,
-        );
-        for (temperature, target) in self
-            .render
-            .status_temperatures
-            .iter_mut()
-            .zip(target_temperatures)
-        {
-            if *temperature == 0.0 {
-                *temperature = target;
-            } else {
-                damp(temperature, target, 4.0, dt);
-            }
-        }
-        let [cpu_temperature, gpu_temperature] = self.render.status_temperatures;
-        self.render.status = self.status.pill(
-            screen_width,
-            power_action,
-            power_progress,
-            self.render.status_audio_level,
-            cpu_temperature,
-            gpu_temperature,
-        );
+        self.status.damp_readings(dt);
+        self.render.status = self.status.pill(screen_width, power_action, power_progress);
         let (weather, weather_label) = self.weather.scene(
             &self.render.status,
             self.config.height,
@@ -485,9 +427,7 @@ impl CantusApp {
         let weather_glyph_end = gpu.text_renderer.glyphs.len() as u32;
 
         let timeline = self.timeline();
-        let px_per_ms = timeline.px_per_ms;
-        let playhead_x = timeline.playhead_x;
-        self.render.uniforms.playhead_x = playhead_x;
+        self.render.uniforms.playhead_x = timeline.playhead_x;
 
         let mut playback_state = mem::take(&mut self.playback);
         if playback_state.queue.is_empty() {
@@ -500,7 +440,8 @@ impl CantusApp {
         let queue = &mut playback_state.queue;
 
         let drag_offset_ms = if self.interaction.dragging {
-            (self.render.uniforms.mouse_pos.x - self.interaction.press_origin.x) / px_per_ms
+            (self.render.uniforms.mouse_pos.x - self.interaction.press_origin.x)
+                / timeline.px_per_ms
         } else {
             0.0
         };
@@ -524,7 +465,7 @@ impl CantusApp {
         self.render.track_offset = current_ms;
 
         layout(queue, &self.config, timeline, current_ms);
-        let gpu = self.render.gpu.as_mut().unwrap();
+        let gpu = self.render.gpu();
         for track in &mut *queue {
             let expansion = track.runtime.playlist_expansion;
             if expansion > 0.0 {
@@ -548,7 +489,6 @@ impl CantusApp {
         self.interaction.hovered_track = hovered_track;
 
         self.render.track_pills.clear();
-        let current_track = queue.iter().position(Track::is_current);
         let playlists = &playback_state.playlists;
         for queue_index in (0..queue.len())
             .filter(|&index| Some(index) != hovered_track)
@@ -566,7 +506,7 @@ impl CantusApp {
 
         self.render_playhead_particles(
             dt,
-            &queue[current_track.unwrap_or(cur_idx)],
+            &queue[queue.iter().position(Track::is_current).unwrap_or(cur_idx)],
             playback_state.playing,
         );
         self.playback = playback_state;
@@ -593,12 +533,7 @@ impl CantusApp {
             return Some(index);
         }
 
-        queue
-            .iter()
-            .enumerate()
-            .rev()
-            .find(|(_, track)| in_track(track))
-            .map(|(index, _)| index)
+        queue.iter().rposition(in_track)
     }
 
     fn draw_track(
@@ -628,21 +563,20 @@ impl CantusApp {
         let mut pill = TrackPill {
             x: start_x,
             width: layout_width.max(self.config.height),
-            colors: track.palette(),
+            colors: track.runtime.art.palette(),
             visibility: detail_alpha.max(f32::from(track.runtime.start_ms <= 0.0)),
-            image_index: self.get_image_index(&track.art),
+            image_index: self.get_image_index(&track.runtime.art),
             rating: -1,
             audio_features: track.audio_features.unwrap_or(DEFAULT_AUDIO_FEATURES),
             playlist_images: [-1; MAX_PILL_PLAYLIST_ICONS],
             ..Default::default()
         };
 
-        if show_details
-            && detail_alpha > 0.0
-            && let Some(gpu) = &mut self.render.gpu
-        {
+        if show_details && detail_alpha > 0.0 {
+            let scale = self.render.scale;
+            let gpu = self.render.gpu();
             gpu.text_renderer
-                .render(&gpu.queue, track, detail_alpha, self.render.scale);
+                .render(&gpu.queue, track, detail_alpha, scale);
         }
 
         // Expand the hitbox vertically so it includes the playlist buttons
@@ -715,7 +649,7 @@ impl CantusApp {
     }
 
     fn render_playhead_particles(&mut self, dt: f32, track: &Track, playing: bool) {
-        let palette = track.palette();
+        let palette = track.runtime.art.palette();
         let playhead_x = self.render.uniforms.playhead_x;
         let avg_speed = self.render.movement_speed;
 

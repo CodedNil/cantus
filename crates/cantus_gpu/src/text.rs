@@ -5,7 +5,7 @@ use cantus_shared::{
 use spirv_std::{
     Sampler,
     arch::{Derivative, kill},
-    glam::{Vec2, Vec4, vec2},
+    glam::{Vec2, Vec3, Vec4, vec2},
     image::Image2d,
     spirv,
 };
@@ -14,7 +14,7 @@ use spirv_std::{
 pub fn vs_text(
     #[spirv(vertex_index)] v_idx: u32,
     #[spirv(instance_index)] i_idx: u32,
-    #[spirv(uniform, descriptor_set = 0, binding = 0)] global: &GlobalUniforms,
+    #[spirv(storage_buffer, descriptor_set = 0, binding = 0)] global: &GlobalUniforms,
     #[spirv(storage_buffer, descriptor_set = 0, binding = 1)] glyphs: &[GlyphInstance;
          MAX_GLYPH_INSTANCES],
     #[spirv(position)] out_pos: &mut Vec4,
@@ -46,10 +46,11 @@ pub fn fs_text(
         + atlas.sample(*sampler, uv + vec2(offset.x, -offset.y)).x
         + atlas.sample(*sampler, uv + vec2(-offset.x, offset.y)).x)
         * 0.25;
-    let alpha = coverage * style.y * smoothstep(0.0, 8.0, style.x);
+    // A negative `style.y` marks a shadow glyph, rendered dark instead of near-white.
+    let alpha = coverage * style.y.abs() * smoothstep(0.0, 8.0, style.x);
     if alpha <= 0.0 {
         kill();
     }
-
-    *out_color = Vec4::new(0.94 * alpha, 0.94 * alpha, 0.94 * alpha, alpha);
+    let brightness = if style.y < 0.0 { 0.0 } else { 0.94 };
+    *out_color = Vec3::splat(brightness * alpha).extend(alpha);
 }
