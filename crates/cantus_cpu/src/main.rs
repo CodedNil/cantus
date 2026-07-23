@@ -90,6 +90,9 @@ impl Default for CantusApp {
 }
 
 fn main() {
+    #[cfg(all(debug_assertions, feature = "generate-nix"))]
+    config::generate_nix_options();
+
     tracing_subscriber::registry()
         .with(
             Targets::new()

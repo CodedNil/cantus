@@ -8,11 +8,6 @@ default-run = "cantus"
 name = "cantus"
 path = "src/main.rs"
 
-[[bin]]
-name = "generate-options"
-path = "src/generate_options.rs"
-required-features = ["generate-nix"]
-
 [features]
 generate-nix = ["dep:schemars"]
 
@@ -28,7 +23,7 @@ tracing-subscriber = { version = "0.3.23", default-features = false, features = 
 
 pollster = "1.0.1"
 
-wayland-client = { version = "0.31.14", default-features = false, features = ["system"] }
+wayland-client = { version = "0.31.15", default-features = false, features = ["system"] }
 wayland-protocols = { version = "0.32.13", features = ["client", "staging"] }
 wayland-protocols-wlr = { version = "0.3.12", features = ["client"] }
 
@@ -43,9 +38,6 @@ swash = { version = "0.2.10", default-features = false, features = ["std", "rend
 image = { version = "0.25.10", default-features = false, features = [
     "jpeg",
     "png",
-] }
-kmeans_colors = { version = "0.7.1", default-features = false, features = [
-    "palette_color",
 ] }
 palette = { version = "0.7.6", default-features = false, features = ["std"] }
 

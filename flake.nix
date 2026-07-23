@@ -95,6 +95,7 @@ rec {
               mold
               pkg-config
               just
+              nixfmt
               pipewire
               wireplumber
             ];

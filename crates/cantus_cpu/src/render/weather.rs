@@ -1,6 +1,7 @@
 use crate::{
-    AppUpdater, Rect, send_update,
+    AppUpdater, Rect,
     render::{status::GAP, text_render::TextStyle},
+    send_update,
 };
 use arrayvec::ArrayString;
 use cantus_shared::{

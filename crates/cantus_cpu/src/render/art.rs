@@ -1,9 +1,8 @@
 use crate::{CantusApp, render::pipelines::IMAGE_SIZE};
 use arrayvec::ArrayVec;
 use image::{DynamicImage, RgbaImage, imageops};
-use kmeans_colors::Sort;
 use palette::{Clamp, IntoColor, Lch, color_theory::Analogous};
-use std::{array, sync::Arc, time::Instant};
+use std::{array, ops::Range, sync::Arc, time::Instant};
 
 const NUM_SWATCHES: usize = 4;
 
@@ -134,6 +133,67 @@ fn pack_color((color, weight): (Lch, f32), total: f32) -> u32 {
     ])
 }
 
+const fn component(color: &palette::Lab, channel: usize) -> f32 {
+    [color.l, color.a, color.b][channel]
+}
+
+/// A small median-cut quantizer tailored to the four swatches the renderer needs.
+fn dominant_colors(pixels: &mut [palette::Lab]) -> ArrayVec<(Lch, f32), NUM_SWATCHES> {
+    let mut buckets = ArrayVec::<Range<usize>, NUM_SWATCHES>::new();
+    buckets.push(0..pixels.len());
+
+    while buckets.len() < NUM_SWATCHES {
+        let Some((bucket_index, channel)) = buckets
+            .iter()
+            .enumerate()
+            .filter(|(_, range)| range.len() > 1)
+            .map(|(index, range)| {
+                let mut min = [f32::INFINITY; 3];
+                let mut max = [f32::NEG_INFINITY; 3];
+                for color in &pixels[range.clone()] {
+                    for channel in 0..3 {
+                        min[channel] = min[channel].min(component(color, channel));
+                        max[channel] = max[channel].max(component(color, channel));
+                    }
+                }
+                let (channel, spread) = (0..3)
+                    .map(|channel| (channel, max[channel] - min[channel]))
+                    .max_by(|a, b| a.1.total_cmp(&b.1))
+                    .unwrap();
+                (index, channel, spread * range.len() as f32)
+            })
+            .max_by(|a, b| a.2.total_cmp(&b.2))
+            .map(|(index, channel, _)| (index, channel))
+        else {
+            break;
+        };
+
+        let range = buckets.swap_remove(bucket_index);
+        pixels[range.clone()]
+            .sort_unstable_by(|a, b| component(a, channel).total_cmp(&component(b, channel)));
+        let middle = range.start + range.len() / 2;
+        buckets.push(range.start..middle);
+        buckets.push(middle..range.end);
+    }
+
+    buckets
+        .into_iter()
+        .map(|range| {
+            let weight = range.len() as f32;
+            let sum = pixels[range].iter().fold([0.0; 3], |mut sum, color| {
+                sum[0] += color.l;
+                sum[1] += color.a;
+                sum[2] += color.b;
+                sum
+            });
+            (
+                palette::Lab::new(sum[0] / weight, sum[1] / weight, sum[2] / weight).into_color(),
+                weight,
+            )
+        })
+        .collect()
+}
+
 fn image_palette(image: &RgbaImage) -> [u32; NUM_SWATCHES] {
     let srgb_to_lab = |pixel: &image::Rgba<u8>| {
         palette::Srgb::new(
@@ -148,24 +208,24 @@ fn image_palette(image: &RgbaImage) -> [u32; NUM_SWATCHES] {
         .filter(|pixel| {
             let max = pixel[0].max(pixel[1]).max(pixel[2]);
             let min = pixel[0].min(pixel[1]).min(pixel[2]);
-            max - min > 30
+            pixel[3] >= 128 && max - min > 30
         })
         .map(srgb_to_lab)
         .collect();
     let use_harmony = !pixels.is_empty();
     if !use_harmony {
-        pixels.extend(image.pixels().map(srgb_to_lab));
+        pixels.extend(
+            image
+                .pixels()
+                .filter(|pixel| pixel[3] >= 128)
+                .map(srgb_to_lab),
+        );
     }
 
-    let result = kmeans_colors::get_kmeans_hamerly(NUM_SWATCHES, 20, 5.0, false, &pixels, 0);
-    let swatches = palette::Lab::sort_indexed_colors(&result.centroids, &result.indices);
-    if swatches.is_empty() {
+    if pixels.is_empty() {
         return [u32::from_le_bytes([0, 0, 0, 255]); NUM_SWATCHES];
     }
-    let mut colors: ArrayVec<_, NUM_SWATCHES> = swatches
-        .iter()
-        .map(|swatch| (swatch.centroid.into_color(), swatch.percentage))
-        .collect();
+    let mut colors = dominant_colors(&mut pixels);
     if use_harmony {
         complete_palette(&mut colors);
     }

@@ -12,8 +12,10 @@ use wgpu::{
     TextureUsages,
 };
 
-const FONT_DATA: &[u8] =
-    include_bytes!(concat!(env!("CARGO_MANIFEST_DIR"), "/../../assets/NotoSans-Variable.ttf"));
+const FONT_DATA: &[u8] = include_bytes!(concat!(
+    env!("CARGO_MANIFEST_DIR"),
+    "/../../assets/NotoSans-Variable.ttf"
+));
 
 /// Size of the glyph atlas texture (square, in pixels).
 const ATLAS_PADDING: u32 = 2;
