@@ -161,10 +161,12 @@ rec {
                 description = "Settings written as TOML to `~/.config/cantus/cantus.toml`.";
                 example = {
                   monitor = "eDP-1";
+                  weather_enabled = true;
                   location = [
                     51.5
                     (-0.1)
                   ];
+                  status_enabled = true;
                   height = 40.0;
                   timeline_future_minutes = 12.0;
                   timeline_past_minutes = 1.5;

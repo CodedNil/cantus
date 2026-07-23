@@ -11,34 +11,35 @@ use tracing::warn;
 )]
 #[serde(default)]
 pub struct Config {
-    /// Spotify client ID to use for authentication.
-    pub spotify_client_id: Option<String>,
-
     /// The monitor to display on.
     pub monitor: Option<String>,
-
-    /// The height of the timeline in logical pixels.
-    pub height: f32,
-
-    /// Latitude and longitude used for the weather pill.
-    pub location: [f32; 2],
-
     /// The layer the app should be on.
     pub layer: Layer,
     /// The corner/edge the application should anchor to.
     pub layer_anchor: LayerAnchor,
+    /// The height of the bar in logical pixels.
+    pub height: f32,
 
+    /// Spotify client ID to use for authentication.
+    pub spotify_client_id: Option<String>,
     /// How many minutes in the future to display in the timeline.
     pub timeline_future_minutes: f32,
     /// How many minutes before the current time to display in the timeline.
     pub timeline_past_minutes: f32,
     /// The width in logical pixels on the left where previous tracks are displayed.
     pub history_width: f32,
-
     /// Favourite playlists to display as buttons.
     pub playlists: ArrayVec<String, MAX_PILL_PLAYLIST_ICONS>,
     /// Whether star ratings should be enabled.
     pub ratings_enabled: bool,
+
+    /// Whether to show the weather and calendar module.
+    pub weather_enabled: bool,
+    /// Latitude and longitude used for the weather pill.
+    pub location: [f32; 2],
+
+    /// Whether to show the system status module.
+    pub status_enabled: bool,
 }
 
 #[derive(Clone, Copy, Deserialize, Serialize)]
@@ -72,6 +73,8 @@ impl Default for Config {
             monitor: None,
             height: 50.0,
             location: [51.5074, -0.1278],
+            weather_enabled: true,
+            status_enabled: true,
             layer: Layer::Top,
             layer_anchor: LayerAnchor::Top,
             timeline_future_minutes: 12.0,

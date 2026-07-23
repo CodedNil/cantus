@@ -158,6 +158,7 @@ impl CantusApp {
         let mut surface_config = surface
             .get_default_config(&adapter, width, height)
             .expect("Surface is unsupported by the selected adapter");
+        surface_config.desired_maximum_frame_latency = 1;
         surface_config.format = format;
         surface_config.alpha_mode = alpha_mode;
         surface.configure(&device, &surface_config);
@@ -226,8 +227,14 @@ impl CantusApp {
             BindingResource::TextureView(&image_view),
             BindingResource::Sampler(&sampler)
         );
-        let status = pass!("Status", StatusPill, 1);
-        let weather = pass!("Weather", WeatherPill, 1);
+        let status = self
+            .config
+            .status_enabled
+            .then(|| pass!("Status", StatusPill, 1));
+        let weather = self
+            .config
+            .weather_enabled
+            .then(|| pass!("Weather", WeatherPill, 1));
         let text = pass!(
             "Text",
             GlyphInstance,

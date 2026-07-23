@@ -1,6 +1,6 @@
 use crate::{
-    CantusApp, MAX_RENDER_INSTANCES, PANEL_EXTENSION, PANEL_START, PARTICLE_COUNT, Rect,
-    TRACK_SPACING_MS,
+    CantusApp, MAX_RENDER_INSTANCES, PANEL_EXTENSION, PANEL_OVERFLOW, PANEL_START, PARTICLE_COUNT,
+    Rect, TRACK_SPACING_MS,
     config::Config,
     spotify::{CondensedPlaylist, Track, playlist_icons},
 };
@@ -51,6 +51,7 @@ const DEFAULT_AUDIO_FEATURES: AudioFeatures = AudioFeatures {
 const PLAYHEAD_START_DURATION: f32 = 0.7;
 const PLAYHEAD_TRANSITION_SPEED: f32 = 5.5;
 const DETAIL_FADE_DURATION: f32 = 0.2;
+const PLAYLIST_EXPANSION_DURATION: f32 = 1.0 / 6.0;
 
 #[derive(Clone, Copy)]
 pub struct Timeline {
@@ -110,8 +111,8 @@ pub struct GpuResources {
     pub globals: Buffer,
     pub playhead: GpuPass,
     pub track: GpuPass,
-    pub weather: GpuPass,
-    pub status: GpuPass,
+    pub weather: Option<GpuPass>,
+    pub status: Option<GpuPass>,
     pub text: GpuPass,
     pub particles: GpuPass,
     pub images: ImageAtlas,
@@ -240,7 +241,13 @@ fn particle_color(rgb: u32, duration: f32) -> u32 {
 impl CantusApp {
     pub fn timeline(&self) -> Timeline {
         let config = &self.config;
-        let reserved = status::WIDTH + weather::WIDTH + GAP * 3.0 + config.history_width + 16.0;
+        let mut reserved = config.history_width + 16.0 + GAP;
+        if config.weather_enabled {
+            reserved += weather::WIDTH + GAP;
+        }
+        if config.status_enabled {
+            reserved += status::WIDTH + GAP;
+        }
         let px_per_ms = (self.logical_surface_size().0 - reserved).max(84.0)
             / (config.timeline_future_minutes * 60_000.0);
         Timeline {
@@ -262,9 +269,14 @@ impl CantusApp {
     }
 
     pub fn logical_surface_size(&self) -> (f32, f32) {
+        let extension = if self.config.weather_enabled {
+            PANEL_EXTENSION
+        } else {
+            PANEL_OVERFLOW
+        };
         (
             self.render.surface_width.unwrap_or(1920.0),
-            self.config.height + PANEL_START + PANEL_EXTENSION,
+            self.config.height + PANEL_START + extension,
         )
     }
 
@@ -321,8 +333,12 @@ impl CantusApp {
             .upload_data(&gpu.queue, slice::from_ref(&self.render.playhead));
         gpu.track.upload_data(&gpu.queue, &self.render.track_pills);
         gpu.text.upload_data(&gpu.queue, &gpu.text_renderer.glyphs);
-        gpu.weather.upload_data(&gpu.queue, &[weather]);
-        gpu.status.upload_data(&gpu.queue, &[self.render.status]);
+        if let (Some(pass), Some(weather)) = (&gpu.weather, weather.as_ref()) {
+            pass.upload_data(&gpu.queue, slice::from_ref(weather));
+        }
+        if let Some(pass) = &gpu.status {
+            pass.upload_data(&gpu.queue, slice::from_ref(&self.render.status));
+        }
 
         let surface_view = surface_texture
             .texture
@@ -357,14 +373,18 @@ impl CantusApp {
                 gpu.track.draw_range(&mut pass, index..index + 1);
                 gpu.text.draw_range(&mut pass, glyphs.clone());
             }
-            gpu.weather.draw_range(&mut pass, 0..1);
+            if let Some(weather) = &gpu.weather {
+                weather.draw_range(&mut pass, 0..1);
+            }
             gpu.text.draw_range(&mut pass, 0..weather_glyph_end);
             if let Some(glyphs) = self.render.track_glyphs.get(foreground) {
                 let foreground = foreground as u32;
                 gpu.track.draw_range(&mut pass, foreground..foreground + 1);
                 gpu.text.draw_range(&mut pass, glyphs.clone());
             }
-            gpu.status.draw_range(&mut pass, 0..1);
+            if let Some(status) = &gpu.status {
+                status.draw_range(&mut pass, 0..1);
+            }
             gpu.particles
                 .draw_range(&mut pass, 0..PARTICLE_COUNT as u32);
             gpu.playhead.draw_range(&mut pass, 0..1);
@@ -385,7 +405,7 @@ impl CantusApp {
         gpu.images.image_index(&gpu.queue, art)
     }
 
-    fn create_scene(&mut self) -> (WeatherPill, u32) {
+    fn create_scene(&mut self) -> (Option<WeatherPill>, u32) {
         let dt = self.render.last_update.elapsed().as_secs_f32().min(0.1);
         self.render.last_update = Instant::now();
 
@@ -394,37 +414,50 @@ impl CantusApp {
         self.render.uniforms.screen_size = vec2(screen_width, screen_height);
         self.render.uniforms.bar_height = vec2(PANEL_START, self.config.height);
         let (power_action, power_progress) = self.power_hold_scene();
-        self.status.damp_readings(dt);
-        self.render.status = self.status.pill(screen_width, power_action, power_progress);
-        let (weather, weather_label) = self.weather.scene(
-            &self.render.status,
-            self.config.height,
-            self.render.uniforms.mouse_pos,
-            self.interaction.mouse_pressure > 0.0,
-            dt,
-        );
-        self.render.status.sun = weather.sun;
-        self.render.status.conditions = weather.conditions;
-        let scale = self.render.scale;
-        let label_y = PANEL_START + self.config.height * 0.46;
-        let gpu = self.render.gpu.as_mut().unwrap();
-        gpu.text_renderer.render_centered_label(
-            &gpu.queue,
-            &weather_label,
-            vec2(weather.x + weather::WIDTH * 0.5, label_y),
-            TextStyle::WEATHER,
-            1.0,
-            scale,
-        );
-        self.weather.calendar_labels(
-            &self.render.status,
-            self.config.height,
-            |text, position, alpha, style| {
-                gpu.text_renderer
-                    .render_centered_label(&gpu.queue, text, position, style, alpha, scale);
+        self.render.status = self.status.as_mut().map_or_else(
+            || StatusPill {
+                x: screen_width,
+                ..StatusPill::default()
+            },
+            |status| {
+                status.damp_readings(dt);
+                status.pill(screen_width, power_action, power_progress)
             },
         );
-        let weather_glyph_end = gpu.text_renderer.glyphs.len() as u32;
+        let weather_scene = self.weather.as_mut().map(|weather| {
+            weather.scene(
+                &self.render.status,
+                self.config.height,
+                self.render.uniforms.mouse_pos,
+                self.interaction.mouse_pressure > 0.0,
+                dt,
+            )
+        });
+        let weather = weather_scene.map(|(weather, weather_label)| {
+            self.render.status.sun = weather.sun;
+            self.render.status.conditions = weather.conditions;
+            let scale = self.render.scale;
+            let label_y = PANEL_START + self.config.height * 0.46;
+            let gpu = self.render.gpu.as_mut().unwrap();
+            gpu.text_renderer.render_centered_label(
+                &gpu.queue,
+                &weather_label,
+                vec2(weather.x + weather::WIDTH * 0.5, label_y),
+                TextStyle::WEATHER,
+                1.0,
+                scale,
+            );
+            self.weather.as_ref().unwrap().calendar_labels(
+                &self.render.status,
+                self.config.height,
+                |text, position, alpha, style| {
+                    gpu.text_renderer
+                        .render_centered_label(&gpu.queue, text, position, style, alpha, scale);
+                },
+            );
+            weather
+        });
+        let weather_glyph_end = self.render.gpu.as_ref().unwrap().text_renderer.glyphs.len() as u32;
 
         let timeline = self.timeline();
         self.render.uniforms.playhead_x = timeline.playhead_x;
@@ -465,9 +498,24 @@ impl CantusApp {
         self.render.track_offset = current_ms;
 
         layout(queue, &self.config, timeline, current_ms);
+        let active_hover = self.interaction.hovered_track;
         let gpu = self.render.gpu();
-        for track in &mut *queue {
-            let expansion = track.runtime.playlist_expansion;
+        for (index, track) in queue.iter_mut().enumerate() {
+            let show_details = track.runtime.width > self.config.height;
+            let primary_icon_count = usize::from(self.config.ratings_enabled) * 5
+                + track.runtime.primary_playlist_count as usize;
+            track.runtime.primary_icons_fit = primary_icon_count > 0
+                && track.runtime.width >= ICON_SPACING * 1.05 * primary_icon_count as f32;
+            approach(
+                &mut track.runtime.playlist_expansion,
+                f32::from(
+                    Some(index) == active_hover
+                        && show_details
+                        && track.runtime.detail_alpha >= 1.0,
+                ),
+                dt.min(0.1) / PLAYLIST_EXPANSION_DURATION,
+            );
+            let expansion = track.runtime.playlist_expansion_curve();
             if expansion > 0.0 {
                 let extra_width = (gpu.text_renderer.track_width(track) - track.runtime.width)
                     .max(0.0)
@@ -554,12 +602,7 @@ impl CantusApp {
             dt / DETAIL_FADE_DURATION,
         );
         let detail_alpha = track.runtime.detail_alpha;
-        approach(
-            &mut track.runtime.playlist_expansion,
-            f32::from(hovered && show_details && detail_alpha >= 1.0),
-            dt.min(0.1) * 6.0,
-        );
-        let playlist_expansion = track.runtime.playlist_expansion;
+        let playlist_expansion = track.runtime.playlist_expansion_curve();
         let mut pill = TrackPill {
             x: start_x,
             width: layout_width.max(self.config.height),
@@ -598,14 +641,13 @@ impl CantusApp {
         let primary_icons = pill.star_count() + pill.primary_playlist_count as f32;
         approach(
             &mut track.runtime.primary_icon_alpha,
-            f32::from(
-                primary_icons > 0.0
-                    && (playlist_expansion > 0.0
-                        || layout_width >= ICON_SPACING * 1.05 * primary_icons),
-            ),
+            f32::from(primary_icons > 0.0 && track.runtime.primary_icons_fit),
             dt / DETAIL_FADE_DURATION,
         );
-        pill.primary_alpha = track.runtime.primary_icon_alpha;
+        pill.primary_alpha = track
+            .runtime
+            .primary_icon_alpha
+            .max(playlist_expansion * f32::from(primary_icons > 0.0));
         pill.secondary_expansion = playlist_expansion;
         let glyph_end = self.render.gpu.as_ref().unwrap().text_renderer.glyphs.len() as u32;
         self.render.track_glyphs.push(glyph_start..glyph_end);

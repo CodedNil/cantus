@@ -134,6 +134,7 @@ pub struct TrackRuntime {
     pub playlist_expansion: f32,
     pub detail_alpha: f32,
     pub primary_icon_alpha: f32,
+    pub primary_icons_fit: bool,
     pub primary_playlist_count: u8,
     pub secondary_playlist_count: u8,
     pub start_ms: f32,
@@ -163,6 +164,11 @@ impl Track {
 }
 
 impl TrackRuntime {
+    pub fn playlist_expansion_curve(&self) -> f32 {
+        let progress = self.playlist_expansion;
+        progress * progress * (3.0 - 2.0 * progress)
+    }
+
     pub fn rect(&self, height: f32) -> Option<Rect> {
         (self.width > 0.0 && self.start_x + self.width > 0.0).then_some(Rect::pill(
             self.start_x,

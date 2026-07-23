@@ -17,7 +17,7 @@ use spirv_std::{
 #[cfg(target_arch = "spirv")]
 use spirv_std::num_traits::Float;
 
-fn hash(p: Vec2) -> Vec2 {
+pub fn hash(p: Vec2) -> Vec2 {
     let mut value = uvec2(p.x as i32 as u32, p.y as i32 as u32);
     value = value * 1_664_525 + UVec2::splat(1_013_904_223);
     value.x += value.y * 1_664_525;
@@ -60,17 +60,8 @@ fn fbm(mut p: Vec2) -> f32 {
     0.5 + density * 0.5
 }
 
-fn cloud_mass(p: Vec2, scale: f32, time: f32) -> f32 {
+pub fn cloud_mass(p: Vec2, scale: f32, time: f32) -> f32 {
     fbm(p / scale * 0.14 + vec2(time * 0.012, 6.1))
-}
-
-fn clouds(p: Vec2, scale: f32, time: f32) -> Vec2 {
-    let mass = cloud_mass(p, scale, time);
-    let billows = fbm(p / scale * 0.287 + vec2(time * 0.018, -3.7));
-    vec2(
-        smoothstep(0.43, 0.69, mass + (billows - 0.5) * 0.2),
-        smoothstep(0.42, 0.72, billows) * 0.55 + smoothstep(0.48, 0.7, mass) * 0.45,
-    )
 }
 
 fn god_rays(p: Vec2, sun: Vec2, width: f32, cloud_scale: f32, time: f32) -> f32 {
@@ -153,7 +144,10 @@ fn scene(
     let stars = particles(p, Vec2::ZERO, 18.0, 0.55, 0.25) * (1.0 - daylight);
     color += Vec3::splat(stars * (1.0 - weather.cloud) * (0.3 + vertical * 0.7));
 
-    let (cloud_shape, cloud_light) = clouds(p, cloud_scale, time).into();
+    let mass = cloud_mass(p, cloud_scale, time);
+    let billows = fbm(p / cloud_scale * 0.287 + vec2(time * 0.018, -3.7));
+    let cloud_shape = smoothstep(0.43, 0.69, mass + (billows - 0.5) * 0.2);
+    let cloud_light = smoothstep(0.42, 0.72, billows) * 0.55 + smoothstep(0.48, 0.7, mass) * 0.45;
     let cloud_color = vec3(0.16, 0.2, 0.28)
         .lerp(vec3(0.32, 0.36, 0.43), cloud_light)
         .lerp(
@@ -202,7 +196,7 @@ pub fn sky_background(
     conditions: [Condition; 3],
     sun_presence: f32,
 ) -> (Vec3, Vec2) {
-    let position = (((local.x / size.x - 0.5).abs() * 2.0 - 0.6) / 0.2).clamp(0.0, 2.0);
+    let position = ((local.x / size.x - 0.5).abs() * 10.0 - 3.0).clamp(0.0, 2.0);
     let forecast = conditions[0]
         .lerp(conditions[1], smoothstep(0.0, 1.0, position))
         .lerp(conditions[2], smoothstep(1.0, 2.0, position));
@@ -265,10 +259,7 @@ pub fn fs_weather(
         kill();
     }
 
-    let size = vec2(
-        pill_size.x,
-        pill_size.y + WEATHER_CALENDAR_EXTENSION * expansion,
-    );
+    let size = vec2(pill_size.x, pill_size.y + calendar_height);
     let local = pixel - vec2(pill.x, global.bar_height.x);
     let (mut color, _) = sky_background(
         global,
@@ -286,9 +277,9 @@ pub fn fs_weather(
     let ring = smoothstep(16.0, 14.0, today_distance) - today;
     color = color.lerp(Vec3::splat(0.88), ring * today_presence * 0.55);
     color = color.lerp(color * 0.42 + 0.012, today * today_presence * 0.82);
+    let mouse = global.mouse_pos - vec2(pill.x, body_bottom);
     let arrow_button = |x: f32, sign: f32| {
         let center = vec2(x, WEATHER_CALENDAR_TITLE_Y);
-        let mouse = global.mouse_pos - vec2(pill.x, body_bottom);
         let hover = smoothstep(WEATHER_CALENDAR_ARROW_RADIUS, 6.0, mouse.distance(center))
             * global.mouse_pressure.saturate();
         let point = (calendar_local - center) * vec2(sign, 1.0);

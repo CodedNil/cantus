@@ -19,7 +19,8 @@ mod render;
 mod spotify;
 
 const PANEL_START: f32 = 6.0;
-const PANEL_EXTENSION: f32 = WEATHER_CALENDAR_EXTENSION + 16.0;
+const PANEL_OVERFLOW: f32 = 16.0;
+const PANEL_EXTENSION: f32 = WEATHER_CALENDAR_EXTENSION + PANEL_OVERFLOW;
 const PARTICLE_COUNT: usize = 64;
 const MAX_RENDER_INSTANCES: usize = 64;
 const TRACK_SPACING_MS: f32 = 4000.0;
@@ -68,22 +69,26 @@ struct CantusApp {
     app_updates: mpsc::Receiver<Update<Self>>,
     config: config::Config,
     spotify: spotify::SpotifyBackend,
-    status: Status,
-    weather: Weather,
+    status: Option<Status>,
+    weather: Option<Weather>,
 }
 
 impl Default for CantusApp {
     fn default() -> Self {
         let (updater, app_updates) = mpsc::channel();
         let mut config = config::load();
+        let status = config.status_enabled.then(|| Status::new(updater.clone()));
+        let weather = config
+            .weather_enabled
+            .then(|| Weather::new(config.location, updater.clone()));
         Self {
             render: RenderState::default(),
             interaction: InteractionState::default(),
             playback: PlaybackState::default(),
             app_updates,
             spotify: spotify::SpotifyBackend::new(&mut config, updater.clone()),
-            status: Status::new(updater.clone()),
-            weather: Weather::new(config.location, updater),
+            status,
+            weather,
             config,
         }
     }

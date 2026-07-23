@@ -87,7 +87,13 @@ impl Weather {
                     warn!(%error, "Failed to refresh weather");
                     true
                 },
-                |forecast| send_update(&updater, move |app| app.weather.apply_forecast(&forecast)),
+                |forecast| {
+                    send_update(&updater, move |app| {
+                        if let Some(weather) = &mut app.weather {
+                            weather.apply_forecast(&forecast);
+                        }
+                    })
+                },
             ) {
                 thread::sleep(Duration::from_mins(15));
             }

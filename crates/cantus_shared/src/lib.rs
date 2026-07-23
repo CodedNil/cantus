@@ -3,7 +3,7 @@
 use glam::{FloatExt, Vec2};
 
 pub const STATUS_HISTORY_SAMPLES: usize = 40;
-pub const RIPPLE_COUNT: usize = 8;
+pub const RIPPLE_COUNT: usize = 4;
 const STATUS_HISTORY_PACKS: usize = STATUS_HISTORY_SAMPLES / 4;
 const STATUS_GAP: f32 = 8.0;
 const STATUS_PADDING: f32 = 12.0;

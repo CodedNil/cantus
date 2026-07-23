@@ -229,22 +229,25 @@ impl LayerShellApp {
 }
 
 impl CantusApp {
-    fn overlay_rects(&self) -> [Rect; 2] {
+    fn overlay_rects(&self) -> impl Iterator<Item = Rect> + '_ {
         [
             self.weather
-                .interaction_rect(&self.render.status, self.config.height),
-            Rect::pill(
-                self.render.status.x,
-                self.render.status.width,
-                self.config.height,
-            ),
+                .as_ref()
+                .map(|weather| weather.interaction_rect(&self.render.status, self.config.height)),
+            self.status.as_ref().map(|_| {
+                Rect::pill(
+                    self.render.status.x,
+                    self.render.status.width,
+                    self.config.height,
+                )
+            }),
         ]
+        .into_iter()
+        .flatten()
     }
 
     pub fn overlay_contains(&self, point: glam::Vec2) -> bool {
-        self.overlay_rects()
-            .into_iter()
-            .any(|rect| rect.contains(point))
+        self.overlay_rects().any(|rect| rect.contains(point))
     }
 
     fn input_rects(&self) -> impl Iterator<Item = Rect> + '_ {

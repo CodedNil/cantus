@@ -45,8 +45,9 @@ impl CantusApp {
             .hovered_track
             .and_then(|index| self.playback.queue.get(index))
             .is_some_and(|track| track.contains(mouse_pos, self.config.height));
-        let power_action =
-            Status::power_action_at(mouse_pos, &self.render.status, self.config.height);
+        let power_action = self.status.as_ref().and_then(|_| {
+            Status::power_action_at(mouse_pos, &self.render.status, self.config.height)
+        });
         let now = Instant::now();
         self.interaction.mouse_pressure = 2.0;
         self.interaction.press_origin = mouse_pos;
@@ -96,10 +97,9 @@ impl CantusApp {
     fn handle_click(&mut self) {
         let mouse_pos = self.render.uniforms.mouse_pos;
         let timeline = self.timeline();
-        if self
-            .weather
-            .navigate_calendar(mouse_pos, &self.render.status, self.config.height)
-        {
+        if self.weather.as_mut().is_some_and(|weather| {
+            weather.navigate_calendar(mouse_pos, &self.render.status, self.config.height)
+        }) {
             self.pulse(mouse_pos, 1.0);
             return;
         }
@@ -182,12 +182,14 @@ impl CantusApp {
 
     /// Handle scrolling events to adjust volume. `direction` must be -1 or 1.
     pub fn handle_scroll(&mut self, direction: i32) {
-        if Status::audio_at(
-            self.render.uniforms.mouse_pos,
-            &self.render.status,
-            self.config.height,
-        ) {
-            self.status.adjust_volume(direction);
+        if let Some(status) = &mut self.status
+            && Status::audio_at(
+                self.render.uniforms.mouse_pos,
+                &self.render.status,
+                self.config.height,
+            )
+        {
+            status.adjust_volume(direction);
             return;
         }
         let near_playhead = (self.render.uniforms.mouse_pos.x - self.timeline().playhead_x).abs()
@@ -211,6 +213,10 @@ impl CantusApp {
     }
 
     pub fn power_hold_scene(&mut self) -> (Option<PowerAction>, f32) {
+        if self.status.is_none() {
+            self.interaction.power_hold = None;
+            return (None, 0.0);
+        }
         let Some(mut hold) = self.interaction.power_hold else {
             return (None, 0.0);
         };
@@ -252,7 +258,7 @@ impl CantusApp {
             pill_icon_primary_center_y(PANEL_START, self.config.height),
             (stars + track.runtime.primary_playlist_count as usize) as f32,
             f32::from(track.runtime.secondary_playlist_count),
-            track.runtime.playlist_expansion,
+            track.runtime.playlist_expansion_curve(),
         );
         Some((track_id, stars, primary_row, secondary_row))
     }

@@ -189,14 +189,17 @@ fn monitor(updater: &AppUpdater) {
         gpu.usage.push(gpu_metrics.usage);
         gpu.memory.push(gpu_metrics.memory);
         if !send_update(updater, move |app| {
-            app.status.cpu = cpu;
-            app.status.gpu = gpu;
-            app.status.battery = battery;
-            app.status.battery_charging = battery_charging;
+            let Some(status) = &mut app.status else {
+                return;
+            };
+            status.cpu = cpu;
+            status.gpu = gpu;
+            status.battery = battery;
+            status.battery_charging = battery_charging;
             if let Some(audio) = audio {
-                (app.status.volume, app.status.muted) = audio;
+                (status.volume, status.muted) = audio;
             }
-            app.status.sample_time = app.render.start_time.elapsed().as_secs_f32();
+            status.sample_time = app.render.start_time.elapsed().as_secs_f32();
         }) {
             break;
         }
