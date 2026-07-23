@@ -47,7 +47,11 @@ rec {
           version = (lib.importTOML ./crates/cantus_cpu/Cargo.toml).package.version;
 
           src = lib.cleanSource ./.;
-          cargoLock.lockFile = ./Cargo.lock;
+          cargoLock = {
+            lockFile = ./Cargo.lock;
+            outputHashes."rustc_codegen_spirv-0.10.0-alpha.1" =
+              "sha256-1RuZqIq1sp2+tGz4Qhnr/vTPLseNauLTOd5fOxpJ/Xk=";
+          };
 
           nativeBuildInputs = with pkgs; [
             pkg-config

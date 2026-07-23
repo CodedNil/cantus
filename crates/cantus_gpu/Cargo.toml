@@ -3,19 +3,16 @@ name = "cantus_gpu"
 version = "0.1.0"
 edition = "2024"
 
-[workspace]
-
 [lib]
 crate-type = ["dylib", "lib"]
 
 [[bin]]
 name = "build-shader"
-path = "src/build-shader.rs"
 required-features = ["build-shader"]
 
 [dependencies]
 cantus_shared = { path = "../cantus_shared", features = ["gpu"] }
-naga = { version = "29", features = ["spv-in"], optional = true }
+naga = { version = "30.0.0", optional = true, features = ["spv-in"] }
 spirv-builder = { git = "https://github.com/Rust-GPU/rust-gpu", rev = "c1acf6e4b2d338b0f822457350ea91db21757f1a", optional = true }
 spirv-std = { git = "https://github.com/Rust-GPU/rust-gpu", rev = "c1acf6e4b2d338b0f822457350ea91db21757f1a", features = [
     "glam_0_33",
@@ -27,28 +24,3 @@ build-shader = ["dep:spirv-builder", "dep:naga"]
 
 [lints]
 workspace = true
-
-[workspace.lints.rust]
-unexpected_cfgs = { level = "allow", check-cfg = [
-    'cfg(target_arch, values("spirv"))',
-] }
-unused_qualifications = "warn"
-
-[workspace.lints.clippy]
-pedantic = { level = "warn", priority = -1 }
-nursery = { level = "warn", priority = -1 }
-must_use_candidate = "allow"
-too_many_lines = "allow"
-too_many_arguments = "allow"
-cast_possible_truncation = "allow"
-cast_precision_loss = "allow"
-cast_sign_loss = "allow"
-cast_possible_wrap = "allow"
-suboptimal_flops = "allow"
-
-absolute_paths = "warn"
-separated_literal_suffix = "warn"
-renamed_function_params = "warn"
-str_to_string = "warn"
-if_then_some_else_none = "warn"
-redundant_type_annotations = "warn"

@@ -1,8 +1,7 @@
 [workspace]
 resolver = "3"
-members = ["crates/cantus_cpu", "crates/cantus_shared"]
+members = ["crates/cantus_cpu", "crates/cantus_gpu", "crates/cantus_shared"]
 default-members = ["crates/cantus_cpu"]
-exclude = ["crates/cantus_gpu"]
 
 [workspace.dependencies]
 bytemuck = { version = "1.25.2", features = ["derive"] }
@@ -14,6 +13,9 @@ glam = { version = "=0.33.2", default-features = false, features = [
 serde = { version = "1.0.229", features = ["derive"] }
 
 [workspace.lints.rust]
+unexpected_cfgs = { level = "allow", check-cfg = [
+    'cfg(target_arch, values("spirv"))',
+] }
 unused_qualifications = "warn"
 
 [workspace.lints.clippy]
