@@ -25,8 +25,15 @@ fn plasma_field(uv: Vec2, packed: u32, x: f32, y: f32, phase: f32) -> Vec4 {
 }
 
 fn hash(point: Vec2, seed: f32) -> f32 {
-    let value = (point.dot(vec2(127.1, 311.7)) + seed * 74.7).sin() * 43_758.547;
-    value - value.floor()
+    let mut value = ((point.x as i32 as u32) * 1_664_525)
+        ^ ((point.y as i32 as u32) * 1_013_904_223)
+        ^ (seed.to_bits() * 2_654_435_761);
+    value ^= value >> 16;
+    value *= 2_246_822_519;
+    value ^= value >> 13;
+    value *= 3_266_489_917;
+    value ^= value >> 16;
+    value as f32 * 2.328_306_4e-10
 }
 
 fn speckle(pixel: Vec2, time: f32, seed: f32, audio: AudioFeatures) -> f32 {

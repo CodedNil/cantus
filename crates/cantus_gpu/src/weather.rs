@@ -274,12 +274,14 @@ pub fn fs_weather(
     let popup_local = pixel - vec2(WeatherLayout::expanded_x(pill.x, expansion), body_bottom);
     let content_origin = vec2(WeatherLayout::expanded_x(pill.x, 1.0), body_bottom);
     let content_local = pixel - content_origin;
+    let top_gap = WeatherLayout::TOP_GAP * expansion;
+    let box_size = vec2(popup_size.x, (popup_size.y - top_gap).max(0.0));
     let popup_dist = sd_rounded_box(
-        popup_local - popup_size * 0.5,
-        popup_size * 0.5,
-        (popup_size.y * 0.5).min(18.0),
+        popup_local - vec2(popup_size.x * 0.5, top_gap + box_size.y * 0.5),
+        box_size * 0.5,
+        (box_size.y * 0.5).min(18.0),
     );
-    let main_dist = smooth_union(body_dist, popup_dist, 20.0, expansion);
+    let main_dist = smooth_union(body_dist, popup_dist, 32.0, expansion);
     let (_, mask, alpha) = interaction.surface(main_dist);
     if alpha <= 0.0 {
         kill();

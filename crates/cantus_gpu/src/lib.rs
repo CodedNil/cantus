@@ -73,7 +73,7 @@ impl PillInteraction {
     pub fn surface(self, distance: f32) -> (f32, f32, f32) {
         let distance = self.expand(distance);
         let mask = (0.5 - distance).saturate();
-        let shadow = (-distance * 0.3).exp() * 0.16;
+        let shadow = (-distance.max(0.0) * 0.3).exp() * 0.16;
         (distance, mask, mask.max(shadow))
     }
 

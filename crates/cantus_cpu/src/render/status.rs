@@ -4,7 +4,6 @@ use glam::{FloatExt, Vec2, vec2};
 use std::{
     fs,
     io::{self, Read},
-    path::{Path, PathBuf},
     process::{Command, Stdio},
     sync::{
         Arc,
@@ -13,7 +12,7 @@ use std::{
     thread,
     time::Duration,
 };
-use sysinfo::{Components, System};
+use sysinfo::{Components, Gpus, System};
 use tracing::warn;
 
 pub const GAP: f32 = 6.0;
@@ -55,13 +54,6 @@ pub struct Status {
     damped_temperatures: [f32; 2],
 }
 
-#[derive(Clone, Copy, Default)]
-struct GpuMetrics {
-    usage: f32,
-    memory: f32,
-    temperature: f32,
-}
-
 impl Status {
     pub fn new(updater: AppUpdater) -> Self {
         let status = Self::default();
@@ -88,7 +80,15 @@ impl Status {
 
     pub fn adjust_volume(&mut self, direction: i32) {
         self.volume = (self.volume - direction as f32 * VOLUME_STEP).saturate();
-        set_system_volume(self.volume);
+        let volume = format!("{:.3}", self.volume);
+        thread::spawn(move || {
+            if let Err(error) = Command::new("wpctl")
+                .args(["set-volume", "@DEFAULT_AUDIO_SINK@", &volume])
+                .status()
+            {
+                warn!(%error, "Failed to set PipeWire volume");
+            }
+        });
     }
 
     pub fn audio_at(position: Vec2, pill: &StatusPill, height: f32) -> bool {
@@ -167,27 +167,75 @@ fn slot_hit(position: Vec2, pill: &StatusPill, height: f32, first: u32, last: u3
 }
 
 fn monitor(updater: &AppUpdater) {
+    let (Ok(mut system), Ok(mut components)) =
+        (System::new(), Components::new_with_refreshed_list())
+    else {
+        warn!("sysinfo unavailable; system status monitor disabled");
+        return;
+    };
     let mut cpu = ProcessorStatus::default();
     let mut gpu = ProcessorStatus::default();
-    let mut system = System::new();
-    let mut components = Components::new_with_refreshed_list();
+    let mut gpus = Gpus::new_with_refreshed_list().ok();
     loop {
         system.refresh_cpu_usage();
         system.refresh_memory();
         components.refresh(false);
-        let (battery, battery_charging) = battery();
-        let gpu_metrics = nvidia_metrics()
-            .or_else(|| drm_metrics(&components))
+        if let Some(gpus) = &mut gpus {
+            gpus.refresh(false);
+        }
+        let (battery, battery_charging) = fs::read_dir("/sys/class/power_supply")
+            .ok()
+            .and_then(|entries| {
+                entries
+                    .flatten()
+                    .map(|entry| entry.path())
+                    .find(|path| path.join("capacity").exists())
+            })
+            .map_or((None, false), |path| {
+                let capacity: u64 = fs::read_to_string(path.join("capacity"))
+                    .map_or(0, |value| value.trim().parse().unwrap_or_default());
+                let charging = fs::read_to_string(path.join("status"))
+                    .is_ok_and(|status| status.trim().eq_ignore_ascii_case("charging"));
+                (Some(capacity as f32 / 100.0), charging)
+            });
+
+        let audio = Command::new("wpctl")
+            .args(["get-volume", "@DEFAULT_AUDIO_SINK@"])
+            .output()
+            .ok()
+            .and_then(|output| {
+                String::from_utf8(output.status.success().then_some(output.stdout)?).ok()
+            })
+            .and_then(|text| {
+                Some((
+                    text.split_whitespace().nth(1)?.parse().ok()?,
+                    text.contains("MUTED"),
+                ))
+            });
+
+        cpu.temperature = components
+            .iter()
+            .find(|component| {
+                ["k10temp", "coretemp", "zenpower", "cpu"]
+                    .iter()
+                    .any(|name| component.label().contains(name))
+            })
+            .and_then(sysinfo::Component::temperature)
             .unwrap_or_default();
-        let audio = system_volume();
-        cpu.temperature =
-            component_temperature(&components, &["k10temp", "coretemp", "zenpower", "cpu"]);
         cpu.usage.push(system.global_cpu_usage() / 100.0);
         cpu.memory
             .push(ratio(system.used_memory(), system.total_memory()));
-        gpu.temperature = gpu_metrics.temperature;
-        gpu.usage.push(gpu_metrics.usage);
-        gpu.memory.push(gpu_metrics.memory);
+
+        if let Some(gpu_device) = gpus.as_ref().and_then(|gpus| gpus.list().first()) {
+            gpu.temperature = gpu_device.temperature().unwrap_or_default();
+            gpu.usage
+                .push((gpu_device.usage().unwrap_or_default() / 100.0).saturate());
+            gpu.memory.push(ratio(
+                gpu_device.used_memory().unwrap_or_default(),
+                gpu_device.total_memory().unwrap_or_default(),
+            ));
+        }
+
         if !send_update(updater, move |app| {
             let Some(status) = &mut app.status else {
                 return;
@@ -209,94 +257,6 @@ fn monitor(updater: &AppUpdater) {
 
 fn ratio(used: u64, total: u64) -> f32 {
     used as f32 / total.max(1) as f32
-}
-
-fn number(path: impl AsRef<Path>) -> u64 {
-    fs::read_to_string(path).map_or(0, |value| value.trim().parse().unwrap_or_default())
-}
-
-fn entry_with(root: &str, child: &str) -> Option<PathBuf> {
-    fs::read_dir(root)
-        .ok()?
-        .flatten()
-        .map(|entry| entry.path())
-        .find(|path| path.join(child).exists())
-}
-
-fn component_temperature(components: &Components, names: &[&str]) -> f32 {
-    components
-        .iter()
-        .find(|component| names.iter().any(|name| component.label().contains(name)))
-        .and_then(sysinfo::Component::temperature)
-        .unwrap_or_default()
-}
-
-fn battery() -> (Option<f32>, bool) {
-    let Some(path) = entry_with("/sys/class/power_supply", "capacity") else {
-        return (None, false);
-    };
-    let charging = fs::read_to_string(path.join("status"))
-        .is_ok_and(|status| status.trim().eq_ignore_ascii_case("charging"));
-    (Some(number(path.join("capacity")) as f32 / 100.0), charging)
-}
-
-fn nvidia_metrics() -> Option<GpuMetrics> {
-    let output = command_output(
-        "nvidia-smi",
-        &[
-            "--query-gpu=utilization.gpu,memory.used,memory.total,temperature.gpu",
-            "--format=csv,noheader,nounits",
-        ],
-    )?;
-    let mut values = output
-        .lines()
-        .next()?
-        .split(',')
-        .map(|value| value.trim().parse::<f32>());
-    let mut next = || values.next()?.ok();
-    let (usage, used, total, temperature) = (next()?, next()?, next()?, next()?);
-    Some(GpuMetrics {
-        usage: (usage / 100.0).saturate(),
-        memory: (used / total.max(1.0)).saturate(),
-        temperature,
-    })
-}
-
-fn drm_metrics(components: &Components) -> Option<GpuMetrics> {
-    let device = entry_with("/sys/class/drm", "device/gpu_busy_percent")?.join("device");
-    Some(GpuMetrics {
-        usage: number(device.join("gpu_busy_percent")) as f32 / 100.0,
-        memory: ratio(
-            number(device.join("mem_info_vram_used")),
-            number(device.join("mem_info_vram_total")),
-        ),
-        temperature: component_temperature(components, &["amdgpu"]),
-    })
-}
-
-fn set_system_volume(volume: f32) {
-    let volume = format!("{:.3}", volume.saturate());
-    thread::spawn(move || {
-        if let Err(error) = Command::new("wpctl")
-            .args(["set-volume", "@DEFAULT_AUDIO_SINK@", &volume])
-            .status()
-        {
-            warn!(%error, "Failed to set PipeWire volume");
-        }
-    });
-}
-
-fn system_volume() -> Option<(f32, bool)> {
-    let text = command_output("wpctl", &["get-volume", "@DEFAULT_AUDIO_SINK@"])?;
-    Some((
-        text.split_whitespace().nth(1)?.parse().ok()?,
-        text.contains("MUTED"),
-    ))
-}
-
-fn command_output(command: &str, args: &[&str]) -> Option<String> {
-    let output = Command::new(command).args(args).output().ok()?;
-    String::from_utf8(output.status.success().then_some(output.stdout)?).ok()
 }
 
 fn monitor_playback(level: &AtomicU32) {

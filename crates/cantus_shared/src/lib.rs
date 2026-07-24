@@ -276,12 +276,14 @@ impl WeatherLayout {
     const COLUMN_GAP: f32 = 10.0;
     pub const FORECAST_X: f32 = Self::WIDTH + Self::COLUMN_GAP;
     pub const MONTH_SLIDE: f32 = 24.0;
-    pub const EXTENSION: f32 = 231.0;
-    pub const TITLE: Vec2 = Vec2::new(Self::WIDTH * 0.5, 38.0);
+    pub const EXTENSION: f32 = 239.0;
+    pub const TITLE: Vec2 = Vec2::new(Self::WIDTH * 0.5, 46.0);
     pub const TITLE_HALF_SIZE: Vec2 = Vec2::new(62.0, 18.0);
-    pub const DETAILS: Vec2 = Vec2::new(Self::FORECAST_X + Self::WIDTH * 0.5, 22.0);
+    pub const DETAILS: Vec2 = Vec2::new(Self::FORECAST_X + Self::WIDTH * 0.5, Self::TITLE.y);
     pub const ARROW_RADIUS: f32 = 20.0;
     const FORECAST_INSET: f32 = 8.0;
+    /// Gap between the pill's bottom edge and the top of the popup background.
+    pub const TOP_GAP: f32 = 7.0;
 
     pub fn expanded_x(x: f32, expansion: f32) -> f32 {
         x - Self::FORECAST_X * expansion * 0.5
@@ -301,16 +303,16 @@ impl WeatherLayout {
     pub fn cell(index: usize) -> Vec2 {
         Vec2::new(
             (index % 7) as f32 * Self::WIDTH / 7.0 + Self::WIDTH / 14.0,
-            96.0 + (index / 7) as f32 * 23.0,
+            104.0 + (index / 7) as f32 * 23.0,
         )
     }
 
     pub fn weekday(index: usize) -> Vec2 {
-        Vec2::new(Self::cell(index).x, 69.0)
+        Vec2::new(Self::cell(index).x, 77.0)
     }
 
     pub fn forecast_center(height: f32, row: f32) -> f32 {
-        40.0 + height * 0.5 + row * (height + Self::COLUMN_GAP)
+        64.0 + height * 0.5 + row * (height + Self::COLUMN_GAP)
     }
 
     pub fn forecast_center_at(height: f32, row: f32, reveal: f32) -> Vec2 {
