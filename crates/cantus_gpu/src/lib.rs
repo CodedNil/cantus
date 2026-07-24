@@ -108,11 +108,10 @@ fn pill_interaction(pixel: Vec2, global: &GlobalUniforms) -> PillInteraction {
     }
 
     let (mouse, mouse_distance) = if global.mouse_pressure > 0.0 {
-        let offset = pixel - global.mouse_pos;
-        let distance = offset.length();
+        let (direction, distance) = direction_and_length(pixel - global.mouse_pos);
         let influence = smoothstep(150.0, 0.0, distance);
         (
-            offset / 70.0 * influence * influence * global.mouse_pressure,
+            direction * influence * influence * global.mouse_pressure,
             distance,
         )
     } else {

@@ -322,9 +322,8 @@ pub fn fs_status(
         local,
         size,
         dist,
-        pill.sun,
+        pill.sun[1],
         pill.conditions,
-        0.0,
     );
     let color = status_sections(refracted, size, &pill, background, global)
         .lerp(Vec3::splat(0.95), interaction.ripple_flash * 0.35);

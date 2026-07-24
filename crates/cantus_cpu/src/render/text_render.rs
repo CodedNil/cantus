@@ -23,9 +23,9 @@ const RASTER_OVERSAMPLE: f32 = 2.5;
 const SCALE_STEPS: f32 = 4.0;
 
 /// Soft blurred shadow behind text
-const LABEL_SHADOW_RING: usize = 8;
+const LABEL_SHADOW_RING: usize = 4;
 const LABEL_SHADOW_RADIUS: f32 = 1.8;
-const LABEL_SHADOW_STRENGTH: f32 = 0.05;
+const LABEL_SHADOW_STRENGTH: f32 = 0.07;
 
 #[derive(Clone, Copy)]
 pub struct TextStyle {
@@ -38,6 +38,7 @@ impl TextStyle {
     pub const TODAY: Self = Self::new(16.0, 900);
     pub const DETAILS: Self = Self::new(14.0, 700);
     pub const WEATHER: Self = Self::new(24.0, 600);
+    pub const CALENDAR_TITLE: Self = Self::new(20.0, 750);
 
     const fn new(size: f32, weight: u16) -> Self {
         Self { size, weight }

@@ -174,6 +174,8 @@ pub struct WeatherPill {
     pub today: Vec2,
     pub calendar_expansion: f32,
     pub conditions: [WeatherCondition; 3],
+    pub hourly: [WeatherCondition; 6],
+    pub daily: [WeatherCondition; 5],
     pub padding: f32,
 }
 
@@ -266,26 +268,89 @@ pub const ICON_WIDTH: f32 = 21.6;
 /// Center-to-center icon spacing for rating stars and playlist artwork.
 pub const ICON_SPACING: f32 = 18.0;
 
-/// Calendar title and arrow center, relative to the submenu's top edge.
-pub const WEATHER_CALENDAR_TITLE_Y: f32 = 38.0;
-/// Horizontal inset of each calendar arrow's center.
-pub const WEATHER_CALENDAR_ARROW_X: f32 = 28.0;
-/// Visual and clickable radius of the calendar arrow buttons.
-pub const WEATHER_CALENDAR_ARROW_RADIUS: f32 = 20.0;
+/// Geometry shared by weather drawing, text placement, and hit testing.
+pub struct WeatherLayout;
 
-/// Y of the first day-grid row, relative to the submenu's top edge.
-pub const WEATHER_CALENDAR_GRID_TOP: f32 = 96.0;
-/// Center-to-center spacing between day-grid rows.
-pub const WEATHER_CALENDAR_ROW_HEIGHT: f32 = 23.0;
-/// The day grid always spans 6 rows (42 cells / 7 days).
-const WEATHER_CALENDAR_ROWS: f32 = 6.0;
-/// Breathing room below the last day-grid row.
-const WEATHER_CALENDAR_BOTTOM_MARGIN: f32 = 20.0;
+impl WeatherLayout {
+    pub const WIDTH: f32 = 310.0;
+    const COLUMN_GAP: f32 = 10.0;
+    pub const FORECAST_X: f32 = Self::WIDTH + Self::COLUMN_GAP;
+    pub const MONTH_SLIDE: f32 = 24.0;
+    pub const EXTENSION: f32 = 231.0;
+    pub const TITLE: Vec2 = Vec2::new(Self::WIDTH * 0.5, 38.0);
+    pub const TITLE_HALF_SIZE: Vec2 = Vec2::new(62.0, 18.0);
+    pub const DETAILS: Vec2 = Vec2::new(Self::FORECAST_X + Self::WIDTH * 0.5, 22.0);
+    pub const ARROW_RADIUS: f32 = 20.0;
+    const FORECAST_INSET: f32 = 8.0;
 
-/// Total distance added below the weather pill while the calendar is open.
-pub const WEATHER_CALENDAR_EXTENSION: f32 = WEATHER_CALENDAR_GRID_TOP
-    + (WEATHER_CALENDAR_ROWS - 1.0) * WEATHER_CALENDAR_ROW_HEIGHT
-    + WEATHER_CALENDAR_BOTTOM_MARGIN;
+    pub fn expanded_x(x: f32, expansion: f32) -> f32 {
+        x - Self::FORECAST_X * expansion * 0.5
+    }
+
+    pub fn popup_size(expansion: f32) -> Vec2 {
+        Vec2::new(
+            Self::WIDTH + Self::FORECAST_X * expansion,
+            Self::EXTENSION * expansion,
+        )
+    }
+
+    pub fn pill_center(height: f32) -> Vec2 {
+        Vec2::new((Self::WIDTH + Self::FORECAST_X) * 0.5, -height * 0.5)
+    }
+
+    pub fn cell(index: usize) -> Vec2 {
+        Vec2::new(
+            (index % 7) as f32 * Self::WIDTH / 7.0 + Self::WIDTH / 14.0,
+            96.0 + (index / 7) as f32 * 23.0,
+        )
+    }
+
+    pub fn weekday(index: usize) -> Vec2 {
+        Vec2::new(Self::cell(index).x, 69.0)
+    }
+
+    pub fn forecast_center(height: f32, row: f32) -> f32 {
+        40.0 + height * 0.5 + row * (height + Self::COLUMN_GAP)
+    }
+
+    pub fn forecast_center_at(height: f32, row: f32, reveal: f32) -> Vec2 {
+        Self::pill_center(height).lerp(
+            Vec2::new(Self::DETAILS.x, Self::forecast_center(height, row)),
+            reveal,
+        )
+    }
+
+    pub fn forecast_item(height: f32, row: f32, column: usize, count: usize, line: usize) -> Vec2 {
+        let line = line as f32 * 2.0 - 1.0;
+        Vec2::new(
+            Self::FORECAST_X + (column as f32 + 0.5) * Self::WIDTH / count as f32,
+            Self::forecast_center(height, row) + line * 9.0,
+        )
+    }
+
+    pub fn forecast_row(height: f32, row: f32, reveal: f32) -> (Vec2, Vec2) {
+        let size = Vec2::new(Self::WIDTH - Self::FORECAST_INSET * 2.0, height);
+        (
+            Self::forecast_center_at(height, row, reveal) - size * 0.5,
+            size,
+        )
+    }
+
+    pub fn forecast_reveal(expansion: f32, row: f32) -> f32 {
+        smoothstep(0.48 + row * 0.08, 0.76 + row * 0.08, expansion)
+    }
+
+    pub fn header_reveal(expansion: f32) -> f32 {
+        smoothstep(0.5, 0.8, expansion)
+    }
+
+    pub fn arrow(side: f32, reveal: f32) -> Vec2 {
+        Vec2::new(
+            Self::WIDTH * 0.5 + side * (Self::WIDTH * 0.5 - 28.0) * reveal,
+            Self::TITLE.y - (1.0 - reveal) * 14.0,
+        )
+    }
+}
 
 impl TrackPill {
     pub const fn star_count(&self) -> f32 {

@@ -3,7 +3,7 @@ use crate::{
     render::{RenderState, status::Status, weather::Weather},
     spotify::PlaybackState,
 };
-use cantus_shared::WEATHER_CALENDAR_EXTENSION;
+use cantus_shared::WeatherLayout;
 use glam::Vec2;
 use std::{
     io,
@@ -20,7 +20,7 @@ mod spotify;
 
 const PANEL_START: f32 = 6.0;
 const PANEL_OVERFLOW: f32 = 16.0;
-const PANEL_EXTENSION: f32 = WEATHER_CALENDAR_EXTENSION + PANEL_OVERFLOW;
+const PANEL_EXTENSION: f32 = WeatherLayout::EXTENSION + PANEL_OVERFLOW;
 const PARTICLE_COUNT: usize = 64;
 const MAX_RENDER_INSTANCES: usize = 64;
 const TRACK_SPACING_MS: f32 = 4000.0;
