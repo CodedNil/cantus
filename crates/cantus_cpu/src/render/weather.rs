@@ -23,6 +23,7 @@ const HOURLY_SAMPLES: [usize; 6] = [0, 4, 8, 12, 16, 20];
 struct ForecastItem {
     text: [String; 2],
     conditions: WeatherCondition,
+    hour: f32,
 }
 
 fn reveal_progress(expansion: f32, y: f32) -> f32 {
@@ -142,6 +143,8 @@ impl Weather {
             x: rect(status, height).x0,
             width: WIDTH,
             sun: sun_position(hour, self.sun_hours),
+            sun_hours: self.sun_hours,
+            hourly_times: self.hourly.each_ref().map(|item| item.hour),
             today: vec2(WIDTH * 0.5, 0.0).lerp(marker, marker_reveal),
             calendar_expansion: self.calendar_expansion,
             conditions: self.conditions,
@@ -293,6 +296,7 @@ impl Weather {
                 time.strftime("%H:%M").to_string(),
                 format!("{:.0}°", forecast.hourly.temperature_2m[source]),
             ];
+            item.hour = f32::from(time.hour()) + f32::from(time.minute()) / 60.0;
             item.conditions = conditions(&forecast.hourly.at(source));
         }
         for (day, item) in self.daily.iter_mut().enumerate() {

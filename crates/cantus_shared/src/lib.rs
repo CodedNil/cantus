@@ -124,6 +124,14 @@ impl UsageHistory {
     }
 }
 
+/// Range mapped to the 0.0..=1.0 fraction stored in `ProcessorStatus::temperature_history`.
+pub const MIN_TEMPERATURE: f32 = 30.0;
+pub const MAX_TEMPERATURE: f32 = 100.0;
+
+pub fn normalize_temperature(celsius: f32) -> f32 {
+    ((celsius - MIN_TEMPERATURE) / (MAX_TEMPERATURE - MIN_TEMPERATURE)).saturate()
+}
+
 #[repr(C)]
 #[derive(Copy, Clone, Default)]
 #[cfg_attr(feature = "cpu", derive(bytemuck::Pod, bytemuck::Zeroable))]
@@ -131,6 +139,7 @@ pub struct ProcessorStatus {
     pub temperature: f32,
     pub usage: UsageHistory,
     pub memory: UsageHistory,
+    pub temperature_history: UsageHistory,
 }
 
 #[repr(C)]
@@ -171,6 +180,8 @@ pub struct WeatherPill {
     pub x: f32,
     pub width: f32,
     pub sun: [f32; 2],
+    pub sun_hours: [f32; 2],
+    pub hourly_times: [f32; 6],
     pub today: Vec2,
     pub calendar_expansion: f32,
     pub conditions: [WeatherCondition; 3],

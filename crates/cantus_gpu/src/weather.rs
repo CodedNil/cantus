@@ -5,6 +5,7 @@ use crate::{
 use cantus_shared::{
     GlobalUniforms, WeatherCondition as Condition, WeatherLayout, WeatherPill, smoothstep,
 };
+use core::f32::consts::PI;
 use spirv_std::{
     arch::kill,
     glam::{FloatExt, UVec2, Vec2, Vec3, Vec4, uvec2, vec2, vec3},
@@ -61,17 +62,6 @@ pub fn cloud_mass(p: Vec2, scale: f32, time: f32) -> f32 {
     fbm(p / scale * 0.14 + vec2(time * 0.012, 6.1))
 }
 
-fn god_rays(p: Vec2, sun: Vec2, width: f32, cloud_scale: f32, time: f32) -> f32 {
-    let ray = p - sun;
-    let depth = ray.y.max(0.0);
-    let occlusion = smoothstep(0.42, 0.68, cloud_mass(p.lerp(sun, 0.3), cloud_scale, time))
-        + smoothstep(0.42, 0.68, cloud_mass(p.lerp(sun, 0.6), cloud_scale, time));
-    (1.0 - occlusion * 0.5)
-        * (0.35 + smoothstep(1.0, 0.0, (ray.x / (depth * 0.55 + 24.0)).abs()) * 0.65)
-        * smoothstep(5.0, 55.0, depth)
-        * smoothstep(width * 0.85, 35.0, ray.length())
-}
-
 fn particles(p: Vec2, movement: Vec2, cell_size: f32, radius: f32, density: f32) -> f32 {
     let q = p - movement;
     let cell = (q / cell_size).floor();
@@ -113,8 +103,9 @@ fn scene(
     let p = refracted * size;
     let (cloud_scale, time) = (global.bar_height.y, global.time);
     let uv = p / size;
-    let daylight = smoothstep(-0.02, 0.12, sun_y);
-    let twilight = smoothstep(0.18, 0.0, sun_y) * smoothstep(-0.45, -0.05, sun_y);
+    let daylight = smoothstep(-0.04, 0.2, sun_y);
+    let blue_hour = smoothstep(-0.32, -0.08, sun_y) * (1.0 - daylight);
+    let twilight = smoothstep(-0.18, 0.0, sun_y) * smoothstep(0.2, 0.02, sun_y);
     let vertical = smoothstep(1.0, 0.0, uv.y);
     let mut color = vec3(0.006, 0.012, 0.035)
         .lerp(vec3(0.025, 0.04, 0.095), vertical)
@@ -123,8 +114,12 @@ fn scene(
             daylight,
         )
         .lerp(
-            vec3(0.68, 0.38, 0.3).lerp(vec3(0.24, 0.22, 0.36), vertical),
-            twilight * 0.7,
+            vec3(0.10, 0.16, 0.30).lerp(vec3(0.22, 0.25, 0.45), vertical),
+            blue_hour * 0.8,
+        )
+        .lerp(
+            vec3(0.78, 0.30, 0.20).lerp(vec3(0.38, 0.22, 0.42), vertical),
+            twilight * 0.9,
         );
 
     let stars = particles(p, Vec2::ZERO, 18.0, 0.55, 0.25) * (1.0 - daylight);
@@ -132,7 +127,7 @@ fn scene(
 
     let mass = cloud_mass(p, cloud_scale, time);
     let billows = fbm(p / cloud_scale * 0.287 + vec2(time * 0.018, -3.7));
-    let cloud_shape = smoothstep(0.43, 0.69, mass + (billows - 0.5) * 0.2);
+    let cloud_shape = smoothstep(0.35, 0.6, mass + (billows - 0.5) * 0.24);
     let cloud_light = smoothstep(0.42, 0.72, billows) * 0.55 + smoothstep(0.48, 0.7, mass) * 0.45;
     let cloud_color = vec3(0.16, 0.2, 0.28)
         .lerp(vec3(0.32, 0.36, 0.43), cloud_light)
@@ -144,7 +139,8 @@ fn scene(
             vec3(0.5, 0.36, 0.4).lerp(vec3(0.76, 0.59, 0.56), cloud_light),
             twilight * 0.45,
         );
-    let cloud_mask = weather.cloud * cloud_shape * 0.82;
+    // Keep a low-frequency veil of the forecast coverage visible
+    let cloud_mask = weather.cloud * (0.12 + cloud_shape * 0.7);
     color = color.lerp(cloud_color, cloud_mask);
 
     color = color.lerp(vec3(0.1, 0.17, 0.25), weather.rain * 0.2);
@@ -192,11 +188,7 @@ fn sun_layer(
         sun_color,
         (smoothstep(62.0, 4.0, distance) * 0.24 + smoothstep(11.0, 1.0, distance) * 0.7) * clear,
     );
-    color
-        + sun_color
-            * god_rays(point, sun, size.x, size.y, time)
-            * clear
-            * (0.14 + weather.cloud * 0.12)
+    color + sun_color * clear * 0.16
 }
 
 /// Sky backdrop shared by the weather and status pills, blending the forecast across the pill's width; also returns the refracted pixel position.
@@ -238,6 +230,34 @@ fn forecast_at<const N: usize>(x: f32, forecasts: &[Condition; N]) -> Condition 
         forecasts[if index + 1 < N { index + 1 } else { index }],
         smoothstep(0.0, 1.0, position - position.floor()),
     )
+}
+
+/// Map the whole hourly strip onto one continuous timeline.
+fn forecast_time_at(x: f32, hours: &[f32; 6]) -> f32 {
+    let mut end = hours[5];
+    if end < hours[0] {
+        end += 24.0;
+    }
+    let interval = (end - hours[0]) / 5.0;
+    let start = hours[0] - interval * 0.5;
+    let time = start + (x / WeatherLayout::WIDTH).clamp(0.0, 1.0) * (end - start + interval * 0.5);
+    time % 24.0
+}
+
+fn sun_position(hour: f32, [sunrise, sunset]: [f32; 2]) -> [f32; 2] {
+    let daylight = sunset - sunrise;
+    if hour >= sunrise && hour <= sunset {
+        let phase = (hour - sunrise) / daylight;
+        [phase, (phase * PI).sin()]
+    } else {
+        let night = 24.0 - daylight;
+        let phase = if hour < sunrise {
+            (hour + 24.0 - sunset) / night
+        } else {
+            (hour - sunset) / night
+        };
+        [if hour >= sunset { 1.0 } else { 0.0 }, -(phase * PI).sin()]
+    }
 }
 
 #[spirv(vertex)]
@@ -309,9 +329,6 @@ pub fn fs_weather(
     } else {
         forecast_at(forecast_x, &pill.daily)
     };
-    let object_size = vec2(popup_size.x, pill_size.y + popup_size.y);
-    let object_local = popup_local + vec2(0.0, pill_size.y);
-    let object_conditions = blended_conditions(object_local, object_size, pill.conditions);
     let pill_conditions = blended_conditions(main_local, pill_size, pill.conditions);
     let row_inside = row_dist < 0.5 && row_reveal > 0.0;
     let (scene_local, scene_size, scene_dist, scene_conditions) = if row_inside {
@@ -319,19 +336,34 @@ pub fn fs_weather(
             row_local,
             row_size,
             row_dist,
-            object_conditions.lerp(conditions, row_reveal),
+            pill.conditions[0].lerp(conditions, row_reveal),
         )
     } else {
-        (main_local, pill_size, main_dist, pill_conditions)
+        let popup_conditions = if popup_dist < 0.5 {
+            pill.conditions[0]
+        } else {
+            pill_conditions
+        };
+        (main_local, pill_size, main_dist, popup_conditions)
     };
     let refracted = interaction.refract(scene_local, scene_size, scene_dist);
+    let sun_height = if row_inside && row < 0.5 {
+        sun_position(
+            forecast_time_at(forecast_x, &pill.hourly_times),
+            pill.sun_hours,
+        )[1]
+    } else if row_inside {
+        sun_position(12.0, pill.sun_hours)[1]
+    } else {
+        pill.sun[1]
+    };
     let mut color = scene(
         global,
         interaction,
         refracted,
         scene_size,
         scene_dist,
-        pill.sun[1],
+        sun_height,
         scene_conditions,
     );
     if !row_inside && row_dist < 12.0 {
@@ -386,5 +418,8 @@ pub fn fs_weather(
     let arrows = arrow_button(-1.0) + arrow_button(1.0);
     color = color.lerp(Vec3::ONE, (arrows * header_reveal).min(1.0));
     let color = color.lerp(color * 1.5 + 0.1, interaction.ripple_flash);
-    *out_color = (color * mask).extend(alpha);
+
+    let forecast_alpha = if row_inside { row_reveal } else { 1.0 };
+    let layer_alpha = alpha * forecast_alpha;
+    *out_color = (color * mask * forecast_alpha).extend(layer_alpha);
 }

@@ -1,5 +1,5 @@
 use crate::{AppUpdater, send_update};
-use cantus_shared::{ProcessorStatus, StatusLayout, StatusPill};
+use cantus_shared::{ProcessorStatus, StatusLayout, StatusPill, normalize_temperature};
 use glam::{FloatExt, Vec2, vec2};
 use std::{
     fs,
@@ -178,6 +178,7 @@ fn monitor(updater: &AppUpdater) {
     let mut gpus = Gpus::new_with_refreshed_list().ok();
     loop {
         system.refresh_cpu_usage();
+        system.refresh_cpu_temperature();
         system.refresh_memory();
         components.refresh(false);
         if let Some(gpus) = &mut gpus {
@@ -213,18 +214,14 @@ fn monitor(updater: &AppUpdater) {
                 ))
             });
 
-        cpu.temperature = components
-            .iter()
-            .find(|component| {
-                ["k10temp", "coretemp", "zenpower", "cpu"]
-                    .iter()
-                    .any(|name| component.label().contains(name))
-            })
-            .and_then(sysinfo::Component::temperature)
-            .unwrap_or_default();
+        if let Some(cpu_device) = system.cpus().as_ref().first() {
+            cpu.temperature = cpu_device.temperature();
+        }
         cpu.usage.push(system.global_cpu_usage() / 100.0);
         cpu.memory
             .push(ratio(system.used_memory(), system.total_memory()));
+        cpu.temperature_history
+            .push(normalize_temperature(cpu.temperature));
 
         if let Some(gpu_device) = gpus.as_ref().and_then(|gpus| gpus.list().first()) {
             gpu.temperature = gpu_device.temperature().unwrap_or_default();
@@ -234,6 +231,8 @@ fn monitor(updater: &AppUpdater) {
                 gpu_device.used_memory().unwrap_or_default(),
                 gpu_device.total_memory().unwrap_or_default(),
             ));
+            gpu.temperature_history
+                .push(normalize_temperature(gpu.temperature));
         }
 
         if !send_update(updater, move |app| {

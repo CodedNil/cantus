@@ -19,6 +19,7 @@ const CHART_SIZE: Vec2 = Vec2::new(21.0, 9.2);
 const CHART_LINE_WIDTH: f32 = 0.85;
 const USAGE_COLOR: Vec3 = Vec3::new(0.32, 0.68, 1.0);
 const MEMORY_COLOR: Vec3 = Vec3::new(0.78, 0.3, 1.0);
+const TEMPERATURE_COLOR: Vec3 = Vec3::new(1.0, 0.5, 0.12);
 const MUTED_COLOR: Vec3 = Vec3::new(1.0, 0.24, 0.3);
 const HISTORY_END: usize = STATUS_HISTORY_SAMPLES - 1;
 const HISTORY_STEP: f32 = CHART_SIZE.x * 2.0 / HISTORY_END as f32;
@@ -117,7 +118,15 @@ fn processor_monitor(
         CHART_SIZE.y,
     ));
     let graphs = history_curve(point, &processor.usage, USAGE_COLOR, 0.13, scroll, chart)
-        + history_curve(point, &processor.memory, MEMORY_COLOR, 0.07, scroll, chart);
+        + history_curve(point, &processor.memory, MEMORY_COLOR, 0.07, scroll, chart)
+        + history_curve(
+            point,
+            &processor.temperature_history,
+            TEMPERATURE_COLOR,
+            0.1,
+            scroll,
+            chart,
+        );
     let grid = (((point + CHART_SIZE) / vec2(7.0, 6.1)).fract() - 0.5).abs();
     let grid = smoothstep(0.49, 0.46, grid.x).max(smoothstep(0.49, 0.45, grid.y));
     let frame_color = vec3(0.025, 0.09, 0.15)
