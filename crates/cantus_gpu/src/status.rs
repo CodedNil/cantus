@@ -1,9 +1,10 @@
 use crate::{
     fill, pill_fragment, pill_vertex, sd_capsule_box, sd_chevron, sd_rounded_box, stroke,
-    weather::{cloud_mass, hash, sky_background},
+    tempo::{cloud_mass, hash, sky_background},
 };
 use cantus_shared::{
-    GlobalUniforms, ProcessorStatus, STATUS_HISTORY_SAMPLES, StatusPill, UsageHistory, smoothstep,
+    GlobalUniforms, smoothstep,
+    status::{ProcessorStatus, STATUS_HISTORY_SAMPLES, StatusPill, UsageHistory},
 };
 use core::f32::consts::{PI, TAU};
 use spirv_std::{
@@ -73,29 +74,36 @@ fn cpu_pin_distance(point: Vec2) -> f32 {
     long_edge.min(end_cap)
 }
 
+/// The 4 chart samples a `history_curve` needs to interpolate through `index`.
+fn history_samples(history: &UsageHistory, index: usize) -> [f32; 4] {
+    let previous = if index > 0 { index - 1 } else { 0 };
+    let height = |i: usize| CHART_SIZE.y * (1.0 - history.get(i.min(HISTORY_END)) * 2.0);
+    [
+        height(previous),
+        height(index),
+        height(index + 1),
+        height(index + 2),
+    ]
+}
+
 fn history_curve(
-    point: Vec2,
-    history: &UsageHistory,
+    point_y: f32,
+    phase: f32,
+    progress: f32,
+    [before, at, after, next]: [f32; 4],
     color: Vec3,
     fill_strength: f32,
-    scroll: f32,
     inside: f32,
 ) -> Vec3 {
-    let sample = ((point.x + CHART_SIZE.x) / HISTORY_STEP + scroll).clamp(0.0, HISTORY_END as f32);
-    let index = sample.floor() as usize;
-    let height = |index: usize| CHART_SIZE.y * (1.0 - history.get(index.min(HISTORY_END)) * 2.0);
-    let previous = if index > 0 { index - 1 } else { 0 };
-    let start = (height(previous) + height(index) * 2.0 + height(index + 1)) * 0.25;
-    let end = (height(index) + height(index + 1) * 2.0 + height(index + 2)) * 0.25;
-    let phase = sample.fract();
-    let progress = smoothstep(0.0, 1.0, phase);
+    let start = (before + at * 2.0 + after) * 0.25;
+    let end = (at + after * 2.0 + next) * 0.25;
     let graph_y = start + (end - start) * progress;
     let slope = (end - start) * 6.0 * phase * (1.0 - phase) / HISTORY_STEP;
     let line = stroke(
-        (point.y - graph_y).abs() / (1.0 + slope * slope).sqrt(),
+        (point_y - graph_y).abs() / (1.0 + slope * slope).sqrt(),
         CHART_LINE_WIDTH,
     );
-    color * inside * (fill(graph_y - point.y) * fill_strength + line)
+    color * inside * (fill(graph_y - point_y) * fill_strength + line)
 }
 
 fn processor_monitor(
@@ -117,15 +125,31 @@ fn processor_monitor(
         CHART_SIZE.x - CHART_SIZE.y,
         CHART_SIZE.y,
     ));
-    let graphs = history_curve(point, &processor.usage, USAGE_COLOR, 0.13, scroll, chart)
-        + history_curve(point, &processor.memory, MEMORY_COLOR, 0.07, scroll, chart)
-        + history_curve(
-            point,
-            &processor.temperature_history,
+    let sample = ((point.x + CHART_SIZE.x) / HISTORY_STEP + scroll).clamp(0.0, HISTORY_END as f32);
+    let index = sample.floor() as usize;
+    let phase = sample.fract();
+    let progress = smoothstep(0.0, 1.0, phase);
+    let curve = |samples, color, fill_strength| {
+        history_curve(
+            point.y,
+            phase,
+            progress,
+            samples,
+            color,
+            fill_strength,
+            chart,
+        )
+    };
+    let graphs = curve(history_samples(&processor.usage, index), USAGE_COLOR, 0.13)
+        + curve(
+            history_samples(&processor.memory, index),
+            MEMORY_COLOR,
+            0.07,
+        )
+        + curve(
+            history_samples(&processor.temperature_history, index),
             TEMPERATURE_COLOR,
             0.1,
-            scroll,
-            chart,
         );
     let grid = (((point + CHART_SIZE) / vec2(7.0, 6.1)).fract() - 0.5).abs();
     let grid = smoothstep(0.49, 0.46, grid.x).max(smoothstep(0.49, 0.45, grid.y));

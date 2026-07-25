@@ -35,10 +35,12 @@ pub struct TextStyle {
 
 impl TextStyle {
     pub const PRIMARY: Self = Self::new(16.0, 700);
-    pub const TODAY: Self = Self::new(16.0, 900);
+    pub const TODAY: Self = Self::new(24.0, 900);
     pub const DETAILS: Self = Self::new(14.0, 700);
     pub const WEATHER: Self = Self::new(24.0, 600);
     pub const CALENDAR_TITLE: Self = Self::new(20.0, 750);
+    pub const CALENDAR_TITLE_HOVER: Self = Self::new(24.0, 900);
+    pub const CALENDAR_ARROW_HOVER: Self = Self::new(30.0, 900);
 
     const fn new(size: f32, weight: u16) -> Self {
         Self { size, weight }

@@ -1,10 +1,9 @@
 use crate::{
     interaction::InteractionState,
-    render::{RenderState, status::Status, weather::Weather},
+    render::{RenderState, status::Status, tempo::Weather},
     spotify::PlaybackState,
 };
-use cantus_shared::WeatherLayout;
-use glam::Vec2;
+use cantus_shared::tempo;
 use std::{
     io,
     sync::mpsc::{self, Sender},
@@ -14,43 +13,17 @@ use tracing_subscriber::{filter::Targets, fmt, layer::SubscriberExt, util::Subsc
 
 mod config;
 mod interaction;
+mod openmeteo;
 mod platform;
 mod render;
 mod spotify;
 
 const PANEL_START: f32 = 6.0;
 const PANEL_OVERFLOW: f32 = 16.0;
-const PANEL_EXTENSION: f32 = WeatherLayout::EXTENSION + PANEL_OVERFLOW;
+const PANEL_EXTENSION: f32 = tempo::EXTENSION + PANEL_OVERFLOW;
 const PARTICLE_COUNT: usize = 64;
 const MAX_RENDER_INSTANCES: usize = 64;
 const TRACK_SPACING_MS: f32 = 4000.0;
-
-#[derive(Copy, Clone)]
-struct Rect {
-    x0: f32,
-    y0: f32,
-    x1: f32,
-    y1: f32,
-}
-
-impl Rect {
-    const fn new(x0: f32, y0: f32, x1: f32, y1: f32) -> Self {
-        Self { x0, y0, x1, y1 }
-    }
-
-    const fn pill(x: f32, width: f32, height: f32) -> Self {
-        Self::new(x, PANEL_START, x + width, PANEL_START + height)
-    }
-
-    fn from_center(center: Vec2, half_size: Vec2) -> Self {
-        let (min, max) = (center - half_size, center + half_size);
-        Self::new(min.x, min.y, max.x, max.y)
-    }
-
-    fn contains(self, point: Vec2) -> bool {
-        point.x >= self.x0 && point.x <= self.x1 && point.y >= self.y0 && point.y <= self.y1
-    }
-}
 
 type Update<T> = Box<dyn FnOnce(&mut T) + Send>;
 type AppUpdater = Sender<Update<CantusApp>>;

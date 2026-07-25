@@ -1,12 +1,13 @@
 use crate::{
-    AppUpdater, Rect, TRACK_SPACING_MS, Update,
+    AppUpdater, TRACK_SPACING_MS, Update,
     config::{self, Config},
+    interaction::Rect,
     render::art::{self, ArtState},
     send_update,
 };
 use arrayvec::{ArrayString, ArrayVec};
 use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
-use cantus_shared::{AudioFeatures, MAX_PILL_PLAYLIST_ICONS};
+use cantus_shared::track::{AudioFeatures, MAX_PILL_PLAYLIST_ICONS};
 use glam::Vec2;
 use jiff::Timestamp;
 use serde::{Deserialize, Deserializer, Serialize, de::DeserializeOwned};

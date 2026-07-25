@@ -9,9 +9,9 @@ use spirv_std::num_traits::Float;
 pub mod particles;
 pub mod playhead;
 pub mod status;
+pub mod tempo;
 pub mod text;
 pub mod track;
-pub mod weather;
 
 pub const fn quad_coord(vertex_index: u32) -> Vec2 {
     vec2((vertex_index & 1) as f32, (vertex_index >> 1) as f32)

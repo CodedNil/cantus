@@ -1,13 +1,16 @@
 use crate::{
     CantusApp, MAX_RENDER_INSTANCES, PANEL_EXTENSION, PANEL_OVERFLOW, PANEL_START, PARTICLE_COUNT,
-    Rect, TRACK_SPACING_MS,
+    TRACK_SPACING_MS,
     config::Config,
+    interaction::Rect,
     spotify::{CondensedPlaylist, Track, playlist_icons},
 };
 use art::{AlbumArt, ArtState};
 use cantus_shared::{
-    AudioFeatures, GlobalUniforms, ICON_SPACING, MAX_PILL_PLAYLIST_ICONS, Particle,
-    PlayheadUniforms, StatusPill, TrackPill, WeatherPill, approach,
+    GlobalUniforms, Particle, PlayheadUniforms, approach,
+    status::StatusPill,
+    tempo::{WeatherPill, sun_position},
+    track::{AudioFeatures, ICON_SPACING, MAX_PILL_PLAYLIST_ICONS, TrackPill},
 };
 use glam::{FloatExt, Vec2, vec2};
 use pipelines::{IMAGE_SIZE, MAX_TEXTURE_IMAGES, write_texture_region};
@@ -20,7 +23,7 @@ use std::{
     sync::{Arc, Weak},
     time::Instant,
 };
-use text_render::{TextRenderer, TextStyle};
+use text::{TextRenderer, TextStyle};
 use wgpu::{
     BindGroup, Buffer, Color, CommandEncoderDescriptor, CurrentSurfaceTexture, Device, Instance,
     LoadOp, Operations, Queue, RenderPass, RenderPassColorAttachment, RenderPassDescriptor,
@@ -30,8 +33,8 @@ use wgpu::{
 pub mod art;
 pub mod pipelines;
 pub mod status;
-pub mod text_render;
-pub mod weather;
+pub mod tempo;
+pub mod text;
 
 const SPARK_EMISSION: f32 = 20.0;
 const SPARK_VELOCITY_X: Range<usize> = 40..60;
@@ -243,7 +246,7 @@ impl CantusApp {
         let config = &self.config;
         let mut reserved = config.history_width + 16.0 + GAP;
         if config.weather_enabled {
-            reserved += weather::WIDTH + GAP;
+            reserved += tempo::WIDTH + GAP;
         }
         if config.status_enabled {
             reserved += status::WIDTH + GAP;
@@ -424,25 +427,28 @@ impl CantusApp {
                 status.pill(screen_width, power_action, power_progress)
             },
         );
+        let mouse = self.render.uniforms.mouse_pos;
+        let mouse_active = self.interaction.mouse_pressure > 0.0;
         let weather_scene = self.weather.as_mut().map(|weather| {
             weather.scene(
                 &self.render.status,
                 self.config.height,
-                self.render.uniforms.mouse_pos,
-                self.interaction.mouse_pressure > 0.0,
+                mouse,
+                mouse_active,
                 dt,
             )
         });
-        let weather = weather_scene.map(|(weather, weather_label)| {
-            self.render.status.sun = weather.sun;
-            self.render.status.conditions = weather.conditions;
+        let weather = weather_scene.map(|(weather, weather_label, hour)| {
+            self.render.uniforms.weather_hour = hour;
+            self.render.status.sun = sun_position(hour, weather.sun_hours);
+            self.render.status.conditions = weather.hourly[0];
             let scale = self.render.scale;
             let label_y = PANEL_START + self.config.height * 0.46;
             let gpu = self.render.gpu.as_mut().unwrap();
             gpu.text_renderer.render_centered_label(
                 &gpu.queue,
                 &weather_label,
-                vec2(weather.x + weather::WIDTH * 0.5, label_y),
+                vec2(weather.x + tempo::WIDTH * 0.5, label_y),
                 TextStyle::WEATHER,
                 1.0,
                 scale,
@@ -450,6 +456,8 @@ impl CantusApp {
             self.weather.as_ref().unwrap().calendar_labels(
                 &self.render.status,
                 self.config.height,
+                mouse,
+                mouse_active,
                 |text, position, alpha, style| {
                     gpu.text_renderer
                         .render_centered_label(&gpu.queue, text, position, style, alpha, scale);

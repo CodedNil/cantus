@@ -1,16 +1,16 @@
 use crate::{
     pill_fragment, pill_sheen, pixel_to_ndc, quad_coord, sd_capsule_box, sd_star, smooth_union,
-    unpack3x8unorm,
+    tempo::avalanche, unpack3x8unorm,
 };
 use cantus_shared::{
-    AudioFeatures, GlobalUniforms, ICON_WIDTH, MAX_PILL_PLAYLIST_ICONS, PillIconRow, TrackPill,
-    smoothstep,
+    GlobalUniforms, smoothstep,
+    track::{AudioFeatures, ICON_WIDTH, MAX_PILL_PLAYLIST_ICONS, PillIconRow, TrackPill},
 };
 use core::f32::consts::{FRAC_PI_2, TAU};
 use spirv_std::{
     Sampler,
     arch::{Derivative, kill},
-    glam::{FloatExt, Vec2, Vec3, Vec4, vec2, vec3},
+    glam::{FloatExt, UVec2, Vec2, Vec3, Vec4, uvec2, vec2, vec3},
     image::Image2dArray,
     spirv,
 };
@@ -25,15 +25,9 @@ fn plasma_field(uv: Vec2, packed: u32, x: f32, y: f32, phase: f32) -> Vec4 {
 }
 
 fn hash(point: Vec2, seed: f32) -> f32 {
-    let mut value = ((point.x as i32 as u32) * 1_664_525)
-        ^ ((point.y as i32 as u32) * 1_013_904_223)
-        ^ (seed.to_bits() * 2_654_435_761);
-    value ^= value >> 16;
-    value *= 2_246_822_519;
-    value ^= value >> 13;
-    value *= 3_266_489_917;
-    value ^= value >> 16;
-    value as f32 * 2.328_306_4e-10
+    let cell = uvec2(point.x as i32 as u32, point.y as i32 as u32);
+    let value = avalanche(cell ^ UVec2::splat(seed.to_bits() * 2_654_435_761));
+    value.x as f32 * 2.328_306_4e-10
 }
 
 fn speckle(pixel: Vec2, time: f32, seed: f32, audio: AudioFeatures) -> f32 {
@@ -77,6 +71,7 @@ fn near_icon(pixel: Vec2, center: Vec2) -> bool {
 }
 
 fn presence(value: f32) -> f32 {
+    // Not `f32::from(bool)`: it lowers through a `u8` cast, which needs `OpCapability Int8`.
     if value > 0.0 { 1.0 } else { 0.0 }
 }
 

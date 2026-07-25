@@ -1,14 +1,42 @@
 use crate::{
-    CantusApp, PANEL_START, Rect,
+    CantusApp, PANEL_START,
     render::status::{PowerAction, Status},
     spotify::{CondensedPlaylist, PlaylistId, Track, TrackId, playlist_icons},
 };
 use cantus_shared::{
-    ICON_WIDTH, PillIconRow, RIPPLE_COUNT, RipplePulse, pill_icon_primary_center_y, pill_icon_rows,
+    RIPPLE_COUNT, RipplePulse,
+    track::{ICON_WIDTH, PillIconRow, pill_icon_primary_center_y, pill_icon_rows},
 };
 use glam::{Vec2, vec2};
 use std::time::{Duration, Instant};
 use tracing::{info, warn};
+
+#[derive(Copy, Clone)]
+pub struct Rect {
+    pub x0: f32,
+    pub y0: f32,
+    pub x1: f32,
+    pub y1: f32,
+}
+
+impl Rect {
+    pub const fn new(x0: f32, y0: f32, x1: f32, y1: f32) -> Self {
+        Self { x0, y0, x1, y1 }
+    }
+
+    pub const fn pill(x: f32, width: f32, height: f32) -> Self {
+        Self::new(x, PANEL_START, x + width, PANEL_START + height)
+    }
+
+    pub fn from_center(center: Vec2, half_size: Vec2) -> Self {
+        let (min, max) = (center - half_size, center + half_size);
+        Self::new(min.x, min.y, max.x, max.y)
+    }
+
+    pub fn contains(self, point: Vec2) -> bool {
+        point.x >= self.x0 && point.x <= self.x1 && point.y >= self.y0 && point.y <= self.y1
+    }
+}
 
 enum IconAction {
     Rate(u8),
@@ -38,6 +66,28 @@ pub struct InteractionState {
 }
 
 impl CantusApp {
+    /// Every always-on-top overlay widget's bounds (weather popup, status pill).
+    pub fn overlay_rects(&self) -> impl Iterator<Item = Rect> + '_ {
+        [
+            self.weather
+                .as_ref()
+                .map(|weather| weather.interaction_rect(&self.render.status, self.config.height)),
+            self.status.as_ref().map(|_| {
+                Rect::pill(
+                    self.render.status.x,
+                    self.render.status.width,
+                    self.config.height,
+                )
+            }),
+        ]
+        .into_iter()
+        .flatten()
+    }
+
+    pub fn overlay_contains(&self, point: Vec2) -> bool {
+        self.overlay_rects().any(|rect| rect.contains(point))
+    }
+
     pub fn left_click(&mut self) {
         let mouse_pos = self.render.uniforms.mouse_pos;
         let drag_enabled = self
@@ -96,17 +146,14 @@ impl CantusApp {
     /// Handle click events.
     fn handle_click(&mut self) {
         let mouse_pos = self.render.uniforms.mouse_pos;
-        let timeline = self.timeline();
-        if self.weather.as_mut().is_some_and(|weather| {
+        let calendar_clicked = self.weather.as_mut().is_some_and(|weather| {
             weather.navigate_calendar(mouse_pos, &self.render.status, self.config.height)
-        }) {
+        });
+        if calendar_clicked || self.overlay_contains(mouse_pos) {
             self.pulse(mouse_pos, 1.0);
             return;
         }
-        if self.overlay_contains(mouse_pos) {
-            self.pulse(mouse_pos, 1.0);
-            return;
-        }
+        let timeline = self.timeline();
         let icon_click = |track: &Track| self.icon_at(track, &self.playback.playlists);
 
         if let Some((track_id, action)) = self
@@ -120,16 +167,48 @@ impl CantusApp {
             self.emit_click_particles(mouse_pos);
 
             match action {
-                IconAction::Rate(rating) => self.update_star_rating(track_id, rating),
+                IconAction::Rate(rating) => {
+                    self.spotify.update_library(
+                        track_id,
+                        self.playback
+                            .playlists
+                            .iter_mut()
+                            .filter_map(|playlist| {
+                                let add = playlist.rating_index? == rating;
+                                playlist
+                                    .set_membership(track_id, add)
+                                    .then_some((playlist.id, add))
+                            })
+                            .collect(),
+                        Some(rating >= 5),
+                    );
+                }
                 IconAction::TogglePlaylist(playlist_id) => {
-                    self.toggle_playlist_membership(track_id, playlist_id);
+                    let Some(playlist) = self
+                        .playback
+                        .playlists
+                        .iter_mut()
+                        .find(|playlist| playlist.id == playlist_id)
+                    else {
+                        warn!(
+                            "Playlist {playlist_id} not found while toggling membership for track {track_id}"
+                        );
+                        return;
+                    };
+                    let add = !playlist.tracks.contains(&track_id);
+                    playlist.set_membership(track_id, add);
+                    self.spotify
+                        .update_library(track_id, vec![(playlist_id, add)], None);
                 }
             }
         } else if self.playhead_rect().contains(mouse_pos) {
             // Play/pause
             self.pulse_at_playhead();
             self.render.last_toggle_playing = Instant::now();
-            self.toggle_playing(!self.playback.playing);
+            let play = !self.playback.playing;
+            info!("{} current track", if play { "Playing" } else { "Pausing" });
+            self.playback.playing = play;
+            self.spotify.set_playing(play);
         } else if let Some((track_id, (track_range_a, track_range_b))) =
             self.playback.queue.iter().rev().find_map(|track| {
                 let range = track.natural_x_range(timeline.playhead_x, timeline.px_per_ms);
@@ -334,48 +413,5 @@ impl CantusApp {
         }
         // Ignore remote playback updates briefly so they don't fight the local seek.
         state.last_interaction = Instant::now() + Duration::from_secs(2);
-    }
-
-    /// Update Spotify rating playlists for the given track.
-    fn update_star_rating(&mut self, track_id: TrackId, rating_slot: u8) {
-        let changes = self
-            .playback
-            .playlists
-            .iter_mut()
-            .filter_map(|playlist| {
-                let add = playlist.rating_index? == rating_slot;
-                playlist
-                    .set_membership(track_id, add)
-                    .then_some((playlist.id, add))
-            })
-            .collect::<Vec<_>>();
-
-        self.spotify
-            .update_library(track_id, changes, Some(rating_slot >= 5));
-    }
-
-    fn toggle_playlist_membership(&mut self, track_id: TrackId, playlist_id: PlaylistId) {
-        let Some(playlist) = self
-            .playback
-            .playlists
-            .iter_mut()
-            .find(|playlist| playlist.id == playlist_id)
-        else {
-            warn!(
-                "Playlist {playlist_id} not found while toggling membership for track {track_id}"
-            );
-            return;
-        };
-        let add = !playlist.tracks.contains(&track_id);
-        playlist.set_membership(track_id, add);
-        self.spotify
-            .update_library(track_id, vec![(playlist_id, add)], None);
-    }
-
-    /// Set Spotify playing or paused.
-    fn toggle_playing(&mut self, play: bool) {
-        info!("{} current track", if play { "Playing" } else { "Pausing" });
-        self.playback.playing = play;
-        self.spotify.set_playing(play);
     }
 }

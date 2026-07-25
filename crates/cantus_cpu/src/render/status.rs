@@ -1,5 +1,5 @@
 use crate::{AppUpdater, send_update};
-use cantus_shared::{ProcessorStatus, StatusLayout, StatusPill, normalize_temperature};
+use cantus_shared::status::{ProcessorStatus, StatusLayout, StatusPill};
 use glam::{FloatExt, Vec2, vec2};
 use std::{
     fs,
@@ -25,6 +25,13 @@ const AUDIO_BUFFER_SIZE: usize = 8192;
 const AUDIO_SLOT: u32 = 3;
 const REBOOT_SLOT: u32 = 4;
 const POWER_OFF_SLOT: u32 = 5;
+/// Range mapped to the 0.0..=1.0 fraction stored in `ProcessorStatus::temperature_history`.
+const MIN_TEMPERATURE: f32 = 30.0;
+const MAX_TEMPERATURE: f32 = 100.0;
+
+fn normalize_temperature(celsius: f32) -> f32 {
+    ((celsius - MIN_TEMPERATURE) / (MAX_TEMPERATURE - MIN_TEMPERATURE)).saturate()
+}
 
 #[repr(u32)]
 #[derive(Clone, Copy, PartialEq, Eq)]

@@ -1,10 +1,10 @@
 use crate::{
     CantusApp, MAX_RENDER_INSTANCES, PARTICLE_COUNT,
-    render::{GpuPass, GpuResources, ImageAtlas, text_render::TextRenderer},
+    render::{GpuPass, GpuResources, ImageAtlas, text::TextRenderer},
 };
 use cantus_shared::{
-    GlobalUniforms, GlyphInstance, MAX_GLYPH_INSTANCES, Particle, PlayheadUniforms, StatusPill,
-    TrackPill, WeatherPill,
+    GlobalUniforms, GlyphInstance, MAX_GLYPH_INSTANCES, Particle, PlayheadUniforms,
+    status::StatusPill, tempo::WeatherPill, track::TrackPill,
 };
 use std::{
     mem::size_of,
@@ -234,7 +234,7 @@ impl CantusApp {
         let weather = self
             .config
             .weather_enabled
-            .then(|| pass!("Weather", WeatherPill, 1));
+            .then(|| pass!("Tempo", WeatherPill, 1));
         let text = pass!(
             "Text",
             GlyphInstance,

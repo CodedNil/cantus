@@ -1,6 +1,7 @@
 use crate::{
-    CantusApp, PANEL_START, Rect,
+    CantusApp, PANEL_START,
     config::{Layer as ConfigLayer, LayerAnchor as ConfigLayerAnchor},
+    interaction::Rect,
 };
 use glam::vec2;
 use std::{
@@ -229,27 +230,6 @@ impl LayerShellApp {
 }
 
 impl CantusApp {
-    fn overlay_rects(&self) -> impl Iterator<Item = Rect> + '_ {
-        [
-            self.weather
-                .as_ref()
-                .map(|weather| weather.interaction_rect(&self.render.status, self.config.height)),
-            self.status.as_ref().map(|_| {
-                Rect::pill(
-                    self.render.status.x,
-                    self.render.status.width,
-                    self.config.height,
-                )
-            }),
-        ]
-        .into_iter()
-        .flatten()
-    }
-
-    pub fn overlay_contains(&self, point: glam::Vec2) -> bool {
-        self.overlay_rects().any(|rect| rect.contains(point))
-    }
-
     fn input_rects(&self) -> impl Iterator<Item = Rect> + '_ {
         self.playback
             .queue

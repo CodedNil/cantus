@@ -4,6 +4,7 @@ version = "0.1.0"
 edition = "2024"
 
 [dependencies]
+bitfields = "3.0.0"
 bytemuck = { workspace = true, optional = true }
 glam = { workspace = true }
 serde = { workspace = true, optional = true }
