@@ -1,14 +1,12 @@
 use crate::{
     CantusApp, PANEL_START,
-    render::status::{PowerAction, Status},
-    spotify::{CondensedPlaylist, PlaylistId, Track, TrackId, playlist_icons},
+    spotify::{PlaylistId, TrackId},
 };
-use cantus_shared::{
-    RIPPLE_COUNT, RipplePulse,
-    track::{ICON_WIDTH, PillIconRow, pill_icon_primary_center_y, pill_icon_rows},
+use glam::Vec2;
+use std::{
+    mem,
+    time::{Duration, Instant},
 };
-use glam::{Vec2, vec2};
-use std::time::{Duration, Instant};
 use tracing::{info, warn};
 
 #[derive(Copy, Clone)]
@@ -38,358 +36,212 @@ impl Rect {
     }
 }
 
-enum IconAction {
-    Rate(u8),
-    TogglePlaylist(PlaylistId),
-}
-
-const POWER_HOLD_DURATION: Duration = Duration::from_millis(1_500);
-const POWER_PULSE_INTERVAL: Duration = Duration::from_millis(420);
-const VOLUME_SCROLL_RANGE: f32 = 100.0;
-
-#[derive(Clone, Copy)]
-struct PowerHold {
-    action: PowerAction,
-    started: Instant,
-    last_pulse: Instant,
-}
-
 #[derive(Default)]
 pub struct InteractionState {
-    pub mouse_pressure: f32, // 0 not hovered - 1 hovered - 2 mouse down
-    pub hovered_track: Option<usize>,
+    pub mouse_pressure: f32, // 0 outside, 1 hovering, 2 held
     pub dragging: bool,
     drag_enabled: bool,
     pub press_origin: Vec2,
-    power_hold: Option<PowerHold>,
-    ripple_cursor: usize,
+    pointer: Vec2,
+    event: PointerEvent,
+    scroll: i32,
+    pub hover_claimed: bool,
+    pulse: Option<Vec2>,
+    pub regions: Vec<Rect>,
+}
+
+#[derive(Default)]
+enum PointerEvent {
+    #[default]
+    None,
+    Press,
+    Release,
+}
+
+pub struct Response {
+    pub hovered: bool,
+    pub pressed: bool,
+    pub clicked: bool,
+}
+
+impl InteractionState {
+    pub fn interact(&mut self, center: Vec2, half_size: Vec2) -> Response {
+        self.respond(Rect::from_center(center, half_size))
+    }
+
+    fn respond(&mut self, rect: Rect) -> Response {
+        let inside = rect.contains(self.pointer);
+        let hovered = self.mouse_pressure > 0.0 && !self.hover_claimed && inside;
+        self.hover_claimed |= hovered;
+        let pressed = inside && matches!(self.event, PointerEvent::Press);
+        let clicked = inside
+            && !self.dragging
+            && self.press_origin.distance(self.pointer) < 2.0
+            && matches!(self.event, PointerEvent::Release);
+        if pressed || clicked {
+            self.event = PointerEvent::None;
+        }
+        if clicked {
+            self.pulse = Some(self.pointer);
+        }
+        Response {
+            hovered,
+            pressed,
+            clicked,
+        }
+    }
+
+    pub fn surface(&mut self, rect: Rect) -> Response {
+        self.regions.push(rect);
+        self.respond(rect)
+    }
+
+    pub fn scroll_surface(&mut self, rect: Rect) -> i32 {
+        self.regions.push(rect);
+        self.scroll(rect)
+    }
+
+    pub fn scroll(&mut self, rect: Rect) -> i32 {
+        if rect.contains(self.pointer) {
+            mem::take(&mut self.scroll)
+        } else {
+            0
+        }
+    }
+
+    pub fn contains(&self, rect: Rect) -> bool {
+        self.mouse_pressure > 0.0 && rect.contains(self.pointer)
+    }
+
+    pub const fn pointer(&self) -> Vec2 {
+        self.pointer
+    }
+
+    pub const fn down(&self) -> bool {
+        self.mouse_pressure > 1.0
+    }
+
+    pub const fn released(&self) -> bool {
+        matches!(self.event, PointerEvent::Release)
+    }
+
+    pub const fn begin_frame(&mut self, pointer: Vec2) {
+        self.pointer = pointer;
+        self.hover_claimed = false;
+    }
+
+    pub const fn end_frame(&mut self) -> Option<Vec2> {
+        let pulse = self.pulse.take();
+        self.event = PointerEvent::None;
+        self.scroll = 0;
+        pulse
+    }
+
+    pub const fn press(&mut self, position: Vec2) {
+        self.mouse_pressure = 2.0;
+        self.press_origin = position;
+        self.event = PointerEvent::Press;
+        self.dragging = false;
+    }
+
+    pub const fn release(&mut self) {
+        self.event = if self.down() {
+            PointerEvent::Release
+        } else {
+            PointerEvent::None
+        };
+        self.mouse_pressure = 1.0;
+    }
+
+    pub fn motion(&mut self, position: Vec2) {
+        if self.drag_enabled {
+            self.dragging |= (position - self.press_origin).abs().max_element() >= 2.0;
+        }
+    }
+
+    pub const fn set_scroll(&mut self, direction: i32) {
+        self.scroll = direction;
+    }
+
+    pub const fn enable_drag(&mut self) {
+        self.drag_enabled = true;
+    }
+
+    pub const fn cancel_drag(&mut self) {
+        self.drag_enabled = false;
+        self.dragging = false;
+    }
+}
+
+#[derive(Clone, Copy)]
+pub enum TrackAction {
+    Rate(TrackId, u8),
+    TogglePlaylist(TrackId, PlaylistId),
+    Seek(TrackId, f32),
 }
 
 impl CantusApp {
-    /// Every always-on-top overlay widget's bounds (weather popup, status pill).
-    pub fn overlay_rects(&self) -> impl Iterator<Item = Rect> + '_ {
-        [
-            self.weather
-                .as_ref()
-                .map(|weather| weather.interaction_rect(&self.render.status, self.config.height)),
-            self.status.as_ref().map(|_| {
-                Rect::pill(
-                    self.render.status.x,
-                    self.render.status.width,
-                    self.config.height,
-                )
-            }),
-        ]
-        .into_iter()
-        .flatten()
-    }
-
-    pub fn overlay_contains(&self, point: Vec2) -> bool {
-        self.overlay_rects().any(|rect| rect.contains(point))
-    }
-
-    pub fn left_click(&mut self) {
-        let mouse_pos = self.render.uniforms.mouse_pos;
-        let drag_enabled = self
-            .interaction
-            .hovered_track
-            .and_then(|index| self.playback.queue.get(index))
-            .is_some_and(|track| track.contains(mouse_pos, self.config.height));
-        let power_action = self.status.as_ref().and_then(|_| {
-            Status::power_action_at(mouse_pos, &self.render.status, self.config.height)
-        });
-        let now = Instant::now();
-        self.interaction.mouse_pressure = 2.0;
-        self.interaction.press_origin = mouse_pos;
-        self.interaction.drag_enabled = drag_enabled;
-        self.interaction.dragging = false;
-        self.interaction.power_hold = power_action.map(|action| {
-            let center =
-                Status::power_action_center(action, &self.render.status, self.config.height);
-            self.pulse(center, 1.0);
-            PowerHold {
-                action,
-                started: now,
-                last_pulse: now,
+    pub fn handle_track_action(&mut self, action: TrackAction) {
+        match action {
+            TrackAction::Rate(track_id, rating) => self.spotify.update_library(
+                track_id,
+                self.playback
+                    .playlists
+                    .iter_mut()
+                    .filter_map(|playlist| {
+                        let add = playlist.rating_index? == rating;
+                        playlist
+                            .set_membership(track_id, add)
+                            .then_some((playlist.id, add))
+                    })
+                    .collect(),
+                Some(rating >= 5),
+            ),
+            TrackAction::TogglePlaylist(track_id, playlist_id) => {
+                let Some(playlist) = self
+                    .playback
+                    .playlists
+                    .iter_mut()
+                    .find(|playlist| playlist.id == playlist_id)
+                else {
+                    warn!("Playlist {playlist_id} not found for track {track_id}");
+                    return;
+                };
+                let add = !playlist.tracks.contains(&track_id);
+                playlist.set_membership(track_id, add);
+                self.spotify
+                    .update_library(track_id, vec![(playlist_id, add)], None);
             }
-        });
-    }
-
-    pub fn left_click_released(&mut self) {
-        let held_power_action = self.interaction.power_hold.take().is_some();
-        let same_spot = self
-            .interaction
-            .press_origin
-            .distance(self.render.uniforms.mouse_pos)
-            < 2.0;
-        if !held_power_action
-            && same_spot
-            && !self.interaction.dragging
-            && self.interaction.mouse_pressure > 1.0
-        {
-            self.handle_click();
-        }
-        if self.interaction.dragging
-            && let Some(track) = self.playback.queue.iter().find(|track| track.is_current())
-            && let Some(track_id) = track.id
-        {
-            let timeline = self.timeline();
-            let (start, end) = track.natural_x_range(timeline.playhead_x, timeline.px_per_ms);
-            let position = (timeline.playhead_x.max(track.runtime.start_x) - start) / (end - start);
-            self.pulse_at_playhead();
-            self.skip_to_track(track_id, position);
-        }
-        self.cancel_drag();
-        self.interaction.mouse_pressure = 1.0;
-    }
-
-    /// Handle click events.
-    fn handle_click(&mut self) {
-        let mouse_pos = self.render.uniforms.mouse_pos;
-        let calendar_clicked = self.weather.as_mut().is_some_and(|weather| {
-            weather.navigate_calendar(mouse_pos, &self.render.status, self.config.height)
-        });
-        if calendar_clicked || self.overlay_contains(mouse_pos) {
-            self.pulse(mouse_pos, 1.0);
-            return;
-        }
-        let timeline = self.timeline();
-        let icon_click = |track: &Track| self.icon_at(track, &self.playback.playlists);
-
-        if let Some((track_id, action)) = self
-            .interaction
-            .hovered_track
-            .into_iter()
-            .chain(0..self.playback.queue.len())
-            .filter_map(|index| self.playback.queue.get(index))
-            .find_map(icon_click)
-        {
-            self.emit_click_particles(mouse_pos);
-
-            match action {
-                IconAction::Rate(rating) => {
-                    self.spotify.update_library(
-                        track_id,
-                        self.playback
-                            .playlists
-                            .iter_mut()
-                            .filter_map(|playlist| {
-                                let add = playlist.rating_index? == rating;
-                                playlist
-                                    .set_membership(track_id, add)
-                                    .then_some((playlist.id, add))
-                            })
-                            .collect(),
-                        Some(rating >= 5),
-                    );
-                }
-                IconAction::TogglePlaylist(playlist_id) => {
-                    let Some(playlist) = self
-                        .playback
-                        .playlists
-                        .iter_mut()
-                        .find(|playlist| playlist.id == playlist_id)
-                    else {
-                        warn!(
-                            "Playlist {playlist_id} not found while toggling membership for track {track_id}"
-                        );
-                        return;
-                    };
-                    let add = !playlist.tracks.contains(&track_id);
-                    playlist.set_membership(track_id, add);
-                    self.spotify
-                        .update_library(track_id, vec![(playlist_id, add)], None);
-                }
-            }
-        } else if self.playhead_rect().contains(mouse_pos) {
-            // Play/pause
-            self.pulse_at_playhead();
-            self.render.last_toggle_playing = Instant::now();
-            let play = !self.playback.playing;
-            info!("{} current track", if play { "Playing" } else { "Pausing" });
-            self.playback.playing = play;
-            self.spotify.set_playing(play);
-        } else if let Some((track_id, (track_range_a, track_range_b))) =
-            self.playback.queue.iter().rev().find_map(|track| {
-                let range = track.natural_x_range(timeline.playhead_x, timeline.px_per_ms);
-                track
-                    .contains(mouse_pos, self.config.height)
-                    .then_some((track.id, range))
-            })
-        {
-            // Seek track
-            self.pulse(mouse_pos, 1.0);
-
-            // If click is near the very left, reset to the start of the song, else seek to clicked position
-            let position = if mouse_pos.x < self.config.history_width + 40.0 {
-                0.0
-            } else {
-                (mouse_pos.x - track_range_a) / (track_range_b - track_range_a)
-            };
-            if let Some(track_id) = track_id {
-                self.skip_to_track(track_id, position);
-            }
+            TrackAction::Seek(track_id, position) => self.skip_to_track(track_id, position),
         }
     }
 
-    fn pulse(&mut self, pos: Vec2, strength: f32) {
-        let cursor = self.interaction.ripple_cursor;
-        self.render.uniforms.ripples[cursor] = RipplePulse {
-            origin: pos,
-            animation: vec2(self.render.start_time.elapsed().as_secs_f32(), strength),
+    pub fn toggle_playing(&mut self) {
+        self.render.last_toggle_playing = Instant::now();
+        self.playback.playing = !self.playback.playing;
+        let action = if self.playback.playing {
+            "Playing"
+        } else {
+            "Pausing"
         };
-        self.interaction.ripple_cursor = (cursor + 1) % RIPPLE_COUNT;
+        info!("{action} current track");
+        self.spotify.set_playing(self.playback.playing);
     }
 
-    fn pulse_at_playhead(&mut self) {
-        let center = vec2(
-            self.timeline().playhead_x,
-            PANEL_START + self.config.height * 0.5,
-        );
-        self.pulse(center, 1.0);
-    }
-
-    /// Drag across the progress bar to seek.
-    pub fn handle_mouse_drag(&mut self) {
-        let interaction = &mut self.interaction;
-        if !interaction.drag_enabled {
-            return;
-        }
-        let delta = (self.render.uniforms.mouse_pos - interaction.press_origin).abs();
-        interaction.dragging |= delta.x >= 2.0 || delta.y >= 2.0;
-    }
-
-    /// Handle scrolling events to adjust volume. `direction` must be -1 or 1.
-    pub fn handle_scroll(&mut self, direction: i32) {
-        if let Some(status) = &mut self.status
-            && Status::audio_at(
-                self.render.uniforms.mouse_pos,
-                &self.render.status,
-                self.config.height,
-            )
-        {
-            status.adjust_volume(direction);
-            return;
-        }
-        let near_playhead = (self.render.uniforms.mouse_pos.x - self.timeline().playhead_x).abs()
-            <= VOLUME_SCROLL_RANGE;
-        if !near_playhead {
-            return;
-        }
+    pub fn adjust_playback_volume(&mut self, direction: i32) {
         if let Some(volume) = &mut self.playback.volume {
             *volume = volume
                 .saturating_add_signed(if direction < 0 { 5 } else { -5 })
                 .min(100);
             info!("Setting volume to {volume}%");
-            self.spotify
-                .player_parameter("volume", "volume_percent", volume);
+            self.spotify.player_parameter("volume", "volume_percent", volume);
         }
     }
 
-    pub const fn cancel_drag(&mut self) {
-        self.interaction.drag_enabled = false;
-        self.interaction.dragging = false;
-    }
-
-    pub fn power_hold_scene(&mut self) -> (Option<PowerAction>, f32) {
-        if self.status.is_none() {
-            self.interaction.power_hold = None;
-            return (None, 0.0);
-        }
-        let Some(mut hold) = self.interaction.power_hold else {
-            return (None, 0.0);
-        };
-        let still_over_action = Status::power_action_at(
-            self.render.uniforms.mouse_pos,
-            &self.render.status,
-            self.config.height,
-        ) == Some(hold.action);
-        if self.interaction.mouse_pressure <= 1.0 || !still_over_action {
-            self.interaction.power_hold = None;
-            return (None, 0.0);
-        }
-
-        let now = Instant::now();
-        let progress =
-            now.duration_since(hold.started).as_secs_f32() / POWER_HOLD_DURATION.as_secs_f32();
-        let pulse_interval = POWER_PULSE_INTERVAL.mul_f32(1.0 - progress.min(1.0) * 0.65);
-        if now.duration_since(hold.last_pulse) >= pulse_interval {
-            let center =
-                Status::power_action_center(hold.action, &self.render.status, self.config.height);
-            self.pulse(center, 1.0 + progress.min(1.0).powi(2) * 2.0);
-            hold.last_pulse = now;
-            self.interaction.power_hold = Some(hold);
-        }
-
-        if progress >= 1.0 {
-            self.interaction.power_hold = None;
-            Status::run_power_action(hold.action);
-            return (Some(hold.action), 1.0);
-        }
-        (Some(hold.action), progress)
-    }
-
-    fn icon_layout(&self, track: &Track) -> Option<(TrackId, usize, PillIconRow, PillIconRow)> {
-        let track_id = track.id?;
-        let stars = usize::from(self.config.ratings_enabled) * 5;
-        let (primary_row, secondary_row) = pill_icon_rows(
-            track.runtime.start_x + track.runtime.width * 0.5,
-            pill_icon_primary_center_y(PANEL_START, self.config.height),
-            (stars + track.runtime.primary_playlist_count as usize) as f32,
-            f32::from(track.runtime.secondary_playlist_count),
-            track.runtime.playlist_expansion_curve(),
-        );
-        Some((track_id, stars, primary_row, secondary_row))
-    }
-
-    pub fn icon_row_rects(&self, track: &Track) -> [Option<Rect>; 2] {
-        let Some((_, _, primary_row, secondary_row)) = self.icon_layout(track) else {
-            return [None, None];
-        };
-        [
-            (primary_row, track.runtime.primary_icon_alpha),
-            (secondary_row, secondary_row.expansion),
-        ]
-        .map(|(row, alpha)| {
-            (row.count > 0.0 && alpha > 0.0)
-                .then(|| Rect::from_center(row.center, row.half_size(9.0 + ICON_WIDTH / 3.0)))
-        })
-    }
-
-    fn icon_at(
-        &self,
-        track: &Track,
-        playlists: &[CondensedPlaylist],
-    ) -> Option<(TrackId, IconAction)> {
-        let mouse_pos = self.render.uniforms.mouse_pos;
-        let (track_id, stars, primary_row, secondary_row) = self.icon_layout(track)?;
-
-        if track.runtime.primary_icon_alpha > 0.0
-            && let Some((index, right_half)) = primary_row.hit(mouse_pos)
-        {
-            return if index < stars {
-                Some((
-                    track_id,
-                    IconAction::Rate(index as u8 * 2 + u8::from(right_half)),
-                ))
-            } else {
-                playlist_icons(track_id, playlists, true)
-                    .nth(index - stars)
-                    .map(|playlist| (track_id, IconAction::TogglePlaylist(playlist.id)))
-            };
-        }
-
-        secondary_row
-            .hit(mouse_pos)
-            .and_then(|(index, _)| playlist_icons(track_id, playlists, false).nth(index))
-            .map(|playlist| (track_id, IconAction::TogglePlaylist(playlist.id)))
-    }
-
-    /// Skip to the specified track in the queue.
     fn skip_to_track(&mut self, track_id: TrackId, position: f32) {
         let state = &mut self.playback;
         let queue_index = state.queue_index;
-        let Some(position_in_queue) = state.queue.iter().position(|t| t.id == Some(track_id))
+        let Some(position_in_queue) = state.queue.iter().position(|track| track.id == Some(track_id))
         else {
             warn!("Track not found in queue");
             return;
@@ -403,15 +255,13 @@ impl CantusApp {
             }
             .round() as u32;
             state.update_progress(milliseconds, Instant::now());
-            self.spotify
-                .player_parameter("seek", "position_ms", milliseconds);
+            self.spotify.player_parameter("seek", "position_ms", milliseconds);
         } else {
             state.queue_index = position_in_queue;
             state.update_progress(0, Instant::now());
             self.spotify
                 .skip(queue_index < position_in_queue, skip_count.min(10));
         }
-        // Ignore remote playback updates briefly so they don't fight the local seek.
         state.last_interaction = Instant::now() + Duration::from_secs(2);
     }
 }

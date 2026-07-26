@@ -1,20 +1,17 @@
 use crate::{
     CantusApp, MAX_RENDER_INSTANCES, PANEL_EXTENSION, PANEL_OVERFLOW, PANEL_START, PARTICLE_COUNT,
-    TRACK_SPACING_MS,
-    config::Config,
-    interaction::Rect,
-    spotify::{CondensedPlaylist, Track, playlist_icons},
+    interaction::{InteractionState, Rect, TrackAction},
+    spotify::Track,
 };
 use art::{AlbumArt, ArtState};
 use cantus_shared::{
-    GlobalUniforms, Particle, PlayheadUniforms, approach,
-    status::StatusPill,
-    tempo::{WeatherPill, sun_position},
-    track::{AudioFeatures, ICON_SPACING, MAX_PILL_PLAYLIST_ICONS, TrackPill},
+    GAP, GlobalUniforms, Particle, PlayheadUniforms, RipplePulse,
+    status::{StatusPill, WIDTH as STATUS_WIDTH},
+    tempo::{WIDTH as TEMPO_WIDTH, WeatherPill, pill_x as tempo_pill_x, sun_position},
+    track::{ICON_SPACING, TrackPill},
 };
 use glam::{FloatExt, Vec2, vec2};
 use pipelines::{IMAGE_SIZE, MAX_TEXTURE_IMAGES, write_texture_region};
-use status::GAP;
 use std::{
     f32::consts::TAU,
     mem,
@@ -25,85 +22,34 @@ use std::{
 };
 use text::{TextRenderer, TextStyle};
 use wgpu::{
-    BindGroup, Buffer, Color, CommandEncoderDescriptor, CurrentSurfaceTexture, Device, Instance,
-    LoadOp, Operations, Queue, RenderPass, RenderPassColorAttachment, RenderPassDescriptor,
-    RenderPipeline, StoreOp, Surface, SurfaceConfiguration, Texture, TextureViewDescriptor,
+    BindGroup, Buffer, Color, CommandEncoderDescriptor, CurrentSurfaceTexture, Device, Instance, LoadOp,
+    Operations, Queue, RenderPass, RenderPassColorAttachment, RenderPassDescriptor, RenderPipeline,
+    StoreOp, Surface, SurfaceConfiguration, Texture, TextureViewDescriptor,
 };
+
+fn approach(current: &mut f32, target: f32, speed: f32) {
+    *current += (target - *current).clamp(-speed, speed);
+}
 
 pub mod art;
 pub mod pipelines;
 pub mod status;
 pub mod tempo;
 pub mod text;
+pub mod track;
 
 const SPARK_EMISSION: f32 = 20.0;
 const SPARK_VELOCITY_X: Range<usize> = 40..60;
 const SPARK_VELOCITY_Y: f32 = 5.0;
 const SPARK_LIFETIME: Range<f32> = 1.2..1.5;
 
-const DEFAULT_AUDIO_FEATURES: AudioFeatures = AudioFeatures {
-    energy: 0.5,
-    danceability: 0.5,
-    acousticness: 0.3,
-    tempo: 120.0,
-    valence: 0.5,
-    instrumentalness: 0.1,
-    loudness: -10.0,
-};
-
 const PLAYHEAD_START_DURATION: f32 = 0.7;
 const PLAYHEAD_TRANSITION_SPEED: f32 = 5.5;
-const DETAIL_FADE_DURATION: f32 = 0.2;
-const PLAYLIST_EXPANSION_DURATION: f32 = 1.0 / 6.0;
 
 #[derive(Clone, Copy)]
 pub struct Timeline {
     pub px_per_ms: f32,
     pub playhead_x: f32,
-}
-
-fn layout(queue: &mut [Track], config: &Config, timeline: Timeline, current_ms: f32) {
-    let history_width = config.history_width;
-    let height = config.height;
-    let end_ms = (config.timeline_future_minutes - config.timeline_past_minutes) * 60_000.0;
-    let end_x = history_width + config.timeline_future_minutes * 60_000.0 * timeline.px_per_ms;
-    let gap = TRACK_SPACING_MS * timeline.px_per_ms;
-    let width_trim = (GAP - gap).max(0.0);
-    let mut compact_count = 0;
-    let mut transition = 0.0;
-    let mut queue_offset = 0.0;
-
-    for track in &mut *queue {
-        track.runtime.width = 0.0;
-        let start_ms = current_ms + queue_offset;
-        queue_offset += track.queue_span_ms();
-        if start_ms > end_ms {
-            continue;
-        }
-
-        track.runtime.start_ms = start_ms;
-        let (natural_start, natural_end) =
-            track.natural_x_range(timeline.playhead_x, timeline.px_per_ms);
-        let runtime = &mut track.runtime;
-        if natural_end >= history_width + height {
-            runtime.start_x = natural_start.max(history_width);
-            runtime.width = (natural_end.min(end_x) - runtime.start_x - width_trim).max(0.0);
-        } else if natural_end >= history_width {
-            transition = (history_width + height - natural_end) / height;
-            runtime.start_x = natural_end - height;
-            runtime.width = height;
-        } else {
-            compact_count += 1;
-        }
-    }
-
-    let stride = height * 0.55;
-    for (index, track) in queue[..compact_count].iter_mut().enumerate() {
-        let slot = compact_count - index - 1;
-        let right = history_width - gap - (slot as f32 + transition) * stride;
-        track.runtime.start_x = right - height;
-        track.runtime.width = height;
-    }
 }
 
 pub struct GpuResources {
@@ -167,13 +113,7 @@ impl ImageAtlas {
             return -1;
         }
         self.used |= 1 << index;
-        write_texture_region(
-            queue,
-            &self.texture,
-            [0, 0, index],
-            [IMAGE_SIZE; 2],
-            &art.pixels,
-        );
+        write_texture_region(queue, &self.texture, [0, 0, index], [IMAGE_SIZE; 2], &art.pixels);
         self.slots[index as usize] = Arc::downgrade(art);
         index as i32
     }
@@ -231,9 +171,7 @@ impl RenderState {
 
     /// The GPU device and its dependent resources, valid once the Wayland surface is configured.
     const fn gpu(&mut self) -> &mut GpuResources {
-        self.gpu
-            .as_mut()
-            .expect("render called before gpu configured")
+        self.gpu.as_mut().expect("render called before gpu configured")
     }
 }
 
@@ -242,32 +180,37 @@ fn particle_color(rgb: u32, duration: f32) -> u32 {
 }
 
 impl CantusApp {
+    fn finish_interaction(&mut self, mut interaction: InteractionState) {
+        let pulse = interaction.end_frame();
+        self.interaction = interaction;
+        if let Some(origin) = pulse {
+            let globals = &mut self.render.uniforms;
+            let ripple = globals
+                .ripples
+                .iter_mut()
+                .min_by(|a, b| a.animation.x.total_cmp(&b.animation.x))
+                .unwrap();
+            *ripple = RipplePulse {
+                origin,
+                animation: vec2(globals.time, 1.0),
+            };
+        }
+    }
+
     pub fn timeline(&self) -> Timeline {
         let config = &self.config;
-        let mut reserved = config.history_width + 16.0 + GAP;
+        let mut reserved = config.history_width + GAP;
         if config.weather_enabled {
-            reserved += tempo::WIDTH + GAP;
+            reserved += TEMPO_WIDTH + GAP;
         }
         if config.status_enabled {
-            reserved += status::WIDTH + GAP;
+            reserved += STATUS_WIDTH + GAP;
         }
         let px_per_ms = (self.logical_surface_size().0 - reserved).max(84.0)
             / (config.timeline_future_minutes * 60_000.0);
         Timeline {
             px_per_ms,
             playhead_x: config.history_width + config.timeline_past_minutes * 60_000.0 * px_per_ms,
-        }
-    }
-
-    pub fn emit_click_particles(&mut self, position: Vec2) {
-        let time = self.render.start_time.elapsed().as_secs_f32();
-        for particle in self.render.expired_particles(time).take(20) {
-            let duration = 0.5.lerp(1.5, fastrand::f32());
-            particle.spawn_pos = position;
-            particle.spawn_vel =
-                Vec2::from_angle(fastrand::f32() * TAU) * (30.0 + fastrand::f32() * 20.0);
-            particle.color = particle_color(0x32_D7_FF, duration);
-            particle.end_time = time + duration;
         }
     }
 
@@ -288,14 +231,6 @@ impl CantusApp {
         (
             (width * self.render.scale).round() as u32,
             (height * self.render.scale).round() as u32,
-        )
-    }
-
-    pub fn playhead_rect(&self) -> Rect {
-        let x = self.timeline().playhead_x;
-        Rect::from_center(
-            vec2(x, PANEL_START + self.config.height * 0.5),
-            vec2(self.config.height * 0.25, self.config.height * 0.5),
         )
     }
 
@@ -330,8 +265,7 @@ impl CantusApp {
         let gpu = self.render.gpu.as_mut().unwrap();
         gpu.queue
             .write_buffer(&gpu.globals, 0, bytemuck::bytes_of(&self.render.uniforms));
-        gpu.particles
-            .upload_data(&gpu.queue, &self.render.particles);
+        gpu.particles.upload_data(&gpu.queue, &self.render.particles);
         gpu.playhead
             .upload_data(&gpu.queue, slice::from_ref(&self.render.playhead));
         gpu.track.upload_data(&gpu.queue, &self.render.track_pills);
@@ -366,30 +300,19 @@ impl CantusApp {
                 occlusion_query_set: None,
                 multiview_mask: None,
             });
-            let foreground = self
-                .render
-                .track_glyphs
-                .len()
-                .saturating_sub(usize::from(self.interaction.hovered_track.is_some()));
-            for (index, glyphs) in self.render.track_glyphs.iter().take(foreground).enumerate() {
-                let index = index as u32;
-                gpu.track.draw_range(&mut pass, index..index + 1);
-                gpu.text.draw_range(&mut pass, glyphs.clone());
-            }
             if let Some(weather) = &gpu.weather {
                 weather.draw_range(&mut pass, 0..1);
             }
             gpu.text.draw_range(&mut pass, 0..weather_glyph_end);
-            if let Some(glyphs) = self.render.track_glyphs.get(foreground) {
-                let foreground = foreground as u32;
-                gpu.track.draw_range(&mut pass, foreground..foreground + 1);
+            for (index, glyphs) in self.render.track_glyphs.iter().enumerate() {
+                let index = index as u32;
+                gpu.track.draw_range(&mut pass, index..index + 1);
                 gpu.text.draw_range(&mut pass, glyphs.clone());
             }
             if let Some(status) = &gpu.status {
                 status.draw_range(&mut pass, 0..1);
             }
-            gpu.particles
-                .draw_range(&mut pass, 0..PARTICLE_COUNT as u32);
+            gpu.particles.draw_range(&mut pass, 0..PARTICLE_COUNT as u32);
             gpu.playhead.draw_range(&mut pass, 0..1);
         }
 
@@ -416,118 +339,124 @@ impl CantusApp {
         let (screen_width, screen_height) = self.logical_surface_size();
         self.render.uniforms.screen_size = vec2(screen_width, screen_height);
         self.render.uniforms.bar_height = vec2(PANEL_START, self.config.height);
-        let (power_action, power_progress) = self.power_hold_scene();
-        self.render.status = self.status.as_mut().map_or_else(
-            || StatusPill {
-                x: screen_width,
-                ..StatusPill::default()
-            },
-            |status| {
-                status.damp_readings(dt);
-                status.pill(screen_width, power_action, power_progress)
-            },
-        );
         let mouse = self.render.uniforms.mouse_pos;
-        let mouse_active = self.interaction.mouse_pressure > 0.0;
-        let weather_scene = self.weather.as_mut().map(|weather| {
-            weather.scene(
-                &self.render.status,
-                self.config.height,
-                mouse,
-                mouse_active,
-                dt,
-            )
+        let mut ui = mem::take(&mut self.interaction);
+        ui.begin_frame(mouse);
+        self.render.status = self.status.as_mut().map_or_else(StatusPill::default, |status| {
+            status.damp_readings(dt);
+            status.pill(self.render.uniforms.time)
         });
-        let weather = weather_scene.map(|(weather, weather_label, hour)| {
+
+        let weather = if let Some(weather_state) = &mut self.weather {
+            let (weather, weather_label, hour) =
+                weather_state.scene(screen_width, self.config.height, &ui, dt);
             self.render.uniforms.weather_hour = hour;
-            self.render.status.sun = sun_position(hour, weather.sun_hours);
-            self.render.status.conditions = weather.hourly[0];
+            self.render.status.sun_height = sun_position(hour, weather.sun_hours)[1];
+            self.render.status.conditions = weather.hourly[0].values();
             let scale = self.render.scale;
             let label_y = PANEL_START + self.config.height * 0.46;
             let gpu = self.render.gpu.as_mut().unwrap();
             gpu.text_renderer.render_centered_label(
                 &gpu.queue,
                 &weather_label,
-                vec2(weather.x + tempo::WIDTH * 0.5, label_y),
+                vec2(tempo_pill_x(screen_width) + TEMPO_WIDTH * 0.5, label_y),
                 TextStyle::WEATHER,
                 1.0,
                 scale,
             );
-            self.weather.as_ref().unwrap().calendar_labels(
-                &self.render.status,
+            weather_state.calendar_labels(
+                screen_width,
                 self.config.height,
-                mouse,
-                mouse_active,
+                &mut ui,
                 |text, position, alpha, style| {
                     gpu.text_renderer
                         .render_centered_label(&gpu.queue, text, position, style, alpha, scale);
                 },
             );
-            weather
-        });
+            Some(weather)
+        } else {
+            None
+        };
+        if let Some(status) = &mut self.status {
+            status.interact(&mut self.render.status, screen_width, self.config.height, &mut ui);
+        }
         let weather_glyph_end = self.render.gpu.as_ref().unwrap().text_renderer.glyphs.len() as u32;
 
         let timeline = self.timeline();
         self.render.uniforms.playhead_x = timeline.playhead_x;
 
+        let playhead = ui.interact(
+            vec2(timeline.playhead_x, PANEL_START + self.config.height * 0.5),
+            vec2(self.config.height * 0.25, self.config.height * 0.5),
+        );
+        if playhead.clicked {
+            self.toggle_playing();
+        }
+        let volume_rect = Rect::new(
+            timeline.playhead_x - 100.0,
+            PANEL_START,
+            timeline.playhead_x + 100.0,
+            PANEL_START + self.config.height,
+        );
+        let volume_scroll = ui.scroll_surface(volume_rect);
+        if volume_scroll != 0 {
+            self.adjust_playback_volume(volume_scroll);
+        }
+        if ui.released() {
+            if ui.dragging
+                && let Some(track) = self.playback.queue.iter().find(|track| track.is_current())
+                && let Some(track_id) = track.id
+            {
+                let (start, end) = track.natural_x_range(timeline.playhead_x, timeline.px_per_ms);
+                let position = (timeline.playhead_x.max(track.runtime.start_x) - start) / (end - start);
+                self.handle_track_action(TrackAction::Seek(track_id, position));
+            }
+            ui.cancel_drag();
+        }
+
         let mut playback_state = mem::take(&mut self.playback);
         if playback_state.queue.is_empty() {
             self.render.track_pills.clear();
             self.playback = playback_state;
+            self.finish_interaction(ui);
             return (weather, weather_glyph_end);
         }
         // Lerp the progress based on when the data was last updated.
         let playback_elapsed = playback_state.estimated_progress();
         let queue = &mut playback_state.queue;
 
-        let drag_offset_ms = if self.interaction.dragging {
-            (self.render.uniforms.mouse_pos.x - self.interaction.press_origin.x)
-                / timeline.px_per_ms
+        let drag_offset_ms = if ui.dragging {
+            (self.render.uniforms.mouse_pos.x - ui.press_origin.x) / timeline.px_per_ms
         } else {
             0.0
         };
         let cur_idx = playback_state.queue_index.min(queue.len() - 1);
 
         let mut current_ms = -playback_elapsed
-            - queue[..cur_idx]
-                .iter()
-                .map(Track::queue_span_ms)
-                .sum::<f32>()
+            - queue[..cur_idx].iter().map(Track::queue_span_ms).sum::<f32>()
             + drag_offset_ms;
         let diff = current_ms - self.render.track_offset;
-        if !self.interaction.dragging && diff.abs() > 200.0 {
+        if !ui.dragging && diff.abs() > 200.0 {
             current_ms = self.render.track_offset + diff * 3.5 * dt;
         }
 
-        self.render.movement_speed = self.render.movement_speed.lerp(
-            (current_ms - self.render.track_offset) * dt,
-            (dt * 10.0).min(1.0),
-        );
+        self.render.movement_speed = self
+            .render
+            .movement_speed
+            .lerp((current_ms - self.render.track_offset) * dt, (dt * 10.0).min(1.0));
         self.render.track_offset = current_ms;
 
-        layout(queue, &self.config, timeline, current_ms);
-        let active_hover = self.interaction.hovered_track;
+        track::layout(queue, &self.config, timeline, current_ms);
         let gpu = self.render.gpu();
-        for (index, track) in queue.iter_mut().enumerate() {
-            let show_details = track.runtime.width > self.config.height;
+        for track in queue.iter_mut() {
             let primary_icon_count = usize::from(self.config.ratings_enabled) * 5
                 + track.runtime.primary_playlist_count as usize;
             track.runtime.primary_icons_fit = primary_icon_count > 0
                 && track.runtime.width >= ICON_SPACING * 1.05 * primary_icon_count as f32;
-            approach(
-                &mut track.runtime.playlist_expansion,
-                f32::from(
-                    Some(index) == active_hover
-                        && show_details
-                        && track.runtime.detail_alpha >= 1.0,
-                ),
-                dt.min(0.1) / PLAYLIST_EXPANSION_DURATION,
-            );
             let expansion = track.runtime.playlist_expansion_curve();
             if expansion > 0.0 {
-                let extra_width = (gpu.text_renderer.track_width(track) - track.runtime.width)
-                    .max(0.0)
-                    * expansion;
+                let extra_width =
+                    (gpu.text_renderer.track_width(track) - track.runtime.width).max(0.0) * expansion;
                 track.runtime.start_x -= extra_width * 0.5;
                 track.runtime.width += extra_width;
             }
@@ -535,170 +464,73 @@ impl CantusApp {
 
         approach(
             &mut self.render.uniforms.mouse_pressure,
-            self.interaction.mouse_pressure,
+            ui.mouse_pressure,
             5.0 * dt,
         );
 
-        let hovered_track = (!self.interaction.dragging && self.interaction.mouse_pressure > 0.0)
-            .then(|| self.hovered_track(queue))
-            .flatten();
-        self.interaction.hovered_track = hovered_track;
-
-        self.render.track_pills.clear();
         let playlists = &playback_state.playlists;
-        for queue_index in (0..queue.len())
-            .filter(|&index| Some(index) != hovered_track)
-            .chain(hovered_track)
-        {
-            if self.render.track_pills.len() == MAX_RENDER_INSTANCES {
+        self.render.track_pills.clear();
+        self.render.track_glyphs.clear();
+        let mut foreground = None;
+        let mut track_action = None;
+        if ui.dragging {
+            ui.hover_claimed = true;
+        }
+        for queue_index in (0..queue.len()).rev() {
+            if self.render.track_pills.len() + usize::from(foreground.is_some()) == MAX_RENDER_INSTANCES
+            {
                 break;
             }
             let track = &mut queue[queue_index];
-            if track.runtime.rect(self.config.height).is_some() {
-                let hovered = Some(queue_index) == hovered_track;
-                self.draw_track(track, hovered, dt, playlists);
+            if track.runtime.width > 0.0 && track.runtime.start_x + track.runtime.width > 0.0 {
+                let (pill, glyphs, hovered, action) =
+                    self.draw_track(track, dt, playlists, timeline, &mut ui);
+                track_action = action.or(track_action);
+                if hovered {
+                    foreground = Some((pill, glyphs));
+                } else {
+                    self.render.track_pills.insert(0, pill);
+                    self.render.track_glyphs.insert(0, glyphs);
+                }
             }
+        }
+        if let Some((pill, glyphs)) = foreground {
+            self.render.track_pills.push(pill);
+            self.render.track_glyphs.push(glyphs);
         }
 
         self.render_playhead_particles(
             dt,
             &queue[queue.iter().position(Track::is_current).unwrap_or(cur_idx)],
             playback_state.playing,
+            playhead.hovered,
         );
         self.playback = playback_state;
+        if let Some(action) = track_action {
+            if matches!(action, TrackAction::Rate(..) | TrackAction::TogglePlaylist(..)) {
+                let time = self.render.uniforms.time;
+                for particle in self.render.expired_particles(time).take(20) {
+                    let duration = 0.5.lerp(1.5, fastrand::f32());
+                    particle.spawn_pos = ui.pointer();
+                    particle.spawn_vel =
+                        Vec2::from_angle(fastrand::f32() * TAU) * (30.0 + fastrand::f32() * 20.0);
+                    particle.color = particle_color(0x32_D7_FF, duration);
+                    particle.end_time = time + duration;
+                }
+            }
+            self.handle_track_action(action);
+        }
+        self.finish_interaction(ui);
         (weather, weather_glyph_end)
     }
 
-    fn hovered_track(&self, queue: &[Track]) -> Option<usize> {
-        let mouse_pos = self.render.uniforms.mouse_pos;
-        if self.overlay_contains(mouse_pos) || self.playhead_rect().contains(mouse_pos) {
-            return None;
-        }
-        let in_track = |track: &Track| {
-            track.contains(mouse_pos, self.config.height)
-                || self
-                    .icon_row_rects(track)
-                    .into_iter()
-                    .flatten()
-                    .any(|rect| rect.contains(mouse_pos))
-        };
-
-        if let Some(index) = self.interaction.hovered_track
-            && queue.get(index).is_some_and(in_track)
-        {
-            return Some(index);
-        }
-
-        queue.iter().rposition(in_track)
-    }
-
-    fn draw_track(
+    fn render_playhead_particles(
         &mut self,
-        track: &mut Track,
-        hovered: bool,
         dt: f32,
-        playlists: &[CondensedPlaylist],
-    ) {
-        let glyph_start = self.render.gpu.as_ref().unwrap().text_renderer.glyphs.len() as u32;
-        let layout_width = track.runtime.width;
-        let start_x = track.runtime.start_x;
-
-        let show_details = layout_width > self.config.height;
-        approach(
-            &mut track.runtime.detail_alpha,
-            f32::from(show_details),
-            dt / DETAIL_FADE_DURATION,
-        );
-        let detail_alpha = track.runtime.detail_alpha;
-        let playlist_expansion = track.runtime.playlist_expansion_curve();
-        let mut pill = TrackPill {
-            x: start_x,
-            width: layout_width.max(self.config.height),
-            colors: track.runtime.art.palette(),
-            visibility: detail_alpha.max(f32::from(track.runtime.start_ms <= 0.0)),
-            image_index: self.get_image_index(&track.runtime.art),
-            rating: -1,
-            audio_features: track.audio_features.unwrap_or(DEFAULT_AUDIO_FEATURES),
-            playlist_images: [-1; MAX_PILL_PLAYLIST_ICONS],
-            ..Default::default()
-        };
-
-        if show_details && detail_alpha > 0.0 {
-            let scale = self.render.scale;
-            let gpu = self.render.gpu();
-            gpu.text_renderer
-                .render(&gpu.queue, track, detail_alpha, scale);
-        }
-
-        // Expand the hitbox vertically so it includes the playlist buttons
-        if show_details {
-            self.populate_playlist_buttons(track, playlists, &mut pill);
-        }
-        if hovered
-            && pill.rating >= 0
-            && let Some((index, right_half)) = pill
-                .icon_rows(PANEL_START, self.config.height)
-                .0
-                .hit(self.render.uniforms.mouse_pos)
-            && index < 5
-        {
-            pill.rating = index as i32 * 2 + 1 + i32::from(right_half);
-        }
-        track.runtime.primary_playlist_count = pill.primary_playlist_count as u8;
-        track.runtime.secondary_playlist_count = pill.secondary_playlist_count as u8;
-        let primary_icons = pill.star_count() + pill.primary_playlist_count as f32;
-        approach(
-            &mut track.runtime.primary_icon_alpha,
-            f32::from(primary_icons > 0.0 && track.runtime.primary_icons_fit),
-            dt / DETAIL_FADE_DURATION,
-        );
-        pill.primary_alpha = track
-            .runtime
-            .primary_icon_alpha
-            .max(playlist_expansion * f32::from(primary_icons > 0.0));
-        pill.secondary_expansion = playlist_expansion;
-        let glyph_end = self.render.gpu.as_ref().unwrap().text_renderer.glyphs.len() as u32;
-        self.render.track_glyphs.push(glyph_start..glyph_end);
-        self.render.track_pills.push(pill);
-    }
-
-    fn populate_playlist_buttons(
-        &mut self,
         track: &Track,
-        playlists: &[CondensedPlaylist],
-        pill: &mut TrackPill,
+        playing: bool,
+        playhead_hovered: bool,
     ) {
-        let Some(track_id) = track.id else {
-            return;
-        };
-        let icons = playlist_icons(track_id, playlists, true).chain(
-            playlist_icons(track_id, playlists, false)
-                .filter(|_| track.runtime.playlist_expansion > 0.0),
-        );
-        for (slot, playlist) in pill.playlist_images.iter_mut().zip(icons) {
-            *slot = self.get_image_index(&playlist.art);
-            let primary = playlist.tracks.contains(&track_id);
-            pill.primary_playlist_count += u32::from(primary);
-            pill.secondary_playlist_count += u32::from(!primary);
-        }
-
-        pill.rating = if self.config.ratings_enabled {
-            i32::from(
-                playlists
-                    .iter()
-                    .find_map(|playlist| {
-                        playlist
-                            .rating_index
-                            .filter(|_| playlist.tracks.contains(&track_id))
-                    })
-                    .map_or(0, |rating| rating + 1),
-            )
-        } else {
-            -1
-        };
-    }
-
-    fn render_playhead_particles(&mut self, dt: f32, track: &Track, playing: bool) {
         let palette = track.runtime.art.palette();
         let playhead_x = self.render.uniforms.playhead_x;
         let avg_speed = self.render.movement_speed;
@@ -716,11 +548,7 @@ impl CantusApp {
         let horizontal_bias = (avg_speed.abs().powf(0.2) * avg_speed.signum()).clamp(-3.0, 3.0);
         let time = self.render.uniforms.time;
 
-        for particle in self
-            .render
-            .expired_particles(time)
-            .take(emit_count as usize)
-        {
+        for particle in self.render.expired_particles(time).take(emit_count as usize) {
             let y_fraction = fastrand::f32();
 
             particle.spawn_pos = vec2(
@@ -731,18 +559,12 @@ impl CantusApp {
                 fastrand::usize(SPARK_VELOCITY_X) as f32 * horizontal_bias,
                 (y_fraction - 0.5) * 2.0 * SPARK_VELOCITY_Y,
             );
-            let duration = SPARK_LIFETIME
-                .start
-                .lerp(SPARK_LIFETIME.end, fastrand::f32());
+            let duration = SPARK_LIFETIME.start.lerp(SPARK_LIFETIME.end, fastrand::f32());
             particle.color = particle_color(palette[fastrand::usize(0..palette.len())], duration);
             particle.end_time = time + duration;
         }
 
         let speed = PLAYHEAD_TRANSITION_SPEED * dt;
-        let playhead_hovered = self
-            .playhead_rect()
-            .contains(self.render.uniforms.mouse_pos)
-            && self.interaction.mouse_pressure > 0.0;
         let last_toggle =
             self.render.last_toggle_playing.elapsed().as_secs_f32() / PLAYHEAD_START_DURATION;
 

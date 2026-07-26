@@ -5,10 +5,7 @@ use std::{env, fs, path::PathBuf};
 use tracing::warn;
 
 #[derive(Deserialize)]
-#[cfg_attr(
-    all(debug_assertions, feature = "generate-nix"),
-    derive(schemars::JsonSchema)
-)]
+#[cfg_attr(all(debug_assertions, feature = "generate-nix"), derive(schemars::JsonSchema))]
 #[serde(default)]
 pub struct Config {
     /// The monitor to display on.
@@ -43,10 +40,7 @@ pub struct Config {
 }
 
 #[derive(Clone, Copy, Deserialize, Serialize)]
-#[cfg_attr(
-    all(debug_assertions, feature = "generate-nix"),
-    derive(schemars::JsonSchema)
-)]
+#[cfg_attr(all(debug_assertions, feature = "generate-nix"), derive(schemars::JsonSchema))]
 #[serde(rename_all = "lowercase")]
 pub enum Layer {
     Background,
@@ -56,10 +50,7 @@ pub enum Layer {
 }
 
 #[derive(Clone, Copy, Deserialize, Serialize)]
-#[cfg_attr(
-    all(debug_assertions, feature = "generate-nix"),
-    derive(schemars::JsonSchema)
-)]
+#[cfg_attr(all(debug_assertions, feature = "generate-nix"), derive(schemars::JsonSchema))]
 #[serde(rename_all = "lowercase")]
 pub enum LayerAnchor {
     Top,

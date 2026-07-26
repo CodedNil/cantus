@@ -1,80 +1,21 @@
 use crate::{
-    PillInteraction, pill_fragment, pill_sheen, pill_vertex, sd_capsule_box, sd_rounded_box,
+    cloud_mass, fbm, hash, pill_fragment, pill_sheen, pill_vertex, sd_capsule_box, sd_rounded_box,
     smooth_union,
 };
 use cantus_shared::{
     GlobalUniforms, smoothstep,
-    tempo::{self, WeatherCondition, WeatherPill, sun_position},
+    tempo::{self, WeatherCondition, WeatherConditions, WeatherPill, sun_position},
 };
 use spirv_std::{
     arch::kill,
-    glam::{FloatExt, UVec2, Vec2, Vec3, Vec4, uvec2, vec2, vec3},
+    glam::{FloatExt, Vec2, Vec3, Vec4, vec2, vec3},
     spirv,
 };
 
 #[cfg(target_arch = "spirv")]
 use spirv_std::num_traits::Float;
 
-type Condition = [f32; 6];
-
-fn lerp_conditions(mut from: Condition, to: Condition, amount: f32) -> Condition {
-    for index in 0..from.len() {
-        from[index] += (to[index] - from[index]) * amount;
-    }
-    from
-}
-
-/// Core 2-lane avalanche mixer for hash functions
-pub fn avalanche(mut value: UVec2) -> UVec2 {
-    value = value * 1_664_525 + UVec2::splat(1_013_904_223);
-    value.x += value.y * 1_664_525;
-    value.y += value.x * 1_664_525;
-    value ^= value >> 16;
-    value.x += value.y * 1_664_525;
-    value.y += value.x * 1_664_525;
-    value ^= value >> 16;
-    value
-}
-
-pub fn hash(p: Vec2) -> Vec2 {
-    let value = avalanche(uvec2(p.x as i32 as u32, p.y as i32 as u32));
-    vec2(value.x as f32, value.y as f32) * 2.328_306_4e-10
-}
-
-fn simplex_noise(p: Vec2) -> f32 {
-    const K1: f32 = 0.366_025_42;
-    const K2: f32 = 0.211_324_87;
-    let cell = (p + (p.x + p.y) * K1).floor();
-    let a = p - cell + (cell.x + cell.y) * K2;
-    let corner = if a.x > a.y {
-        vec2(1.0, 0.0)
-    } else {
-        vec2(0.0, 1.0)
-    };
-    let b = a - corner + K2;
-    let c = a - 1.0 + 2.0 * K2;
-    let contribution = |offset: Vec2, point: Vec2| {
-        let falloff = (0.5 - point.dot(point)).max(0.0);
-        let gradient = hash(cell + offset) * 2.0 - 1.0;
-        falloff * falloff * falloff * falloff * point.dot(gradient)
-    };
-    70.0 * (contribution(Vec2::ZERO, a) + contribution(corner, b) + contribution(Vec2::ONE, c))
-}
-
-fn fbm(mut p: Vec2) -> f32 {
-    let mut density = 0.0;
-    let mut amplitude = 0.5;
-    for _ in 0..4 {
-        density += simplex_noise(p) * amplitude;
-        p = vec2(p.x * 1.6 + p.y * 1.2, p.y * 1.6 - p.x * 1.2);
-        amplitude *= 0.5;
-    }
-    0.5 + density * 0.5
-}
-
-pub fn cloud_mass(p: Vec2, scale: f32, time: f32) -> f32 {
-    fbm(p / scale * 0.14 + vec2(time * 0.012, 6.1))
-}
+type Condition = WeatherConditions;
 
 fn particles(p: Vec2, movement: Vec2, cell_size: f32, radius: f32, density: f32) -> f32 {
     let q = p - movement;
@@ -87,27 +28,32 @@ fn particles(p: Vec2, movement: Vec2, cell_size: f32, radius: f32, density: f32)
 fn rain_layer(p: Vec2, time: f32, depth: f32, seed: f32) -> f32 {
     let seed = vec2(seed, seed * 0.37);
     let layer = hash(seed) * 2.0 - 1.0;
-    let drift = vec2(0.22 + layer.x * 0.05, 1.0);
-    let q = p - time * (72.0 + depth * 38.0) * drift + layer * 91.0;
-    let cell_size = vec2(
+    let q = p - time * (72.0 + depth * 38.0) * vec2(0.22 + layer.x * 0.05, 1.0) + layer * 91.0;
+    let size = vec2(
         21.0 - depth * 4.5 + layer.y * 1.5,
         31.0 - depth * 3.0 + layer.x * 1.5,
     );
-    let cell = (q / cell_size).floor();
+    let cell = (q / size).floor();
     let random = hash(cell + seed);
-    let local = q - (cell + random * 0.75) * cell_size;
-    let slant = 0.22 + random.x * 0.14 + layer.y * 0.05;
-    let lane = (random.y - 0.5) * cell_size.x * 0.65;
-    let curve = local.x - local.y * slant - lane;
-    let streak = smoothstep(0.72, 0.0, curve.abs());
-    let taper = smoothstep(0.0, 5.0 + depth * 2.0, local.y)
-        * smoothstep(cell_size.y - 4.0, cell_size.y - 11.0, local.y);
-    streak * taper * smoothstep(0.45, 0.95, hash(cell + 31.7).x)
+    let local = q - (cell + random * 0.75) * size;
+    let curve =
+        local.x - local.y * (0.22 + random.x * 0.14 + layer.y * 0.05) - (random.y - 0.5) * size.x * 0.65;
+    smoothstep(0.72, 0.0, curve.abs())
+        * smoothstep(0.0, 5.0 + depth * 2.0, local.y)
+        * smoothstep(size.y - 4.0, size.y - 11.0, local.y)
+        * smoothstep(0.45, 0.95, hash(cell + 31.7).x)
 }
 
-fn scene(
+fn lerp_conditions(mut from: Condition, to: Condition, amount: f32) -> Condition {
+    for index in 0..from.len() {
+        from[index] += (to[index] - from[index]) * amount;
+    }
+    from
+}
+
+/// Sky backdrop for the status pill; also returns the refracted pixel position.
+pub(crate) fn scene(
     global: &GlobalUniforms,
-    interaction: PillInteraction,
     refracted: Vec2,
     size: Vec2,
     dist: f32,
@@ -186,7 +132,7 @@ fn scene(
     color.lerp(
         vec3(0.63, 0.69, 0.73),
         fog_strength * (0.58 + smoothstep(0.35, 0.7, fog) * 0.18),
-    ) + pill_sheen(sky_y, dist, interaction)
+    ) + pill_sheen(sky_y, dist)
 }
 
 fn sun_layer(
@@ -201,39 +147,13 @@ fn sun_layer(
         16.0 + sun_x * (size.x - 32.0),
         size.y * (0.72 - sun_y.saturate() * 0.45),
     );
-    let sun_color =
-        vec3(0.96, 0.98, 1.0).lerp(vec3(0.98, 0.74, 0.66), smoothstep(0.55, 0.02, sun_y));
+    let sun_color = vec3(0.96, 0.98, 1.0).lerp(vec3(0.98, 0.74, 0.66), smoothstep(0.55, 0.02, sun_y));
     let clear = smoothstep(-0.02, 0.04, sun_y)
         * (1.0 - smoothstep(0.43, 0.69, cloud_mass(sun, size.y, time)) * cloud * 0.82);
     let distance = point.distance(sun);
     color.lerp(
         sun_color,
         (smoothstep(62.0, 4.0, distance) * 0.24 + smoothstep(11.0, 1.0, distance) * 0.7) * clear,
-    )
-}
-
-/// Sky backdrop for the status pill; also returns the refracted pixel position.
-pub fn sky_background(
-    global: &GlobalUniforms,
-    interaction: PillInteraction,
-    local: Vec2,
-    size: Vec2,
-    dist: f32,
-    sun_height: f32,
-    conditions: WeatherCondition,
-) -> (Vec3, Vec2) {
-    let refracted = interaction.refract(local, size, dist);
-    (
-        scene(
-            global,
-            interaction,
-            refracted,
-            size,
-            dist,
-            sun_height,
-            conditions.values(),
-        ),
-        refracted * size,
     )
 }
 
@@ -251,11 +171,6 @@ fn forecast_at<const N: usize>(x: f32, forecasts: &[WeatherCondition; N]) -> Con
     )
 }
 
-/// Lerp the hour at `x` across the six four-hour forecast samples.
-fn forecast_time_at(x: f32, start: f32) -> f32 {
-    (start + forecast_position(x, tempo::HOURLY_FORECASTS) * tempo::HOURLY_STEP_HOURS as f32) % 24.0
-}
-
 #[spirv(vertex)]
 pub fn vs_tempo(
     #[spirv(vertex_index)] vertex: u32,
@@ -263,13 +178,17 @@ pub fn vs_tempo(
     #[spirv(storage_buffer, descriptor_set = 0, binding = 1)] weather: &[WeatherPill],
     #[spirv(position)] out_pos: &mut Vec4,
     #[spirv(location = 0)] out_pixel: &mut Vec2,
+    #[spirv(location = 1, flat)] out_weather: &mut Vec4,
 ) {
     let pill = weather[0];
+    let x = tempo::pill_x(global.screen_size.x);
     let expansion = smoothstep(0.0, 1.0, pill.calendar_expansion);
+    let sun = sun_position(global.weather_hour, pill.sun_hours);
+    *out_weather = vec3(sun[0], sun[1], sun_position(12.0, pill.sun_hours)[1]).extend(expansion);
     (*out_pos, *out_pixel) = pill_vertex(
         vertex,
         global,
-        tempo::expanded_x(pill.x, expansion),
+        tempo::expanded_x(x, expansion),
         tempo::popup_size(expansion),
     );
 }
@@ -277,18 +196,19 @@ pub fn vs_tempo(
 #[spirv(fragment)]
 pub fn fs_tempo(
     #[spirv(location = 0)] pixel: Vec2,
+    #[spirv(location = 1, flat)] weather_data: Vec4,
     #[spirv(storage_buffer, descriptor_set = 0, binding = 0)] global: &GlobalUniforms,
     #[spirv(storage_buffer, descriptor_set = 0, binding = 1)] weather: &[WeatherPill],
     #[spirv(location = 0)] out_color: &mut Vec4,
 ) {
     let pill = weather[0];
-    let (interaction, main_local, pill_size, body_dist) =
-        pill_fragment(pixel, global, pill.x, tempo::WIDTH);
-    let expansion = smoothstep(0.0, 1.0, pill.calendar_expansion);
+    let x = tempo::pill_x(global.screen_size.x);
+    let (interaction, main_local, pill_size, body_dist) = pill_fragment(pixel, global, x, tempo::WIDTH);
+    let expansion = weather_data.w;
     let body_bottom = global.bar_height.x + global.bar_height.y;
     let popup_size = tempo::popup_size(expansion);
-    let popup_local = pixel - vec2(tempo::expanded_x(pill.x, expansion), body_bottom);
-    let content_local = pixel - vec2(tempo::expanded_x(pill.x, 1.0), body_bottom);
+    let popup_local = pixel - vec2(tempo::expanded_x(x, expansion), body_bottom);
+    let content_local = pixel - vec2(tempo::expanded_x(x, 1.0), body_bottom);
     let top_gap = tempo::TOP_GAP * expansion;
     let box_size = vec2(popup_size.x, (popup_size.y - top_gap).max(0.0));
     let popup_dist = sd_rounded_box(
@@ -297,11 +217,6 @@ pub fn fs_tempo(
         (box_size.y * 0.5).min(18.0),
     );
     let main_dist = smooth_union(body_dist, popup_dist, 32.0, expansion);
-    let (_, mask, alpha) = interaction.surface(main_dist);
-    if alpha <= 0.0 {
-        kill();
-    }
-
     let center_y = |row| tempo::forecast_center(global.bar_height.y, row);
     let hourly_row = content_local.y <= (center_y(0.0) + center_y(1.0)) * 0.5;
     let row = if hourly_row { 0.0 } else { 1.0 };
@@ -313,13 +228,30 @@ pub fn fs_tempo(
         (row_size.x - row_size.y) * 0.5,
         row_size.y * 0.5,
     );
+    let mouse_row_dist = sd_capsule_box(
+        (global.mouse_pos - vec2(tempo::expanded_x(x, 1.0), body_bottom)) - row_origin - row_size * 0.5,
+        (row_size.x - row_size.y) * 0.5,
+        row_size.y * 0.5,
+    );
+    let row_hover = smoothstep(0.5, -0.5, mouse_row_dist) * global.mouse_pressure;
+    let row_surface_dist = row_dist - interaction.mouse_bulge * row_hover * 0.5;
+    let surface_dist = if expansion > 0.0 && row_reveal > 0.0 {
+        interaction.expand(main_dist).min(row_surface_dist)
+    } else {
+        interaction.expand(main_dist)
+    };
+    let mask = (0.5 - surface_dist).saturate();
+    let alpha = mask.max((-surface_dist.max(0.0) * 0.3).exp() * 0.16);
+    if alpha <= 0.0 {
+        kill();
+    }
     let forecast_x = content_local.x - tempo::FORECAST_X;
     let conditions = if hourly_row {
         forecast_at(forecast_x, &pill.hourly)
     } else {
         forecast_at(forecast_x, &pill.daily)
     };
-    let sun = sun_position(global.weather_hour, pill.sun_hours);
+    let sun = [weather_data.x, weather_data.y];
     let current_conditions = pill.hourly[0].values();
     let edge = ((main_local.x / pill_size.x).clamp(0.0, 1.0) - 0.5).abs();
     let pill_conditions = lerp_conditions(
@@ -327,62 +259,48 @@ pub fn fs_tempo(
         pill.hourly[1].values(),
         smoothstep(0.2, 0.3, edge),
     );
-    let row_inside = row_dist < 0.5 && row_reveal > 0.0;
+    let row_blend = smoothstep(1.0, -1.0, row_surface_dist) * row_reveal;
+    let row_inside = row_blend > 0.0;
     let merged_size = vec2(pill_size.x, pill_size.y + popup_size.y);
-    let (scene_local, scene_size, scene_dist, scene_conditions) = if row_inside {
-        (
-            row_local,
-            row_size,
-            row_dist,
-            lerp_conditions(current_conditions, conditions, row_reveal),
-        )
-    } else {
-        let popup_conditions = lerp_conditions(
-            pill_conditions,
-            current_conditions,
-            smoothstep(8.0, -8.0, popup_dist),
-        );
-        (main_local, merged_size, main_dist, popup_conditions)
-    };
+    let popup_conditions = lerp_conditions(
+        pill_conditions,
+        current_conditions,
+        smoothstep(8.0, -8.0, popup_dist),
+    );
+    let row_conditions = lerp_conditions(current_conditions, conditions, row_reveal);
+    let scene_local = main_local.lerp(row_local, row_blend);
+    let scene_size = merged_size.lerp(row_size, row_blend);
+    let scene_dist = main_dist;
+    let scene_conditions = lerp_conditions(popup_conditions, row_conditions, row_blend);
     let refracted = interaction.refract(scene_local, scene_size, scene_dist);
     let sun_height = if row_inside && hourly_row {
         sun_position(
-            forecast_time_at(forecast_x, pill.hourly_start),
+            (pill.hourly_start
+                + forecast_position(forecast_x, tempo::HOURLY_FORECASTS)
+                    * tempo::HOURLY_STEP_HOURS as f32)
+                % 24.0,
             pill.sun_hours,
         )[1]
     } else if row_inside {
-        sun_position(12.0, pill.sun_hours)[1]
+        weather_data.z
     } else {
         sun[1]
     };
     let mut color = scene(
         global,
-        interaction,
         refracted,
         scene_size,
         scene_dist,
         sun_height,
         scene_conditions,
     );
-    if !row_inside && row_dist < 12.0 {
-        let (_, row_mask, row_alpha) = interaction.surface(row_dist);
-        color *= 1.0 - (row_alpha - row_mask).max(0.0) * row_reveal * 0.45;
-    }
     if body_dist < 1.0 {
         color = color.lerp(
-            sun_layer(
-                color,
-                main_local,
-                pill_size,
-                sun,
-                pill_conditions[1],
-                global.time,
-            ),
+            sun_layer(color, main_local, pill_size, sun, pill_conditions[1], global.time),
             smoothstep(1.0, -1.0, body_dist),
         );
     }
-    let color = color.lerp(color * 1.5 + 0.1, interaction.ripple_flash);
-
-    let forecast_alpha = if row_inside { row_reveal } else { 1.0 };
+    color = color.lerp(color * 1.5 + 0.1, interaction.ripple_flash);
+    let forecast_alpha = 1.0 - row_blend * (1.0 - row_reveal);
     *out_color = (color * mask * forecast_alpha).extend(alpha * forecast_alpha);
 }

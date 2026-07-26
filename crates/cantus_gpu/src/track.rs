@@ -1,6 +1,6 @@
 use crate::{
-    pill_fragment, pill_sheen, pixel_to_ndc, quad_coord, sd_capsule_box, sd_star, smooth_union,
-    tempo::avalanche, unpack3x8unorm,
+    avalanche, pill_fragment, pill_sheen, pixel_to_ndc, quad_coord, sd_capsule_box, sd_star,
+    smooth_union, unpack3x8unorm,
 };
 use cantus_shared::{
     GlobalUniforms, smoothstep,
@@ -32,10 +32,7 @@ fn hash(point: Vec2, seed: f32) -> f32 {
 
 fn speckle(pixel: Vec2, time: f32, seed: f32, audio: AudioFeatures) -> f32 {
     let amount = audio.acousticness * 0.7 + audio.instrumentalness * 0.3;
-    let drift = vec2(
-        0.16 + seed.fract() * 0.08,
-        0.055 + (seed * 0.7).sin() * 0.025,
-    );
+    let drift = vec2(0.16 + seed.fract() * 0.08, 0.055 + (seed * 0.7).sin() * 0.025);
     let uv = pixel / (8.0 - amount) + time * (0.35 + audio.instrumentalness * 0.55) * drift;
     let cell = uv.floor();
     let phase = hash(vec2(cell.y, cell.x), seed + 2.71);
@@ -79,8 +76,8 @@ fn over_icon(base: Vec4, color: Vec3, shape: f32, alpha: f32) -> Vec4 {
     let mask = (0.5 - shape).saturate();
     let shadow = (-shape.max(0.0) * 0.5).exp();
     let bevel = 1.0 - smoothstep(0.0, -5.0, shape);
-    let layer = ((color + bevel * bevel * 0.045) * mask * alpha)
-        .extend(mask.max(shadow * shadow * 0.2) * alpha);
+    let layer =
+        ((color + bevel * bevel * 0.045) * mask * alpha).extend(mask.max(shadow * shadow * 0.2) * alpha);
     base * (1.0 - layer.w) + layer
 }
 
@@ -137,8 +134,7 @@ pub fn fs_track(
         pill_fragment(pixel_pos, global, pill.x, pill.width);
     let local_uv = local_pixel / pill_size;
     let local_centered = local_uv - 0.5;
-    let stretched_uv_y =
-        local_centered.y * (pill_size.y / (pill_size.y + interaction.bulge())) + 0.5;
+    let stretched_uv_y = local_centered.y * (pill_size.y / (pill_size.y + interaction.bulge())) + 0.5;
 
     let (primary_row, secondary_row) = pill.icon_rows(global.bar_height.x, global.bar_height.y);
 
@@ -172,16 +168,13 @@ pub fn fs_track(
     let beat = (global.time * audio.tempo * (TAU / 60.0)).sin() * 0.5 + 0.5;
     let beat = beat * beat * audio.danceability * (0.025 + audio.energy * 0.055);
     let lens_warp = (1.0 + dist.min(0.0) / 120.0).saturate();
-    let deformation = local_centered * lens_warp * lens_warp * 0.6
-        + interaction.ripple
-        + interaction.mouse * 0.03;
+    let deformation = local_centered * lens_warp * lens_warp * 0.6 + interaction.ripple;
     let flow_time = global.time
         * (0.12 + audio.energy * 0.25 + ((audio.tempo - 60.0) / 120.0).saturate() * 0.12)
         + seed;
     let frequency =
         (pill_size.x / pill_size.y * (0.5 + seed.fract() * 0.12 + turbulence * 0.18)).max(1.7);
-    let field_uv =
-        (local_uv.clamp(Vec2::ZERO, Vec2::ONE) - deformation * 0.08) * vec2(frequency, 1.6);
+    let field_uv = (local_uv.clamp(Vec2::ZERO, Vec2::ONE) - deformation * 0.08) * vec2(frequency, 1.6);
     let warped_uv = field_uv
         + vec2(
             (field_uv.y * 2.7 + flow_time).sin() + (field_uv.x * 1.3 - flow_time * 0.7).cos(),
@@ -189,29 +182,13 @@ pub fn fs_track(
         ) * (0.14 + turbulence * 0.2 + beat);
     let phase = seed + FRAC_PI_2;
     let weighted = plasma_field(warped_uv, pill.colors[0], 2.1, 0.7, flow_time)
-        + plasma_field(
-            warped_uv,
-            pill.colors[1],
-            0.6,
-            -2.4,
-            phase - flow_time * 0.8,
-        )
+        + plasma_field(warped_uv, pill.colors[1], 0.6, -2.4, phase - flow_time * 0.8)
         + plasma_field(warped_uv, pill.colors[2], -1.5, 1.9, flow_time * 0.65 + 2.0)
-        + plasma_field(
-            warped_uv,
-            pill.colors[3],
-            2.4,
-            1.6,
-            phase - flow_time * 0.55,
-        );
+        + plasma_field(warped_uv, pill.colors[3], 2.4, 1.6, phase - flow_time * 0.55);
     let mut color = weighted.truncate() / weighted.w;
 
     let luma = color.dot(vec3(0.2126, 0.7152, 0.0722));
-    let played = smoothstep(
-        global.playhead_x + 3.0,
-        global.playhead_x - 3.0,
-        pixel_pos.x,
-    );
+    let played = smoothstep(global.playhead_x + 3.0, global.playhead_x - 3.0, pixel_pos.x);
     color = Vec3::splat(luma)
         .lerp(color, 1.55 + audio.valence * 0.4)
         .clamp(Vec3::splat(0.035), Vec3::splat(0.92))
@@ -233,9 +210,8 @@ pub fn fs_track(
         color = color.lerp(tex.truncate(), img_mask * tex.w);
     }
 
-    color += color.lerp(Vec3::ONE, 0.32) * pill_sheen(stretched_uv_y, dist, interaction);
+    color += color.lerp(Vec3::ONE, 0.32) * pill_sheen(stretched_uv_y, dist);
     color = color.lerp(color * 1.5 + 0.1, interaction.ripple_flash);
-
     let mut output = (color * mask).extend(alpha);
 
     if pill.rating >= 0 && pill.primary_alpha > 0.0 {
@@ -266,11 +242,7 @@ pub fn fs_track(
         }
         let primary = index < primary_playlists;
         let (row, icon, alpha) = if primary {
-            (
-                primary_row,
-                index as f32 + pill.star_count(),
-                pill.primary_alpha,
-            )
+            (primary_row, index as f32 + pill.star_count(), pill.primary_alpha)
         } else {
             (
                 secondary_row,

@@ -10,6 +10,18 @@ use tracing::warn;
 
 const WEATHER_FIELDS: &str = "temperature_2m,weather_code";
 
+fn condition([fog, cloud, rain, snow, lightning, hail]: [f32; 6]) -> WeatherCondition {
+    let pack = |value: f32, max: f32| (value.clamp(0.0, 1.0) * max) as u32;
+    let mut result = WeatherCondition::from_bits(0);
+    result.set_fog_raw(pack(fog, 15.0));
+    result.set_cloud_raw(pack(cloud, 127.0));
+    result.set_rain_raw(pack(rain, 255.0));
+    result.set_snow_raw(pack(snow, 255.0));
+    result.set_lightning(lightning > 0.0);
+    result.set_hail_raw(pack(hail, 15.0));
+    result
+}
+
 /// Fetches and applies a forecast every 15 minutes.
 pub fn spawn_refresh_loop(latitude: f32, longitude: f32, updater: AppUpdater) {
     thread::spawn(move || {
@@ -69,6 +81,10 @@ impl Hourly {
     pub fn condition(&self, index: usize) -> WeatherCondition {
         coded_conditions(self.weather_code[index])
     }
+
+    pub fn name(&self, index: usize) -> &'static str {
+        WeatherCode::name(self.weather_code[index])
+    }
 }
 
 #[derive(Deserialize)]
@@ -82,15 +98,7 @@ pub struct Daily {
 
 /// Derives a condition from a WMO weather code.
 pub fn coded_conditions(code: u8) -> WeatherCondition {
-    let code = WeatherCode::from_repr(code);
-    WeatherCondition::from_values(
-        code.map_or(0.0, WeatherCode::fog),
-        code.map_or(0.9, WeatherCode::cloud),
-        code.map_or(0.0, WeatherCode::rain),
-        code.map_or(0.0, WeatherCode::snow),
-        code.is_some_and(WeatherCode::lightning),
-        code.map_or(0.0, WeatherCode::hail),
-    )
+    condition(WeatherCode::from_repr(code).map_or([0.0, 0.9, 0.0, 0.0, 0.0, 0.0], WeatherCode::values))
 }
 
 /// WMO weather interpretation codes, as used by Open-Meteo's `weather_code` field.
@@ -133,28 +141,19 @@ impl WeatherCode {
         Self::from_repr(code).map_or("Unknown weather", Into::into)
     }
 
-    /// Cloud cover, 0-1.
-    pub const fn cloud(self) -> f32 {
-        match self {
+    const fn values(self) -> [f32; 6] {
+        let cloud = match self {
             Self::Clear => 0.05,
             Self::MainlyClear => 0.25,
             Self::PartlyCloudy => 0.55,
             _ => 0.9,
-        }
-    }
-
-    /// Ground fog, 0-1.
-    pub const fn fog(self) -> f32 {
-        match self {
+        };
+        let fog = match self {
             Self::Fog => 0.6,
             Self::RimeFog => 0.75,
             _ => 0.0,
-        }
-    }
-
-    /// Rain intensity, 0-1.
-    pub const fn rain(self) -> f32 {
-        match self {
+        };
+        let rain = match self {
             Self::LightDrizzle => 0.15,
             Self::ModerateDrizzle | Self::LightRain => 0.3,
             Self::DenseDrizzle => 0.45,
@@ -169,12 +168,8 @@ impl WeatherCode {
             Self::ThunderstormLightHail => 0.75,
             Self::ThunderstormHeavyHail => 0.85,
             _ => 0.0,
-        }
-    }
-
-    /// Snow intensity, 0-1.
-    pub const fn snow(self) -> f32 {
-        match self {
+        };
+        let snow = match self {
             Self::SnowGrains => 0.25,
             Self::LightSnow => 0.3,
             Self::LightSnowShowers => 0.35,
@@ -182,23 +177,20 @@ impl WeatherCode {
             Self::HeavySnowShowers => 0.9,
             Self::HeavySnow => 1.0,
             _ => 0.0,
-        }
-    }
-
-    /// Whether the code calls for lightning.
-    pub const fn lightning(self) -> bool {
-        matches!(
+        };
+        let lightning = if matches!(
             self,
             Self::Thunderstorm | Self::ThunderstormLightHail | Self::ThunderstormHeavyHail
-        )
-    }
-
-    /// Hail intensity, 0-1.
-    pub const fn hail(self) -> f32 {
-        match self {
+        ) {
+            1.0
+        } else {
+            0.0
+        };
+        let hail = match self {
             Self::ThunderstormHeavyHail => 1.0,
             Self::ThunderstormLightHail => 0.6,
             _ => 0.0,
-        }
+        };
+        [fog, cloud, rain, snow, lightning, hail]
     }
 }

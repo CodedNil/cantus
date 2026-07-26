@@ -35,16 +35,12 @@ impl TrackPill {
     pub fn icon_rows(&self, bar_start_y: f32, bar_height: f32) -> (PillIconRow, PillIconRow) {
         pill_icon_rows(
             self.x + self.width * 0.5,
-            pill_icon_primary_center_y(bar_start_y, bar_height),
+            bar_start_y + bar_height * 0.975 - 3.0,
             self.star_count() + self.primary_playlist_count as f32,
             self.secondary_playlist_count as f32,
             self.secondary_expansion,
         )
     }
-}
-
-pub fn pill_icon_primary_center_y(bar_start_y: f32, bar_height: f32) -> f32 {
-    bar_start_y + bar_height * 0.975 - 3.0
 }
 
 #[repr(C)]
@@ -72,19 +68,13 @@ pub struct PillIconRow {
 
 impl PillIconRow {
     pub fn hit(self, point: Vec2) -> Option<(usize, bool)> {
-        if self.expansion <= 0.0 {
-            return None;
-        }
         let index = (point.x - self.center.x) / (ICON_SPACING * self.expansion)
             + (self.count - 1.0).max(0.0) * 0.5
             + 0.5;
-        if !(0.0..self.count).contains(&index) {
-            return None;
-        }
-        let index = index as usize;
+        let index =
+            (self.expansion > 0.0 && (0.0..self.count).contains(&index)).then_some(index as usize)?;
         let center = self.icon_center(index as f32);
-        let delta = (point - center).abs();
-        (delta.x <= ICON_WIDTH * 0.5 && delta.y <= ICON_WIDTH * 0.5)
+        ((point - center).abs().max_element() <= ICON_WIDTH * 0.5)
             .then_some((index, point.x >= center.x))
     }
 
@@ -123,10 +113,7 @@ pub fn pill_icon_rows(
             expansion: 1.0,
         },
         PillIconRow {
-            center: Vec2::new(
-                center_x,
-                primary_center_y + ICON_SPACING * secondary_expansion,
-            ),
+            center: Vec2::new(center_x, primary_center_y + ICON_SPACING * secondary_expansion),
             count: secondary_count,
             expansion: secondary_expansion,
         },

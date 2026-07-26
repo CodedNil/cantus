@@ -4,12 +4,7 @@ use crate::{
     interaction::Rect,
 };
 use glam::vec2;
-use std::{
-    collections::hash_map::DefaultHasher,
-    ffi::c_void,
-    hash::{Hash, Hasher},
-    ptr::NonNull,
-};
+use std::{ffi::c_void, ptr::NonNull};
 use wayland_client::{
     Connection, Dispatch, Proxy, QueueHandle, WEnum, delegate_noop,
     protocol::{
@@ -47,9 +42,7 @@ pub fn run() {
         .expect("Failed to get display pointer");
     let mut app = LayerShellApp::default();
 
-    event_queue
-        .roundtrip(&mut app)
-        .expect("Initial roundtrip failed");
+    event_queue.roundtrip(&mut app).expect("Initial roundtrip failed");
     let compositor = app.compositor.clone().expect("Missing compositor");
     let layer_shell = app.layer_shell.take().expect("Missing layer shell");
     assert!(!app.outputs.is_empty(), "No Wayland outputs found");
@@ -59,12 +52,10 @@ pub fn run() {
         .expect("Failed to fetch output details");
 
     let wl_surface = compositor.create_surface(&qhandle, ());
-    let surface_ptr = NonNull::new(wl_surface.id().as_ptr().cast::<c_void>())
-        .expect("Failed to get surface pointer");
+    let surface_ptr =
+        NonNull::new(wl_surface.id().as_ptr().cast::<c_void>()).expect("Failed to get surface pointer");
     let target = SurfaceTargetUnsafe::RawHandle {
-        raw_display_handle: Some(RawDisplayHandle::Wayland(WaylandDisplayHandle::new(
-            display_ptr,
-        ))),
+        raw_display_handle: Some(RawDisplayHandle::Wayland(WaylandDisplayHandle::new(display_ptr))),
         raw_window_handle: RawWindowHandle::Wayland(WaylandWindowHandle::new(surface_ptr)),
     };
     app.pending_surface = Some(
@@ -138,8 +129,6 @@ struct LayerShellApp {
     layer_shell: Option<ZwlrLayerShellV1>,
     pointer: Option<WlPointer>,
     outputs: Vec<OutputInfo>,
-    last_hitbox_hash: u64,
-
     pending_surface: Option<Surface<'static>>,
     wl_surface: Option<WlSurface>,
     viewport: Option<WpViewport>,
@@ -169,8 +158,7 @@ impl LayerShellApp {
         let (buffer_width, buffer_height) = self.cantus.buffer_size();
         if buffer_width > 0 && buffer_height > 0 && self.is_configured {
             if let Some(gpu) = &mut self.cantus.render.gpu {
-                if (gpu.surface_config.width, gpu.surface_config.height)
-                    != (buffer_width, buffer_height)
+                if (gpu.surface_config.width, gpu.surface_config.height) != (buffer_width, buffer_height)
                 {
                     gpu.surface_config.width = buffer_width;
                     gpu.surface_config.height = buffer_height;
@@ -212,36 +200,13 @@ impl LayerShellApp {
         let (Some(wl_surface), Some(compositor)) = (&self.wl_surface, &self.compositor) else {
             return;
         };
-        let rects: Vec<_> = self.cantus.input_rects().map(region_rect).collect();
-        let mut hasher = DefaultHasher::new();
-        rects.hash(&mut hasher);
-        let hash = hasher.finish();
-
-        if hash != self.last_hitbox_hash {
-            let region = compositor.create_region(qhandle, ());
-            for [x, y, width, height] in rects {
-                region.add(x, y, width, height);
-            }
-            wl_surface.set_input_region(Some(&region));
-            region.destroy();
-            self.last_hitbox_hash = hash;
+        let region = compositor.create_region(qhandle, ());
+        for rect in self.cantus.interaction.regions.drain(..) {
+            let [x, y, width, height] = region_rect(rect);
+            region.add(x, y, width, height);
         }
-    }
-}
-
-impl CantusApp {
-    fn input_rects(&self) -> impl Iterator<Item = Rect> + '_ {
-        self.playback
-            .queue
-            .iter()
-            .flat_map(|track| {
-                track
-                    .runtime
-                    .rect(self.config.height)
-                    .into_iter()
-                    .chain(self.icon_row_rects(track).into_iter().flatten())
-            })
-            .chain(self.overlay_rects())
+        wl_surface.set_input_region(Some(&region));
+        region.destroy();
     }
 }
 
@@ -283,8 +248,9 @@ dispatch!(WlOutput, |state, proxy, event, _qhandle| {
     if let Some(info) = state.outputs.iter_mut().find(|info| info.handle.id() == id) {
         let identifier = match event {
             wl_output::Event::Geometry { make, model, .. } => format!("{make} {model}"),
-            wl_output::Event::Name { name }
-            | wl_output::Event::Description { description: name } => name,
+            wl_output::Event::Name { name } | wl_output::Event::Description { description: name } => {
+                name
+            }
             _ => return,
         };
         if !info.identifiers.is_empty() {
@@ -324,29 +290,30 @@ dispatch!(WlPointer, |state, _proxy, event, _qhandle| {
             interaction.mouse_pressure = 1.0;
         }
         wl_pointer::Event::Motion {
-            surface_x,
-            surface_y,
-            ..
+            surface_x, surface_y, ..
         } => {
-            cantus.render.uniforms.mouse_pos = vec2(surface_x as f32, surface_y as f32);
-            cantus.handle_mouse_drag();
+            let position = vec2(surface_x as f32, surface_y as f32);
+            cantus.render.uniforms.mouse_pos = position;
+            interaction.motion(position);
         }
         wl_pointer::Event::Leave { .. } => {
             interaction.mouse_pressure = 0.0;
-            cantus.cancel_drag();
+            interaction.cancel_drag();
         }
         wl_pointer::Event::Button {
             button,
             state: button_state,
             ..
         } => match (button, button_state) {
-            (0x110, WEnum::Value(wl_pointer::ButtonState::Pressed)) => cantus.left_click(),
+            (0x110, WEnum::Value(wl_pointer::ButtonState::Pressed)) => {
+                interaction.press(cantus.render.uniforms.mouse_pos);
+            }
             (0x110, WEnum::Value(wl_pointer::ButtonState::Released)) => {
-                cantus.left_click_released();
+                interaction.release();
             }
             (0x111, WEnum::Value(wl_pointer::ButtonState::Pressed)) if interaction.dragging => {
-                cantus.cancel_drag();
-                cantus.interaction.mouse_pressure = 1.0;
+                interaction.cancel_drag();
+                interaction.mouse_pressure = 1.0;
             }
             _ => {}
         },
@@ -359,7 +326,9 @@ dispatch!(WlPointer, |state, _proxy, event, _qhandle| {
             axis: WEnum::Value(wl_pointer::Axis::VerticalScroll),
             value120: discrete,
             ..
-        } if discrete != 0 => state.cantus.handle_scroll(discrete.signum()),
+        } if discrete != 0 => {
+            state.cantus.interaction.set_scroll(discrete.signum());
+        }
         _ => {}
     }
 });

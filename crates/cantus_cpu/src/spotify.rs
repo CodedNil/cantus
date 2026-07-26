@@ -1,14 +1,12 @@
 use crate::{
     AppUpdater, TRACK_SPACING_MS, Update,
     config::{self, Config},
-    interaction::Rect,
     render::art::{self, ArtState},
     send_update,
 };
 use arrayvec::{ArrayString, ArrayVec};
 use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
 use cantus_shared::track::{AudioFeatures, MAX_PILL_PLAYLIST_ICONS};
-use glam::Vec2;
 use jiff::Timestamp;
 use serde::{Deserialize, Deserializer, Serialize, de::DeserializeOwned};
 use serde_json::json;
@@ -137,7 +135,6 @@ pub struct TrackRuntime {
     pub primary_icon_alpha: f32,
     pub primary_icons_fit: bool,
     pub primary_playlist_count: u8,
-    pub secondary_playlist_count: u8,
     pub start_ms: f32,
     pub start_x: f32,
     pub width: f32,
@@ -156,26 +153,12 @@ impl Track {
         let start = playhead_x + self.runtime.start_ms * px_per_ms;
         (start, start + self.duration_ms as f32 * px_per_ms)
     }
-
-    pub fn contains(&self, point: Vec2, height: f32) -> bool {
-        self.runtime
-            .rect(height)
-            .is_some_and(|rect| rect.contains(point))
-    }
 }
 
 impl TrackRuntime {
     pub fn playlist_expansion_curve(&self) -> f32 {
         let progress = self.playlist_expansion;
         progress * progress * (3.0 - 2.0 * progress)
-    }
-
-    pub fn rect(&self, height: f32) -> Option<Rect> {
-        (self.width > 0.0 && self.start_x + self.width > 0.0).then_some(Rect::pill(
-            self.start_x,
-            self.width,
-            height,
-        ))
     }
 }
 
@@ -391,10 +374,7 @@ fn prompt_for_token(client_id: &str, http: &Agent) -> ClientResult<OAuthCredenti
         .and_then(|target| Some(target.split_once('?')?.1))
         .ok_or_else(|| client_error("invalid Spotify authorization response"))?;
     let params: HashMap<_, _> = form_urlencoded::parse(query.as_bytes()).collect();
-    if params
-        .get("state")
-        .is_none_or(|state| *state != expected_state)
-    {
+    if params.get("state").is_none_or(|state| *state != expected_state) {
         return Err(client_error("Spotify authorization state did not match"));
     }
     let code = params
@@ -459,12 +439,7 @@ impl SpotifyClient {
         Ok(token)
     }
 
-    fn send(
-        &mut self,
-        method: &Method,
-        path: &str,
-        json: Option<&str>,
-    ) -> ClientResult<Response<Body>> {
+    fn send(&mut self, method: &Method, path: &str, json: Option<&str>) -> ClientResult<Response<Body>> {
         let request = Request::builder()
             .method(method.clone())
             .uri(format!("{API_BASE}/{path}"))
@@ -512,8 +487,8 @@ impl SpotifyClient {
 
     fn new(client_id: String, cache_path: PathBuf) -> ClientResult<Self> {
         let agent = Agent::new_with_defaults();
-        let token = read_token_cache(&cache_path)
-            .map_or_else(|| prompt_for_token(&client_id, &agent), Ok)?;
+        let token =
+            read_token_cache(&cache_path).map_or_else(|| prompt_for_token(&client_id, &agent), Ok)?;
         write_json(&cache_path, &token)?;
         Ok(Self {
             client_id,
@@ -646,11 +621,7 @@ impl SpotifyBackend {
                 )
                 && liked != should_like
             {
-                let method = if should_like {
-                    Method::PUT
-                } else {
-                    Method::DELETE
-                };
+                let method = if should_like { Method::PUT } else { Method::DELETE };
                 let path = form_urlencoded::Serializer::new("me/library?".to_owned())
                     .append_pair("uris", &uri)
                     .finish();
@@ -686,10 +657,7 @@ impl SpotifyBackend {
     }
 
     pub fn player_parameter(&self, action: &str, parameter: &str, value: impl Display) {
-        self.request(
-            Method::PUT,
-            format!("me/player/{action}?{parameter}={value}"),
-        );
+        self.request(Method::PUT, format!("me/player/{action}?{parameter}={value}"));
     }
 }
 
@@ -772,17 +740,14 @@ impl SpotifyWorker {
             return None;
         }
 
-        let q =
-            self.client
-                .api_json_payload::<CurrentUserQueue>("me/player/queue", &[], "queue")?;
+        let q = self
+            .client
+            .api_json_payload::<CurrentUserQueue>("me/player/queue", &[], "queue")?;
         let currently_playing = q.currently_playing?.into_track()?;
         let current_track_id = currently_playing.id;
         let mut new_queue = vec![currently_playing];
         new_queue.extend(q.queue.into_iter().filter_map(PlaybackItem::into_track));
-        let feature_ids = new_queue
-            .iter()
-            .filter_map(|track| track.id)
-            .collect::<Vec<_>>();
+        let feature_ids = new_queue.iter().filter_map(|track| track.id).collect::<Vec<_>>();
 
         let context_updated = mem::take(&mut self.context_updated);
         self.last_grabbed_queue = Some(now);
@@ -832,8 +797,7 @@ impl SpotifyWorker {
                 cache_changed = true;
                 tracks
             };
-            self.playlist_snapshots
-                .insert(playlist.id, playlist.snapshot_id);
+            self.playlist_snapshots.insert(playlist.id, playlist.snapshot_id);
             send_update(&self.updater, move |app| {
                 let mut update = CondensedPlaylist {
                     id: playlist.id,
@@ -844,10 +808,7 @@ impl SpotifyWorker {
                     rating_index,
                 };
                 let playlists = &mut app.playback.playlists;
-                if let Some(previous) = playlists
-                    .iter_mut()
-                    .find(|playlist| playlist.id == update.id)
-                {
+                if let Some(previous) = playlists.iter_mut().find(|playlist| playlist.id == update.id) {
                     update.art = mem::take(&mut previous.art);
                     *previous = update;
                 } else {
@@ -927,10 +888,7 @@ fn resolve_audio_features(
     }
 }
 
-fn fetch_playlist_tracks(
-    client: &mut SpotifyClient,
-    playlist: &Playlist,
-) -> Option<PlaylistTracks> {
+fn fetch_playlist_tracks(client: &mut SpotifyClient, playlist: &Playlist) -> Option<PlaylistTracks> {
     const FIELDS: &str = "href,limit,offset,total,items(is_local,item(id))";
     const PAGE_SIZE: u32 = 50;
     let total = playlist.items.as_ref()?.total;
@@ -946,12 +904,7 @@ fn fetch_playlist_tracks(
             &[("fields", FIELDS), ("limit", &limit), ("offset", &offset)],
             "playlist page",
         )?;
-        tracks.extend(
-            page.items
-                .into_iter()
-                .flatten()
-                .filter_map(|item| item.item?.id),
-        );
+        tracks.extend(page.items.into_iter().flatten().filter_map(|item| item.item?.id));
     }
     Some(Arc::new(tracks))
 }

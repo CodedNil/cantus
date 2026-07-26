@@ -1,5 +1,5 @@
 use crate::{PANEL_START, render::pipelines::write_texture_region, spotify::Track};
-use cantus_shared::{GLYPH_ATLAS_SIZE, GlyphInstance, MAX_GLYPH_INSTANCES, pack_u16x2};
+use cantus_shared::{GLYPH_ATLAS_SIZE, GlyphInstance, MAX_GLYPH_INSTANCES};
 use glam::{Vec2, vec2};
 use std::{collections::HashMap, f32::consts::TAU};
 use swash::{
@@ -8,8 +8,7 @@ use swash::{
     shape::ShapeContext,
 };
 use wgpu::{
-    Device, Extent3d, Queue, Texture, TextureDescriptor, TextureDimension, TextureFormat,
-    TextureUsages,
+    Device, Extent3d, Queue, Texture, TextureDescriptor, TextureDimension, TextureFormat, TextureUsages,
 };
 
 const FONT_DATA: &[u8] = include_bytes!(concat!(
@@ -20,6 +19,10 @@ const FONT_DATA: &[u8] = include_bytes!(concat!(
 /// Size of the glyph atlas texture (square, in pixels).
 const ATLAS_PADDING: u32 = 2;
 const RASTER_OVERSAMPLE: f32 = 2.5;
+
+const fn pack_u16x2(value: [u32; 2]) -> u32 {
+    value[0] | value[1] << 16
+}
 const SCALE_STEPS: f32 = 4.0;
 
 /// Soft blurred shadow behind text
@@ -31,11 +34,16 @@ const LABEL_SHADOW_STRENGTH: f32 = 0.07;
 pub struct TextStyle {
     size: f32,
     weight: u16,
+    red: bool,
 }
 
 impl TextStyle {
     pub const PRIMARY: Self = Self::new(16.0, 700);
-    pub const TODAY: Self = Self::new(24.0, 900);
+    pub const TODAY: Self = Self {
+        size: 16.0,
+        weight: 900,
+        red: true,
+    };
     pub const DETAILS: Self = Self::new(14.0, 700);
     pub const WEATHER: Self = Self::new(24.0, 600);
     pub const CALENDAR_TITLE: Self = Self::new(20.0, 750);
@@ -43,7 +51,11 @@ impl TextStyle {
     pub const CALENDAR_ARROW_HOVER: Self = Self::new(30.0, 900);
 
     const fn new(size: f32, weight: u16) -> Self {
-        Self { size, weight }
+        Self {
+            size,
+            weight,
+            red: false,
+        }
     }
 }
 
@@ -166,13 +178,7 @@ impl TextRenderer {
         let row_h = row_h.max(height + ATLAS_PADDING * 2);
         self.atlas_cursor = (cx + width + ATLAS_PADDING * 2, cy, row_h);
 
-        write_texture_region(
-            queue,
-            &self.atlas,
-            [gx, gy, 0],
-            [width, height],
-            &image.data,
-        );
+        write_texture_region(queue, &self.atlas, [gx, gy, 0], [width, height], &image.data);
 
         let entry = AtlasEntry {
             pos: [gx, gy],
@@ -198,14 +204,7 @@ impl TextRenderer {
             let fits = width <= available_width;
             self.queue_glyphs(
                 queue,
-                vec2(
-                    if fits {
-                        (left + right - width) * 0.5
-                    } else {
-                        left
-                    },
-                    y,
-                ),
+                vec2(if fits { (left + right - width) * 0.5 } else { left }, y),
                 style,
                 baseline,
                 alpha,
@@ -235,7 +234,7 @@ impl TextRenderer {
                 let offset = vec2(angle.cos(), angle.sin()) * LABEL_SHADOW_RADIUS;
                 (offset, -alpha * LABEL_SHADOW_STRENGTH)
             })
-            .chain([(Vec2::ZERO, alpha)]);
+            .chain([(Vec2::ZERO, alpha + if style.red { 2.0 } else { 0.0 })]);
         for (offset, glyph_alpha) in taps {
             self.queue_glyphs(
                 queue,
@@ -300,11 +299,7 @@ fn song_name(track: &Track) -> &str {
         .split_once(" -")
         .map_or(track.name.as_str(), |(name, _)| name);
     let name = name.split_once('(').map_or(name, |(name, _)| name).trim();
-    if name.is_empty() {
-        track.name.trim()
-    } else {
-        name
-    }
+    if name.is_empty() { track.name.trim() } else { name }
 }
 
 fn track_details(track: &Track) -> String {

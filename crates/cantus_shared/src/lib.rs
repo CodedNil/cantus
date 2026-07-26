@@ -10,14 +10,12 @@ pub mod track;
 pub const UNIT: f32 = 4.0;
 /// The standard small gap between adjacent elements.
 pub const GAP: f32 = UNIT * 2.0;
+/// The standard inset between a container edge and its contents.
+pub const PADDING: f32 = UNIT * 3.0;
 
 pub fn smoothstep(edge0: f32, edge1: f32, x: f32) -> f32 {
     let t = ((x - edge0) / (edge1 - edge0)).saturate();
     t * t * (3.0 - 2.0 * t)
-}
-
-pub fn approach(current: &mut f32, target: f32, speed: f32) {
-    *current += (target - *current).clamp(-speed, speed);
 }
 
 pub const RIPPLE_COUNT: usize = 4;
@@ -27,7 +25,6 @@ pub const RIPPLE_COUNT: usize = 4;
 #[cfg_attr(feature = "cpu", derive(bytemuck::Pod, bytemuck::Zeroable))]
 pub struct RipplePulse {
     pub origin: Vec2,
-    /// Start time and visual strength. A zero strength marks an unused slot.
     pub animation: Vec2,
 }
 
@@ -81,12 +78,4 @@ pub struct GlyphInstance {
     /// Right clip edge in logical pixels.
     pub clip_right: f32,
     pub alpha: f32,
-}
-
-pub const fn pack_u16x2(value: [u32; 2]) -> u32 {
-    value[0] | value[1] << 16
-}
-
-pub const fn unpack_u16x2(value: u32) -> Vec2 {
-    Vec2::new((value & 0xffff) as f32, (value >> 16) as f32)
 }

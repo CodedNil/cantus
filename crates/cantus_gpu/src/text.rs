@@ -1,7 +1,5 @@
-use crate::{pixel_to_ndc, quad_coord};
-use cantus_shared::{
-    GLYPH_ATLAS_SIZE, GlobalUniforms, GlyphInstance, MAX_GLYPH_INSTANCES, smoothstep, unpack_u16x2,
-};
+use crate::{pixel_to_ndc, quad_coord, unpack_u16x2};
+use cantus_shared::{GLYPH_ATLAS_SIZE, GlobalUniforms, GlyphInstance, MAX_GLYPH_INSTANCES, smoothstep};
 use spirv_std::{
     Sampler,
     arch::{Derivative, kill},
@@ -46,11 +44,19 @@ pub fn fs_text(
         + atlas.sample(*sampler, uv + vec2(offset.x, -offset.y)).x
         + atlas.sample(*sampler, uv + vec2(-offset.x, offset.y)).x)
         * 0.25;
-    // A negative `style.y` marks a shadow glyph, rendered dark instead of near-white.
-    let alpha = coverage * style.y.abs() * smoothstep(0.0, 8.0, style.x);
+    // A negative value marks a shadow; values over 2 mark red calendar text.
+    let red = style.y > 1.0;
+    let opacity = if red { style.y - 2.0 } else { style.y.abs() };
+    let alpha = coverage * opacity * smoothstep(0.0, 8.0, style.x);
     if alpha <= 0.0 {
         kill();
     }
-    let brightness = if style.y < 0.0 { 0.0 } else { 0.94 };
-    *out_color = Vec3::splat(brightness * alpha).extend(alpha);
+    let color = if style.y < 0.0 {
+        Vec3::ZERO
+    } else if red {
+        Vec3::new(1.0, 0.68, 0.68)
+    } else {
+        Vec3::splat(0.94)
+    };
+    *out_color = (color * alpha).extend(alpha);
 }

@@ -28,10 +28,7 @@ const TRACK_SPACING_MS: f32 = 4000.0;
 type Update<T> = Box<dyn FnOnce(&mut T) + Send>;
 type AppUpdater = Sender<Update<CantusApp>>;
 
-fn send_update<T>(
-    sender: &Sender<Update<T>>,
-    update: impl FnOnce(&mut T) + Send + 'static,
-) -> bool {
+fn send_update<T>(sender: &Sender<Update<T>>, update: impl FnOnce(&mut T) + Send + 'static) -> bool {
     sender.send(Box::new(update)).is_ok()
 }
 

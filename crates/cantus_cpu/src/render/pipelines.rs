@@ -3,16 +3,16 @@ use crate::{
     render::{GpuPass, GpuResources, ImageAtlas, text::TextRenderer},
 };
 use cantus_shared::{
-    GlobalUniforms, GlyphInstance, MAX_GLYPH_INSTANCES, Particle, PlayheadUniforms,
-    status::StatusPill, tempo::WeatherPill, track::TrackPill,
+    GlobalUniforms, GlyphInstance, MAX_GLYPH_INSTANCES, Particle, PlayheadUniforms, status::StatusPill,
+    tempo::WeatherPill, track::TrackPill,
 };
 use std::{
     mem::size_of,
     sync::{Arc, Weak},
 };
 use wgpu::{
-    BindGroupDescriptor, BindGroupEntry, BindingResource, BlendState, BufferDescriptor,
-    BufferUsages, ColorTargetState, ColorWrites,
+    BindGroupDescriptor, BindGroupEntry, BindingResource, BlendState, BufferDescriptor, BufferUsages,
+    ColorTargetState, ColorWrites,
     CompositeAlphaMode::{Auto, PostMultiplied, PreMultiplied},
     Device, DeviceDescriptor, Extent3d, FilterMode, FragmentState, Limits, MemoryHints,
     MultisampleState, Origin3d, PipelineCompilationOptions, PowerPreference, PrimitiveState,
@@ -123,13 +123,11 @@ fn gpu_pass(
 
 impl CantusApp {
     pub fn configure_render_surface(&mut self, surface: Surface<'static>, width: u32, height: u32) {
-        let adapter = pollster::block_on(self.render.instance.request_adapter(
-            &RequestAdapterOptions {
-                power_preference: PowerPreference::LowPower,
-                compatible_surface: Some(&surface),
-                ..Default::default()
-            },
-        ))
+        let adapter = pollster::block_on(self.render.instance.request_adapter(&RequestAdapterOptions {
+            power_preference: PowerPreference::LowPower,
+            compatible_surface: Some(&surface),
+            ..Default::default()
+        }))
         .expect("No adapter");
 
         let info = adapter.get_info();
@@ -141,9 +139,7 @@ impl CantusApp {
             ..Default::default()
         }))
         .expect("No device");
-        device.on_uncaptured_error(Arc::new(
-            |error| tracing::error!(%error, "uncaptured wgpu error"),
-        ));
+        device.on_uncaptured_error(Arc::new(|error| tracing::error!(%error, "uncaptured wgpu error")));
 
         let capabilities = surface.get_capabilities(&adapter);
         let alpha_mode = [PreMultiplied, PostMultiplied]
@@ -164,9 +160,7 @@ impl CantusApp {
         surface.configure(&device, &surface_config);
 
         let text_renderer = TextRenderer::new(&device, self.config.height);
-        let text_atlas_view = text_renderer
-            .atlas
-            .create_view(&TextureViewDescriptor::default());
+        let text_atlas_view = text_renderer.atlas.create_view(&TextureViewDescriptor::default());
 
         let rust_gpu_shader = device.create_shader_module(wgpu::include_spirv!(concat!(
             env!("CARGO_MANIFEST_DIR"),
@@ -227,10 +221,7 @@ impl CantusApp {
             BindingResource::TextureView(&image_view),
             BindingResource::Sampler(&sampler)
         );
-        let status = self
-            .config
-            .status_enabled
-            .then(|| pass!("Status", StatusPill, 1));
+        let status = self.config.status_enabled.then(|| pass!("Status", StatusPill, 1));
         let weather = self
             .config
             .weather_enabled

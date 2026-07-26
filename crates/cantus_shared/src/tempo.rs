@@ -1,7 +1,9 @@
-use crate::{GAP, UNIT, smoothstep};
+use crate::{GAP, UNIT, smoothstep, status::WIDTH as STATUS_WIDTH};
 use bitfields::bitfield;
 use core::f32::consts::PI;
 use glam::Vec2;
+
+pub type WeatherConditions = [f32; 6];
 
 /// Number of conditions shown in the hourly forecast row.
 pub const HOURLY_FORECASTS: usize = 6;
@@ -12,8 +14,6 @@ pub const HOURLY_STEP_HOURS: usize = 4;
 #[derive(Copy, Clone, Default)]
 #[cfg_attr(feature = "cpu", derive(bytemuck::Pod, bytemuck::Zeroable))]
 pub struct WeatherPill {
-    /// Left edge of the pill, in bar pixels.
-    pub x: f32,
     /// How open the calendar popup is, from 0 (closed) to 1 (fully expanded).
     pub calendar_expansion: f32,
     /// `[sunrise, sunset]`, as hour-of-day.
@@ -48,29 +48,6 @@ impl WeatherCondition {
     const SEVEN_BIT_MAX: f32 = 127.0;
     const EIGHT_BIT_MAX: f32 = 255.0;
 
-    fn pack(value: f32, max: f32) -> u32 {
-        (value.clamp(0.0, 1.0) * max) as u32
-    }
-
-    #[must_use]
-    pub fn from_values(
-        fog: f32,
-        cloud: f32,
-        rain: f32,
-        snow: f32,
-        lightning: bool,
-        hail: f32,
-    ) -> Self {
-        let mut result = Self::from_bits(0);
-        result.set_fog_raw(Self::pack(fog, Self::FOUR_BIT_MAX));
-        result.set_cloud_raw(Self::pack(cloud, Self::SEVEN_BIT_MAX));
-        result.set_rain_raw(Self::pack(rain, Self::EIGHT_BIT_MAX));
-        result.set_snow_raw(Self::pack(snow, Self::EIGHT_BIT_MAX));
-        result.set_lightning(lightning);
-        result.set_hail_raw(Self::pack(hail, Self::FOUR_BIT_MAX));
-        result
-    }
-
     /// Unpacks `[fog, cloud, rain, snow, lightning, hail]` as 0-1 values.
     pub fn values(self) -> [f32; 6] {
         [
@@ -83,7 +60,6 @@ impl WeatherCondition {
         ]
     }
 }
-
 pub const WIDTH: f32 = UNIT * 77.0;
 pub const FORECAST_X: f32 = WIDTH + GAP;
 pub const TOP_GAP: f32 = GAP;
@@ -92,6 +68,10 @@ const HEADER_BOTTOM: f32 = UNIT * 14.0;
 const REVEAL_START: f32 = 0.5;
 const REVEAL_SPREAD: f32 = 0.18;
 const REVEAL_DURATION: f32 = 0.24;
+
+pub fn pill_x(screen_width: f32) -> f32 {
+    screen_width - STATUS_WIDTH - WIDTH - GAP * 2.0
+}
 
 pub fn expanded_x(x: f32, expansion: f32) -> f32 {
     x - FORECAST_X * expansion * 0.5
@@ -116,18 +96,17 @@ pub fn reveal_progress(expansion: f32, y: f32) -> f32 {
     smoothstep(delay, delay + REVEAL_DURATION, expansion)
 }
 
-/// Approximates `sin(x)` for `x` in `[0, PI]`
-fn sin_arch(x: f32) -> f32 {
-    let y = PI - x;
-    16.0 * x * y / (5.0 * PI * PI - 4.0 * x * y)
-}
-
 /// Sun phase (0 at sunrise, 1 at sunset) and height (-1 to 1) for the given hour.
 pub fn sun_position(hour: f32, [sunrise, sunset]: [f32; 2]) -> [f32; 2] {
+    let height = |phase: f32| {
+        let x = phase * PI;
+        let y = PI - x;
+        16.0 * x * y / (5.0 * PI * PI - 4.0 * x * y)
+    };
     let daylight = sunset - sunrise;
     if hour >= sunrise && hour <= sunset {
         let phase = (hour - sunrise) / daylight;
-        [phase, sin_arch(phase * PI)]
+        [phase, height(phase)]
     } else {
         let night = 24.0 - daylight;
         let phase = if hour < sunrise {
@@ -135,7 +114,6 @@ pub fn sun_position(hour: f32, [sunrise, sunset]: [f32; 2]) -> [f32; 2] {
         } else {
             (hour - sunset) / night
         };
-        let past_sunset = if hour >= sunset { 1.0 } else { 0.0 };
-        [past_sunset, -sin_arch(phase * PI)]
+        [if hour >= sunset { 1.0 } else { 0.0 }, -height(phase)]
     }
 }

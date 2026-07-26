@@ -1,93 +1,84 @@
-use crate::{GAP, tempo::WeatherCondition};
+use crate::tempo::WeatherConditions;
+use crate::{GAP, PADDING};
 #[cfg(feature = "cpu")]
 use glam::FloatExt;
 
 pub const STATUS_HISTORY_SAMPLES: usize = 40;
+pub const AUDIO_SPECTRUM_BANDS: usize = 7;
 const STATUS_HISTORY_PACKS: usize = STATUS_HISTORY_SAMPLES / 4;
-const STATUS_PADDING: f32 = crate::UNIT * 3.0;
-const STATUS_WIDTHS: [f32; 6] = [60.0, 60.0, 32.0, 32.0, 24.0, 24.0];
-const STATUS_CENTERS: [f32; 6] = [42.0, 110.0, 164.0, 164.0, 200.0, 232.0];
-const BATTERY_SLOT: u32 = 2;
+const PROCESSOR_WIDTH: f32 = 60.0;
+const DATA_WIDTH: f32 = 32.0;
+const ACTION_WIDTH: f32 = 24.0;
+pub const CPU_SECTION: u32 = 0;
+pub const GPU_SECTION: u32 = 1;
+pub const BATTERY_SECTION: u32 = 2;
+pub const AUDIO_SECTION: u32 = 3;
+pub const REBOOT_SECTION: u32 = 4;
+pub const POWER_SECTION: u32 = 5;
+pub const WIDTH: f32 = PADDING * 2.0 + (PROCESSOR_WIDTH + DATA_WIDTH + ACTION_WIDTH) * 2.0 + GAP * 5.0;
 
 #[repr(C)]
 #[derive(Copy, Clone, Default)]
 #[cfg_attr(feature = "cpu", derive(bytemuck::Pod, bytemuck::Zeroable))]
 pub struct StatusPill {
-    /// Left edge of the pill, in bar pixels.
-    pub x: f32,
-    /// Width of the pill, in pixels.
-    pub width: f32,
-    /// Battery charge, 0 to 1.
+    /// Battery charge from 0 to 1, or negative when no battery is present.
     pub battery_level: f32,
-    /// Whether this machine has a battery.
-    pub battery_present: f32,
     /// Whether the battery is currently charging.
     pub battery_charging: f32,
-    /// System output volume, 0 to 1.
+    /// Signed volume: magnitude is the level, negative means muted.
     pub volume: f32,
-    /// Whether audio output is muted.
-    pub muted: f32,
-    /// RMS level sampled from the system audio monitor stream.
-    pub audio_activity: f32,
-    /// Global shader time at which the newest history samples arrived.
-    pub sample_time: f32,
+    /// Logarithmic frequency-band levels sampled from the system audio monitor stream.
+    pub audio_spectrum: [f32; AUDIO_SPECTRUM_BANDS],
+    /// Fractional scroll between the two newest history samples.
+    pub history_scroll: f32,
     /// CPU temperature and usage history.
     pub cpu: ProcessorStatus,
     /// GPU temperature and usage history.
     pub gpu: ProcessorStatus,
-    /// 0 means idle, 1 means power off, and 2 means reboot.
-    pub power_action: f32,
-    /// How far the held-down confirmation for `power_action` has progressed, 0 to 1.
-    pub power_progress: f32,
-    /// Sky state copied from the weather pill.
-    pub sun: [f32; 2],
-    /// Current sky condition, for the pill's background.
-    pub conditions: WeatherCondition,
+    /// Action ID plus hold progress; zero means no action is active.
+    pub power_state: f32,
+    /// Hovered power action using the same IDs as `power_action`.
+    pub power_hover: f32,
+    /// Current sun height and decoded sky condition.
+    pub sun_height: f32,
+    pub conditions: WeatherConditions,
 }
 
 impl StatusPill {
-    pub const fn layout(&self) -> StatusLayout {
-        StatusLayout::new(self.battery_present > 0.5)
-    }
-}
-
-#[derive(Copy, Clone)]
-pub struct StatusLayout {
-    battery: bool,
-}
-
-impl StatusLayout {
-    pub const fn new(battery: bool) -> Self {
-        Self { battery }
-    }
-
-    pub const fn center(self, slot: u32) -> f32 {
-        STATUS_CENTERS[slot as usize]
-            + if self.battery && slot > BATTERY_SLOT {
-                STATUS_WIDTHS[BATTERY_SLOT as usize] + GAP
-            } else {
-                0.0
+    pub const fn section_center(&self, section: u32) -> f32 {
+        let mut x = PADDING;
+        let mut index = 0;
+        while index < section {
+            if self.battery_level >= 0.0 || index != BATTERY_SECTION {
+                x += self.section_width(index) + GAP;
             }
+            index += 1;
+        }
+        x + self.section_width(section) * 0.5
     }
 
-    pub const fn width(self) -> f32 {
-        self.center(5) + STATUS_WIDTHS[5] * 0.5 + STATUS_PADDING
+    pub const fn section_width(&self, section: u32) -> f32 {
+        let width = if section < BATTERY_SECTION {
+            PROCESSOR_WIDTH
+        } else if section < REBOOT_SECTION {
+            DATA_WIDTH
+        } else {
+            ACTION_WIDTH
+        };
+        if self.battery_level < 0.0 && section < BATTERY_SECTION {
+            width + (DATA_WIDTH + GAP) * 0.5
+        } else {
+            width
+        }
     }
 
-    pub const fn bounds(self, first: u32, last: u32) -> (f32, f32) {
-        (
-            self.center(first) - (STATUS_WIDTHS[first as usize] + GAP) * 0.5,
-            self.center(last) + (STATUS_WIDTHS[last as usize] + GAP) * 0.5,
-        )
-    }
-
-    pub fn section(self, x: f32) -> u32 {
+    pub fn section_at(&self, x: f32) -> u32 {
         (0..5)
-            .find(|&slot| {
-                (slot != BATTERY_SLOT || self.battery)
-                    && x < self.center(slot) + (STATUS_WIDTHS[slot as usize] + GAP) * 0.5
+            .find(|&section| {
+                (section != BATTERY_SECTION || self.battery_level >= 0.0)
+                    && x < self.section_center(section) + (self.section_width(section) + GAP) * 0.5
             })
-            .unwrap_or(5)
+            .unwrap_or(POWER_SECTION)
     }
 }
 
@@ -121,5 +112,4 @@ pub struct ProcessorStatus {
     pub temperature: f32,
     pub usage: UsageHistory,
     pub memory: UsageHistory,
-    pub temperature_history: UsageHistory,
 }

@@ -57,9 +57,8 @@ impl CantusApp {
         tracks
             .filter_map(|track| Some((track.album.image.as_deref()?, &mut track.runtime.art)))
             .chain(
-                playlists.filter_map(|playlist| {
-                    Some((playlist.image_url.as_deref()?, &mut playlist.art))
-                }),
+                playlists
+                    .filter_map(|playlist| Some((playlist.image_url.as_deref()?, &mut playlist.art))),
             )
     }
 
@@ -214,12 +213,7 @@ fn image_palette(image: &RgbaImage) -> [u32; NUM_SWATCHES] {
         .collect();
     let use_harmony = !pixels.is_empty();
     if !use_harmony {
-        pixels.extend(
-            image
-                .pixels()
-                .filter(|pixel| pixel[3] >= 128)
-                .map(srgb_to_lab),
-        );
+        pixels.extend(image.pixels().filter(|pixel| pixel[3] >= 128).map(srgb_to_lab));
     }
 
     if pixels.is_empty() {

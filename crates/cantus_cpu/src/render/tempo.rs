@@ -1,93 +1,52 @@
 use crate::{
     AppUpdater,
-    interaction::Rect,
+    interaction::{InteractionState, Rect},
     openmeteo::{self, Forecast, WeatherCode},
-    render::{status::GAP, text::TextStyle},
+    render::{approach, text::TextStyle},
 };
 use arrayvec::ArrayString;
 use cantus_shared::{
-    UNIT, approach,
-    status::StatusPill,
-    tempo::{self, WeatherCondition, WeatherPill},
+    UNIT, smoothstep,
+    tempo::{self, WIDTH, WeatherCondition, WeatherPill},
 };
 use glam::Vec2;
 use jiff::{Span, Zoned, civil::DateTime};
 use std::{array::from_fn, fmt::Write, time::UNIX_EPOCH};
 
-pub const WIDTH: f32 = tempo::WIDTH;
-const HOURS_PER_DAY: f64 = 24.0;
-const DAYS_PER_WEEK: usize = 7;
 const GRID_ROWS: usize = 6;
 const GRID_ROW_HEIGHT: f32 = UNIT * 6.0;
 const GRID_TOP_Y: f32 = UNIT * 24.0;
 const WEEKDAY_Y: f32 = UNIT * 17.0;
 const TITLE: Vec2 = Vec2::new(WIDTH * 0.5, UNIT * 10.0);
-const TITLE_HALF_SIZE: Vec2 = Vec2::new(UNIT * 15.0, UNIT * 4.0);
 const DETAILS: Vec2 = Vec2::new(tempo::FORECAST_X + WIDTH * 0.5, TITLE.y);
-const ARROW_RADIUS: f32 = UNIT * 5.0;
 const WEEKDAYS: [&str; 7] = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"];
 const ARROWS: [(&str, i32); 2] = [("<", -1), (">", 1)];
 
 fn cell(index: usize) -> Vec2 {
-    let column_width = WIDTH / DAYS_PER_WEEK as f32;
+    let column_width = WIDTH / WEEKDAYS.len() as f32;
     Vec2::new(
-        (index % DAYS_PER_WEEK) as f32 * column_width + column_width * 0.5,
-        GRID_TOP_Y + (index / DAYS_PER_WEEK) as f32 * GRID_ROW_HEIGHT,
-    )
-}
-
-fn arrow(side: i32, reveal: f32) -> Vec2 {
-    Vec2::new(
-        WIDTH * 0.5 + side as f32 * (WIDTH * 0.5 - UNIT * 7.0) * reveal,
-        TITLE.y - (1.0 - reveal) * UNIT * 3.0,
-    )
-}
-
-/// Zero selects the month title; -1 and 1 select the previous/next arrows.
-fn header_action(point: Vec2, reveal: f32) -> Option<i32> {
-    if Rect::from_center(TITLE, TITLE_HALF_SIZE).contains(point) {
-        return Some(0);
-    }
-    ARROWS.into_iter().find_map(|(_, side)| {
-        Rect::from_center(arrow(side, reveal), Vec2::splat(ARROW_RADIUS))
-            .contains(point)
-            .then_some(side)
-    })
-}
-
-fn forecast_item(height: f32, row: f32, column: usize, count: usize, line: usize) -> Vec2 {
-    Vec2::new(
-        tempo::FORECAST_X + (column as f32 + 0.5) * WIDTH / count as f32,
-        tempo::forecast_center(height, row) + (line as f32 * 2.0 - 1.0) * tempo::TOP_GAP,
+        (index % WEEKDAYS.len()) as f32 * column_width + column_width * 0.5,
+        GRID_TOP_Y + (index / WEEKDAYS.len()) as f32 * GRID_ROW_HEIGHT,
     )
 }
 
 #[derive(Default)]
 struct ForecastItem {
     text: [String; 2],
+    hover_text: String,
     conditions: WeatherCondition,
 }
 
-fn pill_rect(status: &StatusPill, height: f32) -> Rect {
-    Rect::pill(status.x - WIDTH - GAP, WIDTH, height)
+fn pill_rect(screen_width: f32, height: f32) -> Rect {
+    Rect::pill(tempo::pill_x(screen_width), WIDTH, height)
 }
 
-fn calendar_rect(status: &StatusPill, height: f32, popup: bool) -> Rect {
-    let mut area = pill_rect(status, height);
-    area.x0 = tempo::expanded_x(area.x0, 1.0);
-    area.x1 = area.x0
-        + if popup {
-            tempo::popup_size(1.0).x
-        } else {
-            WIDTH
-        };
-    area.y1 += f32::from(popup) * tempo::EXTENSION;
-    area
-}
-
-fn calendar_origin(status: &StatusPill, height: f32) -> Vec2 {
-    let pill = calendar_rect(status, height, false);
-    Vec2::new(pill.x0, pill.y1)
+fn visible_rects(screen_width: f32, height: f32, expansion: f32) -> [Rect; 2] {
+    let pill = pill_rect(screen_width, height);
+    let expansion = smoothstep(0.0, 1.0, expansion);
+    let size = tempo::popup_size(expansion);
+    let x = tempo::expanded_x(pill.x0, expansion);
+    [pill, Rect::new(x, pill.y1, x + size.x, pill.y1 + size.y)]
 }
 
 pub struct Weather {
@@ -120,24 +79,28 @@ impl Weather {
 
     pub fn scene(
         &mut self,
-        status: &StatusPill,
+        screen_width: f32,
         height: f32,
-        mouse: Vec2,
-        mouse_active: bool,
+        ui: &InteractionState,
         dt: f32,
     ) -> (WeatherPill, ArrayString<64>, f32) {
-        let hovered = self.hovered(status, height, mouse);
+        let hovered = visible_rects(screen_width, height, self.calendar_expansion)
+            .into_iter()
+            .any(|rect| ui.contains(rect));
         approach(
             &mut self.calendar_expansion,
-            f32::from(mouse_active && hovered),
+            f32::from(hovered),
             dt.min(1.0 / 30.0) * 3.0,
         );
         let time = Zoned::now();
-        let hour = self
-            .utc_offset_seconds
-            .map_or_else(|| hour_of_day(time.datetime()), hour_at_offset);
+        let hour = self.utc_offset_seconds.map_or_else(
+            || hour_of_day(time.datetime()),
+            |offset| {
+                let utc_hours = UNIX_EPOCH.elapsed().unwrap_or_default().as_secs_f64() / 3600.0;
+                (utc_hours + f64::from(offset) / 3600.0).rem_euclid(24.0) as f32
+            },
+        );
         let pill = WeatherPill {
-            x: pill_rect(status, height).x0,
             sun_hours: self.sun_hours,
             hourly_start: self.hourly_start,
             calendar_expansion: self.calendar_expansion,
@@ -150,70 +113,80 @@ impl Weather {
         (pill, label, hour)
     }
 
-    /// Whether `point` is over the pill's collapsed or fully-expanded position, or the popup.
-    fn hovered(&self, status: &StatusPill, height: f32, point: Vec2) -> bool {
-        pill_rect(status, height).contains(point)
-            || calendar_rect(status, height, false).contains(point)
-            || self.calendar_expansion > 0.25 && calendar_rect(status, height, true).contains(point)
-    }
-
-    pub fn interaction_rect(&self, status: &StatusPill, height: f32) -> Rect {
-        if self.calendar_expansion > 0.25 {
-            calendar_rect(status, height, true)
-        } else {
-            pill_rect(status, height)
-        }
-    }
-
-    pub fn navigate_calendar(&mut self, position: Vec2, status: &StatusPill, height: f32) -> bool {
-        if self.calendar_expansion < 0.5 {
-            return false;
-        }
-        let local = position - calendar_origin(status, height);
-        let reveal = tempo::reveal_progress(self.calendar_expansion, TITLE.y);
-        let Some(step) = header_action(local, reveal) else {
-            return false;
-        };
-        let new_offset = if step == 0 {
-            0
-        } else {
-            (self.month_offset + step).clamp(-1200, 1200)
-        };
-        self.month_offset = new_offset;
-        true
-    }
-
     pub fn calendar_labels(
-        &self,
-        status: &StatusPill,
+        &mut self,
+        screen_width: f32,
         height: f32,
-        mouse: Vec2,
-        mouse_active: bool,
+        ui: &mut InteractionState,
         mut draw: impl FnMut(&str, Vec2, f32, TextStyle),
     ) {
         if self.calendar_expansion <= 0.0 {
+            ui.regions.push(pill_rect(screen_width, height));
             return;
         }
+        let pill = pill_rect(screen_width, height);
+        let origin = Vec2::new(tempo::expanded_x(pill.x0, 1.0), pill.y1);
+        let reveal = tempo::reveal_progress(self.calendar_expansion, TITLE.y);
+        let title = ui.interact(origin + TITLE, Vec2::new(UNIT * 15.0, UNIT * 4.0));
+        if title.clicked {
+            self.month_offset = 0;
+        }
+        let arrows = ARROWS.map(|(text, side)| {
+            let position = Vec2::new(
+                WIDTH * 0.5 + side as f32 * (WIDTH * 0.5 - UNIT * 7.0) * reveal,
+                TITLE.y - (1.0 - reveal) * UNIT * 3.0,
+            );
+            let response = ui.interact(origin + position, Vec2::splat(UNIT * 5.0));
+            if response.clicked {
+                self.month_offset = (self.month_offset + side).clamp(-1200, 1200);
+            }
+            (text, position, response.hovered)
+        });
+
         let today = Zoned::now().date();
         let month = today
             .first_of_month()
             .saturating_add(Span::new().months(self.month_offset));
-        let origin = calendar_origin(status, height);
-        let header_reveal = tempo::reveal_progress(self.calendar_expansion, TITLE.y);
-        let hovered = mouse_active
-            .then(|| header_action(mouse - origin, header_reveal))
-            .flatten();
         let mut label = |text: &str, target: Vec2, alpha, style| {
             let eased = tempo::reveal_progress(self.calendar_expansion, target.y);
             draw(text, origin + target, alpha * eased, style);
         };
-        label(&self.details, DETAILS, 1.0, TextStyle::DETAILS);
-
+        let hovered_forecast = if self.calendar_expansion > 0.01 {
+            let popup_x = origin.x;
+            [self.hourly.len(), self.daily.len()]
+                .into_iter()
+                .enumerate()
+                .find_map(|(row, count)| {
+                    let (row_origin, size) = tempo::forecast_row(height, row as f32);
+                    (0..count).find_map(|column| {
+                        let rect = Rect::new(
+                            popup_x + row_origin.x + column as f32 * size.x / count as f32,
+                            pill.y1 + row_origin.y,
+                            popup_x + row_origin.x + (column + 1) as f32 * size.x / count as f32,
+                            pill.y1 + row_origin.y + size.y,
+                        );
+                        ui.contains(rect)
+                            .then(|| self.forecast(row)[column].hover_text.as_str())
+                    })
+                })
+        } else {
+            None
+        };
+        label(
+            hovered_forecast.unwrap_or(&self.details),
+            DETAILS,
+            1.0,
+            TextStyle::DETAILS,
+        );
         for (row, forecasts) in [&self.hourly[..], &self.daily[..]].into_iter().enumerate() {
             for (column, forecast) in forecasts.iter().enumerate() {
                 for (line, text) in forecast.text.iter().enumerate() {
-                    let target = forecast_item(height, row as f32, column, forecasts.len(), line);
-                    label(text, target, 1.0, TextStyle::DETAILS);
+                    let position = Vec2::new(
+                        tempo::FORECAST_X + (column as f32 + 0.5) * WIDTH / forecasts.len() as f32,
+                        tempo::forecast_center(height, row as f32)
+                            + (line as f32 * 2.0 - 1.0) * tempo::TOP_GAP,
+                    );
+                    label(text, position, 1.0, TextStyle::DETAILS);
                 }
             }
         }
@@ -222,19 +195,18 @@ impl Weather {
             &month.strftime("%B %Y").to_string(),
             TITLE,
             1.0,
-            if hovered == Some(0) {
+            if title.hovered {
                 TextStyle::CALENDAR_TITLE_HOVER
             } else {
                 TextStyle::CALENDAR_TITLE
             },
         );
-        for (text, side) in ARROWS {
-            let position = arrow(side, header_reveal);
+        for (text, position, hovered) in arrows {
             label(
                 text,
                 position,
                 1.0,
-                if hovered == Some(side) {
+                if hovered {
                     TextStyle::CALENDAR_ARROW_HOVER
                 } else {
                     TextStyle::CALENDAR_TITLE
@@ -242,8 +214,7 @@ impl Weather {
             );
         }
 
-        let grid_start =
-            month.saturating_sub(Span::new().days(month.weekday().to_monday_zero_offset()));
+        let grid_start = month.saturating_sub(Span::new().days(month.weekday().to_monday_zero_offset()));
         for (column, weekday) in WEEKDAYS.iter().enumerate() {
             label(
                 weekday,
@@ -252,8 +223,7 @@ impl Weather {
                 TextStyle::DETAILS,
             );
         }
-
-        for index in 0..DAYS_PER_WEEK * GRID_ROWS {
+        for index in 0..WEEKDAYS.len() * GRID_ROWS {
             let date = grid_start.saturating_add(Span::new().days(index as i64));
             let mut text = ArrayString::<2>::new();
             write!(text, "{}", date.day()).unwrap();
@@ -265,6 +235,14 @@ impl Weather {
             };
             label(&text, cell(index), alpha, style);
         }
+
+        for rect in visible_rects(screen_width, height, self.calendar_expansion) {
+            ui.regions.push(rect);
+        }
+    }
+
+    const fn forecast(&self, row: usize) -> &[ForecastItem] {
+        if row == 0 { &self.hourly } else { &self.daily }
     }
 
     pub fn apply_forecast(&mut self, forecast: &Forecast) {
@@ -281,6 +259,12 @@ impl Weather {
                     time.strftime("%H:%M").to_string(),
                     format!("{:.0}°", forecast.hourly.temperature_2m[source]),
                 ],
+                hover_text: format!(
+                    "{} {} {:.0}°",
+                    time.strftime("%H:%M"),
+                    forecast.hourly.name(source),
+                    forecast.hourly.temperature_2m[source]
+                ),
                 conditions: forecast.hourly.condition(source),
             }
         });
@@ -292,10 +276,17 @@ impl Weather {
                     forecast.daily.sunrise[day].strftime("%a").to_string(),
                     format!(
                         "{:.0}°/{:.0}°",
-                        forecast.daily.temperature_2m_max[day],
-                        forecast.daily.temperature_2m_min[day]
+                        forecast.daily.temperature_2m_max[day], forecast.daily.temperature_2m_min[day]
                     ),
                 ],
+                hover_text: format!(
+                    "{}{} {} {:.0}°/{:.0}°",
+                    forecast.daily.sunrise[day].strftime("%A %-d"),
+                    ordinal(forecast.daily.sunrise[day].day()),
+                    WeatherCode::name(forecast.daily.weather_code[day]),
+                    forecast.daily.temperature_2m_max[day],
+                    forecast.daily.temperature_2m_min[day]
+                ),
                 conditions: openmeteo::coded_conditions(forecast.daily.weather_code[day]),
             }
         });
@@ -308,11 +299,18 @@ impl Weather {
     }
 }
 
-fn hour_of_day(time: DateTime) -> f32 {
-    f32::from(time.hour()) + f32::from(time.minute()) / 60.0 + f32::from(time.second()) / 3600.0
+const fn ordinal(day: i8) -> &'static str {
+    match day % 100 {
+        11..=13 => "th",
+        _ => match day % 10 {
+            1 => "st",
+            2 => "nd",
+            3 => "rd",
+            _ => "th",
+        },
+    }
 }
 
-fn hour_at_offset(utc_offset_seconds: i32) -> f32 {
-    let utc_hours = UNIX_EPOCH.elapsed().unwrap_or_default().as_secs_f64() / 3600.0;
-    (utc_hours + f64::from(utc_offset_seconds) / 3600.0).rem_euclid(HOURS_PER_DAY) as f32
+fn hour_of_day(time: DateTime) -> f32 {
+    f32::from(time.hour()) + f32::from(time.minute()) / 60.0 + f32::from(time.second()) / 3600.0
 }
