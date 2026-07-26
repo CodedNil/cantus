@@ -5,7 +5,6 @@ use cantus_gpu::tempo::WeatherCondition;
 use jiff::civil::DateTime;
 use serde::Deserialize;
 use std::{thread, time::Duration};
-use strum::{FromRepr, IntoStaticStr};
 use tracing::warn;
 
 const WEATHER_FIELDS: &str = "temperature_2m,weather_code";
@@ -76,105 +75,83 @@ pub struct Daily {
 
 /// Derives a condition from a WMO weather code.
 pub fn coded_conditions(code: u8) -> WeatherCondition {
-    let [fog, cloud, rain, snow, lightning, hail] =
-        WeatherCode::from_repr(code).map_or([0.0, 0.9, 0.0, 0.0, 0.0, 0.0], WeatherCode::values);
+    let intensity = weather(code).1;
     let pack = |value: f32, max: f32| (value.clamp(0.0, 1.0) * max) as u32;
     let mut result = WeatherCondition::from_bits(0);
-    result.set_fog_raw(pack(fog, 15.0));
-    result.set_cloud_raw(pack(cloud, 127.0));
-    result.set_rain_raw(pack(rain, 255.0));
-    result.set_snow_raw(pack(snow, 255.0));
-    result.set_lightning(lightning > 0.0);
-    result.set_hail_raw(pack(hail, 15.0));
+    result.set_fog_raw(pack(intensity.fog, 15.0));
+    result.set_cloud_raw(pack(intensity.cloud, 127.0));
+    result.set_rain_raw(pack(intensity.rain, 255.0));
+    result.set_snow_raw(pack(intensity.snow, 255.0));
+    result.set_lightning(intensity.lightning > 0.0);
+    result.set_hail_raw(pack(intensity.hail, 15.0));
     result
 }
 
-/// WMO weather interpretation codes, as used by Open-Meteo's `weather_code` field.
-#[derive(Copy, Clone, FromRepr, IntoStaticStr)]
-#[strum(serialize_all = "title_case")]
-#[repr(u8)]
-pub enum WeatherCode {
-    Clear = 0,
-    MainlyClear = 1,
-    PartlyCloudy = 2,
-    Overcast = 3,
-    Fog = 45,
-    RimeFog = 48,
-    LightDrizzle = 51,
-    ModerateDrizzle = 53,
-    DenseDrizzle = 55,
-    LightFreezingDrizzle = 56,
-    DenseFreezingDrizzle = 57,
-    LightRain = 61,
-    ModerateRain = 63,
-    HeavyRain = 65,
-    LightFreezingRain = 66,
-    HeavyFreezingRain = 67,
-    LightSnow = 71,
-    ModerateSnow = 73,
-    HeavySnow = 75,
-    SnowGrains = 77,
-    LightRainShowers = 80,
-    ModerateRainShowers = 81,
-    ViolentRainShowers = 82,
-    LightSnowShowers = 85,
-    HeavySnowShowers = 86,
-    Thunderstorm = 95,
-    ThunderstormLightHail = 96,
-    ThunderstormHeavyHail = 99,
+macro_rules! weather_codes {
+    ($($code:literal => $name:literal { $($field:ident: $value:literal),* };)*) => {
+        const fn weather(code: u8) -> (&'static str, WeatherIntensity) {
+            match code {
+                $($code => ($name, WeatherIntensity {
+                    $($field: $value,)*
+                    ..WeatherIntensity::OVERCAST
+                }),)*
+                _ => ("Unknown weather", WeatherIntensity::OVERCAST),
+            }
+        }
+    };
 }
 
-impl WeatherCode {
-    pub fn name(code: u8) -> &'static str {
-        Self::from_repr(code).map_or("Unknown weather", Into::into)
-    }
+pub const fn weather_code(code: u8) -> &'static str {
+    weather(code).0
+}
 
-    const fn values(self) -> [f32; 6] {
-        let cloud = match self {
-            Self::Clear => 0.05,
-            Self::MainlyClear => 0.25,
-            Self::PartlyCloudy => 0.55,
-            _ => 0.9,
-        };
-        let fog = match self {
-            Self::Fog => 0.6,
-            Self::RimeFog => 0.75,
-            _ => 0.0,
-        };
-        let rain = match self {
-            Self::LightDrizzle => 0.15,
-            Self::ModerateDrizzle | Self::LightRain => 0.3,
-            Self::DenseDrizzle => 0.45,
-            Self::LightFreezingDrizzle => 0.2,
-            Self::DenseFreezingDrizzle => 0.4,
-            Self::ModerateRain => 0.6,
-            Self::HeavyRain | Self::ViolentRainShowers => 1.0,
-            Self::LightFreezingRain | Self::LightRainShowers => 0.35,
-            Self::HeavyFreezingRain => 0.9,
-            Self::ModerateRainShowers => 0.65,
-            Self::Thunderstorm => 0.7,
-            Self::ThunderstormLightHail => 0.75,
-            Self::ThunderstormHeavyHail => 0.85,
-            _ => 0.0,
-        };
-        let snow = match self {
-            Self::SnowGrains => 0.25,
-            Self::LightSnow => 0.3,
-            Self::LightSnowShowers => 0.35,
-            Self::ModerateSnow => 0.6,
-            Self::HeavySnowShowers => 0.9,
-            Self::HeavySnow => 1.0,
-            _ => 0.0,
-        };
-        let lightning = matches!(
-            self,
-            Self::Thunderstorm | Self::ThunderstormLightHail | Self::ThunderstormHeavyHail
-        ) as u8 as f32;
-        let hail = match self {
-            Self::ThunderstormHeavyHail => 1.0,
-            Self::ThunderstormLightHail => 0.6,
-            _ => 0.0,
-        };
-        [fog, cloud, rain, snow, lightning, hail]
-    }
+struct WeatherIntensity {
+    fog: f32,
+    cloud: f32,
+    rain: f32,
+    snow: f32,
+    lightning: f32,
+    hail: f32,
+}
+
+impl WeatherIntensity {
+    const OVERCAST: Self = Self {
+        fog: 0.0,
+        cloud: 0.9,
+        rain: 0.0,
+        snow: 0.0,
+        lightning: 0.0,
+        hail: 0.0,
+    };
+}
+
+weather_codes! {
+    0 => "Clear" { };
+    1 => "Mainly Clear" { cloud: 0.25 };
+    2 => "Partly Cloudy" { cloud: 0.55 };
+    3 => "Overcast" { cloud: 0.05 };
+    45 => "Fog" { fog: 0.6 };
+    48 => "Rime Fog" { fog: 0.75 };
+    51 => "Light Drizzle" { rain: 0.15 };
+    53 => "Moderate Drizzle" { rain: 0.3 };
+    55 => "Dense Drizzle" { rain: 0.45 };
+    56 => "Light Freezing Drizzle" { rain: 0.2 };
+    57 => "Dense Freezing Drizzle" { rain: 0.4 };
+    61 => "Light Rain" { rain: 0.3 };
+    63 => "Moderate Rain" { rain: 0.6 };
+    65 => "Heavy Rain" { rain: 1.0 };
+    66 => "Light Freezing Rain" { rain: 0.35 };
+    67 => "Heavy Freezing Rain" { rain: 0.9 };
+    71 => "Light Snow" { snow: 0.3 };
+    73 => "Moderate Snow" { snow: 0.6 };
+    75 => "Heavy Snow" { snow: 1.0 };
+    77 => "Snow Grains" { snow: 0.25 };
+    80 => "Light Rain Showers" { rain: 0.35 };
+    81 => "Moderate Rain Showers" { rain: 0.65 };
+    82 => "Violent Rain Showers" { rain: 1.0 };
+    85 => "Light Snow Showers" { snow: 0.35 };
+    86 => "Heavy Snow Showers" { snow: 0.9 };
+    95 => "Thunderstorm" { rain: 0.7, lightning: 1.0 };
+    96 => "Thunderstorm Light Hail" { rain: 0.75, lightning: 1.0, hail: 0.6 };
+    99 => "Thunderstorm Heavy Hail" { rain: 0.85, lightning: 1.0, hail: 1.0 };
 }

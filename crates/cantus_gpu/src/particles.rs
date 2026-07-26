@@ -7,15 +7,12 @@ use spirv_std::{
     spirv,
 };
 
-#[repr(C)]
-#[derive(Copy, Clone, Default)]
-#[cfg_attr(feature = "cpu", derive(bytemuck::Pod, bytemuck::Zeroable))]
-pub struct Data {
+gpu_data!(Data {
     pub spawn_pos: Vec2,
     pub spawn_vel: Vec2,
     pub end_time: f32,
     pub color: u32,
-}
+});
 
 const DURATION_SCALE: f32 = 100.0;
 

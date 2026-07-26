@@ -19,10 +19,7 @@ const fn unpack_u16x2(value: u32) -> Vec2 {
     Vec2::new((value & 0xffff) as f32, (value >> 16) as f32)
 }
 
-#[repr(C)]
-#[derive(Copy, Clone)]
-#[cfg_attr(feature = "cpu", derive(bytemuck::Pod, bytemuck::Zeroable))]
-pub struct Data {
+gpu_data!(Data {
     /// Bottom-left corner of the glyph quad in logical pixels.
     pub pos: Vec2,
     /// Width and height of the glyph quad in logical pixels.
@@ -32,7 +29,7 @@ pub struct Data {
     /// Right clip edge in logical pixels.
     pub clip_right: f32,
     pub alpha: f32,
-}
+});
 
 #[spirv(vertex)]
 pub fn vertex(

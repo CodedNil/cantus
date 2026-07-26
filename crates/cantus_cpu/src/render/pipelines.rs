@@ -4,6 +4,7 @@ use crate::{
 };
 use cantus_gpu::{GlobalUniforms, text::MAX_GLYPH_INSTANCES};
 use std::{
+    marker::PhantomData,
     mem::size_of,
     sync::{Arc, Weak},
 };
@@ -56,7 +57,7 @@ fn gpu_pass<T>(
     globals: &wgpu::Buffer,
     count: usize,
     extra_resources: &[BindingResource<'_>],
-) -> GpuPass {
+) -> GpuPass<T> {
     let pipeline = device.create_render_pipeline(&RenderPipelineDescriptor {
         label: Some(name),
         layout: None,
@@ -109,6 +110,7 @@ fn gpu_pass<T>(
         pipeline,
         buffer,
         bind_group,
+        data: PhantomData,
     }
 }
 
@@ -205,35 +207,28 @@ impl CantusApp {
                 )
             }};
         }
-        let playhead = pass!(playhead, 1);
-        let particles = pass!(particles, PARTICLE_COUNT);
-        let track = pass!(
-            track,
-            MAX_RENDER_INSTANCES,
-            BindingResource::TextureView(&image_view),
-            BindingResource::Sampler(&sampler)
-        );
-        let status = self.config.status_enabled.then(|| pass!(status, 1));
-        let weather = self.config.weather_enabled.then(|| pass!(tempo, 1));
-        let text = pass!(
-            text,
-            MAX_GLYPH_INSTANCES,
-            BindingResource::TextureView(&text_atlas_view),
-            BindingResource::Sampler(&sampler)
-        );
-
         self.render.gpu = Some(GpuResources {
+            playhead: pass!(playhead, 1),
+            track: pass!(
+                track,
+                MAX_RENDER_INSTANCES,
+                BindingResource::TextureView(&image_view),
+                BindingResource::Sampler(&sampler)
+            ),
+            weather: self.config.weather_enabled.then(|| pass!(tempo, 1)),
+            status: self.config.status_enabled.then(|| pass!(status, 1)),
+            text: pass!(
+                text,
+                MAX_GLYPH_INSTANCES,
+                BindingResource::TextureView(&text_atlas_view),
+                BindingResource::Sampler(&sampler)
+            ),
+            particles: pass!(particles, PARTICLE_COUNT),
             device,
             queue,
             surface,
             surface_config,
             globals,
-            playhead,
-            track,
-            weather,
-            status,
-            text,
-            particles,
             images: ImageAtlas {
                 texture: texture_array,
                 slots: [const { Weak::new() }; MAX_TEXTURE_IMAGES as usize],

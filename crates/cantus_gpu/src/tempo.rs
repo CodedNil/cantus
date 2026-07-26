@@ -18,10 +18,7 @@ pub const HOURLY_FORECASTS: usize = 6;
 /// Hours between adjacent conditions in the hourly forecast row.
 pub const HOURLY_STEP_HOURS: usize = 4;
 
-#[repr(C)]
-#[derive(Copy, Clone, Default)]
-#[cfg_attr(feature = "cpu", derive(bytemuck::Pod, bytemuck::Zeroable))]
-pub struct Data {
+gpu_data!(Data {
     /// Left edge of the collapsed pill in logical pixels.
     pub x: f32,
     /// How open the calendar popup is, from 0 (closed) to 1 (fully expanded).
@@ -34,7 +31,7 @@ pub struct Data {
     pub hourly: [WeatherCondition; HOURLY_FORECASTS],
     /// Condition for each of the next five days.
     pub daily: [WeatherCondition; 5],
-}
+});
 
 /// Cloud/rain/snow/lightning/hail conditions, packed into a `u32`.
 #[bitfield(u32, new = false)]

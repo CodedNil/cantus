@@ -21,10 +21,7 @@ pub const ICON_WIDTH: f32 = 21.6;
 /// Center-to-center icon spacing for rating stars and playlist artwork.
 pub const ICON_SPACING: f32 = 18.0;
 
-#[repr(C)]
-#[derive(Copy, Clone, Default)]
-#[cfg_attr(feature = "cpu", derive(bytemuck::Pod, bytemuck::Zeroable))]
-pub struct Data {
+gpu_data!(Data {
     pub x: f32,
     pub width: f32,
     pub colors: [u32; 4],
@@ -37,7 +34,7 @@ pub struct Data {
     pub secondary_expansion: f32,
     pub audio_features: AudioFeatures,
     pub playlist_images: [i32; MAX_PILL_PLAYLIST_ICONS],
-}
+});
 
 impl Data {
     pub const fn star_count(&self) -> f32 {

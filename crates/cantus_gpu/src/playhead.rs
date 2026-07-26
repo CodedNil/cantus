@@ -5,14 +5,11 @@ use spirv_std::{
     spirv,
 };
 
-#[repr(C)]
-#[derive(Copy, Clone, Default)]
-#[cfg_attr(feature = "cpu", derive(bytemuck::Pod, bytemuck::Zeroable))]
-pub struct Data {
+gpu_data!(Data {
     pub bar_split: f32,
     pub icon_presence: f32,
     pub icon_morph: f32,
-}
+});
 
 #[spirv(vertex)]
 pub fn vertex(

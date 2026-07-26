@@ -213,7 +213,7 @@ impl CantusApp {
     }
 
     pub fn toggle_playing(&mut self) {
-        self.render.last_toggle_playing = Instant::now();
+        self.render.last_toggle_time = self.render.uniforms.time;
         self.playback.playing = !self.playback.playing;
         info!(
             "{} current track",

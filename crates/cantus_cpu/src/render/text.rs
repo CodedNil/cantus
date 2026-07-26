@@ -1,4 +1,8 @@
-use crate::{PANEL_START, render::pipelines::write_texture_region, spotify::Track};
+use crate::{
+    PANEL_START,
+    render::{pipelines::write_texture_region, track::TrackLayout},
+    spotify::Track,
+};
 use cantus_gpu::text::{Data, GLYPH_ATLAS_SIZE, MAX_GLYPH_INSTANCES, pack_u16x2};
 use glam::{Vec2, vec2};
 use std::{collections::HashMap, f32::consts::TAU};
@@ -112,11 +116,11 @@ impl TextRenderer {
         }
     }
 
-    pub fn track_width(&mut self, track: &Track) -> f32 {
+    pub fn track_width(&mut self, track: &Track, start_ms: f32) -> f32 {
         let text_width = self
             .shape(song_name(track), TextStyle::PRIMARY)
             .0
-            .max(self.shape(&track_details(track), TextStyle::DETAILS).0);
+            .max(self.shape(&track_details(track, start_ms), TextStyle::DETAILS).0);
         text_width + self.panel_height + 20.0
     }
 
@@ -186,9 +190,9 @@ impl TextRenderer {
         Some(entry)
     }
 
-    pub fn render(&mut self, queue: &Queue, track: &Track, alpha: f32, render_scale: f32) {
-        let left = track.runtime.start_x + 12.0;
-        let right = track.runtime.start_x + track.runtime.width - self.panel_height - 8.0;
+    pub fn render(&mut self, queue: &Queue, track: &Track, layout: TrackLayout, render_scale: f32) {
+        let left = layout.x + 12.0;
+        let right = layout.x + layout.width - self.panel_height - 8.0;
         let available_width = right - left;
         if available_width <= 0.0 {
             return;
@@ -196,6 +200,7 @@ impl TextRenderer {
 
         let top = PANEL_START + (self.panel_height * 0.26).floor();
         let bottom = PANEL_START + (self.panel_height * 0.57).floor();
+        let alpha = track.runtime.detail_alpha;
         let mut line = |text: &str, y, style| {
             let (width, baseline) = self.shape(text, style);
             let fits = width <= available_width + 0.5;
@@ -210,7 +215,7 @@ impl TextRenderer {
             );
         };
         line(song_name(track), top, TextStyle::PRIMARY);
-        line(&track_details(track), bottom, TextStyle::DETAILS);
+        line(&track_details(track, layout.start_ms), bottom, TextStyle::DETAILS);
     }
 
     /// Renders `text` centered on `position`, with a soft dropped shadow
@@ -299,8 +304,8 @@ fn song_name(track: &Track) -> &str {
     if name.is_empty() { track.name.trim() } else { name }
 }
 
-fn track_details(track: &Track) -> String {
-    let seconds = (track.runtime.start_ms / 1000.0).abs();
+fn track_details(track: &Track, start_ms: f32) -> String {
+    let seconds = (start_ms / 1000.0).abs();
     let time = if seconds >= 60.0 {
         let seconds = seconds as u32;
         format!("{}m{}s", seconds / 60, seconds % 60)

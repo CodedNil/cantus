@@ -1,6 +1,6 @@
 use crate::{
     interaction::InteractionState,
-    render::{RenderState, status::Status, tempo::Weather},
+    render::{RenderState, status::StatusRuntime, tempo::Weather},
     spotify::PlaybackState,
 };
 use std::{
@@ -37,7 +37,7 @@ struct CantusApp {
     app_updates: mpsc::Receiver<Update<Self>>,
     config: config::Config,
     spotify: spotify::SpotifyBackend,
-    status: Option<Status>,
+    status: Option<StatusRuntime>,
     weather: Option<Weather>,
 }
 
@@ -45,7 +45,7 @@ impl Default for CantusApp {
     fn default() -> Self {
         let (updater, app_updates) = mpsc::channel();
         let mut config = config::load();
-        let status = config.status_enabled.then(|| Status::new(updater.clone()));
+        let status = config.status_enabled.then(|| StatusRuntime::new(updater.clone()));
         let weather = config
             .weather_enabled
             .then(|| Weather::new(config.location, updater.clone()));
@@ -76,5 +76,5 @@ fn main() {
         .with(fmt::layer().with_writer(io::stderr))
         .init();
 
-    platform::wayland::run();
+    platform::linux::run();
 }

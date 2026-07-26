@@ -5,6 +5,16 @@ use spirv_std::glam::{FloatExt, UVec2, Vec2, Vec3, Vec4, uvec2, vec2, vec3, vec4
 #[cfg(target_arch = "spirv")]
 use spirv_std::num_traits::Float;
 
+macro_rules! gpu_data {
+    ($(#[$meta:meta])* $name:ident {$($fields:tt)*}) => {
+        $(#[$meta])*
+        #[repr(C)]
+        #[derive(Copy, Clone, Default)]
+        #[cfg_attr(feature = "cpu", derive(bytemuck::Pod, bytemuck::Zeroable))]
+        pub struct $name {$($fields)*}
+    };
+}
+
 pub mod particles;
 pub mod playhead;
 pub mod status;
@@ -24,18 +34,12 @@ pub fn smoothstep(edge0: f32, edge1: f32, x: f32) -> f32 {
     t * t * (3.0 - 2.0 * t)
 }
 
-#[repr(C)]
-#[derive(Copy, Clone, Default)]
-#[cfg_attr(feature = "cpu", derive(bytemuck::Pod, bytemuck::Zeroable))]
-pub struct RipplePulse {
+gpu_data!(RipplePulse {
     pub origin: Vec2,
     pub animation: Vec2,
-}
+});
 
-#[repr(C)]
-#[derive(Copy, Clone, Default)]
-#[cfg_attr(feature = "cpu", derive(bytemuck::Pod, bytemuck::Zeroable))]
-pub struct GlobalUniforms {
+gpu_data!(GlobalUniforms {
     pub screen_size: Vec2,
     pub bar_height: Vec2,
     pub mouse_pos: Vec2,
@@ -45,7 +49,7 @@ pub struct GlobalUniforms {
     /// Current hour in the configured weather location's local time.
     pub weather_hour: f32,
     pub ripples: [RipplePulse; 4],
-}
+});
 
 /// Core 2-lane avalanche mixer for hash functions
 pub(crate) fn avalanche(mut value: UVec2) -> UVec2 {

@@ -47,10 +47,7 @@ impl StatusSection {
     pub const POWER_ACTIONS: [Self; 2] = [Self::Power, Self::Reboot];
 }
 
-#[repr(C)]
-#[derive(Copy, Clone, Default)]
-#[cfg_attr(feature = "cpu", derive(bytemuck::Pod, bytemuck::Zeroable))]
-pub struct Data {
+gpu_data!(Data {
     /// Battery charge from 0 to 1, or negative when no battery is present.
     pub battery_level: f32,
     /// Whether the battery is currently charging.
@@ -72,7 +69,7 @@ pub struct Data {
     /// Current sun height and decoded sky condition.
     pub sun_height: f32,
     pub conditions: [f32; 6],
-}
+});
 
 impl Data {
     pub const fn section_center(&self, section: StatusSection) -> f32 {
@@ -121,12 +118,9 @@ impl Data {
     }
 }
 
-#[repr(C)]
-#[derive(Copy, Clone, Default)]
-#[cfg_attr(feature = "cpu", derive(bytemuck::Pod, bytemuck::Zeroable))]
-pub struct UsageHistory {
+gpu_data!(UsageHistory {
     samples: [u32; STATUS_HISTORY_PACKS],
-}
+});
 
 impl UsageHistory {
     const fn get(&self, index: usize) -> f32 {
@@ -144,14 +138,11 @@ impl UsageHistory {
     }
 }
 
-#[repr(C)]
-#[derive(Copy, Clone, Default)]
-#[cfg_attr(feature = "cpu", derive(bytemuck::Pod, bytemuck::Zeroable))]
-pub struct ProcessorStatus {
+gpu_data!(ProcessorStatus {
     pub temperature: f32,
     pub usage: UsageHistory,
     pub memory: UsageHistory,
-}
+});
 
 const CHART_HEIGHT: f32 = 9.2;
 const PROCESSOR_RADIUS: f32 = 13.0;
