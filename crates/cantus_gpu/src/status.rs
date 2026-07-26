@@ -1,13 +1,6 @@
 use crate::{
-    cloud_mass, fill, hash, pill_fragment, pill_vertex, sd_capsule_box, sd_chevron, sd_rounded_box,
-    stroke, tempo::scene,
-};
-use cantus_shared::{
-    GAP, GlobalUniforms, PADDING, smoothstep,
-    status::{
-        AUDIO_SECTION, BATTERY_SECTION, CPU_SECTION, GPU_SECTION, ProcessorStatus,
-        STATUS_HISTORY_SAMPLES, StatusPill, UsageHistory, WIDTH,
-    },
+    GAP, GlobalUniforms, PADDING, cloud_mass, fill, hash, pill_fragment, pill_vertex, sd_capsule_box,
+    sd_chevron, sd_rounded_box, smoothstep, stroke, tempo::scene,
 };
 use core::f32::consts::TAU;
 use spirv_std::{
@@ -18,6 +11,147 @@ use spirv_std::{
 
 #[cfg(target_arch = "spirv")]
 use spirv_std::num_traits::Float;
+
+const STATUS_HISTORY_SAMPLES: usize = 40;
+pub const AUDIO_SPECTRUM_BANDS: usize = 7;
+const STATUS_HISTORY_PACKS: usize = STATUS_HISTORY_SAMPLES / 4;
+const PROCESSOR_WIDTH: f32 = 60.0;
+const DATA_WIDTH: f32 = 32.0;
+const ACTION_WIDTH: f32 = 24.0;
+pub const WIDTH: f32 = PADDING * 2.0 + (PROCESSOR_WIDTH + DATA_WIDTH + ACTION_WIDTH) * 2.0 + GAP * 5.0;
+
+pub const fn pill_x(screen_width: f32) -> f32 {
+    screen_width - WIDTH - GAP
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+#[repr(u32)]
+pub enum StatusSection {
+    Cpu,
+    Gpu,
+    Battery,
+    Audio,
+    Reboot,
+    Power,
+}
+
+impl StatusSection {
+    const ALL: [Self; 6] = [
+        Self::Cpu,
+        Self::Gpu,
+        Self::Battery,
+        Self::Audio,
+        Self::Reboot,
+        Self::Power,
+    ];
+    pub const POWER_ACTIONS: [Self; 2] = [Self::Power, Self::Reboot];
+}
+
+#[repr(C)]
+#[derive(Copy, Clone, Default)]
+#[cfg_attr(feature = "cpu", derive(bytemuck::Pod, bytemuck::Zeroable))]
+pub struct Data {
+    /// Battery charge from 0 to 1, or negative when no battery is present.
+    pub battery_level: f32,
+    /// Whether the battery is currently charging.
+    pub battery_charging: f32,
+    /// Signed volume: magnitude is the level, negative means muted.
+    pub volume: f32,
+    /// Logarithmic frequency-band levels sampled from the system audio monitor stream.
+    pub audio_spectrum: [f32; AUDIO_SPECTRUM_BANDS],
+    /// Fractional scroll between the two newest history samples.
+    pub history_scroll: f32,
+    /// CPU temperature and usage history.
+    pub cpu: ProcessorStatus,
+    /// GPU temperature and usage history.
+    pub gpu: ProcessorStatus,
+    /// Action ID plus hold progress; zero means no action is active.
+    pub power_state: f32,
+    /// One-based hovered power action index; zero means neither action is hovered.
+    pub power_hover: f32,
+    /// Current sun height and decoded sky condition.
+    pub sun_height: f32,
+    pub conditions: [f32; 6],
+}
+
+impl Data {
+    pub const fn section_center(&self, section: StatusSection) -> f32 {
+        let mut x = PADDING;
+        let mut index = 0;
+        while index < section as usize {
+            let previous = StatusSection::ALL[index];
+            if self.battery_level >= 0.0 || !matches!(previous, StatusSection::Battery) {
+                x += self.section_width(previous) + GAP;
+            }
+            index += 1;
+        }
+        x + self.section_width(section) * 0.5
+    }
+
+    pub const fn section_width(&self, section: StatusSection) -> f32 {
+        let width = match section {
+            StatusSection::Cpu | StatusSection::Gpu => PROCESSOR_WIDTH,
+            StatusSection::Battery | StatusSection::Audio => DATA_WIDTH,
+            StatusSection::Reboot | StatusSection::Power => ACTION_WIDTH,
+        };
+        if self.battery_level < 0.0 && matches!(section, StatusSection::Cpu | StatusSection::Gpu) {
+            width + (DATA_WIDTH + GAP) * 0.5
+        } else {
+            width
+        }
+    }
+
+    fn section_at(&self, x: f32) -> (StatusSection, f32) {
+        let mut edge = PADDING;
+        let mut center = 0.0;
+        let mut index = 0;
+        while index < StatusSection::ALL.len() {
+            let section = StatusSection::ALL[index];
+            if !matches!(section, StatusSection::Battery) || self.battery_level >= 0.0 {
+                let width = self.section_width(section);
+                edge += width + GAP;
+                center = edge - GAP - width * 0.5;
+                if x < edge - GAP * 0.5 {
+                    return (section, center);
+                }
+            }
+            index += 1;
+        }
+        (StatusSection::Power, center)
+    }
+}
+
+#[repr(C)]
+#[derive(Copy, Clone, Default)]
+#[cfg_attr(feature = "cpu", derive(bytemuck::Pod, bytemuck::Zeroable))]
+pub struct UsageHistory {
+    samples: [u32; STATUS_HISTORY_PACKS],
+}
+
+impl UsageHistory {
+    const fn get(&self, index: usize) -> f32 {
+        let shift = ((index & 3) * 8) as u32;
+        ((self.samples[index / 4] >> shift) & 0xff) as f32 / 255.0
+    }
+
+    #[cfg(feature = "cpu")]
+    pub fn push(&mut self, value: f32) {
+        for index in 0..STATUS_HISTORY_PACKS {
+            let carry = self.samples.get(index + 1).map_or(0, |next| next & 0xff);
+            self.samples[index] = self.samples[index] >> 8 | carry << 24;
+        }
+        self.samples[STATUS_HISTORY_PACKS - 1] |= ((value.saturate() * 255.0 + 0.5) as u32) << 24;
+    }
+}
+
+#[repr(C)]
+#[derive(Copy, Clone, Default)]
+#[cfg_attr(feature = "cpu", derive(bytemuck::Pod, bytemuck::Zeroable))]
+pub struct ProcessorStatus {
+    pub temperature: f32,
+    pub usage: UsageHistory,
+    pub memory: UsageHistory,
+}
 
 const CHART_HEIGHT: f32 = 9.2;
 const PROCESSOR_RADIUS: f32 = 13.0;
@@ -69,21 +203,6 @@ fn cpu_pin_distance(point: Vec2, frame_half_width: f32) -> f32 {
     long_edge.min(end_cap)
 }
 
-fn history_curve(
-    point_y: f32,
-    progress: f32,
-    history: &UsageHistory,
-    index: usize,
-    color: Vec3,
-    fill_strength: f32,
-    inside: f32,
-) -> Vec3 {
-    let height = |i: usize| CHART_HEIGHT * (1.0 - history.get(i.min(HISTORY_END)) * 2.0);
-    let graph_y = height(index).lerp(height(index + 1), progress);
-    let line = stroke((point_y - graph_y).abs(), CHART_LINE_WIDTH);
-    color * inside * (fill(graph_y - point_y) * fill_strength + line)
-}
-
 fn processor_monitor(
     point: Vec2,
     processor: ProcessorStatus,
@@ -110,8 +229,11 @@ fn processor_monitor(
     let sample = ((point.x + chart_half_width) / history_step + scroll).clamp(0.0, HISTORY_END as f32);
     let index = sample.floor() as usize;
     let progress = smoothstep(0.0, 1.0, sample.fract());
-    let curve = |history, color, fill_strength| {
-        history_curve(point.y, progress, history, index, color, fill_strength, chart)
+    let curve = |history: &UsageHistory, color: Vec3, fill_strength: f32| {
+        let height = |i: usize| CHART_HEIGHT * (1.0 - history.get(i.min(HISTORY_END)) * 2.0);
+        let graph_y = height(index).lerp(height(index + 1), progress);
+        let line = stroke((point.y - graph_y).abs(), CHART_LINE_WIDTH);
+        color * chart * (fill(graph_y - point.y) * fill_strength + line)
     };
     let graphs =
         curve(&processor.usage, USAGE_COLOR, 0.13) + curve(&processor.memory, MEMORY_COLOR, 0.07);
@@ -131,7 +253,7 @@ fn processor_monitor(
         + graphs
 }
 
-fn battery_icon(point: Vec2, time: f32, pill: &StatusPill) -> Vec3 {
+fn battery_icon(point: Vec2, time: f32, pill: &Data) -> Vec3 {
     let point = point / 0.8;
     let charging = pill.battery_charging;
     let battery_level = pill.battery_level;
@@ -161,7 +283,7 @@ fn battery_icon(point: Vec2, time: f32, pill: &StatusPill) -> Vec3 {
         + liquid_color.lerp(Vec3::ONE, 0.72) * bubble * 0.9
 }
 
-fn audio_icon(point: Vec2, pill: &StatusPill) -> Vec3 {
+fn audio_icon(point: Vec2, pill: &Data) -> Vec3 {
     let muted = if pill.volume < 0.0 { 1.0 } else { 0.0 };
     let volume = pill.volume.abs();
     let bar = ((point.x + 12.0) / 4.0).round().clamp(0.0, 6.0);
@@ -181,7 +303,7 @@ fn audio_icon(point: Vec2, pill: &StatusPill) -> Vec3 {
 }
 
 fn power_icon(point: Vec2, time: f32, charge: f32) -> f32 {
-    let ease = charge * charge * (3.0 - 2.0 * charge);
+    let ease = smoothstep(0.0, 1.0, charge);
     let radius = 7.5 - charge * 4.6 + (time * 8.0).sin() * charge * (1.0 - charge) * 0.16;
     let ring = stroke(point.length() - radius, 1.05 + ease * 0.7);
     let gap = fill_box(point - vec2(0.0, -7.0), vec2(3.0 * (1.0 - charge), 3.0), 0.5);
@@ -212,7 +334,7 @@ fn reboot_icon(point: Vec2, progress: f32) -> f32 {
     arc.max(arrow)
 }
 
-fn action_icon(point: Vec2, time: f32, action: f32, hover: f32, pill: &StatusPill) -> Vec3 {
+fn action_icon(point: Vec2, time: f32, action: f32, hover: f32, pill: &Data) -> Vec3 {
     let point = point / (1.0 + hover * 0.07);
     let action_state = pill.power_state;
     let selected = smoothstep(0.4, 0.05, (action_state.floor() - action - 1.0).abs());
@@ -227,72 +349,27 @@ fn action_icon(point: Vec2, time: f32, action: f32, hover: f32, pill: &StatusPil
     color * icon * (1.0 + charge * 0.45)
 }
 
-fn status_sections(
-    local: Vec2,
-    size: Vec2,
-    pill: &StatusPill,
-    background: Vec3,
-    global: &GlobalUniforms,
-) -> Vec3 {
-    let time = global.time;
-    let scroll = pill.history_scroll;
-    let section = pill.section_at(local.x);
-    let section_center = |section| vec2(pill.section_center(section), size.y * 0.5);
-    let center = section_center(section);
-    let point = local - center;
-    let smoke = thermal_smoke(local - section_center(CPU_SECTION), time, pill.cpu.temperature).max(
-        thermal_smoke(local - section_center(GPU_SECTION), time, pill.gpu.temperature),
-    );
-    let smoke_color = vec3(0.07, 0.12, 0.18).lerp(
-        heat_color(pill.cpu.temperature.max(pill.gpu.temperature)),
-        0.24 + smoke.y * 0.12,
-    );
-    let background = background
-        .lerp(vec3(0.002, 0.006, 0.012), smoke.x * 0.46)
-        .lerp(smoke_color, smoke.y * 0.64);
-    match section {
-        CPU_SECTION | GPU_SECTION => processor_monitor(
-            point,
-            if section == CPU_SECTION {
-                pill.cpu
-            } else {
-                pill.gpu
-            },
-            scroll,
-            background,
-            section == CPU_SECTION,
-            pill.section_width(section),
-        ),
-        BATTERY_SECTION => background + battery_icon(point, time, pill),
-        AUDIO_SECTION => background + audio_icon(point, pill),
-        _ => {
-            let hover = smoothstep(0.4, 0.05, (pill.power_hover - (6 - section) as f32).abs());
-            background + action_icon(point, time, (5 - section) as f32, hover, pill)
-        }
-    }
-}
-
 #[spirv(vertex)]
-pub fn vs_status(
+pub fn vertex(
     #[spirv(vertex_index)] vertex: u32,
     #[spirv(storage_buffer, descriptor_set = 0, binding = 0)] global: &GlobalUniforms,
-    #[spirv(storage_buffer, descriptor_set = 0, binding = 1)] _status: &[StatusPill],
+    #[spirv(storage_buffer, descriptor_set = 0, binding = 1)] _status: &[Data],
     #[spirv(position)] out_pos: &mut Vec4,
     #[spirv(location = 0)] out_pixel: &mut Vec2,
 ) {
-    let x = global.screen_size.x - WIDTH - GAP;
+    let x = pill_x(global.screen_size.x);
     (*out_pos, *out_pixel) = pill_vertex(vertex, global, x, vec2(WIDTH, 0.0));
 }
 
 #[spirv(fragment)]
-pub fn fs_status(
+pub fn fragment(
     #[spirv(location = 0)] pixel: Vec2,
     #[spirv(storage_buffer, descriptor_set = 0, binding = 0)] global: &GlobalUniforms,
-    #[spirv(storage_buffer, descriptor_set = 0, binding = 1)] status: &[StatusPill],
+    #[spirv(storage_buffer, descriptor_set = 0, binding = 1)] status: &[Data],
     #[spirv(location = 0)] out_color: &mut Vec4,
 ) {
     let pill = status[0];
-    let x = global.screen_size.x - WIDTH - GAP;
+    let x = pill_x(global.screen_size.x);
     let (interaction, local, size, dist) = pill_fragment(pixel, global, x, WIDTH);
     let (dist, mask, alpha) = interaction.surface(dist);
     if alpha <= 0.0 {
@@ -300,7 +377,48 @@ pub fn fs_status(
     }
     let refracted = interaction.refract(local, size, dist);
     let background = scene(global, refracted, size, dist, pill.sun_height, pill.conditions);
-    let color = status_sections(refracted * size, size, &pill, background, global)
-        .lerp(Vec3::splat(0.95), interaction.ripple_flash * 0.35);
+    let local = refracted * size;
+    let (section, center_x) = pill.section_at(local.x);
+    let section_center = |section| vec2(pill.section_center(section), size.y * 0.5);
+    let point = local - vec2(center_x, size.y * 0.5);
+    let smoke = thermal_smoke(
+        local - section_center(StatusSection::Cpu),
+        global.time,
+        pill.cpu.temperature,
+    )
+    .max(thermal_smoke(
+        local - section_center(StatusSection::Gpu),
+        global.time,
+        pill.gpu.temperature,
+    ));
+    let smoke_color = vec3(0.07, 0.12, 0.18).lerp(
+        heat_color(pill.cpu.temperature.max(pill.gpu.temperature)),
+        0.24 + smoke.y * 0.12,
+    );
+    let background = background
+        .lerp(vec3(0.002, 0.006, 0.012), smoke.x * 0.46)
+        .lerp(smoke_color, smoke.y * 0.64);
+    let color = match section {
+        StatusSection::Cpu | StatusSection::Gpu => processor_monitor(
+            point,
+            if section == StatusSection::Cpu {
+                pill.cpu
+            } else {
+                pill.gpu
+            },
+            pill.history_scroll,
+            background,
+            section == StatusSection::Cpu,
+            pill.section_width(section),
+        ),
+        StatusSection::Battery => background + battery_icon(point, global.time, &pill),
+        StatusSection::Audio => background + audio_icon(point, &pill),
+        StatusSection::Reboot | StatusSection::Power => {
+            let action = if section == StatusSection::Power { 0.0 } else { 1.0 };
+            let hover = smoothstep(0.4, 0.05, (pill.power_hover - action - 1.0).abs());
+            background + action_icon(point, global.time, action, hover, &pill)
+        }
+    }
+    .lerp(Vec3::splat(0.95), interaction.ripple_flash * 0.35);
     *out_color = (color * mask).extend(alpha);
 }

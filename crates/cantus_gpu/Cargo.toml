@@ -11,8 +11,11 @@ name = "build-shader"
 required-features = ["build-shader"]
 
 [dependencies]
-cantus_shared = { path = "../cantus_shared", features = ["gpu"] }
+bitfields = "3.0.0"
+bytemuck = { workspace = true, optional = true }
+glam = { workspace = true }
 naga = { version = "30.0.0", optional = true, features = ["spv-in"] }
+serde = { workspace = true, optional = true }
 spirv-builder = { git = "https://github.com/Rust-GPU/rust-gpu", rev = "c1acf6e4b2d338b0f822457350ea91db21757f1a", optional = true }
 spirv-std = { git = "https://github.com/Rust-GPU/rust-gpu", rev = "c1acf6e4b2d338b0f822457350ea91db21757f1a", features = [
     "glam_0_33",
@@ -21,6 +24,7 @@ spirv-std = { git = "https://github.com/Rust-GPU/rust-gpu", rev = "c1acf6e4b2d33
 [features]
 default = []
 build-shader = ["dep:spirv-builder", "dep:naga"]
+cpu = ["dep:bytemuck", "dep:serde"]
 
 [lints]
 workspace = true

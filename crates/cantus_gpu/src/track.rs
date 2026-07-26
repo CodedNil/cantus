@@ -1,10 +1,6 @@
 use crate::{
-    avalanche, pill_fragment, pill_sheen, pixel_to_ndc, quad_coord, sd_capsule_box, sd_star,
-    smooth_union, unpack3x8unorm,
-};
-use cantus_shared::{
-    GlobalUniforms, smoothstep,
-    track::{AudioFeatures, ICON_WIDTH, MAX_PILL_PLAYLIST_ICONS, PillIconRow, TrackPill},
+    GlobalUniforms, avalanche, pill_fragment, pill_sheen, pixel_to_ndc, quad_coord, sd_capsule_box,
+    sd_star, smooth_union, smoothstep, unpack3x8unorm,
 };
 use core::f32::consts::{FRAC_PI_2, TAU};
 use spirv_std::{
@@ -17,6 +13,109 @@ use spirv_std::{
 
 #[cfg(target_arch = "spirv")]
 use spirv_std::num_traits::Float;
+
+/// Maximum number of playlist artwork icons carried by one pill instance.
+pub const MAX_PILL_PLAYLIST_ICONS: usize = 8;
+/// Visual width, in pixels, of rating and playlist icons before hover growth.
+pub const ICON_WIDTH: f32 = 21.6;
+/// Center-to-center icon spacing for rating stars and playlist artwork.
+pub const ICON_SPACING: f32 = 18.0;
+
+#[repr(C)]
+#[derive(Copy, Clone, Default)]
+#[cfg_attr(feature = "cpu", derive(bytemuck::Pod, bytemuck::Zeroable))]
+pub struct Data {
+    pub x: f32,
+    pub width: f32,
+    pub colors: [u32; 4],
+    pub visibility: f32,
+    pub image_index: i32,
+    pub rating: i32,
+    pub primary_playlist_count: u32,
+    pub secondary_playlist_count: u32,
+    pub primary_alpha: f32,
+    pub secondary_expansion: f32,
+    pub audio_features: AudioFeatures,
+    pub playlist_images: [i32; MAX_PILL_PLAYLIST_ICONS],
+}
+
+impl Data {
+    pub const fn star_count(&self) -> f32 {
+        if self.rating >= 0 { 5.0 } else { 0.0 }
+    }
+
+    pub fn icon_rows(&self, bar_start_y: f32, bar_height: f32) -> (PillIconRow, PillIconRow) {
+        let center = Vec2::new(self.x + self.width * 0.5, bar_start_y + bar_height * 0.975 - 3.0);
+        (
+            PillIconRow {
+                center,
+                count: self.star_count() + self.primary_playlist_count as f32,
+                expansion: 1.0,
+            },
+            PillIconRow {
+                center: center + Vec2::new(0.0, ICON_SPACING * self.secondary_expansion),
+                count: self.secondary_playlist_count as f32,
+                expansion: self.secondary_expansion,
+            },
+        )
+    }
+}
+
+#[repr(C)]
+#[derive(Copy, Clone, Default)]
+#[cfg_attr(
+    feature = "cpu",
+    derive(bytemuck::Pod, bytemuck::Zeroable, serde::Deserialize)
+)]
+pub struct AudioFeatures {
+    pub energy: f32,
+    pub danceability: f32,
+    pub acousticness: f32,
+    pub tempo: f32,
+    pub valence: f32,
+    pub instrumentalness: f32,
+    pub loudness: f32,
+}
+
+#[derive(Copy, Clone)]
+pub struct PillIconRow {
+    pub center: Vec2,
+    pub count: f32,
+    expansion: f32,
+}
+
+impl PillIconRow {
+    pub fn hit(self, point: Vec2) -> Option<(usize, bool)> {
+        let index = (point.x - self.center.x) / (ICON_SPACING * self.expansion)
+            + (self.count - 1.0).max(0.0) * 0.5
+            + 0.5;
+        let index =
+            (self.expansion > 0.0 && (0.0..self.count).contains(&index)).then_some(index as usize)?;
+        let center = self.icon_center(index as f32);
+        ((point - center).abs().max_element() <= ICON_WIDTH * 0.5)
+            .then_some((index, point.x >= center.x))
+    }
+
+    fn half_span(self) -> f32 {
+        (self.count - 1.0).max(0.0) * ICON_SPACING * self.expansion * 0.5
+    }
+
+    pub fn half_size(self, radius: f32) -> Vec2 {
+        Vec2::new(self.half_span() + radius, radius)
+    }
+
+    fn backplate_center(self) -> Vec2 {
+        self.center + Vec2::new(0.0, -ICON_WIDTH * 0.25)
+    }
+
+    fn icon_center(self, index: f32) -> Vec2 {
+        let row_center = (self.count - 1.0).max(0.0) * 0.5;
+        Vec2::new(
+            self.center.x + (index - row_center) * ICON_SPACING * self.expansion,
+            self.center.y + 2.0,
+        )
+    }
+}
 
 fn plasma_field(uv: Vec2, packed: u32, x: f32, y: f32, phase: f32) -> Vec4 {
     let wave = (uv.dot(vec2(x, y)) + phase).sin() * 0.5 + 0.5;
@@ -82,11 +181,11 @@ fn over_icon(base: Vec4, color: Vec3, shape: f32, alpha: f32) -> Vec4 {
 }
 
 #[spirv(vertex)]
-pub fn vs_track(
+pub fn vertex(
     #[spirv(vertex_index)] v_idx: u32,
     #[spirv(instance_index)] i_idx: u32,
     #[spirv(storage_buffer, descriptor_set = 0, binding = 0)] global: &GlobalUniforms,
-    #[spirv(storage_buffer, descriptor_set = 0, binding = 1)] pills: &[TrackPill],
+    #[spirv(storage_buffer, descriptor_set = 0, binding = 1)] pills: &[Data],
     #[spirv(position)] out_pos: &mut Vec4,
     #[spirv(location = 0)] out_pixel_pos: &mut Vec2,
     #[spirv(location = 1, flat)] out_pill_idx: &mut u32,
@@ -120,11 +219,11 @@ pub fn vs_track(
 }
 
 #[spirv(fragment)]
-pub fn fs_track(
+pub fn fragment(
     #[spirv(location = 0)] pixel_pos: Vec2,
     #[spirv(location = 1, flat)] pill_idx: u32,
     #[spirv(storage_buffer, descriptor_set = 0, binding = 0)] global: &GlobalUniforms,
-    #[spirv(storage_buffer, descriptor_set = 0, binding = 1)] pills: &[TrackPill],
+    #[spirv(storage_buffer, descriptor_set = 0, binding = 1)] pills: &[Data],
     #[spirv(descriptor_set = 0, binding = 2)] images: &Image2dArray,
     #[spirv(descriptor_set = 0, binding = 3)] sampler: &Sampler,
     #[spirv(location = 0)] out_color: &mut Vec4,

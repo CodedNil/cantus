@@ -5,13 +5,17 @@ use crate::{
     render::{approach, text::TextStyle},
 };
 use arrayvec::ArrayString;
-use cantus_shared::{
-    UNIT, smoothstep,
-    tempo::{self, WIDTH, WeatherCondition, WeatherPill},
+use cantus_gpu::{
+    GAP, UNIT, smoothstep,
+    tempo::{self, Data, WIDTH, WeatherCondition},
 };
 use glam::Vec2;
-use jiff::{Span, Zoned, civil::DateTime};
-use std::{array::from_fn, fmt::Write, time::UNIX_EPOCH};
+use jiff::{
+    Span, Zoned,
+    civil::{DateTime, Time},
+    tz::Offset,
+};
+use std::{array::from_fn, fmt::Write};
 
 const GRID_ROWS: usize = 6;
 const GRID_ROW_HEIGHT: f32 = UNIT * 6.0;
@@ -20,7 +24,7 @@ const WEEKDAY_Y: f32 = UNIT * 17.0;
 const TITLE: Vec2 = Vec2::new(WIDTH * 0.5, UNIT * 10.0);
 const DETAILS: Vec2 = Vec2::new(tempo::FORECAST_X + WIDTH * 0.5, TITLE.y);
 const WEEKDAYS: [&str; 7] = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"];
-const ARROWS: [(&str, i32); 2] = [("<", -1), (">", 1)];
+const ORDINALS: [&str; 10] = ["th", "st", "nd", "rd", "th", "th", "th", "th", "th", "th"];
 
 fn cell(index: usize) -> Vec2 {
     let column_width = WIDTH / WEEKDAYS.len() as f32;
@@ -37,12 +41,12 @@ struct ForecastItem {
     conditions: WeatherCondition,
 }
 
-fn pill_rect(screen_width: f32, height: f32) -> Rect {
-    Rect::pill(tempo::pill_x(screen_width), WIDTH, height)
+const fn pill_rect(x: f32, height: f32) -> Rect {
+    Rect::pill(x, WIDTH, height)
 }
 
-fn visible_rects(screen_width: f32, height: f32, expansion: f32) -> [Rect; 2] {
-    let pill = pill_rect(screen_width, height);
+fn visible_rects(x: f32, height: f32, expansion: f32) -> [Rect; 2] {
+    let pill = pill_rect(x, height);
     let expansion = smoothstep(0.0, 1.0, expansion);
     let size = tempo::popup_size(expansion);
     let x = tempo::expanded_x(pill.x0, expansion);
@@ -52,7 +56,7 @@ fn visible_rects(screen_width: f32, height: f32, expansion: f32) -> [Rect; 2] {
 pub struct Weather {
     temperature: String,
     sun_hours: [f32; 2],
-    utc_offset_seconds: Option<i32>,
+    utc_offset: Option<Offset>,
     hourly_start: f32,
     details: String,
     hourly: [ForecastItem; tempo::HOURLY_FORECASTS],
@@ -67,7 +71,7 @@ impl Weather {
         Self {
             temperature: "--.-°C".into(),
             sun_hours: [6.0, 18.0],
-            utc_offset_seconds: None,
+            utc_offset: None,
             hourly_start: 0.0,
             details: "Weather unavailable".into(),
             hourly: Default::default(),
@@ -79,12 +83,12 @@ impl Weather {
 
     pub fn scene(
         &mut self,
-        screen_width: f32,
+        x: f32,
         height: f32,
         ui: &InteractionState,
         dt: f32,
-    ) -> (WeatherPill, ArrayString<64>, f32) {
-        let hovered = visible_rects(screen_width, height, self.calendar_expansion)
+    ) -> (Data, ArrayString<64>, f32) {
+        let hovered = visible_rects(x, height, self.calendar_expansion)
             .into_iter()
             .any(|rect| ui.contains(rect));
         approach(
@@ -93,14 +97,12 @@ impl Weather {
             dt.min(1.0 / 30.0) * 3.0,
         );
         let time = Zoned::now();
-        let hour = self.utc_offset_seconds.map_or_else(
+        let hour = self.utc_offset.map_or_else(
             || hour_of_day(time.datetime()),
-            |offset| {
-                let utc_hours = UNIX_EPOCH.elapsed().unwrap_or_default().as_secs_f64() / 3600.0;
-                (utc_hours + f64::from(offset) / 3600.0).rem_euclid(24.0) as f32
-            },
+            |offset| hour_of_day(offset.to_datetime(time.timestamp())),
         );
-        let pill = WeatherPill {
+        let pill = Data {
+            x,
             sun_hours: self.sun_hours,
             hourly_start: self.hourly_start,
             calendar_expansion: self.calendar_expansion,
@@ -115,28 +117,31 @@ impl Weather {
 
     pub fn calendar_labels(
         &mut self,
-        screen_width: f32,
+        x: f32,
         height: f32,
         ui: &mut InteractionState,
         mut draw: impl FnMut(&str, Vec2, f32, TextStyle),
     ) {
+        let pill = pill_rect(x, height);
         if self.calendar_expansion <= 0.0 {
-            ui.regions.push(pill_rect(screen_width, height));
+            ui.regions.push(pill);
             return;
         }
-        let pill = pill_rect(screen_width, height);
         let origin = Vec2::new(tempo::expanded_x(pill.x0, 1.0), pill.y1);
         let reveal = tempo::reveal_progress(self.calendar_expansion, TITLE.y);
-        let title = ui.interact(origin + TITLE, Vec2::new(UNIT * 15.0, UNIT * 4.0));
+        let title = ui.surface(Rect::from_center(
+            origin + TITLE,
+            Vec2::new(UNIT * 15.0, UNIT * 4.0),
+        ));
         if title.clicked {
             self.month_offset = 0;
         }
-        let arrows = ARROWS.map(|(text, side)| {
+        let arrows = [("<", -1), (">", 1)].map(|(text, side)| {
             let position = Vec2::new(
                 WIDTH * 0.5 + side as f32 * (WIDTH * 0.5 - UNIT * 7.0) * reveal,
                 TITLE.y - (1.0 - reveal) * UNIT * 3.0,
             );
-            let response = ui.interact(origin + position, Vec2::splat(UNIT * 5.0));
+            let response = ui.surface(Rect::from_center(origin + position, Vec2::splat(UNIT * 5.0)));
             if response.clicked {
                 self.month_offset = (self.month_offset + side).clamp(-1200, 1200);
             }
@@ -151,24 +156,22 @@ impl Weather {
             let eased = tempo::reveal_progress(self.calendar_expansion, target.y);
             draw(text, origin + target, alpha * eased, style);
         };
+        let forecasts = [&self.hourly[..], &self.daily[..]];
         let hovered_forecast = if self.calendar_expansion > 0.01 {
-            let popup_x = origin.x;
-            [self.hourly.len(), self.daily.len()]
-                .into_iter()
-                .enumerate()
-                .find_map(|(row, count)| {
-                    let (row_origin, size) = tempo::forecast_row(height, row as f32);
-                    (0..count).find_map(|column| {
-                        let rect = Rect::new(
-                            popup_x + row_origin.x + column as f32 * size.x / count as f32,
-                            pill.y1 + row_origin.y,
-                            popup_x + row_origin.x + (column + 1) as f32 * size.x / count as f32,
-                            pill.y1 + row_origin.y + size.y,
-                        );
-                        ui.contains(rect)
-                            .then(|| self.forecast(row)[column].hover_text.as_str())
-                    })
+            forecasts.into_iter().enumerate().find_map(|(row, forecasts)| {
+                let (row_origin, size) = tempo::forecast_row(height, row as f32);
+                let column_width = size.x / forecasts.len() as f32;
+                (0..forecasts.len()).find_map(|column| {
+                    let x = origin.x + row_origin.x + column as f32 * column_width;
+                    let rect = Rect::new(
+                        x,
+                        pill.y1 + row_origin.y,
+                        x + column_width,
+                        pill.y1 + row_origin.y + size.y,
+                    );
+                    ui.contains(rect).then(|| forecasts[column].hover_text.as_str())
                 })
+            })
         } else {
             None
         };
@@ -178,13 +181,12 @@ impl Weather {
             1.0,
             TextStyle::DETAILS,
         );
-        for (row, forecasts) in [&self.hourly[..], &self.daily[..]].into_iter().enumerate() {
+        for (row, forecasts) in forecasts.into_iter().enumerate() {
             for (column, forecast) in forecasts.iter().enumerate() {
                 for (line, text) in forecast.text.iter().enumerate() {
                     let position = Vec2::new(
                         tempo::FORECAST_X + (column as f32 + 0.5) * WIDTH / forecasts.len() as f32,
-                        tempo::forecast_center(height, row as f32)
-                            + (line as f32 * 2.0 - 1.0) * tempo::TOP_GAP,
+                        tempo::forecast_center(height, row as f32) + (line as f32 * 2.0 - 1.0) * GAP,
                     );
                     label(text, position, 1.0, TextStyle::DETAILS);
                 }
@@ -236,18 +238,14 @@ impl Weather {
             label(&text, cell(index), alpha, style);
         }
 
-        for rect in visible_rects(screen_width, height, self.calendar_expansion) {
+        for rect in visible_rects(x, height, self.calendar_expansion) {
             ui.regions.push(rect);
         }
     }
 
-    const fn forecast(&self, row: usize) -> &[ForecastItem] {
-        if row == 0 { &self.hourly } else { &self.daily }
-    }
-
     pub fn apply_forecast(&mut self, forecast: &Forecast) {
         let raw = &forecast.current;
-        self.utc_offset_seconds = Some(forecast.utc_offset_seconds);
+        self.utc_offset = Offset::from_seconds(forecast.utc_offset_seconds).ok();
         self.temperature = format!("{:.1}°C", raw.temperature_2m);
         self.sun_hours = [forecast.daily.sunrise[0], forecast.daily.sunset[0]].map(hour_of_day);
         self.hourly_start = hour_of_day(forecast.hourly.time[0]);
@@ -262,18 +260,25 @@ impl Weather {
                 hover_text: format!(
                     "{} {} {:.0}°",
                     time.strftime("%H:%M"),
-                    forecast.hourly.name(source),
+                    WeatherCode::name(forecast.hourly.weather_code[source]),
                     forecast.hourly.temperature_2m[source]
                 ),
-                conditions: forecast.hourly.condition(source),
+                conditions: openmeteo::coded_conditions(forecast.hourly.weather_code[source]),
             }
         });
         self.hourly[0].conditions = openmeteo::coded_conditions(raw.weather_code);
         self.daily = from_fn(|day| {
             let day = day + 1;
+            let date = forecast.daily.sunrise[day];
+            let date_day = date.day();
+            let suffix = if (11..=13).contains(&(date_day % 100)) {
+                "th"
+            } else {
+                ORDINALS[(date_day % 10) as usize]
+            };
             ForecastItem {
                 text: [
-                    forecast.daily.sunrise[day].strftime("%a").to_string(),
+                    date.strftime("%a").to_string(),
                     format!(
                         "{:.0}°/{:.0}°",
                         forecast.daily.temperature_2m_max[day], forecast.daily.temperature_2m_min[day]
@@ -281,8 +286,8 @@ impl Weather {
                 ],
                 hover_text: format!(
                     "{}{} {} {:.0}°/{:.0}°",
-                    forecast.daily.sunrise[day].strftime("%A %-d"),
-                    ordinal(forecast.daily.sunrise[day].day()),
+                    date.strftime("%A %-d"),
+                    suffix,
                     WeatherCode::name(forecast.daily.weather_code[day]),
                     forecast.daily.temperature_2m_max[day],
                     forecast.daily.temperature_2m_min[day]
@@ -299,18 +304,6 @@ impl Weather {
     }
 }
 
-const fn ordinal(day: i8) -> &'static str {
-    match day % 100 {
-        11..=13 => "th",
-        _ => match day % 10 {
-            1 => "st",
-            2 => "nd",
-            3 => "rd",
-            _ => "th",
-        },
-    }
-}
-
 fn hour_of_day(time: DateTime) -> f32 {
-    f32::from(time.hour()) + f32::from(time.minute()) / 60.0 + f32::from(time.second()) / 3600.0
+    time.time().duration_since(Time::midnight()).as_secs_f32() / 3600.0
 }

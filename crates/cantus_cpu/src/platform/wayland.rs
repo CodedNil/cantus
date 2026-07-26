@@ -327,7 +327,7 @@ dispatch!(WlPointer, |state, _proxy, event, _qhandle| {
             value120: discrete,
             ..
         } if discrete != 0 => {
-            state.cantus.interaction.set_scroll(discrete.signum());
+            state.cantus.interaction.scroll = discrete.signum();
         }
         _ => {}
     }

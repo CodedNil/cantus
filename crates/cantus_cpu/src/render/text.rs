@@ -1,5 +1,5 @@
 use crate::{PANEL_START, render::pipelines::write_texture_region, spotify::Track};
-use cantus_shared::{GLYPH_ATLAS_SIZE, GlyphInstance, MAX_GLYPH_INSTANCES};
+use cantus_gpu::text::{Data, GLYPH_ATLAS_SIZE, MAX_GLYPH_INSTANCES, pack_u16x2};
 use glam::{Vec2, vec2};
 use std::{collections::HashMap, f32::consts::TAU};
 use swash::{
@@ -20,9 +20,6 @@ const FONT_DATA: &[u8] = include_bytes!(concat!(
 const ATLAS_PADDING: u32 = 2;
 const RASTER_OVERSAMPLE: f32 = 2.5;
 
-const fn pack_u16x2(value: [u32; 2]) -> u32 {
-    value[0] | value[1] << 16
-}
 const SCALE_STEPS: f32 = 4.0;
 
 /// Soft blurred shadow behind text
@@ -80,7 +77,7 @@ pub struct TextRenderer {
     atlas_cursor: (u32, u32, u32),
     shaped: Vec<(GlyphId, Vec2)>,
     /// Queued glyph instances for the current frame.
-    pub glyphs: Vec<GlyphInstance>,
+    pub glyphs: Vec<Data>,
 }
 
 impl TextRenderer {
@@ -201,7 +198,7 @@ impl TextRenderer {
         let bottom = PANEL_START + (self.panel_height * 0.57).floor();
         let mut line = |text: &str, y, style| {
             let (width, baseline) = self.shape(text, style);
-            let fits = width <= available_width;
+            let fits = width <= available_width + 0.5;
             self.queue_glyphs(
                 queue,
                 vec2(if fits { (left + right - width) * 0.5 } else { left }, y),
@@ -273,7 +270,7 @@ impl TextRenderer {
             let Some(glyph) = self.rasterize_glyph(queue, key) else {
                 continue;
             };
-            self.glyphs.push(GlyphInstance {
+            self.glyphs.push(Data {
                 pos: vec2(
                     origin.x + offset.x + glyph.bearing[0] * glyph_scale,
                     baseline_y + offset.y + glyph.bearing[1] * glyph_scale,

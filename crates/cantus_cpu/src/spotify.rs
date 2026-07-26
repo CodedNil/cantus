@@ -6,7 +6,7 @@ use crate::{
 };
 use arrayvec::{ArrayString, ArrayVec};
 use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
-use cantus_shared::track::{AudioFeatures, MAX_PILL_PLAYLIST_ICONS};
+use cantus_gpu::track::{AudioFeatures, MAX_PILL_PLAYLIST_ICONS};
 use jiff::Timestamp;
 use serde::{Deserialize, Deserializer, Serialize, de::DeserializeOwned};
 use serde_json::json;
@@ -157,8 +157,7 @@ impl Track {
 
 impl TrackRuntime {
     pub fn playlist_expansion_curve(&self) -> f32 {
-        let progress = self.playlist_expansion;
-        progress * progress * (3.0 - 2.0 * progress)
+        cantus_gpu::smoothstep(0.0, 1.0, self.playlist_expansion)
     }
 }
 

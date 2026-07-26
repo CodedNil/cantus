@@ -3,7 +3,6 @@ use crate::{
     render::{RenderState, status::Status, tempo::Weather},
     spotify::PlaybackState,
 };
-use cantus_shared::tempo;
 use std::{
     io,
     sync::mpsc::{self, Sender},
@@ -20,7 +19,6 @@ mod spotify;
 
 const PANEL_START: f32 = 6.0;
 const PANEL_OVERFLOW: f32 = 16.0;
-const PANEL_EXTENSION: f32 = tempo::EXTENSION + PANEL_OVERFLOW;
 const PARTICLE_COUNT: usize = 64;
 const MAX_RENDER_INSTANCES: usize = 64;
 const TRACK_SPACING_MS: f32 = 4000.0;

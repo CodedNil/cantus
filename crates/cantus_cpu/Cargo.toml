@@ -12,7 +12,7 @@ path = "src/main.rs"
 generate-nix = ["dep:schemars"]
 
 [dependencies]
-cantus_shared = { path = "../cantus_shared", features = ["cpu"] }
+cantus_gpu = { path = "../cantus_gpu", features = ["cpu"] }
 glam = { workspace = true }
 tracing = { version = "0.1.44", default-features = false, features = ["std"] }
 tracing-subscriber = { version = "0.3.23", default-features = false, features = [

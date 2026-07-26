@@ -1,14 +1,17 @@
 use crate::{
-    CantusApp, MAX_RENDER_INSTANCES, PANEL_EXTENSION, PANEL_OVERFLOW, PANEL_START, PARTICLE_COUNT,
+    CantusApp, MAX_RENDER_INSTANCES, PANEL_OVERFLOW, PANEL_START, PARTICLE_COUNT,
     interaction::{InteractionState, Rect, TrackAction},
     spotify::Track,
 };
 use art::{AlbumArt, ArtState};
-use cantus_shared::{
-    GAP, GlobalUniforms, Particle, PlayheadUniforms, RipplePulse,
-    status::{StatusPill, WIDTH as STATUS_WIDTH},
-    tempo::{WIDTH as TEMPO_WIDTH, WeatherPill, pill_x as tempo_pill_x, sun_position},
-    track::{ICON_SPACING, TrackPill},
+use cantus_gpu::tempo::EXTENSION;
+use cantus_gpu::{
+    GAP, GlobalUniforms, RipplePulse,
+    particles::{self, color as particle_color},
+    playhead,
+    status::{self as gpu_status, WIDTH as STATUS_WIDTH},
+    tempo::{self as gpu_tempo, WIDTH as TEMPO_WIDTH, pill_x as tempo_pill_x, sun_position},
+    track::{self as gpu_track, ICON_SPACING},
 };
 use glam::{FloatExt, Vec2, vec2};
 use pipelines::{IMAGE_SIZE, MAX_TEXTURE_IMAGES, write_texture_region};
@@ -76,18 +79,13 @@ pub struct GpuPass {
 
 impl GpuPass {
     fn draw_range<'pass>(&'pass self, pass: &mut RenderPass<'pass>, instances: Range<u32>) {
-        if instances.is_empty() {
-            return;
-        }
         pass.set_pipeline(&self.pipeline);
         pass.set_bind_group(0, &self.bind_group, &[]);
         pass.draw(0..4, instances);
     }
 
     fn upload_data<T: bytemuck::NoUninit>(&self, queue: &Queue, data: &[T]) {
-        if !data.is_empty() {
-            queue.write_buffer(&self.buffer, 0, bytemuck::cast_slice(data));
-        }
+        queue.write_buffer(&self.buffer, 0, bytemuck::cast_slice(data));
     }
 }
 
@@ -127,16 +125,16 @@ pub struct RenderState {
     track_offset: f32,
     movement_speed: f32,
     pub last_toggle_playing: Instant,
-    particles: [Particle; PARTICLE_COUNT],
+    particles: [particles::Data; PARTICLE_COUNT],
     particles_accumulator: f32,
     /// Physical buffer pixels per logical Wayland surface pixel.
     pub scale: f32,
     pub surface_width: Option<f32>,
     pub uniforms: GlobalUniforms,
-    track_pills: Vec<TrackPill>,
+    track_pills: Vec<gpu_track::Data>,
     track_glyphs: Vec<Range<u32>>,
-    pub status: StatusPill,
-    playhead: PlayheadUniforms,
+    pub status: gpu_status::Data,
+    playhead: playhead::Data,
 }
 impl Default for RenderState {
     fn default() -> Self {
@@ -149,21 +147,21 @@ impl Default for RenderState {
             track_offset: 0.0,
             movement_speed: 0.0,
             last_toggle_playing: now,
-            particles: [Particle::default(); PARTICLE_COUNT],
+            particles: [particles::Data::default(); PARTICLE_COUNT],
             particles_accumulator: 0.0,
             scale: 1.0,
             surface_width: None,
             uniforms: GlobalUniforms::default(),
             track_pills: Vec::with_capacity(MAX_RENDER_INSTANCES),
             track_glyphs: Vec::with_capacity(MAX_RENDER_INSTANCES),
-            status: StatusPill::default(),
-            playhead: PlayheadUniforms::default(),
+            status: gpu_status::Data::default(),
+            playhead: playhead::Data::default(),
         }
     }
 }
 
 impl RenderState {
-    fn expired_particles(&mut self, time: f32) -> impl Iterator<Item = &mut Particle> {
+    fn expired_particles(&mut self, time: f32) -> impl Iterator<Item = &mut particles::Data> {
         self.particles
             .iter_mut()
             .filter(move |particle| time > particle.end_time)
@@ -173,10 +171,6 @@ impl RenderState {
     const fn gpu(&mut self) -> &mut GpuResources {
         self.gpu.as_mut().expect("render called before gpu configured")
     }
-}
-
-fn particle_color(rgb: u32, duration: f32) -> u32 {
-    (rgb & 0x00FF_FFFF) | (u32::from((duration * 100.0).min(255.0) as u8) << 24)
 }
 
 impl CantusApp {
@@ -199,13 +193,10 @@ impl CantusApp {
 
     pub fn timeline(&self) -> Timeline {
         let config = &self.config;
-        let mut reserved = config.history_width + GAP;
-        if config.weather_enabled {
-            reserved += TEMPO_WIDTH + GAP;
-        }
-        if config.status_enabled {
-            reserved += STATUS_WIDTH + GAP;
-        }
+        let reserved = config.history_width
+            + GAP
+            + f32::from(config.weather_enabled) * (TEMPO_WIDTH + GAP)
+            + f32::from(config.status_enabled) * (STATUS_WIDTH + GAP);
         let px_per_ms = (self.logical_surface_size().0 - reserved).max(84.0)
             / (config.timeline_future_minutes * 60_000.0);
         Timeline {
@@ -216,7 +207,7 @@ impl CantusApp {
 
     pub fn logical_surface_size(&self) -> (f32, f32) {
         let extension = if self.config.weather_enabled {
-            PANEL_EXTENSION
+            EXTENSION + PANEL_OVERFLOW
         } else {
             PANEL_OVERFLOW
         };
@@ -331,7 +322,7 @@ impl CantusApp {
         gpu.images.image_index(&gpu.queue, art)
     }
 
-    fn create_scene(&mut self) -> (Option<WeatherPill>, u32) {
+    fn create_scene(&mut self) -> (Option<gpu_tempo::Data>, u32) {
         let dt = self.render.last_update.elapsed().as_secs_f32().min(0.1);
         self.render.last_update = Instant::now();
 
@@ -342,14 +333,16 @@ impl CantusApp {
         let mouse = self.render.uniforms.mouse_pos;
         let mut ui = mem::take(&mut self.interaction);
         ui.begin_frame(mouse);
-        self.render.status = self.status.as_mut().map_or_else(StatusPill::default, |status| {
-            status.damp_readings(dt);
-            status.pill(self.render.uniforms.time)
-        });
+        self.render.status = self
+            .status
+            .as_mut()
+            .map_or_else(gpu_status::Data::default, |status| {
+                status.pill(self.render.uniforms.time, dt)
+            });
 
         let weather = if let Some(weather_state) = &mut self.weather {
-            let (weather, weather_label, hour) =
-                weather_state.scene(screen_width, self.config.height, &ui, dt);
+            let x = tempo_pill_x(screen_width, self.config.status_enabled);
+            let (weather, weather_label, hour) = weather_state.scene(x, self.config.height, &ui, dt);
             self.render.uniforms.weather_hour = hour;
             self.render.status.sun_height = sun_position(hour, weather.sun_hours)[1];
             self.render.status.conditions = weather.hourly[0].values();
@@ -359,13 +352,13 @@ impl CantusApp {
             gpu.text_renderer.render_centered_label(
                 &gpu.queue,
                 &weather_label,
-                vec2(tempo_pill_x(screen_width) + TEMPO_WIDTH * 0.5, label_y),
+                vec2(x + TEMPO_WIDTH * 0.5, label_y),
                 TextStyle::WEATHER,
                 1.0,
                 scale,
             );
             weather_state.calendar_labels(
-                screen_width,
+                x,
                 self.config.height,
                 &mut ui,
                 |text, position, alpha, style| {
@@ -385,10 +378,10 @@ impl CantusApp {
         let timeline = self.timeline();
         self.render.uniforms.playhead_x = timeline.playhead_x;
 
-        let playhead = ui.interact(
+        let playhead = ui.surface(Rect::from_center(
             vec2(timeline.playhead_x, PANEL_START + self.config.height * 0.5),
             vec2(self.config.height * 0.25, self.config.height * 0.5),
-        );
+        ));
         if playhead.clicked {
             self.toggle_playing();
         }
@@ -398,7 +391,7 @@ impl CantusApp {
             timeline.playhead_x + 100.0,
             PANEL_START + self.config.height,
         );
-        let volume_scroll = ui.scroll_surface(volume_rect);
+        let volume_scroll = ui.scroll(volume_rect);
         if volume_scroll != 0 {
             self.adjust_playback_volume(volume_scroll);
         }
@@ -511,7 +504,7 @@ impl CantusApp {
                 let time = self.render.uniforms.time;
                 for particle in self.render.expired_particles(time).take(20) {
                     let duration = 0.5.lerp(1.5, fastrand::f32());
-                    particle.spawn_pos = ui.pointer();
+                    particle.spawn_pos = ui.pointer;
                     particle.spawn_vel =
                         Vec2::from_angle(fastrand::f32() * TAU) * (30.0 + fastrand::f32() * 20.0);
                     particle.color = particle_color(0x32_D7_FF, duration);

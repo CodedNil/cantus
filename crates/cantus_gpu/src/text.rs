@@ -1,5 +1,4 @@
-use crate::{pixel_to_ndc, quad_coord, unpack_u16x2};
-use cantus_shared::{GLYPH_ATLAS_SIZE, GlobalUniforms, GlyphInstance, MAX_GLYPH_INSTANCES, smoothstep};
+use crate::{GlobalUniforms, pixel_to_ndc, quad_coord, smoothstep};
 use spirv_std::{
     Sampler,
     arch::{Derivative, kill},
@@ -8,13 +7,39 @@ use spirv_std::{
     spirv,
 };
 
+pub const MAX_GLYPH_INSTANCES: usize = 2048;
+pub const GLYPH_ATLAS_SIZE: u32 = 2048;
+
+#[cfg(feature = "cpu")]
+pub const fn pack_u16x2([low, high]: [u32; 2]) -> u32 {
+    low | high << 16
+}
+
+const fn unpack_u16x2(value: u32) -> Vec2 {
+    Vec2::new((value & 0xffff) as f32, (value >> 16) as f32)
+}
+
+#[repr(C)]
+#[derive(Copy, Clone)]
+#[cfg_attr(feature = "cpu", derive(bytemuck::Pod, bytemuck::Zeroable))]
+pub struct Data {
+    /// Bottom-left corner of the glyph quad in logical pixels.
+    pub pos: Vec2,
+    /// Width and height of the glyph quad in logical pixels.
+    pub size: Vec2,
+    /// Packed top-left and bottom-right atlas coordinates.
+    pub atlas: [u32; 2],
+    /// Right clip edge in logical pixels.
+    pub clip_right: f32,
+    pub alpha: f32,
+}
+
 #[spirv(vertex)]
-pub fn vs_text(
+pub fn vertex(
     #[spirv(vertex_index)] v_idx: u32,
     #[spirv(instance_index)] i_idx: u32,
     #[spirv(storage_buffer, descriptor_set = 0, binding = 0)] global: &GlobalUniforms,
-    #[spirv(storage_buffer, descriptor_set = 0, binding = 1)] glyphs: &[GlyphInstance;
-         MAX_GLYPH_INSTANCES],
+    #[spirv(storage_buffer, descriptor_set = 0, binding = 1)] glyphs: &[Data; MAX_GLYPH_INSTANCES],
     #[spirv(position)] out_pos: &mut Vec4,
     #[spirv(location = 0)] out_uv: &mut Vec2,
     #[spirv(location = 1)] out_style: &mut Vec2,
@@ -31,7 +56,7 @@ pub fn vs_text(
 }
 
 #[spirv(fragment)]
-pub fn fs_text(
+pub fn fragment(
     #[spirv(location = 0)] uv: Vec2,
     #[spirv(location = 1)] style: Vec2,
     #[spirv(descriptor_set = 0, binding = 2)] atlas: &Image2d,

@@ -1,5 +1,5 @@
 use arrayvec::ArrayVec;
-use cantus_shared::track::MAX_PILL_PLAYLIST_ICONS;
+use cantus_gpu::track::MAX_PILL_PLAYLIST_ICONS;
 use serde::{Deserialize, Serialize};
 use std::{env, fs, path::PathBuf};
 use tracing::warn;

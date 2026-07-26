@@ -2,10 +2,7 @@ use crate::{
     CantusApp, MAX_RENDER_INSTANCES, PARTICLE_COUNT,
     render::{GpuPass, GpuResources, ImageAtlas, text::TextRenderer},
 };
-use cantus_shared::{
-    GlobalUniforms, GlyphInstance, MAX_GLYPH_INSTANCES, Particle, PlayheadUniforms, status::StatusPill,
-    tempo::WeatherPill, track::TrackPill,
-};
+use cantus_gpu::{GlobalUniforms, text::MAX_GLYPH_INSTANCES};
 use std::{
     mem::size_of,
     sync::{Arc, Weak},
@@ -25,11 +22,6 @@ use wgpu::{
 pub const MAX_TEXTURE_IMAGES: u32 = 32;
 pub const IMAGE_SIZE: u32 = 64;
 
-const fn buffer_size<T>(len: usize) -> u64 {
-    (size_of::<T>() * len) as u64
-}
-
-/// Upload `data` as a tightly packed `width` by `height` block at the given texture origin.
 pub fn write_texture_region(
     queue: &Queue,
     texture: &Texture,
@@ -56,28 +48,27 @@ pub fn write_texture_region(
     );
 }
 
-fn gpu_pass(
+fn gpu_pass<T>(
     device: &Device,
     shader: &ShaderModule,
     format: TextureFormat,
-    label: &str,
+    name: &str,
     globals: &wgpu::Buffer,
-    size: u64,
+    count: usize,
     extra_resources: &[BindingResource<'_>],
 ) -> GpuPass {
-    let name = label.to_ascii_lowercase();
     let pipeline = device.create_render_pipeline(&RenderPipelineDescriptor {
-        label: Some(label),
+        label: Some(name),
         layout: None,
         vertex: VertexState {
             module: shader,
-            entry_point: Some(&format!("{name}::vs_{name}")),
+            entry_point: Some(&format!("{name}::vertex")),
             buffers: &[],
             compilation_options: PipelineCompilationOptions::default(),
         },
         fragment: Some(FragmentState {
             module: shader,
-            entry_point: Some(&format!("{name}::fs_{name}")),
+            entry_point: Some(&format!("{name}::fragment")),
             targets: &[Some(ColorTargetState {
                 format,
                 blend: Some(BlendState::PREMULTIPLIED_ALPHA_BLENDING),
@@ -95,8 +86,8 @@ fn gpu_pass(
         cache: None,
     });
     let buffer = device.create_buffer(&BufferDescriptor {
-        label: Some(&format!("{label} Data")),
-        size,
+        label: Some(&format!("{name} Data")),
+        size: (size_of::<T>() * count) as u64,
         usage: BufferUsages::STORAGE | BufferUsages::COPY_DST,
         mapped_at_creation: false,
     });
@@ -110,7 +101,7 @@ fn gpu_pass(
         })
         .collect::<Vec<_>>();
     let bind_group = device.create_bind_group(&BindGroupDescriptor {
-        label: Some(&format!("{label} Bind Group")),
+        label: Some(&format!("{name} Bind Group")),
         layout: &pipeline.get_bind_group_layout(0),
         entries: &entries,
     });
@@ -169,7 +160,7 @@ impl CantusApp {
 
         let globals = device.create_buffer(&BufferDescriptor {
             label: Some("Globals"),
-            size: buffer_size::<GlobalUniforms>(1),
+            size: size_of::<GlobalUniforms>() as u64,
             usage: BufferUsages::STORAGE | BufferUsages::COPY_DST,
             mapped_at_creation: false,
         });
@@ -200,35 +191,32 @@ impl CantusApp {
         });
 
         macro_rules! pass {
-            ($label:literal, $type:ty, $count:expr $(, $resource:expr)*) => {
-                gpu_pass(
+            ($module:ident, $count:expr $(, $resource:expr)*) => {{
+                let _ = cantus_gpu::$module::vertex;
+                let _ = cantus_gpu::$module::fragment;
+                gpu_pass::<cantus_gpu::$module::Data>(
                     &device,
                     &rust_gpu_shader,
                     format,
-                    $label,
+                    stringify!($module),
                     &globals,
-                    buffer_size::<$type>($count),
+                    $count,
                     &[$($resource),*],
                 )
-            };
+            }};
         }
-        let playhead = pass!("Playhead", PlayheadUniforms, 1);
-        let particles = pass!("Particles", Particle, PARTICLE_COUNT);
+        let playhead = pass!(playhead, 1);
+        let particles = pass!(particles, PARTICLE_COUNT);
         let track = pass!(
-            "Track",
-            TrackPill,
+            track,
             MAX_RENDER_INSTANCES,
             BindingResource::TextureView(&image_view),
             BindingResource::Sampler(&sampler)
         );
-        let status = self.config.status_enabled.then(|| pass!("Status", StatusPill, 1));
-        let weather = self
-            .config
-            .weather_enabled
-            .then(|| pass!("Tempo", WeatherPill, 1));
+        let status = self.config.status_enabled.then(|| pass!(status, 1));
+        let weather = self.config.weather_enabled.then(|| pass!(tempo, 1));
         let text = pass!(
-            "Text",
-            GlyphInstance,
+            text,
             MAX_GLYPH_INSTANCES,
             BindingResource::TextureView(&text_atlas_view),
             BindingResource::Sampler(&sampler)

@@ -5,9 +5,9 @@ use crate::{
     interaction::{InteractionState, Rect, TrackAction},
     spotify::{CondensedPlaylist, Track, playlist_icons},
 };
-use cantus_shared::{
+use cantus_gpu::{
     GAP,
-    track::{AudioFeatures, ICON_WIDTH, MAX_PILL_PLAYLIST_ICONS, TrackPill},
+    track::{AudioFeatures, Data, ICON_WIDTH, MAX_PILL_PLAYLIST_ICONS},
 };
 use std::ops::Range;
 
@@ -73,7 +73,7 @@ impl CantusApp {
         playlists: &[CondensedPlaylist],
         timeline: Timeline,
         ui: &mut InteractionState,
-    ) -> (TrackPill, Range<u32>, bool, Option<TrackAction>) {
+    ) -> (Data, Range<u32>, bool, Option<TrackAction>) {
         let glyph_start = self.render.gpu.as_ref().unwrap().text_renderer.glyphs.len() as u32;
         let show_details = track.runtime.width > self.config.height;
         approach(
@@ -83,7 +83,7 @@ impl CantusApp {
         );
         let detail_alpha = track.runtime.detail_alpha;
         let playlist_expansion = track.runtime.playlist_expansion_curve();
-        let mut pill = TrackPill {
+        let mut pill = Data {
             x: track.runtime.start_x,
             width: track.runtime.width.max(self.config.height),
             colors: track.runtime.art.palette(),
@@ -152,7 +152,7 @@ impl CantusApp {
                 let response =
                     ui.surface(Rect::from_center(row.center, row.half_size(ICON_WIDTH * 0.5)));
                 hovered |= response.hovered;
-                if let Some((index, right_half)) = row.hit(ui.pointer()) {
+                if let Some((index, right_half)) = row.hit(ui.pointer) {
                     if primary_row && response.hovered && index < stars {
                         pill.rating = index as i32 * 2 + 1 + i32::from(right_half);
                     }
@@ -175,16 +175,16 @@ impl CantusApp {
         let body = ui.surface(Rect::pill(pill.x, pill.width, self.config.height));
         hovered |= body.hovered;
         if body.pressed {
-            ui.enable_drag();
+            ui.drag_enabled = true;
         }
         if body.clicked
             && let Some(track_id) = track.id
         {
             let (start, end) = track.natural_x_range(timeline.playhead_x, timeline.px_per_ms);
-            let position = if ui.pointer().x < self.config.history_width + 40.0 {
+            let position = if ui.pointer.x < self.config.history_width + 40.0 {
                 0.0
             } else {
-                (ui.pointer().x - start) / (end - start)
+                (ui.pointer.x - start) / (end - start)
             };
             action = Some(TrackAction::Seek(track_id, position));
         }

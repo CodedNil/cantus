@@ -1,7 +1,7 @@
 //! Open-Meteo API: fetching, the raw response shape, weather codes, and deriving conditions.
 
 use crate::{AppUpdater, send_update};
-use cantus_shared::tempo::WeatherCondition;
+use cantus_gpu::tempo::WeatherCondition;
 use jiff::civil::DateTime;
 use serde::Deserialize;
 use std::{thread, time::Duration};
@@ -9,18 +9,6 @@ use strum::{FromRepr, IntoStaticStr};
 use tracing::warn;
 
 const WEATHER_FIELDS: &str = "temperature_2m,weather_code";
-
-fn condition([fog, cloud, rain, snow, lightning, hail]: [f32; 6]) -> WeatherCondition {
-    let pack = |value: f32, max: f32| (value.clamp(0.0, 1.0) * max) as u32;
-    let mut result = WeatherCondition::from_bits(0);
-    result.set_fog_raw(pack(fog, 15.0));
-    result.set_cloud_raw(pack(cloud, 127.0));
-    result.set_rain_raw(pack(rain, 255.0));
-    result.set_snow_raw(pack(snow, 255.0));
-    result.set_lightning(lightning > 0.0);
-    result.set_hail_raw(pack(hail, 15.0));
-    result
-}
 
 /// Fetches and applies a forecast every 15 minutes.
 pub fn spawn_refresh_loop(latitude: f32, longitude: f32, updater: AppUpdater) {
@@ -72,19 +60,9 @@ pub struct Current {
 
 #[derive(Deserialize)]
 pub struct Hourly {
-    weather_code: [u8; 24],
+    pub weather_code: [u8; 24],
     pub time: [DateTime; 24],
     pub temperature_2m: [f32; 24],
-}
-
-impl Hourly {
-    pub fn condition(&self, index: usize) -> WeatherCondition {
-        coded_conditions(self.weather_code[index])
-    }
-
-    pub fn name(&self, index: usize) -> &'static str {
-        WeatherCode::name(self.weather_code[index])
-    }
 }
 
 #[derive(Deserialize)]
@@ -98,7 +76,17 @@ pub struct Daily {
 
 /// Derives a condition from a WMO weather code.
 pub fn coded_conditions(code: u8) -> WeatherCondition {
-    condition(WeatherCode::from_repr(code).map_or([0.0, 0.9, 0.0, 0.0, 0.0, 0.0], WeatherCode::values))
+    let [fog, cloud, rain, snow, lightning, hail] =
+        WeatherCode::from_repr(code).map_or([0.0, 0.9, 0.0, 0.0, 0.0, 0.0], WeatherCode::values);
+    let pack = |value: f32, max: f32| (value.clamp(0.0, 1.0) * max) as u32;
+    let mut result = WeatherCondition::from_bits(0);
+    result.set_fog_raw(pack(fog, 15.0));
+    result.set_cloud_raw(pack(cloud, 127.0));
+    result.set_rain_raw(pack(rain, 255.0));
+    result.set_snow_raw(pack(snow, 255.0));
+    result.set_lightning(lightning > 0.0);
+    result.set_hail_raw(pack(hail, 15.0));
+    result
 }
 
 /// WMO weather interpretation codes, as used by Open-Meteo's `weather_code` field.
@@ -178,14 +166,10 @@ impl WeatherCode {
             Self::HeavySnow => 1.0,
             _ => 0.0,
         };
-        let lightning = if matches!(
+        let lightning = matches!(
             self,
             Self::Thunderstorm | Self::ThunderstormLightHail | Self::ThunderstormHeavyHail
-        ) {
-            1.0
-        } else {
-            0.0
-        };
+        ) as u8 as f32;
         let hail = match self {
             Self::ThunderstormHeavyHail => 1.0,
             Self::ThunderstormLightHail => 0.6,

@@ -1,13 +1,21 @@
-use crate::{pixel_to_ndc, quad_coord, sd_rounded_triangle};
-use cantus_shared::{GlobalUniforms, PlayheadUniforms, smoothstep};
+use crate::{GlobalUniforms, pixel_to_ndc, quad_coord, sd_rounded_triangle, smoothstep};
 use spirv_std::{
     arch::kill,
     glam::{FloatExt, Vec2, Vec3, Vec4, vec2, vec3},
     spirv,
 };
 
+#[repr(C)]
+#[derive(Copy, Clone, Default)]
+#[cfg_attr(feature = "cpu", derive(bytemuck::Pod, bytemuck::Zeroable))]
+pub struct Data {
+    pub bar_split: f32,
+    pub icon_presence: f32,
+    pub icon_morph: f32,
+}
+
 #[spirv(vertex)]
-pub fn vs_playhead(
+pub fn vertex(
     #[spirv(vertex_index)] v_idx: u32,
     #[spirv(storage_buffer, descriptor_set = 0, binding = 0)] global: &GlobalUniforms,
     #[spirv(position)] out_pos: &mut Vec4,
@@ -25,10 +33,10 @@ pub fn vs_playhead(
 }
 
 #[spirv(fragment)]
-pub fn fs_playhead(
+pub fn fragment(
     #[spirv(location = 0)] world_pos: Vec2,
     #[spirv(storage_buffer, descriptor_set = 0, binding = 0)] global: &GlobalUniforms,
-    #[spirv(storage_buffer, descriptor_set = 0, binding = 1)] state: &PlayheadUniforms,
+    #[spirv(storage_buffer, descriptor_set = 0, binding = 1)] state: &Data,
     #[spirv(location = 0)] out_color: &mut Vec4,
 ) {
     let height = global.bar_height.y;

@@ -40,20 +40,18 @@ impl Rect {
 pub struct InteractionState {
     pub mouse_pressure: f32, // 0 outside, 1 hovering, 2 held
     pub dragging: bool,
-    drag_enabled: bool,
+    pub drag_enabled: bool,
     pub press_origin: Vec2,
-    pointer: Vec2,
-    event: PointerEvent,
-    scroll: i32,
+    pub pointer: Vec2,
+    event: Option<PointerEvent>,
+    pub scroll: i32,
     pub hover_claimed: bool,
     pulse: Option<Vec2>,
     pub regions: Vec<Rect>,
 }
 
-#[derive(Default)]
+#[derive(Clone, Copy)]
 enum PointerEvent {
-    #[default]
-    None,
     Press,
     Release,
 }
@@ -65,21 +63,18 @@ pub struct Response {
 }
 
 impl InteractionState {
-    pub fn interact(&mut self, center: Vec2, half_size: Vec2) -> Response {
-        self.respond(Rect::from_center(center, half_size))
-    }
-
-    fn respond(&mut self, rect: Rect) -> Response {
+    pub fn surface(&mut self, rect: Rect) -> Response {
+        self.regions.push(rect);
         let inside = rect.contains(self.pointer);
         let hovered = self.mouse_pressure > 0.0 && !self.hover_claimed && inside;
         self.hover_claimed |= hovered;
-        let pressed = inside && matches!(self.event, PointerEvent::Press);
+        let pressed = inside && matches!(self.event, Some(PointerEvent::Press));
         let clicked = inside
             && !self.dragging
             && self.press_origin.distance(self.pointer) < 2.0
-            && matches!(self.event, PointerEvent::Release);
+            && matches!(self.event, Some(PointerEvent::Release));
         if pressed || clicked {
-            self.event = PointerEvent::None;
+            self.event = None;
         }
         if clicked {
             self.pulse = Some(self.pointer);
@@ -91,17 +86,8 @@ impl InteractionState {
         }
     }
 
-    pub fn surface(&mut self, rect: Rect) -> Response {
-        self.regions.push(rect);
-        self.respond(rect)
-    }
-
-    pub fn scroll_surface(&mut self, rect: Rect) -> i32 {
-        self.regions.push(rect);
-        self.scroll(rect)
-    }
-
     pub fn scroll(&mut self, rect: Rect) -> i32 {
+        self.regions.push(rect);
         if rect.contains(self.pointer) {
             mem::take(&mut self.scroll)
         } else {
@@ -113,16 +99,12 @@ impl InteractionState {
         self.mouse_pressure > 0.0 && rect.contains(self.pointer)
     }
 
-    pub const fn pointer(&self) -> Vec2 {
-        self.pointer
-    }
-
     pub const fn down(&self) -> bool {
         self.mouse_pressure > 1.0
     }
 
     pub const fn released(&self) -> bool {
-        matches!(self.event, PointerEvent::Release)
+        matches!(self.event, Some(PointerEvent::Release))
     }
 
     pub const fn begin_frame(&mut self, pointer: Vec2) {
@@ -132,7 +114,7 @@ impl InteractionState {
 
     pub const fn end_frame(&mut self) -> Option<Vec2> {
         let pulse = self.pulse.take();
-        self.event = PointerEvent::None;
+        self.event = None;
         self.scroll = 0;
         pulse
     }
@@ -140,16 +122,12 @@ impl InteractionState {
     pub const fn press(&mut self, position: Vec2) {
         self.mouse_pressure = 2.0;
         self.press_origin = position;
-        self.event = PointerEvent::Press;
+        self.event = Some(PointerEvent::Press);
         self.dragging = false;
     }
 
-    pub const fn release(&mut self) {
-        self.event = if self.down() {
-            PointerEvent::Release
-        } else {
-            PointerEvent::None
-        };
+    pub fn release(&mut self) {
+        self.event = self.down().then_some(PointerEvent::Release);
         self.mouse_pressure = 1.0;
     }
 
@@ -157,14 +135,6 @@ impl InteractionState {
         if self.drag_enabled {
             self.dragging |= (position - self.press_origin).abs().max_element() >= 2.0;
         }
-    }
-
-    pub const fn set_scroll(&mut self, direction: i32) {
-        self.scroll = direction;
-    }
-
-    pub const fn enable_drag(&mut self) {
-        self.drag_enabled = true;
     }
 
     pub const fn cancel_drag(&mut self) {
@@ -212,19 +182,47 @@ impl CantusApp {
                 self.spotify
                     .update_library(track_id, vec![(playlist_id, add)], None);
             }
-            TrackAction::Seek(track_id, position) => self.skip_to_track(track_id, position),
+            TrackAction::Seek(track_id, position) => {
+                let state = &mut self.playback;
+                let queue_index = state.queue_index;
+                let Some(position_in_queue) =
+                    state.queue.iter().position(|track| track.id == Some(track_id))
+                else {
+                    warn!("Track not found in queue");
+                    return;
+                };
+                let skip_count = position_in_queue.abs_diff(queue_index);
+                if skip_count == 0 {
+                    let milliseconds = if position < 0.05 {
+                        0.0
+                    } else {
+                        state.queue[position_in_queue].duration_ms as f32 * position
+                    }
+                    .round() as u32;
+                    state.update_progress(milliseconds, Instant::now());
+                    self.spotify.player_parameter("seek", "position_ms", milliseconds);
+                } else {
+                    state.queue_index = position_in_queue;
+                    state.update_progress(0, Instant::now());
+                    self.spotify
+                        .skip(queue_index < position_in_queue, skip_count.min(10));
+                }
+                state.last_interaction = Instant::now() + Duration::from_secs(2);
+            }
         }
     }
 
     pub fn toggle_playing(&mut self) {
         self.render.last_toggle_playing = Instant::now();
         self.playback.playing = !self.playback.playing;
-        let action = if self.playback.playing {
-            "Playing"
-        } else {
-            "Pausing"
-        };
-        info!("{action} current track");
+        info!(
+            "{} current track",
+            if self.playback.playing {
+                "Playing"
+            } else {
+                "Pausing"
+            }
+        );
         self.spotify.set_playing(self.playback.playing);
     }
 
@@ -236,32 +234,5 @@ impl CantusApp {
             info!("Setting volume to {volume}%");
             self.spotify.player_parameter("volume", "volume_percent", volume);
         }
-    }
-
-    fn skip_to_track(&mut self, track_id: TrackId, position: f32) {
-        let state = &mut self.playback;
-        let queue_index = state.queue_index;
-        let Some(position_in_queue) = state.queue.iter().position(|track| track.id == Some(track_id))
-        else {
-            warn!("Track not found in queue");
-            return;
-        };
-        let skip_count = position_in_queue.abs_diff(queue_index);
-        if skip_count == 0 {
-            let milliseconds = if position < 0.05 {
-                0.0
-            } else {
-                state.queue[position_in_queue].duration_ms as f32 * position
-            }
-            .round() as u32;
-            state.update_progress(milliseconds, Instant::now());
-            self.spotify.player_parameter("seek", "position_ms", milliseconds);
-        } else {
-            state.queue_index = position_in_queue;
-            state.update_progress(0, Instant::now());
-            self.spotify
-                .skip(queue_index < position_in_queue, skip_count.min(10));
-        }
-        state.last_interaction = Instant::now() + Duration::from_secs(2);
     }
 }

@@ -230,7 +230,7 @@ dependencies = [
  "arrayvec",
  "base64 0.23.0",
  "bytemuck",
- "cantus_shared",
+ "cantus_gpu",
  "fastrand",
  "form_urlencoded",
  "getrandom 0.4.3",
@@ -260,20 +260,13 @@ dependencies = [
 name = "cantus_gpu"
 version = "0.1.0"
 dependencies = [
- "cantus_shared",
- "naga 30.0.0",
- "spirv-builder",
- "spirv-std",
-]
-
-[[package]]
-name = "cantus_shared"
-version = "0.1.0"
-dependencies = [
  "bitfields",
  "bytemuck",
  "glam",
+ "naga 30.0.0",
  "serde",
+ "spirv-builder",
+ "spirv-std",
 ]
 
 [[package]]

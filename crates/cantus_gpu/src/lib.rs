@@ -1,6 +1,5 @@
 #![no_std]
 
-use cantus_shared::{GlobalUniforms, RIPPLE_COUNT, smoothstep};
 use spirv_std::glam::{FloatExt, UVec2, Vec2, Vec3, Vec4, uvec2, vec2, vec3, vec4};
 
 #[cfg(target_arch = "spirv")]
@@ -12,6 +11,41 @@ pub mod status;
 pub mod tempo;
 pub mod text;
 pub mod track;
+
+/// Base spacing unit. Sizes and gaps should be whole multiples of it.
+pub const UNIT: f32 = 4.0;
+/// The standard small gap between adjacent elements.
+pub const GAP: f32 = UNIT * 2.0;
+/// The standard inset between a container edge and its contents.
+pub const PADDING: f32 = UNIT * 3.0;
+
+pub fn smoothstep(edge0: f32, edge1: f32, x: f32) -> f32 {
+    let t = ((x - edge0) / (edge1 - edge0)).saturate();
+    t * t * (3.0 - 2.0 * t)
+}
+
+#[repr(C)]
+#[derive(Copy, Clone, Default)]
+#[cfg_attr(feature = "cpu", derive(bytemuck::Pod, bytemuck::Zeroable))]
+pub struct RipplePulse {
+    pub origin: Vec2,
+    pub animation: Vec2,
+}
+
+#[repr(C)]
+#[derive(Copy, Clone, Default)]
+#[cfg_attr(feature = "cpu", derive(bytemuck::Pod, bytemuck::Zeroable))]
+pub struct GlobalUniforms {
+    pub screen_size: Vec2,
+    pub bar_height: Vec2,
+    pub mouse_pos: Vec2,
+    pub mouse_pressure: f32,
+    pub playhead_x: f32,
+    pub time: f32,
+    /// Current hour in the configured weather location's local time.
+    pub weather_hour: f32,
+    pub ripples: [RipplePulse; 4],
+}
 
 /// Core 2-lane avalanche mixer for hash functions
 pub(crate) fn avalanche(mut value: UVec2) -> UVec2 {
@@ -58,10 +92,6 @@ pub(crate) fn fbm(mut p: Vec2) -> f32 {
 
 pub(crate) fn cloud_mass(p: Vec2, scale: f32, time: f32) -> f32 {
     fbm(p / scale * 0.14 + vec2(time * 0.012, 6.1))
-}
-
-pub(crate) const fn unpack_u16x2(value: u32) -> Vec2 {
-    Vec2::new((value & 0xffff) as f32, (value >> 16) as f32)
 }
 
 pub(crate) const fn quad_coord(vertex_index: u32) -> Vec2 {
@@ -137,7 +167,7 @@ fn pill_interaction(pixel: Vec2, global: &GlobalUniforms) -> PillInteraction {
     let mut ripple = Vec2::ZERO;
     let mut ripple_flash = 0.0;
     #[allow(clippy::needless_range_loop)]
-    for index in 0..RIPPLE_COUNT {
+    for index in 0..global.ripples.len() {
         let pulse = global.ripples[index];
         let progress = ((global.time - pulse.animation.x) * 1.2).saturate();
         let (direction, distance) = direction_and_length(pixel - pulse.origin);
