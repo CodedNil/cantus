@@ -1,21 +1,9 @@
-rust_gpu_bin := `dirname "$(rustup which --toolchain nightly-2026-05-22 rustc)"`
-shader_target_dir := "target/cantus-gpu"
-shader_output := "assets/cantus.spv"
-
 default: run
 
 shader:
-    @if [ ! -f "{{ shader_output }}" ] || find crates/cantus_gpu/src crates/cantus_shared/src crates/cantus_gpu/Cargo.toml crates/cantus_shared/Cargo.toml -type f -newer "{{ shader_output }}" | grep -q .; then \
-        env -u RUSTC -u RUSTDOC -u RUSTUP_TOOLCHAIN \
-            CARGO_TARGET_DIR="{{ shader_target_dir }}" \
-            PATH="{{ rust_gpu_bin }}:$PATH" \
-            cargo run \
-                --manifest-path crates/cantus_gpu/Cargo.toml \
-                --features build-shader \
-                --bin build-shader; \
-    else \
-        echo "{{ shader_output }} is up to date"; \
-    fi
+    CARGO_TARGET_DIR=target/cantus-gpu \
+        PATH="$CANTUS_SHADER_RUST/bin:$PATH" \
+        cargo run -p cantus_gpu --features build-shader --bin build-shader
 
 run: shader
-    cargo run -p cantus_cpu
+    cargo run -p cantus_cpu --features generate-nix

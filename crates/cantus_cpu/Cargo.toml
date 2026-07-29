@@ -2,13 +2,17 @@
 name = "cantus_cpu"
 version = "0.7.0"
 edition = "2024"
+default-run = "cantus"
 
 [[bin]]
 name = "cantus"
 path = "src/main.rs"
 
+[features]
+generate-nix = ["dep:schemars"]
+
 [dependencies]
-cantus_shared = { path = "../cantus_shared", features = ["cpu"] }
+cantus_gpu = { path = "../cantus_gpu", features = ["cpu"] }
 glam = { workspace = true }
 tracing = { version = "0.1.44", default-features = false, features = ["std"] }
 tracing-subscriber = { version = "0.3.23", default-features = false, features = [
@@ -19,7 +23,7 @@ tracing-subscriber = { version = "0.3.23", default-features = false, features = 
 
 pollster = "1.0.1"
 
-wayland-client = { version = "0.31.14", default-features = false, features = ["system"] }
+wayland-client = { version = "0.31.15", default-features = false, features = ["system"] }
 wayland-protocols = { version = "0.32.13", features = ["client", "staging"] }
 wayland-protocols-wlr = { version = "0.3.12", features = ["client"] }
 
@@ -29,29 +33,38 @@ wgpu = { version = "30.0.0", default-features = false, features = [
     "std",
     "vulkan",
 ] }
-ab_glyph = { version = "0.2.32", default-features = false, features = ["std"] }
+swash = { version = "0.2.10", default-features = false, features = ["std", "render"] }
 
 image = { version = "0.25.10", default-features = false, features = [
     "jpeg",
     "png",
 ] }
-kmeans_colors = { version = "0.7.1", default-features = false, features = [
-    "palette_color",
-] }
 palette = { version = "0.7.6", default-features = false, features = ["std"] }
-
-serde = { version = "1.0.228", features = ["derive", "rc"] }
-serde_json = "1.0.150"
+serde = { workspace = true, features = ["rc"] }
+serde_json = "1.0.151"
 toml = "1.1.3"
+schemars = { version = "1.2.1", features = ["arrayvec07", "preserve_order"], optional = true }
 
-fastrand = "2.4.1"
+fastrand = "2.5.0"
+getrandom = "0.4.3"
 arrayvec = { version = "0.7.8", features = ["serde"] }
-thiserror = "2.0.18"
-base64 = "0.22.1"
+base64 = "0.23.0"
 form_urlencoded = "1.2.2"
 sha2 = { version = "0.11.0", default-features = false }
 bytemuck = { workspace = true }
+microfft = { version = "0.6.0", default-features = false, features = ["size-1024", "std"] }
+sysinfo = { git = "https://github.com/CodedNil/sysinfo", branch = "gpu_temp", default-features = false, features = [
+    "component",
+    "system",
+    "gpu",
+] }
 ureq = { version = "3.3.0", default-features = false, features = ["rustls"] }
+jiff = { version = "0.2.35", default-features = false, features = [
+    "serde",
+    "std",
+    "tz-system",
+    "tzdb-zoneinfo",
+] }
 
 [lints]
 workspace = true

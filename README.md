@@ -22,12 +22,12 @@ https://github.com/user-attachments/assets/86c0bc3c-8e50-49bc-a955-86975910b7ae
 
 `cantus` can be run in two different modes: Wayland native (using `layer-shell` protocol) or as a standard window using `winit`.
 
-### Getting a spotify API key
+### Getting a Spotify API key
 
-Due to spotify's rate limiting you will need to get a spotify API key from https://developer.spotify.com/dashboard/applications. And add that to the config file under the `spotify_client_id` key.
+Due to Spotify's rate limiting, you will need to get an API key from https://developer.spotify.com/dashboard/applications and add it to the config file under the `spotify_client_id` key.
 
 ## Installing with Nix
-Avaiable in nixpkgs.
+Available in nixpkgs.
 
 As a flake for home manager:
 Add to flake.nix inputs `cantus.url = "github:CodedNil/cantus";`
@@ -39,7 +39,9 @@ programs.cantus = {
   package = pkgs.cantus;
   settings = {
     monitor = "eDP-1";
-    width = 1050.0;
+    weather_enabled = true;
+    location = [ 51.5 (-0.1) ];
+    status_enabled = true;
     height = 40.0;
     timeline_future_minutes = 12.0;
     timeline_past_minutes = 1.5;
@@ -60,14 +62,14 @@ To build Cantus from source, ensure the following dependencies are installed:
 * libxkbcommon
 * wayland
 * vulkan-loader
+* PipeWire and WirePlumber command-line tools (`pw-record` and `wpctl`)
 
 Then, from the root of the repository, run:
 
 ```cargo build --release```
 
 The CPU-side application builds with stable Rust and embeds the precompiled
-Rust-GPU shader checked in at `assets/cantus.spv`. Rebuild that shader only
-after changing `crates/cantus_gpu` or GPU-facing structs in `crates/cantus_shared`:
+Rust-GPU shader checked in at `assets/cantus.spv`.
 
 ```just shader```
 

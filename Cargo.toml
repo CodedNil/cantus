@@ -1,38 +1,41 @@
 [workspace]
 resolver = "3"
-members = ["crates/cantus_cpu", "crates/cantus_shared"]
+members = ["crates/cantus_cpu", "crates/cantus_gpu"]
 default-members = ["crates/cantus_cpu"]
-exclude = ["crates/cantus_gpu"]
 
 [workspace.dependencies]
-bytemuck = { version = "1.25.1", features = ["derive"] }
+bytemuck = { version = "1.25.2", features = ["derive"] }
 glam = { version = "=0.33.2", default-features = false, features = [
     "bytemuck",
     "libm",
     "u8",
 ] }
+serde = { version = "1.0.229", features = ["derive"] }
 
 [workspace.lints.rust]
+unexpected_cfgs = { level = "allow", check-cfg = [
+    'cfg(target_arch, values("spirv"))',
+] }
 unused_qualifications = "warn"
 
 [workspace.lints.clippy]
 pedantic = { level = "warn", priority = -1 }
 nursery = { level = "warn", priority = -1 }
 must_use_candidate = "allow"
-too-many-lines = "allow"
-too-many-arguments = "allow"
-cast-possible-truncation = "allow"
-cast-precision-loss = "allow"
-cast-sign-loss = "allow"
-cast-possible-wrap = "allow"
+too_many_lines = "allow"
+too_many_arguments = "allow"
+cast_possible_truncation = "allow"
+cast_precision_loss = "allow"
+cast_sign_loss = "allow"
+cast_possible_wrap = "allow"
 suboptimal_flops = "allow"
 
-absolute-paths = "warn"
+absolute_paths = "warn"
 separated_literal_suffix = "warn"
 renamed_function_params = "warn"
 str_to_string = "warn"
 if_then_some_else_none = "warn"
-redundant-type-annotations = "warn"
+redundant_type_annotations = "warn"
 
 [profile.release]
 opt-level = 3

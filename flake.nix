@@ -2,25 +2,41 @@ rec {
   description = "A beautiful interactive music widget for wayland";
 
   inputs.nixpkgs.url = "github:NixOS/nixpkgs/nixos-unstable";
+  inputs.rust-overlay = {
+    url = "github:oxalica/rust-overlay";
+    inputs.nixpkgs.follows = "nixpkgs";
+  };
 
   outputs =
     {
       self,
       nixpkgs,
+      rust-overlay,
       ...
     }:
     let
       inherit (nixpkgs) lib;
       pname = "cantus";
-      supportedSystems = [
-        "x86_64-linux"
-        "aarch64-linux"
-      ];
-      forAllSystems = f: lib.genAttrs supportedSystems (system: f nixpkgs.legacyPackages.${system});
+      forAllSystems =
+        f:
+        lib.genAttrs [ "x86_64-linux" "aarch64-linux" ] (
+          system:
+          f (
+            import nixpkgs {
+              inherit system;
+              overlays = [ rust-overlay.overlays.default ];
+            }
+          )
+        );
       runtimeLibraries =
         pkgs: with pkgs; [
           wayland
           vulkan-loader
+        ];
+      runtimeTools =
+        pkgs: with pkgs; [
+          pipewire
+          wireplumber
         ];
     in
     {
@@ -31,7 +47,11 @@ rec {
           version = (lib.importTOML ./crates/cantus_cpu/Cargo.toml).package.version;
 
           src = lib.cleanSource ./.;
-          cargoLock.lockFile = ./Cargo.lock;
+          cargoLock = {
+            lockFile = ./Cargo.lock;
+            outputHashes."rustc_codegen_spirv-0.10.0-alpha.1" =
+              "sha256-1RuZqIq1sp2+tGz4Qhnr/vTPLseNauLTOd5fOxpJ/Xk=";
+          };
 
           nativeBuildInputs = with pkgs; [
             pkg-config
@@ -42,7 +62,9 @@ rec {
           buildInputs = runtimeLibraries pkgs;
 
           postInstall = ''
-            wrapProgram "$out/bin/${pname}" --set LD_LIBRARY_PATH "${lib.makeLibraryPath (runtimeLibraries pkgs)}"
+            wrapProgram "$out/bin/${pname}" \
+              --set LD_LIBRARY_PATH "${lib.makeLibraryPath (runtimeLibraries pkgs)}" \
+              --prefix PATH : "${lib.makeBinPath (runtimeTools pkgs)}"
           '';
 
           meta = {
@@ -57,20 +79,34 @@ rec {
       });
 
       devShells = forAllSystems (pkgs: {
-        default = pkgs.mkShell {
-          name = pname;
-          packages = with pkgs; [
-            cargo
-            rustc
-            rustfmt
-            clippy
-            mold
-            pkg-config
-            just
-          ];
-          buildInputs = runtimeLibraries pkgs;
-          LD_LIBRARY_PATH = pkgs.lib.makeLibraryPath (runtimeLibraries pkgs);
-        };
+        default =
+          let
+            shaderRust = pkgs.rust-bin.nightly."2026-05-22".default.override {
+              extensions = [
+                "rust-src"
+                "rustc-dev"
+                "llvm-tools"
+              ];
+            };
+          in
+          pkgs.mkShell {
+            name = pname;
+            packages = with pkgs; [
+              cargo
+              rustc
+              rustfmt
+              clippy
+              mold
+              pkg-config
+              just
+              nixfmt
+              pipewire
+              wireplumber
+            ];
+            buildInputs = runtimeLibraries pkgs;
+            CANTUS_SHADER_RUST = shaderRust;
+            LD_LIBRARY_PATH = pkgs.lib.makeLibraryPath (runtimeLibraries pkgs);
+          };
       });
 
       formatter = forAllSystems (pkgs: pkgs.nixfmt);
@@ -118,90 +154,19 @@ rec {
               settings = mkOption {
                 type = types.nullOr (
                   types.submodule {
-                    options = {
-                      spotify_client_id = mkOption {
-                        type = types.nullOr types.str;
-                        default = null;
-                        description = "Spotify client ID to use for authentication.";
-                      };
-
-                      monitor = mkOption {
-                        type = types.nullOr types.str;
-                        default = null;
-                        description = "Monitor to display Cantus on.";
-                      };
-
-                      width = mkOption {
-                        type = types.number;
-                        default = 1050.0;
-                        description = "Width of the timeline in logical pixels.";
-                      };
-
-                      height = mkOption {
-                        type = types.number;
-                        default = 50.0;
-                        description = "Height of the timeline in logical pixels.";
-                      };
-
-                      layer = mkOption {
-                        type = types.enum [
-                          "background"
-                          "bottom"
-                          "top"
-                          "overlay"
-                        ];
-                        default = "top";
-                        description = "Layer the app should be displayed on.";
-                      };
-
-                      layer_anchor = mkOption {
-                        type = types.enum [
-                          "top"
-                          "bottom"
-                        ];
-                        default = "top";
-                        description = "Screen edge the app should anchor to.";
-                      };
-
-                      timeline_future_minutes = mkOption {
-                        type = types.number;
-                        default = 12.0;
-                        description = "Minutes in the future to display in the timeline.";
-                      };
-
-                      timeline_past_minutes = mkOption {
-                        type = types.number;
-                        default = 1.5;
-                        description = "Minutes before the current time to display in the timeline.";
-                      };
-
-                      history_width = mkOption {
-                        type = types.number;
-                        default = 100.0;
-                        description = "Width in logical pixels where previous tracks are displayed.";
-                      };
-
-                      playlists = mkOption {
-                        type = types.addCheck (types.listOf types.str) (items: builtins.length items <= 8) // {
-                          description = "list of strings with at most 8 entries";
-                        };
-                        default = [ ];
-                        description = "Favourite playlists to display as buttons.";
-                      };
-
-                      ratings_enabled = mkOption {
-                        type = types.bool;
-                        default = false;
-                        description = "Whether star ratings should be enabled.";
-                      };
-                    };
+                    options = import ./generated-options.nix { inherit lib; };
                   }
                 );
                 default = null;
                 description = "Settings written as TOML to `~/.config/cantus/cantus.toml`.";
                 example = {
                   monitor = "eDP-1";
-                  width = 1050.0;
+                  weather_enabled = true;
+                  location = [
+                    51.5
+                    (-0.1)
+                  ];
+                  status_enabled = true;
                   height = 40.0;
                   timeline_future_minutes = 12.0;
                   timeline_past_minutes = 1.5;

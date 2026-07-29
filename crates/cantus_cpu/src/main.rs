@@ -1,35 +1,33 @@
-use crate::{interaction::InteractionState, model::PlaybackState, render::RenderState};
+use crate::{
+    interaction::InteractionState,
+    render::{RenderState, status::StatusRuntime, tempo::Weather},
+    spotify::PlaybackState,
+};
 use std::{
     io,
     sync::mpsc::{self, Sender},
 };
-use tracing::{Level, debug, level_filters::LevelFilter};
+use tracing::{Level, level_filters::LevelFilter};
 use tracing_subscriber::{filter::Targets, fmt, layer::SubscriberExt, util::SubscriberInitExt};
 
-mod art;
 mod config;
 mod interaction;
-mod layer_shell;
-mod model;
-mod pipelines;
+mod openmeteo;
+mod platform;
 mod render;
 mod spotify;
-mod text_render;
 
 const PANEL_START: f32 = 6.0;
-const PANEL_EXTENSION: f32 = 44.0;
+const PANEL_OVERFLOW: f32 = 16.0;
 const PARTICLE_COUNT: usize = 64;
-const MAX_RENDER_INSTANCES: usize = 256;
-const MAX_HISTORY_TRACKS: usize = 6;
+const MAX_RENDER_INSTANCES: usize = 64;
 const TRACK_SPACING_MS: f32 = 4000.0;
 
 type Update<T> = Box<dyn FnOnce(&mut T) + Send>;
 type AppUpdater = Sender<Update<CantusApp>>;
 
-fn send_update<T>(sender: &Sender<Update<T>>, update: impl FnOnce(&mut T) + Send + 'static) {
-    if sender.send(Box::new(update)).is_err() {
-        debug!("Discarded update after its receiver stopped");
-    }
+fn send_update<T>(sender: &Sender<Update<T>>, update: impl FnOnce(&mut T) + Send + 'static) -> bool {
+    sender.send(Box::new(update)).is_ok()
 }
 
 struct CantusApp {
@@ -39,25 +37,35 @@ struct CantusApp {
     app_updates: mpsc::Receiver<Update<Self>>,
     config: config::Config,
     spotify: spotify::SpotifyBackend,
+    status: Option<StatusRuntime>,
+    weather: Option<Weather>,
 }
 
 impl Default for CantusApp {
     fn default() -> Self {
         let (updater, app_updates) = mpsc::channel();
-        let config = config::load();
-        let spotify = spotify::SpotifyBackend::new(&config, updater);
+        let mut config = config::load();
+        let status = config.status_enabled.then(|| StatusRuntime::new(updater.clone()));
+        let weather = config
+            .weather_enabled
+            .then(|| Weather::new(config.location, updater.clone()));
         Self {
             render: RenderState::default(),
             interaction: InteractionState::default(),
             playback: PlaybackState::default(),
             app_updates,
-            spotify,
+            spotify: spotify::SpotifyBackend::new(&mut config, updater.clone()),
+            status,
+            weather,
             config,
         }
     }
 }
 
 fn main() {
+    #[cfg(all(debug_assertions, feature = "generate-nix"))]
+    config::generate_nix_options();
+
     tracing_subscriber::registry()
         .with(
             Targets::new()
@@ -68,5 +76,5 @@ fn main() {
         .with(fmt::layer().with_writer(io::stderr))
         .init();
 
-    layer_shell::run();
+    platform::linux::run();
 }
