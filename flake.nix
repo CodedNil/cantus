@@ -49,8 +49,10 @@ rec {
           src = lib.cleanSource ./.;
           cargoLock = {
             lockFile = ./Cargo.lock;
-            outputHashes."rustc_codegen_spirv-0.10.0-alpha.1" =
-              "sha256-1RuZqIq1sp2+tGz4Qhnr/vTPLseNauLTOd5fOxpJ/Xk=";
+            outputHashes = {
+              "rustc_codegen_spirv-0.10.0-alpha.1" = "sha256-1RuZqIq1sp2+tGz4Qhnr/vTPLseNauLTOd5fOxpJ/Xk=";
+              "sysinfo-0.39.6" = "sha256-HgD13E5L5Gtwj1I1mD+vU3ln0dfj61Zeet8LHyUIdkk=";
+            };
           };
 
           nativeBuildInputs = with pkgs; [

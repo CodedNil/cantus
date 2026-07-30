@@ -68,3 +68,6 @@ jiff = { version = "0.2.35", default-features = false, features = [
 
 [lints]
 workspace = true
+
+[profile.release]
+panic = "abort"
