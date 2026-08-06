@@ -1,0 +1,99 @@
+[package]
+name = "cantus"
+version = "0.7.0"
+edition = "2024"
+default-run = "cantus"
+
+[package.metadata.isthmus]
+artifact = "../../assets/cantus.wgsl"
+features = ["shader"]
+
+[[bin]]
+name = "cantus"
+path = "src/main.rs"
+required-features = ["cpu"]
+
+[features]
+default = ["cpu"]
+cpu = [
+    "shader",
+    "dep:arrayvec",
+    "dep:base64",
+    "dep:bytemuck",
+    "dep:fastrand",
+    "dep:form_urlencoded",
+    "dep:getrandom",
+    "dep:image",
+    "dep:jiff",
+    "dep:microfft",
+    "dep:palette",
+    "dep:pollster",
+    "dep:serde",
+    "dep:serde_json",
+    "dep:sha2",
+    "dep:sysinfo",
+    "dep:ttf-parser",
+    "dep:unicode-normalization",
+    "dep:toml",
+    "dep:tracing",
+    "dep:tracing-subscriber",
+    "dep:ureq",
+    "dep:wayland-client",
+    "dep:wayland-protocols",
+    "dep:wayland-protocols-wlr",
+    "isthmus/vulkan",
+]
+shader = ["dep:spirv-std"]
+generate-nix = ["cpu", "dep:schemars"]
+
+[dependencies]
+isthmus = { path = "../isthmus" }
+spirv-std = { git = "https://github.com/Rust-GPU/rust-gpu", rev = "c1acf6e4b2d338b0f822457350ea91db21757f1a", features = [
+    "glam_0_33",
+], optional = true }
+
+# CPU application
+bytemuck = { workspace = true, optional = true }
+arrayvec = { version = "0.7.8", features = ["serde"], optional = true }
+tracing = { version = "0.1.44", default-features = false, features = ["std"], optional = true }
+tracing-subscriber = { version = "0.3.23", default-features = false, features = [
+    "fmt",
+    "smallvec",
+    "tracing-log",
+], optional = true }
+pollster = { version = "1.0.1", optional = true }
+wayland-client = { version = "0.31.15", default-features = false, features = ["system"], optional = true }
+wayland-protocols = { version = "0.32.13", features = ["client", "staging"], optional = true }
+wayland-protocols-wlr = { version = "0.3.12", features = ["client"], optional = true }
+ttf-parser = { version = "0.25.1", optional = true }
+unicode-normalization = { version = "0.1.25", optional = true }
+image = { version = "0.25.10", default-features = false, features = [
+    "jpeg",
+    "png",
+], optional = true }
+palette = { version = "0.7.7", default-features = false, features = ["std"], optional = true }
+serde = { workspace = true, features = ["rc"], optional = true }
+serde_json = { version = "1.0.151", optional = true }
+toml = { version = "1.1.4", optional = true }
+schemars = { version = "1.2.2", features = ["arrayvec07", "preserve_order"], optional = true }
+ureq = { version = "3.3.0", default-features = false, features = ["rustls"], optional = true }
+base64 = { version = "0.23.0", optional = true }
+form_urlencoded = { version = "1.2.2", optional = true }
+sha2 = { version = "0.11.0", default-features = false, optional = true }
+getrandom = { version = "0.4.3", optional = true }
+fastrand = { version = "2.5.0", optional = true }
+microfft = { version = "0.6.0", default-features = false, features = ["size-1024", "std"], optional = true }
+sysinfo = { git = "https://github.com/CodedNil/sysinfo", branch = "gpu_temp", default-features = false, features = [
+    "component",
+    "system",
+    "gpu",
+], optional = true }
+jiff = { version = "0.2.35", default-features = false, features = [
+    "serde",
+    "std",
+    "tz-system",
+    "tzdb-zoneinfo",
+], optional = true }
+
+[lints]
+workspace = true

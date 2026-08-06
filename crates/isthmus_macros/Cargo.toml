@@ -1,0 +1,17 @@
+[package]
+name = "isthmus_macros"
+version = "0.1.0"
+edition = "2024"
+
+[lib]
+proc-macro = true
+
+[dependencies]
+isthmus-build = { path = "../isthmus_build" }
+proc-macro2 = "1"
+proc-macro-crate = "3"
+quote = "1"
+syn = { version = "3", features = ["full", "visit-mut"] }
+
+[lints]
+workspace = true

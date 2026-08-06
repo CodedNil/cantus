@@ -39,7 +39,7 @@ programs.cantus = {
   package = pkgs.cantus;
   settings = {
     monitor = "eDP-1";
-    weather_enabled = true;
+    tempo_enabled = true;
     location = [ 51.5 (-0.1) ];
     status_enabled = true;
     height = 40.0;
@@ -68,8 +68,11 @@ Then, from the root of the repository, run:
 
 ```cargo build --release```
 
-The CPU-side application builds with stable Rust and embeds the precompiled
-Rust-GPU shader checked in at `assets/cantus.spv`.
+The application builds with stable Rust and embeds the checked-in Rust-GPU
+shader. Shader regeneration is a separate developer operation using nightly
+Rust; release and downstream package builds do not require it. Isthmus rejects
+stale shader artifacts during ordinary builds. Rebuild after changing shader
+code with:
 
 ```just shader```
 
