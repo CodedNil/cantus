@@ -32,19 +32,39 @@ rec {
         pkgs: with pkgs; [
           wayland
           vulkan-loader
+          libxkbcommon
         ];
       runtimeTools =
         pkgs: with pkgs; [
           pipewire
           wireplumber
         ];
+      stableRust =
+        pkgs:
+        pkgs.rust-bin.stable.latest.default.override {
+          extensions = [
+            "clippy"
+            "rustfmt"
+          ];
+        };
+      shaderRust =
+        pkgs:
+        pkgs.rust-bin.nightly."2026-05-22".default.override {
+          extensions = [
+            "rust-src"
+            "rustc-dev"
+            "llvm-tools"
+          ];
+        };
     in
     {
       packages = forAllSystems (pkgs: rec {
         default = cantus;
+        rust-stable = stableRust pkgs;
+        rust-nightly = shaderRust pkgs;
         cantus = pkgs.rustPlatform.buildRustPackage {
           inherit pname;
-          version = (lib.importTOML ./crates/cantus_cpu/Cargo.toml).package.version;
+          version = (lib.importTOML ./crates/cantus/Cargo.toml).package.version;
 
           src = lib.cleanSource ./.;
           cargoLock = {
@@ -81,34 +101,20 @@ rec {
       });
 
       devShells = forAllSystems (pkgs: {
-        default =
-          let
-            shaderRust = pkgs.rust-bin.nightly."2026-05-22".default.override {
-              extensions = [
-                "rust-src"
-                "rustc-dev"
-                "llvm-tools"
-              ];
-            };
-          in
-          pkgs.mkShell {
-            name = pname;
-            packages = with pkgs; [
-              cargo
-              rustc
-              rustfmt
-              clippy
-              mold
-              pkg-config
-              just
-              nixfmt
-              pipewire
-              wireplumber
-            ];
-            buildInputs = runtimeLibraries pkgs;
-            CANTUS_SHADER_RUST = shaderRust;
-            LD_LIBRARY_PATH = pkgs.lib.makeLibraryPath (runtimeLibraries pkgs);
-          };
+        default = pkgs.mkShell {
+          name = pname;
+          packages = with pkgs; [
+            (stableRust pkgs)
+            mold
+            pkg-config
+            just
+            nixfmt
+            pipewire
+            wireplumber
+          ];
+          buildInputs = runtimeLibraries pkgs;
+          LD_LIBRARY_PATH = pkgs.lib.makeLibraryPath (runtimeLibraries pkgs);
+        };
       });
 
       formatter = forAllSystems (pkgs: pkgs.nixfmt);

@@ -1,9 +1,7 @@
 default: run
 
 shader:
-    CARGO_TARGET_DIR=target/cantus-gpu \
-        PATH="$CANTUS_SHADER_RUST/bin:$PATH" \
-        cargo run -p cantus_gpu --features build-shader --bin build-shader
+    PATH="$(nix build --no-link --print-out-paths .#rust-nightly)/bin:$PATH" cargo run -p isthmus-build --features compiler --bin isthmus -- build crates/cantus
 
 run: shader
-    cargo run -p cantus_cpu --features generate-nix
+    cargo run -p cantus --features generate-nix
