@@ -1,12 +1,14 @@
-use crate::render::shared::smoothstep;
 use crate::{
-    AppUpdater, TRACK_SPACING_MS, Update,
-    config::{self, Config},
+    app::{
+        AppUpdater, TRACK_SPACING_MS, Update,
+        config::{self, Config},
+        send_update,
+    },
     render::{
         art::{self, ArtState},
+        shared::smoothstep,
         track::{AudioFeatures, MAX_PILL_PLAYLIST_ICONS},
     },
-    send_update,
 };
 use arrayvec::{ArrayString, ArrayVec};
 use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
@@ -54,13 +56,19 @@ type PlaylistTracks = Arc<HashSet<TrackId>>;
 
 pub struct PlaybackState {
     pub playing: bool,
-    pub progress: u32,
     pub volume: Option<u8>,
     pub queue: Vec<Track>,
-    pub queue_index: usize,
     pub playlists: Vec<CondensedPlaylist>,
-    pub last_interaction: Instant,
-    pub last_progress_update: Instant,
+    pub position: QueuePosition,
+}
+
+/// Where playback currently is, and when that last moved.
+pub struct QueuePosition {
+    pub index: usize,
+    pub progress: u32,
+    pub updated: Instant,
+    /// Server updates are ignored until this time, so a local seek is not clobbered.
+    pub hold_until: Instant,
 }
 
 impl Default for PlaybackState {
@@ -68,26 +76,28 @@ impl Default for PlaybackState {
         let now = Instant::now();
         Self {
             playing: false,
-            progress: 0,
             volume: None,
             queue: Vec::new(),
-            queue_index: 0,
             playlists: Vec::new(),
-            last_interaction: now,
-            last_progress_update: now,
+            position: QueuePosition {
+                index: 0,
+                progress: 0,
+                updated: now,
+                hold_until: now,
+            },
         }
     }
 }
 
 impl PlaybackState {
     pub const fn update_progress(&mut self, progress: u32, now: Instant) {
-        self.progress = progress;
-        self.last_progress_update = now;
+        self.position.progress = progress;
+        self.position.updated = now;
     }
 
     pub fn estimated_progress(&self) -> f32 {
-        self.progress as f32
-            + self.last_progress_update.elapsed().as_millis() as f32 * f32::from(self.playing)
+        self.position.progress as f32
+            + self.position.updated.elapsed().as_millis() as f32 * f32::from(self.playing)
     }
 
     fn replace_queue(
@@ -102,7 +112,7 @@ impl PlaybackState {
             .unwrap_or(0);
         let mut remaining = old_queue.split_off(history_len);
         let mut reconciled = old_queue.split_off(history_len.saturating_sub(MAX_HISTORY_TRACKS));
-        self.queue_index = reconciled.len();
+        self.position.index = reconciled.len();
 
         for mut track in new_queue {
             if let Some(index) = remaining.iter().position(|old| old.id == track.id) {
@@ -131,7 +141,7 @@ pub struct Track {
 
 #[derive(Default)]
 pub struct TrackRuntime {
-    /// Album art, shared between owners of the same URL and freed with them.
+    /// Album art, shared with other slots on the same URL and freed with the track.
     pub art: ArtState,
     pub playlist_expansion: f32,
     pub detail_alpha: f32,
@@ -707,12 +717,12 @@ impl SpotifyWorker {
         send_update(&self.updater, move |app| {
             let state = &mut app.playback;
             state.volume = current_playback.device.volume_percent;
-            if now < state.last_interaction {
-                state.last_progress_update = now;
+            if now < state.position.hold_until {
+                state.position.updated = now;
                 return;
             }
             if let Some(track) = current_playback.item.and_then(PlaybackItem::into_track) {
-                state.queue_index = track_index(&state.queue, track.id, &track.name).unwrap_or(0);
+                state.position.index = track_index(&state.queue, track.id, &track.name).unwrap_or(0);
             }
             if current_playback.is_playing && !state.playing {
                 app.render.last_toggle_time = app.render.start_time.elapsed().as_secs_f32();
@@ -737,6 +747,7 @@ impl SpotifyWorker {
         send_update(&self.updater, move |app| {
             app.playback
                 .replace_queue(new_queue, current_track_id, context_updated);
+            app.refresh_art();
         });
 
         if self.features.send(feature_ids).is_err() {
@@ -784,7 +795,7 @@ impl SpotifyWorker {
                 id: playlist.id,
                 name: playlist.name,
                 image_url: playlist.image,
-                art: ArtState::Missing,
+                art: ArtState::default(),
                 tracks,
                 rating_index,
             });
@@ -792,15 +803,15 @@ impl SpotifyWorker {
         if !updates.is_empty() {
             send_update(&self.updater, move |app| {
                 let playlists = &mut app.playback.playlists;
-                for mut update in updates {
+                for update in updates {
                     if let Some(previous) = playlists.iter_mut().find(|item| item.id == update.id) {
-                        update.art = mem::take(&mut previous.art);
                         *previous = update;
                     } else {
                         playlists.push(update);
                     }
                 }
                 playlists.sort_unstable_by(|a, b| a.name.cmp(&b.name));
+                app.refresh_art();
             });
         }
         if cache_changed
@@ -824,7 +835,10 @@ fn audio_features_backend(http: Agent, updater: AppUpdater) -> Sender<Vec<TrackI
                 .collect();
             send_update(&updater, move |app| {
                 for track in &mut app.playback.queue {
-                    track.audio_features = track.id.and_then(|id| features.get(&id).copied());
+                    track.audio_features = track
+                        .id
+                        .and_then(|id| features.get(&id).copied())
+                        .map(AudioFeatures::normalized);
                 }
             });
         }

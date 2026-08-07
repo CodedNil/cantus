@@ -2,21 +2,28 @@ use crate::render::{
     shader::{direction_and_length, pixel_to_ndc, quad_coord},
     shared::{FrameData, smoothstep},
 };
-use isthmus::glam::{Vec2, Vec3, Vec4, vec2, vec3};
+use isthmus::{
+    glam::{Vec2, Vec3, Vec4, vec2, vec3},
+    {contract::Vertex, data::Unorm8x4},
+};
 use spirv_std::arch::kill;
 
 #[cfg(feature = "cpu")]
 use {
-    crate::{
-        PANEL_START, PARTICLE_COUNT,
-        render::{Frame, Passes, track},
+    crate::render::{
+        cpu::{Frame, Passes},
+        shared::PANEL_START,
+        track,
     },
     core::f32::consts::TAU,
+    isthmus::Pass,
 };
+
+pub const PARTICLE_COUNT: usize = 64;
 
 #[isthmus::pass]
 pub struct ParticlePass {
-    pass: isthmus::Pass<Self>,
+    pass: Pass<Self>,
     accumulator: f32,
 }
 
@@ -27,7 +34,7 @@ pub struct Particle {
     pub spawn_vel: Vec2,
     pub end_time: f32,
     pub duration: f32,
-    pub rgb: isthmus::Unorm8x4,
+    pub rgb: Unorm8x4,
 }
 
 #[derive(isthmus::Varyings)]
@@ -53,8 +60,7 @@ impl ParticlePass {
 
         let time = frame.shared.time;
         if let Some(palette) = track.current_track_palette {
-            let movement_speed = track.movement_speed;
-            self.accumulator = if movement_speed.abs() > 0.00001 {
+            self.accumulator = if track.movement_speed.abs() > 0.00001 {
                 self.accumulator + frame.delta_time * EMISSION
             } else {
                 0.0
@@ -62,7 +68,7 @@ impl ParticlePass {
             let emit_count = self.accumulator.floor() as u8;
             self.accumulator -= f32::from(emit_count);
             let horizontal_bias =
-                (movement_speed.abs().powf(0.2) * movement_speed.signum()).clamp(-3.0, 3.0);
+                (track.movement_speed.abs().powf(0.2) * track.movement_speed.signum()).clamp(-3.0, 3.0);
 
             for particle in self.expired(time).take(emit_count as usize) {
                 let y_fraction = fastrand::f32();
@@ -76,7 +82,7 @@ impl ParticlePass {
                     (y_fraction - 0.5) * 2.0 * VELOCITY_Y,
                 );
                 particle.duration = LIFETIME_START + (LIFETIME_END - LIFETIME_START) * fastrand::f32();
-                particle.rgb = palette[fastrand::usize(0..palette.len())].rgb;
+                particle.rgb = palette[fastrand::usize(0..palette.len())];
                 particle.end_time = time + particle.duration;
             }
         }
@@ -86,7 +92,7 @@ impl ParticlePass {
                 particle.spawn_pos = pointer;
                 particle.spawn_vel =
                     Vec2::from_angle(fastrand::f32() * TAU) * (30.0 + fastrand::f32() * 20.0);
-                particle.rgb = isthmus::Unorm8x4::from_rgb(vec3(1.0, 0.843, 0.196));
+                particle.rgb = Unorm8x4::from_vec3(vec3(1.0, 0.843, 0.196));
                 particle.end_time = time + particle.duration;
             }
         }
@@ -104,11 +110,11 @@ impl ParticlePass {
         #[gpu(vertex_index)] vertex: u32,
         #[gpu(shared)] frame: FrameData,
         #[gpu(instance)] particle: Particle,
-    ) -> isthmus::Vertex<Varyings> {
+    ) -> Vertex<Varyings> {
         let dt = frame.time - (particle.end_time - particle.duration);
 
         if dt < 0.0 || dt > particle.duration {
-            return isthmus::Vertex {
+            return Vertex {
                 position: Vec4::ZERO,
                 varyings: Varyings {
                     color: Vec4::ZERO,
@@ -123,11 +129,11 @@ impl ParticlePass {
         let extent = uv * vec2(5.0, 2.5) * (p_life + 0.5);
         let world_pos =
             particle.spawn_pos + particle.spawn_vel * dt + dir * extent.x + dir.perp() * extent.y;
-        let rgb = particle.rgb.rgb();
+        let rgb = particle.rgb.to_vec3();
         let luma = rgb.dot(vec3(0.299, 0.587, 0.114));
         let spark_color = Vec3::splat(luma).lerp(rgb, 2.0).lerp(Vec3::ONE, 0.2) * 2.0;
 
-        isthmus::Vertex {
+        Vertex {
             position: pixel_to_ndc(world_pos, frame.screen_size),
             varyings: Varyings {
                 color: spark_color.extend((1.0 - p_life) * smoothstep(0.0, 0.15, dt) * 0.3),

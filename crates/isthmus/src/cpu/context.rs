@@ -92,15 +92,6 @@ impl Context {
         ))
     }
 
-    /// Wraps an adapter and its device for applications that need custom features or limits.
-    pub const fn from_parts(adapter: Adapter, device: Device, queue: Queue) -> Self {
-        Self {
-            adapter,
-            device,
-            queue,
-        }
-    }
-
     pub const fn device(&self) -> &Device {
         &self.device
     }

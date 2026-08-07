@@ -1,11 +1,12 @@
+#[cfg(feature = "cpu")]
+use crate::{cpu::ResourceBindings, data::BufferData};
+
 /// Values produced by a vertex shader before Isthmus lowers them to the GPU ABI.
 pub struct Vertex<T> {
     pub position: glam::Vec4,
     pub varyings: T,
 }
 
-#[cfg(feature = "cpu")]
-pub struct Texture2D;
 #[cfg(feature = "cpu")]
 pub struct Texture2DArray;
 
@@ -29,37 +30,24 @@ pub struct Pipeline {
     pub vertices: u32,
 }
 
-#[cfg(feature = "cpu")]
-impl Pipeline {
-    pub const DEFAULT: Self = Self {
-        topology: wgpu::PrimitiveTopology::TriangleStrip,
-        blend: wgpu::BlendState::PREMULTIPLIED_ALPHA_BLENDING,
-        vertices: 4,
-    };
-}
-
 /// Describes one typed render pass.
 #[cfg(feature = "cpu")]
 pub trait PassContract {
-    type Instance: crate::BufferData;
-    type Resources<'a>: crate::ResourceBindings;
+    type Instance: BufferData;
+    type Resources<'a>: ResourceBindings;
     const NAME: &'static str;
-    const PIPELINE: Pipeline = Pipeline::DEFAULT;
-    #[doc(hidden)]
-    const INSTANCE_BUFFER: bool;
+    const PIPELINE: Pipeline;
 }
 
 /// Verifies that a pass accepts a program's shared data.
 #[cfg(feature = "cpu")]
-#[doc(hidden)]
-pub trait PassShared<T: crate::BufferData>: PassContract {
+pub trait PassShared<T: BufferData>: PassContract {
     const SHARED_BUFFER: bool;
 }
 
 /// Removes the crate name from a Rust module path.
 #[cfg(feature = "cpu")]
 #[must_use]
-#[doc(hidden)]
 pub const fn pass_module_name(path: &str) -> &str {
     let bytes = path.as_bytes();
     let mut i = 0;

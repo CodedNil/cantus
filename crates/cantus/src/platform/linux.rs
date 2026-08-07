@@ -1,8 +1,13 @@
-use crate::render::status::{AUDIO_SPECTRUM_BANDS, BATTERY_HIDDEN, ProcessorStatus};
 use crate::{
-    AppUpdater, CantusApp, PANEL_START,
-    config::{Layer as ConfigLayer, LayerAnchor as ConfigLayerAnchor},
-    send_update,
+    app::{
+        AppUpdater, CantusApp,
+        config::{Layer as ConfigLayer, LayerAnchor as ConfigLayerAnchor},
+        send_update,
+    },
+    render::{
+        shared::PANEL_START,
+        status::{AUDIO_SPECTRUM_BANDS, BATTERY_HIDDEN, ProcessorStatus},
+    },
 };
 use isthmus::glam::vec2;
 use isthmus::wgpu::{
@@ -484,7 +489,7 @@ impl LayerShellApp {
         let wl_surface = self.wl_surface.as_ref().unwrap();
         let compositor = self.compositor.as_ref().unwrap();
         let region = compositor.create_region(qhandle, ());
-        for rect in self.cantus.interaction.regions.drain(..) {
+        for rect in self.cantus.interaction.take_regions() {
             let [x, y, width, height] = [rect.x0, rect.y0, rect.x1 - rect.x0, rect.y1 - rect.y0]
                 .map(|value| value.round() as i32);
             region.add(x, y, width, height);

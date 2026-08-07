@@ -1,13 +1,29 @@
 use crate::{
-    CantusApp,
-    render::track::{IMAGE_SIZE, PALETTE_COLORS, PaletteColor},
+    app::{CantusApp, spotify::PlaybackState},
+    render::{cpu::Passes, track::PALETTE_COLORS},
 };
 use arrayvec::ArrayVec;
 use image::{DynamicImage, RgbaImage, imageops};
-use isthmus::glam::Vec3;
+use isthmus::{
+    Unorm8x4,
+    contract::Texture2DArray,
+    cpu::{
+        TextureView,
+        texture::{FilterableFloatFormat, SampledTexture},
+        wgpu::Extent3d,
+    },
+    glam::Vec3,
+};
 use palette::{Clamp, IntoColor, Lch, color_theory::Analogous};
-use std::{array, ops::Range, sync::Arc, time::Instant};
+use std::{
+    array,
+    collections::HashMap,
+    ops::Range,
+    sync::{Arc, Weak},
+    time::Instant,
+};
 
+/// Album art for one slot, held beside the track or playlist that wants it.
 #[derive(Clone, Default)]
 pub enum ArtState {
     #[default]
@@ -17,11 +33,93 @@ pub enum ArtState {
     Ready(Arc<AlbumArt>),
 }
 
+impl ArtState {
+    pub const fn ready(&self) -> Option<&Arc<AlbumArt>> {
+        match self {
+            Self::Ready(art) => Some(art),
+            _ => None,
+        }
+    }
+
+    pub fn palette(&self) -> [Unorm8x4; PALETTE_COLORS] {
+        self.ready()
+            .map_or_else(|| [Unorm8x4::default(); PALETTE_COLORS], |art| art.palette)
+    }
+
+    fn wanted(&self, now: Instant) -> bool {
+        matches!(self, Self::Missing) || matches!(self, Self::RetryAt(at) if *at <= now)
+    }
+}
+
 pub struct AlbumArt {
     /// RGBA image pixels.
     pub pixels: Box<[u8]>,
     /// RGB swatches with their relative influence.
-    palette: [PaletteColor; PALETTE_COLORS],
+    palette: [Unorm8x4; PALETTE_COLORS],
+}
+
+const MAX_TEXTURE_IMAGES: u32 = 32;
+pub const IMAGE_SIZE: u32 = 64;
+
+/// The album-art texture array the track shader samples from.
+pub struct ImageAtlas {
+    texture: SampledTexture<Texture2DArray>,
+    slots: [Weak<AlbumArt>; MAX_TEXTURE_IMAGES as usize],
+    used: u32,
+}
+
+impl ImageAtlas {
+    pub fn new(passes: &Passes<'_>) -> Self {
+        Self {
+            texture: passes.sampled_texture::<Texture2DArray>(
+                "Images",
+                Extent3d {
+                    width: IMAGE_SIZE,
+                    height: IMAGE_SIZE,
+                    depth_or_array_layers: MAX_TEXTURE_IMAGES,
+                },
+                FilterableFloatFormat::Rgba8Unorm,
+            ),
+            slots: [const { Weak::new() }; MAX_TEXTURE_IMAGES as usize],
+            used: 0,
+        }
+    }
+
+    pub const fn view(&self) -> &TextureView<Texture2DArray> {
+        self.texture.view()
+    }
+
+    /// Clears the per-frame usage mask; call once before re-registering this frame's images.
+    pub const fn begin_frame(&mut self) {
+        self.used = 0;
+    }
+
+    /// Slot `art` is (or becomes) resident in, or -1 if it isn't ready or the atlas is full.
+    pub fn index_of(&mut self, art: Option<&Arc<AlbumArt>>) -> i32 {
+        let Some(art) = art else {
+            return -1;
+        };
+        if let Some(index) = self
+            .slots
+            .iter()
+            .position(|slot| slot.as_ptr() == Arc::as_ptr(art))
+        {
+            self.used |= 1 << index;
+            return index as i32;
+        }
+        let index = (!self.used).trailing_zeros();
+        if index >= MAX_TEXTURE_IMAGES
+            || self
+                .texture
+                .write([0, 0, index], [IMAGE_SIZE; 2], &art.pixels)
+                .is_err()
+        {
+            return -1;
+        }
+        self.used |= 1 << index;
+        self.slots[index as usize] = Arc::downgrade(art);
+        index as i32
+    }
 }
 
 pub fn prepare(image: &DynamicImage) -> AlbumArt {
@@ -34,64 +132,54 @@ pub fn prepare(image: &DynamicImage) -> AlbumArt {
     }
 }
 
-impl ArtState {
-    pub const fn ready(&self) -> Option<&Arc<AlbumArt>> {
-        match self {
-            Self::Ready(art) => Some(art),
-            _ => None,
-        }
-    }
-
-    pub fn palette(&self) -> [PaletteColor; PALETTE_COLORS] {
-        self.ready()
-            .map_or_else(|| [PaletteColor::default(); PALETTE_COLORS], |art| art.palette)
-    }
-
-    fn needs_fetch(&self, now: Instant) -> bool {
-        matches!(self, Self::Missing) || matches!(self, Self::RetryAt(at) if *at <= now)
-    }
+/// Every art slot in the queue and playlists, with the URL it wants.
+fn art_slots(playback: &mut PlaybackState) -> impl Iterator<Item = (&str, &mut ArtState)> {
+    playback
+        .queue
+        .iter_mut()
+        .filter_map(|track| Some((track.album.image.as_deref()?, &mut track.runtime.art)))
+        .chain(
+            playback
+                .playlists
+                .iter_mut()
+                .filter_map(|playlist| Some((playlist.image_url.as_deref()?, &mut playlist.art))),
+        )
 }
 
 impl CantusApp {
-    /// Every art slot in the queue and playlists, with the URL it wants.
-    fn art_slots(&mut self) -> impl Iterator<Item = (&str, &mut ArtState)> {
-        let tracks = self.playback.queue.iter_mut();
-        let playlists = self.playback.playlists.iter_mut();
-        tracks
-            .filter_map(|track| Some((track.album.image.as_deref()?, &mut track.runtime.art)))
-            .chain(
-                playlists
-                    .filter_map(|playlist| Some((playlist.image_url.as_deref()?, &mut playlist.art))),
-            )
-    }
-
-    pub fn start_missing_art_downloads(&mut self) {
+    /// Starts downloads for art the queue and playlists are missing.
+    pub fn refresh_art(&mut self) {
         let now = Instant::now();
-        loop {
-            let Some(url) = self
-                .art_slots()
-                .find_map(|(url, state)| state.needs_fetch(now).then(|| url.to_owned()))
-            else {
-                break;
-            };
-            // Share art another slot already holds for the same URL, else fetch it.
-            let state = if let Some(art) = self
-                .art_slots()
-                .find_map(|(other, state)| (other == url).then(|| state.ready().cloned())?)
-            {
-                ArtState::Ready(art)
-            } else {
-                self.spotify.download_image(url.clone());
-                ArtState::Fetching
-            };
-            self.set_art_state(&url, &state);
+        let shared = art_slots(&mut self.playback)
+            .filter_map(|(url, state)| Some((url.to_owned(), Arc::clone(state.ready()?))))
+            .collect::<HashMap<_, _>>();
+        let mut download = Vec::new();
+        for (url, state) in art_slots(&mut self.playback) {
+            if !state.wanted(now) {
+                continue;
+            }
+            *state = shared.get(url).map_or_else(
+                || {
+                    download.push(url.to_owned());
+                    ArtState::Fetching
+                },
+                |art| ArtState::Ready(Arc::clone(art)),
+            );
+        }
+        download.sort_unstable();
+        download.dedup();
+        for url in download {
+            self.spotify.download_image(url);
         }
     }
 
+    /// Applies a finished download to every slot that wanted that URL.
     pub fn set_art_state(&mut self, url: &str, state: &ArtState) {
-        self.art_slots()
-            .filter(|(slot_url, _)| *slot_url == url)
-            .for_each(|(_, slot)| *slot = state.clone());
+        for (slot_url, slot) in art_slots(&mut self.playback) {
+            if slot_url == url {
+                *slot = state.clone();
+            }
+        }
     }
 }
 
@@ -126,13 +214,13 @@ fn complete_palette(colors: &mut ArrayVec<(Lch, f32), PALETTE_COLORS>) {
     colors.sort_by(|a, b| a.0.l.total_cmp(&b.0.l));
 }
 
-fn palette_color((color, weight): (Lch, f32), total: f32) -> PaletteColor {
+/// Packs a swatch and its share of the artwork into one word; alpha is the share.
+fn palette_color((color, weight): (Lch, f32), total: f32) -> Unorm8x4 {
     let rgb: palette::Srgb = color.into_color();
     let rgb = rgb.clamp();
-    PaletteColor {
-        rgb: isthmus::Unorm8x4::from_rgb(Vec3::new(rgb.red, rgb.green, rgb.blue)),
-        weight: (weight / total).max(1.0 / 255.0),
-    }
+    Unorm8x4::from_vec4(
+        Vec3::new(rgb.red, rgb.green, rgb.blue).extend((weight / total).max(1.0 / 255.0)),
+    )
 }
 
 const fn component(color: &palette::Lab, channel: usize) -> f32 {
@@ -196,7 +284,7 @@ fn dominant_colors(pixels: &mut [palette::Lab]) -> ArrayVec<(Lch, f32), PALETTE_
         .collect()
 }
 
-fn image_palette(image: &RgbaImage) -> [PaletteColor; PALETTE_COLORS] {
+fn image_palette(image: &RgbaImage) -> [Unorm8x4; PALETTE_COLORS] {
     let srgb_to_lab = |pixel: &image::Rgba<u8>| {
         palette::Srgb::new(
             f32::from(pixel[0]) / 255.0,
@@ -220,7 +308,7 @@ fn image_palette(image: &RgbaImage) -> [PaletteColor; PALETTE_COLORS] {
     }
 
     if pixels.is_empty() {
-        return [PaletteColor::default(); PALETTE_COLORS];
+        return [Unorm8x4::default(); PALETTE_COLORS];
     }
     let mut colors = dominant_colors(&mut pixels);
     if use_harmony {

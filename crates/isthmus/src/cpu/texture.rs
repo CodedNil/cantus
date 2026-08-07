@@ -1,4 +1,5 @@
-use crate::{Texture2D, Texture2DArray, TextureView};
+use crate::contract::Texture2DArray;
+use crate::cpu::TextureView;
 use core::{error::Error, fmt};
 use wgpu::{
     Device, Extent3d, Origin3d, Queue, TexelCopyBufferLayout, TexelCopyTextureInfo, Texture,
@@ -66,11 +67,6 @@ impl From<FilterableFloatFormat> for TextureFormat {
             FilterableFloatFormat::Rgba8Unorm => Self::Rgba8Unorm,
         }
     }
-}
-
-impl dimension::Sealed for Texture2D {}
-impl SampledTextureDimension for Texture2D {
-    const VIEW: Option<TextureViewDimension> = Some(TextureViewDimension::D2);
 }
 
 impl dimension::Sealed for Texture2DArray {}

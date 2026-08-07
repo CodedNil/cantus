@@ -1,6 +1,6 @@
 use crate::{
-    PANEL_START,
-    spotify::{CondensedPlaylist, PlaylistId, SpotifyBackend, TrackId},
+    app::spotify::{CondensedPlaylist, PlaylistId, QueuePosition, SpotifyBackend, TrackId},
+    render::shared::PANEL_START,
 };
 use isthmus::glam::Vec2;
 use std::{
@@ -36,8 +36,16 @@ impl Rect {
     }
 }
 
+/// Where the pointer sits relative to the bar.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Pointer {
+    Outside,
+    Hovering,
+    Held,
+}
+
 pub struct InteractionState {
-    mouse_pressure: f32, // 0 outside, 1 hovering, 2 held
+    state: Pointer,
     pub dragging: bool,
     drag_enabled: bool,
     pub press_origin: Vec2,
@@ -46,7 +54,7 @@ pub struct InteractionState {
     scroll: i32,
     hover_claimed: bool,
     pulse: Option<Vec2>,
-    pub regions: Vec<Rect>,
+    regions: Vec<Rect>,
     /// Set when a rate/playlist-toggle action fires this frame, for particles to burst a spark.
     rate_burst: Option<Vec2>,
     spotify: SpotifyBackend,
@@ -67,7 +75,7 @@ pub struct Response {
 impl InteractionState {
     pub const fn new(spotify: SpotifyBackend) -> Self {
         Self {
-            mouse_pressure: 0.0,
+            state: Pointer::Outside,
             dragging: false,
             drag_enabled: false,
             press_origin: Vec2::ZERO,
@@ -85,7 +93,7 @@ impl InteractionState {
     pub fn surface(&mut self, rect: Rect) -> Response {
         self.regions.push(rect);
         let inside = rect.contains(self.pointer);
-        let hovered = self.mouse_pressure > 0.0 && !self.hover_claimed && inside;
+        let hovered = self.state != Pointer::Outside && !self.hover_claimed && inside;
         self.hover_claimed |= hovered;
         let pressed = inside && matches!(self.event, Some(PointerEvent::Press));
         let clicked = inside
@@ -112,15 +120,30 @@ impl InteractionState {
     }
 
     pub fn contains(&self, rect: Rect) -> bool {
-        self.mouse_pressure > 0.0 && rect.contains(self.pointer)
+        self.state != Pointer::Outside && rect.contains(self.pointer)
     }
 
-    pub const fn mouse_pressure(&self) -> f32 {
-        self.mouse_pressure
+    /// Target the GPU smooths toward to drive hover and press deformation.
+    pub const fn pressure(&self) -> f32 {
+        match self.state {
+            Pointer::Outside => 0.0,
+            Pointer::Hovering => 1.0,
+            Pointer::Held => 2.0,
+        }
     }
 
     pub const fn down(&self) -> bool {
-        self.mouse_pressure > 1.0
+        matches!(self.state, Pointer::Held)
+    }
+
+    /// Marks a rect as accepting pointer input without querying it this frame.
+    pub fn input_region(&mut self, rect: Rect) {
+        self.regions.push(rect);
+    }
+
+    /// Takes this frame's input regions, for the compositor's input mask.
+    pub fn take_regions(&mut self) -> impl Iterator<Item = Rect> + '_ {
+        self.regions.drain(..)
     }
 
     pub const fn released(&self) -> bool {
@@ -144,7 +167,7 @@ impl InteractionState {
     }
 
     pub const fn press(&mut self, position: Vec2) {
-        self.mouse_pressure = 2.0;
+        self.state = Pointer::Held;
         self.press_origin = position;
         self.event = Some(PointerEvent::Press);
         self.dragging = false;
@@ -155,7 +178,7 @@ impl InteractionState {
             self.pulse = Some(self.pointer);
         }
         self.event = self.down().then_some(PointerEvent::Release);
-        self.mouse_pressure = 1.0;
+        self.state = Pointer::Hovering;
     }
 
     pub fn motion(&mut self, position: Vec2) {
@@ -172,12 +195,12 @@ impl InteractionState {
 
     /// The pointer is over the surface but not held (entered, or a held press let go elsewhere).
     pub const fn hover(&mut self) {
-        self.mouse_pressure = 1.0;
+        self.state = Pointer::Hovering;
     }
 
     /// The pointer left the surface entirely.
     pub const fn leave(&mut self) {
-        self.mouse_pressure = 0.0;
+        self.state = Pointer::Outside;
         self.cancel_drag();
     }
 
@@ -248,34 +271,31 @@ impl InteractionState {
         self.rate_burst = Some(self.pointer);
     }
 
+    /// Seeks within `clicked_index`, or skips to it when it is not the current track.
     pub fn seek(
         &self,
-        queue_index: &mut usize,
-        progress: &mut u32,
-        last_progress_update: &mut Instant,
-        last_interaction: &mut Instant,
+        position: &mut QueuePosition,
         clicked_index: usize,
         clicked_duration_ms: u32,
-        position: f32,
+        fraction: f32,
     ) {
-        let skip_count = clicked_index.abs_diff(*queue_index);
+        let skip_count = clicked_index.abs_diff(position.index);
         if skip_count == 0 {
-            let milliseconds = if position < 0.05 {
+            let milliseconds = if fraction < 0.05 {
                 0.0
             } else {
-                clicked_duration_ms as f32 * position
+                clicked_duration_ms as f32 * fraction
             }
             .round() as u32;
-            *progress = milliseconds;
-            *last_progress_update = Instant::now();
+            position.progress = milliseconds;
             self.spotify.player_parameter("seek", "position_ms", milliseconds);
         } else {
-            let was_before = *queue_index < clicked_index;
-            *queue_index = clicked_index;
-            *progress = 0;
-            *last_progress_update = Instant::now();
+            let was_before = position.index < clicked_index;
+            position.index = clicked_index;
+            position.progress = 0;
             self.spotify.skip(was_before, skip_count.min(10));
         }
-        *last_interaction = Instant::now() + Duration::from_secs(2);
+        position.updated = Instant::now();
+        position.hold_until = Instant::now() + Duration::from_secs(2);
     }
 }

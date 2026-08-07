@@ -1,41 +1,48 @@
-use super::{
-    particles, playhead,
-    shared::{FrameData, GAP, RipplePulse},
-    status, tempestas, text, track,
-};
 use crate::{
-    CantusApp, PANEL_OVERFLOW, PANEL_START, config::Config, interaction::InteractionState,
-    spotify::PlaybackState,
+    app::{
+        CantusApp, PANEL_OVERFLOW, config::Config, interaction::InteractionState, spotify::PlaybackState,
+    },
+    render::{
+        particles::ParticlePass,
+        playhead::PlayheadPass,
+        shared::{FrameData, GAP, PANEL_START, RipplePulse},
+        status::StatusPass,
+        tempestas::{EXTENSION, TempestasPass},
+        text::Font,
+        track::TrackPass,
+    },
 };
 use isthmus::{
-    Present, Program,
+    cpu::{
+        pass::PassBuilder,
+        program::Program,
+        surface::Present,
+        wgpu::{Color, Instance, PowerPreference, Surface},
+    },
     glam::{Vec2, vec2},
-    wgpu::{Color, Instance, PowerPreference, Surface},
 };
 use std::{sync::Arc, time::Instant};
 
-pub type Passes<'a> = isthmus::PassBuilder<'a, FrameData>;
+pub type Passes<'a> = PassBuilder<'a, FrameData>;
 type RenderProgram = Program<FrameData, Systems>;
 
 /// The values almost every pass needs each frame.
 pub struct Frame<'a> {
     pub shared: &'a mut FrameData,
     pub delta_time: f32,
-    pub screen_width: f32,
-    pub scale: f32,
     pub config: &'a Config,
     pub interaction: &'a mut InteractionState,
 }
 
 #[derive(isthmus::Render)]
 pub struct Systems {
-    pub tempestas: Option<tempestas::TempestasPass>,
-    pub status: Option<status::StatusPass>,
-    pub track: track::TrackPass,
-    pub particles: particles::ParticlePass,
-    pub playhead: playhead::PlayheadPass,
+    pub tempestas: Option<TempestasPass>,
+    pub status: Option<StatusPass>,
+    pub track: TrackPass,
+    pub particles: ParticlePass,
+    pub playhead: PlayheadPass,
     #[render(skip)]
-    pub text_font: text::Font,
+    pub text_font: Font,
 }
 
 pub struct RenderState {
@@ -59,20 +66,16 @@ impl<'a> Frame<'a> {
         config: &'a Config,
         elapsed: f32,
         screen_size: Vec2,
-        scale: f32,
     ) -> Self {
         let delta_time = (elapsed - shared.time).min(0.1);
         shared.time = elapsed;
         shared.screen_size = screen_size;
-        shared.panel_top = PANEL_START;
         shared.panel_height = config.height;
         shared.mouse_pos = interaction.pointer;
         interaction.begin_frame();
         Self {
             shared,
             delta_time,
-            screen_width: screen_size.x,
-            scale,
             config,
             interaction,
         }
@@ -81,7 +84,7 @@ impl<'a> Frame<'a> {
     pub fn finish(&mut self) {
         approach(
             &mut self.shared.mouse_pressure,
-            self.interaction.mouse_pressure(),
+            self.interaction.pressure(),
             5.0 * self.delta_time,
         );
         if let Some(origin) = self.interaction.end_frame() {
@@ -125,23 +128,18 @@ impl RenderState {
 impl Systems {
     fn new(passes: &Passes<'_>, app: &CantusApp) -> Self {
         let sampler = passes.filtering_sampler("Linear Sampler");
-        let text_font = text::Font::new(passes);
+        let text_font = Font::new(passes);
         Self {
             tempestas: app.config.tempestas_enabled.then(|| {
-                tempestas::TempestasPass::new(
-                    passes,
-                    app.config.location,
-                    app.updater.clone(),
-                    &text_font,
-                )
+                TempestasPass::new(passes, app.config.location, app.updater.clone(), &text_font)
             }),
             status: app
                 .config
                 .status_enabled
-                .then(|| status::StatusPass::new(passes, app.updater.clone(), &text_font)),
-            track: track::TrackPass::new(passes, &sampler, &text_font),
-            particles: particles::ParticlePass::new(passes),
-            playhead: playhead::PlayheadPass::new(passes),
+                .then(|| StatusPass::new(passes, app.updater.clone(), &text_font)),
+            track: TrackPass::new(passes, &sampler, &text_font),
+            particles: ParticlePass::new(passes),
+            playhead: PlayheadPass::new(passes),
             text_font,
         }
     }
@@ -150,6 +148,7 @@ impl Systems {
         &mut self,
         frame: &mut Frame<'_>,
         playback: &mut PlaybackState,
+
         last_toggle_time: &mut f32,
     ) {
         let status_width = self
@@ -157,7 +156,9 @@ impl Systems {
             .as_ref()
             .map_or(0.0, |status| status.pill.width() + GAP);
         frame.shared.status_width = status_width;
-        frame.shared.px_per_ms = frame.config.timeline_px_per_ms(frame.screen_width, status_width);
+        frame.shared.px_per_ms = frame
+            .config
+            .timeline_px_per_ms(frame.shared.screen_size.x, status_width);
         frame.shared.playhead_x = frame.config.playhead_x(frame.shared.px_per_ms);
         if let Some(tempestas) = self.tempestas.as_mut() {
             tempestas.update(&self.text_font, self.status.as_mut(), frame);
@@ -200,7 +201,7 @@ impl CantusApp {
 
     pub fn logical_surface_size(&self) -> (f32, f32) {
         let extension = if self.config.tempestas_enabled {
-            tempestas::EXTENSION + PANEL_OVERFLOW
+            EXTENSION + PANEL_OVERFLOW
         } else {
             PANEL_OVERFLOW
         };
@@ -219,7 +220,6 @@ impl CantusApp {
     }
 
     pub fn render(&mut self) -> bool {
-        self.start_missing_art_downloads();
         if self.render.program.is_none() {
             return false;
         }
@@ -239,7 +239,6 @@ impl CantusApp {
                 &self.config,
                 elapsed,
                 vec2(screen_width, screen_height),
-                self.render.scale,
             );
             systems.update(&mut frame, &mut self.playback, &mut self.render.last_toggle_time);
             frame.finish();

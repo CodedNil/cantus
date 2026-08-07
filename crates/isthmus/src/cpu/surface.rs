@@ -1,4 +1,4 @@
-use crate::{Context, SetupError};
+use crate::cpu::context::{Context, SetupError};
 use wgpu::{
     AdapterInfo, CompositeAlphaMode, CurrentSurfaceTexture, Instance, PowerPreference, Surface,
     SurfaceConfiguration, SurfaceTexture, TextureFormat, TextureView, TextureViewDescriptor,
@@ -72,22 +72,6 @@ impl<'window> SurfaceTarget<'window> {
         config.desired_maximum_frame_latency = 1;
         config.format = format;
         config.alpha_mode = alpha_mode;
-        Self::from_config(context, surface, config)
-    }
-
-    /// Configures a surface with application-selected WGPU settings.
-    ///
-    /// # Errors
-    /// Returns an error when the adapter does not support the configuration.
-    pub fn from_config(
-        context: &Context,
-        surface: Surface<'window>,
-        config: SurfaceConfiguration,
-    ) -> Result<Self, SetupError> {
-        let capabilities = surface.get_capabilities(context.adapter());
-        if !supports(&capabilities, &config) {
-            return Err(SetupError::UnsupportedSurface);
-        }
         surface.configure(context.device(), &config);
         Ok(Self { surface, config })
     }

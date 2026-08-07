@@ -1,6 +1,4 @@
-use crate::artifact::{
-    artifact_is_fresh, shader_artifact, shader_features, workspace_root, write_fingerprint,
-};
+use crate::artifact::{shader_artifact, shader_features, workspace_root};
 use naga::{
     ShaderStage, Statement,
     back::wgsl::{WriterFlags, write_string},
@@ -36,29 +34,22 @@ const SHADER_TARGET: &str = "spirv-unknown-vulkan1.1";
 /// Returns an error if compilation, validation, or file access fails.
 pub fn build_shader(crate_dir: &Path) -> Result<(PathBuf, bool), String> {
     let output = shader_artifact(crate_dir)?;
-    if output.is_file() && artifact_is_fresh(crate_dir, &output) {
+    let target = workspace_root(crate_dir)?.join("target/isthmus");
+    let shader = translate_shader(&compile_shader(crate_dir, &target)?)?;
+    if fs::read_to_string(&output).is_ok_and(|current| current == shader) {
         return Ok((output, false));
     }
-    let target = workspace_root(crate_dir)?.join("target/isthmus");
-    let (bytes, sources) = compile_shader(crate_dir, &target)?;
-    let shader = translate_shader(&bytes)?;
-    let changed = if fs::read_to_string(&output).is_ok_and(|current| current == shader) {
-        false
-    } else {
-        let parent = output
-            .parent()
-            .ok_or_else(|| String::from("shader artifact has no parent"))?;
-        fs::create_dir_all(parent)
-            .map_err(|error| std::format!("failed to create shader artifact directory: {error}"))?;
-        fs::write(&output, shader)
-            .map_err(|error| std::format!("failed to write shader artifact: {error}"))?;
-        true
-    };
-    write_fingerprint(crate_dir, &output, &sources)?;
-    Ok((output, changed))
+    let parent = output
+        .parent()
+        .ok_or_else(|| String::from("shader artifact has no parent"))?;
+    fs::create_dir_all(parent)
+        .map_err(|error| std::format!("failed to create shader artifact directory: {error}"))?;
+    fs::write(&output, shader)
+        .map_err(|error| std::format!("failed to write shader artifact: {error}"))?;
+    Ok((output, true))
 }
 
-fn compile_shader(source: &Path, target: &Path) -> Result<(Vec<u8>, Vec<PathBuf>), String> {
+fn compile_shader(source: &Path, target: &Path) -> Result<Vec<u8>, String> {
     let features = shader_features(source)?;
     let build = SpirvBuilder::new(source, SHADER_TARGET)
         .deny_warnings(true)
@@ -75,76 +66,7 @@ fn compile_shader(source: &Path, target: &Path) -> Result<(Vec<u8>, Vec<PathBuf>
             return Err(String::from("Rust-GPU unexpectedly produced multiple modules"));
         }
     };
-    let bytes =
-        fs::read(&module).map_err(|error| std::format!("failed to read built shader: {error}"))?;
-    Ok((bytes, shader_dependencies(source, &module, target)?))
-}
-
-fn shader_dependencies(source: &Path, module: &Path, target: &Path) -> Result<Vec<PathBuf>, String> {
-    let module_name = module
-        .file_name()
-        .ok_or_else(|| String::from("built shader has no file name"))?;
-    let dependency_file = target
-        .join(SHADER_TARGET)
-        .join("release")
-        .join(module_name)
-        .with_extension("spv.d");
-    let contents = fs::read_to_string(dependency_file)
-        .map_err(|error| std::format!("failed to read shader dependencies: {error}"))?;
-    let contents = contents.replace("\\\n", "");
-    let (_, dependencies) = contents
-        .lines()
-        .next()
-        .and_then(|line| line.split_once(": "))
-        .ok_or_else(|| String::from("invalid shader dependency file"))?;
-    let workspace = workspace_root(source)?;
-    let workspace_target = workspace.join("target");
-    let mut sources = split_makefile_paths(dependencies)
-        .into_iter()
-        .filter(|path| path.starts_with(&workspace) && !path.starts_with(&workspace_target))
-        .collect::<BTreeSet<_>>();
-    for source in ["src/compiler.rs", "src/artifact.rs"] {
-        let source = Path::new(env!("CARGO_MANIFEST_DIR")).join(source);
-        if source.starts_with(&workspace) {
-            sources.insert(source);
-        }
-    }
-    for path in sources.clone() {
-        if let Some(manifest) = path
-            .ancestors()
-            .take_while(|directory| directory.starts_with(&workspace))
-            .map(|directory| directory.join("Cargo.toml"))
-            .find(|manifest| manifest.is_file())
-        {
-            sources.insert(manifest);
-        }
-    }
-    sources.extend([workspace.join("Cargo.toml"), workspace.join("Cargo.lock")]);
-    Ok(sources.into_iter().filter(|path| path.is_file()).collect())
-}
-
-fn split_makefile_paths(input: &str) -> Vec<PathBuf> {
-    let mut paths = Vec::new();
-    let mut path = String::new();
-    let mut escaped = false;
-    for character in input.chars() {
-        if escaped {
-            path.push(character);
-            escaped = false;
-        } else if character == '\\' {
-            escaped = true;
-        } else if character.is_whitespace() {
-            if !path.is_empty() {
-                paths.push(PathBuf::from(core::mem::take(&mut path)));
-            }
-        } else {
-            path.push(character);
-        }
-    }
-    if !path.is_empty() {
-        paths.push(PathBuf::from(path));
-    }
-    paths
+    fs::read(&module).map_err(|error| std::format!("failed to read built shader: {error}"))
 }
 
 fn translate_shader(bytes: &[u8]) -> Result<String, String> {
@@ -209,10 +131,53 @@ fn translate_shader(bytes: &[u8]) -> Result<String, String> {
         .map_err(|error| std::format!("WGPU cannot validate shader: {error}"))?;
     let shader = write_string(&module, &info, WriterFlags::empty())
         .map_err(|error| std::format!("WGPU cannot translate shader to WGSL: {error}"))?;
+    let shader = localize_phi_names(&shader);
     let emitted = naga::front::wgsl::parse_str(&shader)
         .map_err(|error| std::format!("WGPU cannot parse generated WGSL: {error}"))?;
     Validator::new(ValidationFlags::all(), Capabilities::empty())
         .validate(&emitted)
         .map_err(|error| std::format!("WGPU cannot validate generated WGSL: {error}"))?;
     Ok(shader.lines().map(str::trim_end).collect::<Vec<_>>().join("\n") + "\n")
+}
+
+/// Renumbers Naga's phi temporaries per function.
+///
+/// Naga draws phi names from a module-wide counter, so adding one expression
+/// renumbers every phi after it and rewrites most of the checked-in artifact.
+/// Numbering them within each function keeps an edit's diff local to the
+/// function that actually changed.
+fn localize_phi_names(shader: &str) -> String {
+    let mut output = String::with_capacity(shader.len());
+    let mut names = BTreeMap::<&str, usize>::new();
+    let mut depth = 0usize;
+    let mut rest = shader;
+    loop {
+        let (head, tail) = rest.find("phi_").map_or((rest, ""), |at| rest.split_at(at));
+        for character in head.chars() {
+            match character {
+                '{' => depth += 1,
+                '}' => {
+                    depth = depth.saturating_sub(1);
+                    if depth == 0 {
+                        names.clear();
+                    }
+                }
+                _ => {}
+            }
+        }
+        output.push_str(head);
+        if tail.is_empty() {
+            return output;
+        }
+        let digits = tail[4..].bytes().take_while(u8::is_ascii_digit).count();
+        if digits > 0 && tail.as_bytes().get(4 + digits) == Some(&b'_') {
+            let next = names.len();
+            let name = &tail[..=4 + digits];
+            output.push_str(&std::format!("phi_{}_", *names.entry(name).or_insert(next)));
+            rest = &tail[name.len()..];
+        } else {
+            output.push_str("phi_");
+            rest = &tail[4..];
+        }
+    }
 }

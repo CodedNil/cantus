@@ -1,5 +1,7 @@
 use isthmus::glam::{FloatExt, Vec2};
 
+/// Gap between the top of the surface and the top of the bar.
+pub const PANEL_START: f32 = 6.0;
 /// Base spacing unit. Sizes and gaps should be whole multiples of it.
 pub const UNIT: f32 = 4.0;
 /// The standard small gap between adjacent elements.
@@ -19,9 +21,8 @@ pub struct RipplePulse {
 #[derive(Default)]
 pub struct FrameData {
     pub screen_size: Vec2,
-    pub panel_top: f32,
-    pub panel_height: f32,
     pub mouse_pos: Vec2,
+    pub panel_height: f32,
     pub mouse_pressure: f32,
     pub playhead_x: f32,
     pub px_per_ms: f32,

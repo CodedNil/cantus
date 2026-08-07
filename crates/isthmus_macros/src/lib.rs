@@ -1,3 +1,4 @@
+use isthmus_build::artifact::shader_artifact;
 use proc_macro::TokenStream;
 use proc_macro_crate::{FoundCrate, crate_name};
 use proc_macro2::TokenStream as TokenStream2;
@@ -60,11 +61,11 @@ pub fn outline(args: TokenStream, input: TokenStream) -> TokenStream {
 /// Internal second half of the pass expansion.
 #[proc_macro]
 #[doc(hidden)]
-pub fn __pass_impl(input: TokenStream) -> TokenStream {
+pub fn lower_pass(input: TokenStream) -> TokenStream {
     pass::lower(input)
 }
 
-/// Includes the package's verified shader artifact.
+/// Includes the package's checked-in shader artifact.
 #[proc_macro]
 pub fn shader_module(input: TokenStream) -> TokenStream {
     if !input.is_empty() {
@@ -77,7 +78,7 @@ pub fn shader_module(input: TokenStream) -> TokenStream {
             .to_compile_error()
             .into();
     };
-    let artifact = match isthmus_build::checked_shader_artifact(Path::new(&crate_dir)) {
+    let artifact = match shader_artifact(Path::new(&crate_dir)) {
         Ok(artifact) => artifact,
         Err(error) => {
             return syn::Error::new(proc_macro2::Span::call_site(), error)
@@ -86,11 +87,6 @@ pub fn shader_module(input: TokenStream) -> TokenStream {
         }
     };
     let artifact = artifact.to_string_lossy();
-    let fingerprint = format!("{artifact}.fingerprint");
     let isthmus = isthmus_path();
-    quote!({
-        const _: &[u8] = include_bytes!(#fingerprint);
-        #isthmus::wgpu::include_wgsl!(#artifact)
-    })
-    .into()
+    quote!(#isthmus::wgpu::include_wgsl!(#artifact)).into()
 }

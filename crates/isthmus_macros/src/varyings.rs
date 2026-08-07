@@ -17,7 +17,7 @@ pub fn derive(input: TokenStream) -> TokenStream {
     quote! {
         macro_rules! #bridge {
             ($implementation:item) => {
-                #isthmus::__pass_impl! {
+                #isthmus::lower_pass! {
                     #item
                     $implementation
                 }

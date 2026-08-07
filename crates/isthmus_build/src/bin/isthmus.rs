@@ -12,19 +12,15 @@ fn main() -> ExitCode {
 
 fn run() -> Result<(), String> {
     let mut arguments = env::args_os().skip(1);
-    if arguments.next().as_deref() != Some("build".as_ref()) {
-        return Err(String::from("usage: isthmus build [package]"));
-    }
-    let start = arguments.next().map_or_else(
-        || env::current_dir().map_err(|error| error.to_string()),
-        |path| Ok(PathBuf::from(path)),
-    )?;
-    if arguments.next().is_some() {
-        return Err(String::from("usage: isthmus build [package]"));
+    let (Some(command), Some(package), None) = (arguments.next(), arguments.next(), arguments.next())
+    else {
+        return Err(String::from("usage: isthmus build <package>"));
+    };
+    if command != "build" {
+        return Err(String::from("usage: isthmus build <package>"));
     }
 
-    let crate_dir = isthmus_build::find_shader_crate(&start)?;
-    let (output, changed) = isthmus_build::build_shader(&crate_dir)?;
+    let (output, changed) = isthmus_build::compiler::build_shader(&PathBuf::from(package))?;
     if changed {
         println!("wrote {}", output.display());
     } else {

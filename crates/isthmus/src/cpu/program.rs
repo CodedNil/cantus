@@ -1,10 +1,14 @@
 use super::buffer::DataBuffer;
 use super::surface::Acquire;
-use crate::{BufferData, Context, PassBuilder, Present, Render, SetupError, SurfaceTarget};
+use crate::cpu::context::Context;
+use crate::cpu::context::{Render, SetupError};
+use crate::cpu::pass::PassBuilder;
+use crate::cpu::surface::Present;
+use crate::cpu::surface::SurfaceTarget;
+use crate::data::BufferData;
 use core::slice::from_ref;
 use wgpu::{
     AdapterInfo, Color, Instance, PowerPreference, ShaderModuleDescriptor, Surface, TextureFormat,
-    TextureView,
 };
 
 /// A GPU context with typed shared data, passes, and a render target.
@@ -70,20 +74,8 @@ impl<SharedData, Passes, Target> Program<SharedData, Passes, Target> {
         self.context.device()
     }
 
-    pub const fn queue(&self) -> &wgpu::Queue {
-        self.context.queue()
-    }
-
     pub const fn passes_mut(&mut self) -> &mut Passes {
         &mut self.passes
-    }
-
-    /// Draws the state prepared by [`Self::update`] to a texture view.
-    pub fn draw_to(&self, target: &TextureView, clear: Color)
-    where
-        Passes: Render,
-    {
-        self.context.draw(target, clear, &self.passes);
     }
 }
 

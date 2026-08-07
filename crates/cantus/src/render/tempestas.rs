@@ -3,7 +3,7 @@ use crate::render::{
         SdfSurface, cloud_mass, fbm, hash, pill_fragment, pill_interaction, pill_sheen, pill_vertex,
         sd_capsule_box, sd_rounded_box, sdf_coverage,
     },
-    shared::{FrameData, GAP, UNIT, smoothstep},
+    shared::{FrameData, GAP, PANEL_START, UNIT, smoothstep},
     text,
 };
 use core::f32::consts::PI;
@@ -13,13 +13,20 @@ use spirv_std::arch::kill;
 #[cfg(target_arch = "spirv")]
 use spirv_std::num_traits::Float;
 
+use isthmus::Vertex;
 #[cfg(feature = "cpu")]
 use {
     crate::{
-        AppUpdater,
-        interaction::{InteractionState, Rect},
-        openmeteo::{self, Forecast},
-        render::{Frame, Passes, approach, status, text::TextStyle},
+        app::{
+            AppUpdater,
+            interaction::{InteractionState, Rect},
+            openmeteo::{self, Forecast},
+        },
+        render::{
+            cpu::{Frame, Passes, approach},
+            status,
+            text::TextStyle,
+        },
     },
     arrayvec::ArrayString,
     isthmus::StatePass,
@@ -60,6 +67,8 @@ const GRID_TOP_Y: f32 = UNIT * 24.0;
 const WEEKDAY_Y: f32 = UNIT * 17.0;
 const TITLE: Vec2 = Vec2::new(WIDTH * 0.5, UNIT * 10.0);
 const DETAILS_POS: Vec2 = Vec2::new(FORECAST_X + WIDTH * 0.5, TITLE.y);
+/// Month title's zone; fits the title at hover scale and clears the arrows.
+const TITLE_HALF_WIDTH: f32 = UNIT * 26.0;
 
 const WEATHER_TEXT: usize = 0;
 const TITLE_TEXT: usize = WEATHER_TEXT + 1;
@@ -103,7 +112,7 @@ fn grid_index(local: Vec2) -> usize {
 }
 
 fn forecast_index(local: Vec2, row_height: f32) -> (bool, usize) {
-    let daily = local.y > (forecast_center(row_height, 0.0) + forecast_center(row_height, 1.0)) * 0.5;
+    let daily = local.y > forecast_split(row_height);
     let count = if daily { DAILY_FORECASTS } else { HOURLY_FORECASTS };
     let column = forecast_position(local.x - FORECAST_X, count)
         .round()
@@ -161,6 +170,11 @@ fn forecast_center(height: f32, row: f32) -> f32 {
     HEADER_BOTTOM + height * 0.5 + row * (height + GAP)
 }
 
+/// The y that divides the hourly forecast row from the daily one.
+fn forecast_split(height: f32) -> f32 {
+    (forecast_center(height, 0.0) + forecast_center(height, 1.0)) * 0.5
+}
+
 fn forecast_row(height: f32, row: f32) -> (Vec2, Vec2) {
     let size = Vec2::new(WIDTH - GAP * 2.0, height);
     let center = Vec2::new(FORECAST_X + WIDTH * 0.5, forecast_center(height, row));
@@ -190,7 +204,8 @@ fn sun_position(hour: f32, [sunrise, sunset]: [f32; 2]) -> [f32; 2] {
     }
 }
 
-fn precipitation(p: Vec2, time: f32, kind: i32, weather: WeatherCondition) -> Vec4 {
+/// One layer; `kind` is a literal at every call site, so the tables below fold away.
+fn precipitation(p: Vec2, time: f32, kind: i32, strength: f32) -> Vec4 {
     let rain = kind == 0;
     let snow = kind == 1;
     let (velocity, cell_size, radius, density, trail) = if rain {
@@ -211,60 +226,84 @@ fn precipitation(p: Vec2, time: f32, kind: i32, weather: WeatherCondition) -> Ve
     let distance = (offset - segment * along).length();
     let particle = smoothstep(radius + 0.45, radius - 0.15, distance)
         * smoothstep(1.0 - density, 1.0, hash(cell + 19.3).x);
-    let (strength, color) = if rain {
-        (weather.rain, vec3(0.52, 0.72, 0.9))
+    let color = if rain {
+        vec3(0.52, 0.72, 0.9)
     } else if snow {
-        (weather.snow, Vec3::splat(0.96))
+        Vec3::splat(0.96)
     } else {
-        (weather.hail, vec3(0.75, 0.86, 0.94))
+        vec3(0.75, 0.86, 0.94)
     };
     color.extend((particle * strength * if snow { 0.92 } else { 0.7 }).saturate())
 }
 
-/// Sky backdrop for the status pill.
+/// How much each sky palette contributes at a given sun height.
+#[derive(Clone, Copy)]
+pub struct SkyPhase {
+    daylight: f32,
+    blue_hour: f32,
+    twilight: f32,
+}
+
+impl SkyPhase {
+    fn new(sun_y: f32) -> Self {
+        let daylight = smoothstep(-0.04, 0.2, sun_y);
+        Self {
+            daylight,
+            blue_hour: smoothstep(-0.32, -0.08, sun_y) * (1.0 - daylight),
+            twilight: smoothstep(-0.18, 0.0, sun_y) * smoothstep(0.2, 0.02, sun_y),
+        }
+    }
+
+    /// Blends the palettes, so a day/night crossfade never passes through sunset.
+    fn lerp(self, to: Self, amount: f32) -> Self {
+        let mix = |from: f32, to: f32| from + (to - from) * amount;
+        Self {
+            daylight: mix(self.daylight, to.daylight),
+            blue_hour: mix(self.blue_hour, to.blue_hour),
+            twilight: mix(self.twilight, to.twilight),
+        }
+    }
+}
+
+/// Sky backdrop for the status pill, sampled at pixel position `p`.
 pub fn scene(
     frame: &FrameData,
-    refracted: Vec2,
-    size: Vec2,
+    p: Vec2,
+    width: f32,
     dist: f32,
-    sun_y: f32,
+    phase: SkyPhase,
     weather: WeatherCondition,
 ) -> Vec3 {
     let WeatherCondition {
         fog: fog_strength,
         cloud,
         rain: rain_strength,
-        snow: _,
         lightning,
-        hail: _,
+        ..
     } = weather;
-    let p = refracted * size;
     let (cloud_scale, time) = (frame.panel_height, frame.time);
     let sky_y = p.y / cloud_scale;
-    let daylight = smoothstep(-0.04, 0.2, sun_y);
-    let blue_hour = smoothstep(-0.32, -0.08, sun_y) * (1.0 - daylight);
-    let twilight = smoothstep(-0.18, 0.0, sun_y) * smoothstep(0.2, 0.02, sun_y);
     let vertical = smoothstep(1.0, 0.0, sky_y);
     let mut color = vec3(0.006, 0.012, 0.035)
         .lerp(vec3(0.025, 0.04, 0.095), vertical)
         .lerp(
             vec3(0.08, 0.34, 0.62).lerp(vec3(0.32, 0.67, 0.87), vertical),
-            daylight,
+            phase.daylight,
         )
         .lerp(
             vec3(0.10, 0.16, 0.30).lerp(vec3(0.22, 0.25, 0.45), vertical),
-            blue_hour * 0.8,
+            phase.blue_hour * 0.8,
         )
         .lerp(
             vec3(0.78, 0.30, 0.20).lerp(vec3(0.38, 0.22, 0.42), vertical),
-            twilight * 0.9,
+            phase.twilight * 0.9,
         );
 
     let star_cell = (p / 18.0).floor();
     let star_center = (star_cell + 0.2 + hash(star_cell) * 0.6) * 18.0;
     let stars = smoothstep(1.0, 0.4, p.distance(star_center))
         * smoothstep(0.75, 1.0, hash(star_cell + 31.7).x)
-        * (1.0 - daylight);
+        * (1.0 - phase.daylight);
     color += Vec3::splat(stars * (1.0 - cloud) * (0.3 + vertical * 0.7));
 
     if cloud > 1.0 / 1024.0 {
@@ -276,26 +315,26 @@ pub fn scene(
             .lerp(vec3(0.32, 0.36, 0.43), cloud_light)
             .lerp(
                 vec3(0.62, 0.7, 0.78).lerp(vec3(0.92, 0.94, 0.96), cloud_light),
-                daylight,
+                phase.daylight,
             )
             .lerp(
                 vec3(0.5, 0.36, 0.4).lerp(vec3(0.76, 0.59, 0.56), cloud_light),
-                twilight * 0.45,
+                phase.twilight * 0.45,
             );
         color = color.lerp(cloud_color, cloud * (0.12 + cloud_shape * 0.7));
     }
 
     color = color.lerp(vec3(0.1, 0.17, 0.25), rain_strength * 0.2);
     if weather.rain > 1.0 / 1024.0 {
-        let particle = precipitation(p, time, 0, weather);
+        let particle = precipitation(p, time, 0, weather.rain);
         color = color.lerp(particle.truncate(), particle.w);
     }
     if weather.snow > 1.0 / 1024.0 {
-        let particle = precipitation(p, time, 1, weather);
+        let particle = precipitation(p, time, 1, weather.snow);
         color = color.lerp(particle.truncate(), particle.w);
     }
     if weather.hail > 1.0 / 1024.0 {
-        let particle = precipitation(p, time, 2, weather);
+        let particle = precipitation(p, time, 2, weather.hail);
         color = color.lerp(particle.truncate(), particle.w);
     }
 
@@ -303,7 +342,7 @@ pub fn scene(
     color = color.lerp(vec3(0.65, 0.74, 0.96), flash * 0.55);
 
     if fog_strength > 1.0 / 1024.0 {
-        let fog = fbm(vec2(p.x / size.x * 0.9 + time * 0.008, sky_y * 0.32 + 12.0));
+        let fog = fbm(vec2(p.x / width * 0.9 + time * 0.008, sky_y * 0.32 + 12.0));
         color = color.lerp(
             vec3(0.63, 0.69, 0.73),
             fog_strength * (0.58 + smoothstep(0.35, 0.7, fog) * 0.18),
@@ -378,12 +417,10 @@ impl ForecastSample {
 }
 
 fn sample_forecast(pixel: Vec2, frame: &FrameData, pill: &WeatherSurface) -> ForecastSample {
-    let body_bottom = frame.panel_top + frame.panel_height;
+    let body_bottom = PANEL_START + frame.panel_height;
     let content_origin = vec2(expanded_x(pill.x, 1.0), body_bottom);
     let content = pixel - content_origin;
-    let split =
-        (forecast_center(frame.panel_height, 0.0) + forecast_center(frame.panel_height, 1.0)) * 0.5;
-    let daily = content.y > split;
+    let daily = content.y > forecast_split(frame.panel_height);
     let row = if daily { 1.0 } else { 0.0 };
     let reveal = reveal_progress(pill.calendar_expansion, forecast_center(frame.panel_height, row));
     let (full_origin, full_size) = forecast_row(frame.panel_height, row);
@@ -445,15 +482,18 @@ impl TempestasPass {
         #[gpu(vertex_index)] vertex: u32,
         #[gpu(shared)] frame: FrameData,
         #[gpu(instance)] pill: WeatherSurface,
-    ) -> isthmus::Vertex<Varyings> {
-        let x = pill.x;
+    ) -> Vertex<Varyings> {
         let expansion = smoothstep(0.0, 1.0, pill.calendar_expansion);
         let sun = sun_position(frame.weather_hour, pill.sun_hours);
         let weather = vec3(sun[0], sun[1], sun_position(12.0, pill.sun_hours)[1]).extend(expansion);
         // `pill_vertex` reserves space around the animated SDF for bulge and AA.
-        let (position, pixel) =
-            pill_vertex(vertex, frame, expanded_x(x, expansion), popup_size(expansion));
-        isthmus::Vertex {
+        let (position, pixel) = pill_vertex(
+            vertex,
+            frame,
+            expanded_x(pill.x, expansion),
+            popup_size(expansion),
+        );
+        Vertex {
             position,
             varyings: Varyings { pixel, weather },
         }
@@ -467,29 +507,24 @@ impl TempestasPass {
         #[gpu(resource)] glyphs: &[text::Glyph],
         #[gpu(resource)] edges: &[text::Edge],
     ) -> Vec4 {
-        let x = pill.x;
-        let (_, body_local, body_size, body_surface) = pill_fragment(pixel, frame, x, WIDTH);
+        let (_, body_local, body_size, body_surface) = pill_fragment(pixel, frame, pill.x, WIDTH);
         let expansion = weather.w;
-        let body_bottom = frame.panel_top + frame.panel_height;
+        let body_bottom = PANEL_START + frame.panel_height;
         let popup_size = popup_size(expansion);
-        let popup_origin = vec2(expanded_x(x, expansion), body_bottom);
+        let popup_origin = vec2(expanded_x(pill.x, expansion), body_bottom);
         let popup_local = pixel - popup_origin;
-        let content_local = pixel - vec2(expanded_x(x, 1.0), body_bottom);
+        let content_local = pixel - vec2(expanded_x(pill.x, 1.0), body_bottom);
         let top_gap = GAP * expansion;
         let box_size = vec2(popup_size.x, (popup_size.y - top_gap).max(0.0));
-        let popup_distance = sd_rounded_box(
-            popup_local - vec2(popup_size.x * 0.5, top_gap + box_size.y * 0.5),
-            box_size * 0.5,
-            (box_size.y * 0.5).min(18.0),
-        );
-        let mouse_popup = frame.mouse_pos - popup_origin;
-        let mouse_popup_distance = sd_rounded_box(
-            mouse_popup - vec2(popup_size.x * 0.5, top_gap + box_size.y * 0.5),
-            box_size * 0.5,
-            (box_size.y * 0.5).min(18.0),
-        );
+        let popup = |point: Vec2| {
+            sd_rounded_box(
+                point - vec2(popup_size.x * 0.5, top_gap + box_size.y * 0.5),
+                box_size * 0.5,
+                (box_size.y * 0.5).min(18.0),
+            )
+        };
         let main_surface = body_surface.smooth_union(
-            SdfSurface::new(popup_distance, mouse_popup_distance),
+            SdfSurface::new(popup(popup_local), popup(frame.mouse_pos - popup_origin)),
             56.0,
             expansion,
         );
@@ -517,20 +552,13 @@ impl TempestasPass {
         };
         let row_blend = sdf_coverage(row_surface_distance) * row.reveal;
         let (row_conditions, row_sun_height) = row.weather(pill);
-        let refracted = main_refracted.lerp(row_refracted, row_blend);
-        let scene_size = body_size.lerp(row.size, row_blend);
+        let sample = (main_refracted * body_size).lerp(row_refracted * row.size, row_blend);
+        let scene_width = body_size.x + (row.size.x - body_size.x) * row_blend;
         let scene_distance = main_surface_distance
             + (row_surface_distance.min(1000.0) - main_surface_distance) * row_blend;
         let conditions = main_conditions.lerp(row_conditions, row_blend);
-        let sun_height = weather.y + (row_sun_height - weather.y) * row_blend;
-        let mut color = scene(
-            frame,
-            refracted,
-            scene_size,
-            scene_distance,
-            sun_height,
-            conditions,
-        );
+        let phase = SkyPhase::new(weather.y).lerp(SkyPhase::new(row_sun_height), row_blend);
+        let mut color = scene(frame, sample, scene_width, scene_distance, phase, conditions);
         if body_surface.distance < 1.0 {
             color = color.lerp(
                 sun_layer(
@@ -555,9 +583,9 @@ impl TempestasPass {
             if content_local.x < WIDTH {
                 if content_local.y < (TITLE.y + WEEKDAY_Y) * 0.5 {
                     let side = content_local.x - WIDTH * 0.5;
-                    line = if side < -UNIT * 15.0 {
+                    line = if side < -TITLE_HALF_WIDTH {
                         ARROW_TEXT
-                    } else if side > UNIT * 15.0 {
+                    } else if side > TITLE_HALF_WIDTH {
                         ARROW_TEXT + 1
                     } else {
                         TITLE_TEXT
@@ -669,7 +697,7 @@ impl TempestasPass {
         frame: &mut Frame,
     ) {
         let height = frame.config.height;
-        let x = Self::pill_x(frame.screen_width, frame.shared.status_width);
+        let x = Self::pill_x(frame.shared.screen_size.x, frame.shared.status_width);
         let (weather_label, hour) = self.collapsed_label(x, height, frame);
         frame.shared.weather_hour = hour;
         if let Some(status) = status {
@@ -697,14 +725,14 @@ impl TempestasPass {
         let bounds = Self::pill_rect(x, height);
         if self.pill.calendar_expansion <= 0.0 {
             self.pill.text_hover = [0.0; 3];
-            interaction.regions.push(bounds);
+            interaction.input_region(bounds);
             return;
         }
         let origin = Vec2::new(expanded_x(bounds.x0, 1.0), bounds.y1);
         let reveal = reveal_progress(self.pill.calendar_expansion, TITLE.y);
         let title = interaction.surface(Rect::from_center(
             origin + TITLE,
-            Vec2::new(UNIT * 15.0, UNIT * 4.0),
+            Vec2::new(TITLE_HALF_WIDTH, UNIT * 4.0),
         ));
         if title.clicked {
             self.month_offset = 0;
@@ -826,7 +854,7 @@ impl TempestasPass {
         }
 
         for rect in Self::visible_rects(x, height, self.pill.calendar_expansion) {
-            interaction.regions.push(rect);
+            interaction.input_region(rect);
         }
     }
 

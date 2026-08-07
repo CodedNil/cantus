@@ -1,4 +1,4 @@
-use crate::BufferData;
+use crate::data::BufferData;
 use std::{string::String, vec::Vec};
 use wgpu::{Buffer, BufferDescriptor, BufferUsages, Device, Queue};
 

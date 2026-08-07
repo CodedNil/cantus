@@ -1,4 +1,4 @@
-use crate::render::shared::{FrameData, smoothstep};
+use crate::render::shared::{FrameData, PANEL_START, smoothstep};
 use isthmus::glam::{FloatExt, UVec2, Vec2, Vec4, uvec2, vec2, vec4};
 use spirv_std::arch::Derivative;
 
@@ -80,7 +80,7 @@ pub fn hash(p: Vec2) -> Vec2 {
 }
 
 #[isthmus::outline]
-fn simplex_noise(p: Vec2) -> f32 {
+pub fn simplex_noise(p: Vec2) -> f32 {
     const K1: f32 = 0.366_025_42;
     const K2: f32 = 0.211_324_87;
     let cell = (p + (p.x + p.y) * K1).floor();
@@ -122,9 +122,26 @@ pub fn pixel_to_ndc(pixel: Vec2, screen_size: Vec2) -> Vec4 {
     vec4(ndc.x, -ndc.y, 0.0, 1.0)
 }
 
+/// Where the drop shadow fades below the fragment kill threshold, plus an AA pixel.
+const SHADOW_REACH: f32 = 18.0;
+
+/// Pixels the pill can cover beyond its bounds: shadow always, bulges only while active.
+pub fn pill_margin(frame: &FrameData) -> f32 {
+    let mut bulge = frame.mouse_pressure * 8.0;
+    let mut index = 0;
+    while index < frame.ripples.len() {
+        let pulse = frame.ripples[index];
+        let fade = 1.0 - ((frame.time - pulse.start_time) * 1.2).saturate();
+        bulge += pulse.strength * fade * fade * 11.0;
+        index += 1;
+    }
+    SHADOW_REACH + bulge * 0.5
+}
+
 pub fn pill_vertex(vertex: u32, frame: &FrameData, x: f32, size: Vec2) -> (Vec4, Vec2) {
-    let pixel = vec2(x - 48.0, frame.panel_top - 48.0)
-        + quad_coord(vertex) * (size + vec2(96.0, frame.panel_height + 96.0));
+    let margin = pill_margin(frame);
+    let pixel = vec2(x - margin, PANEL_START - margin)
+        + quad_coord(vertex) * (size + vec2(margin, frame.panel_height + margin) * 2.0);
     (pixel_to_ndc(pixel, frame.screen_size), pixel)
 }
 
@@ -135,9 +152,9 @@ pub fn pill_fragment(
     width: f32,
 ) -> (PillInteraction, Vec2, Vec2, SdfSurface) {
     let size = vec2(width, frame.panel_height);
-    let local = pixel - vec2(x, frame.panel_top);
+    let local = pixel - vec2(x, PANEL_START);
     let distance = sd_capsule_box(local - size * 0.5, (size.x - size.y) * 0.5, size.y * 0.5);
-    let mouse = frame.mouse_pos - vec2(x, frame.panel_top) - size * 0.5;
+    let mouse = frame.mouse_pos - vec2(x, PANEL_START) - size * 0.5;
     let mouse_distance = sd_capsule_box(mouse, (size.x - size.y) * 0.5, size.y * 0.5);
     (
         pill_interaction(pixel, frame),
@@ -159,6 +176,11 @@ pub fn direction_and_length(vector: Vec2) -> (Vec2, f32) {
 
 pub fn hover_mask(mouse_distance: f32) -> f32 {
     smoothstep(0.5, -0.5, mouse_distance)
+}
+
+/// 1.0 when positive, else 0.0; `f32::from(bool)` needs `OpCapability Int8`.
+pub fn presence(value: f32) -> f32 {
+    if value > 0.0 { 1.0 } else { 0.0 }
 }
 
 /// Derivative-aware coverage for an anti-aliased signed-distance edge.

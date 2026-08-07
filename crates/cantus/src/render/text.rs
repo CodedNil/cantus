@@ -5,7 +5,8 @@ use spirv_std::num_traits::Float;
 
 #[cfg(feature = "cpu")]
 use {
-    crate::render::Passes,
+    crate::render::cpu::Passes,
+    isthmus::Storage,
     ttf_parser::{Face, GlyphId, OutlineBuilder, Tag},
     unicode_normalization::UnicodeNormalization,
 };
@@ -217,20 +218,17 @@ pub fn line_distance<const LINES: usize, const GLYPHS: usize>(
     best
 }
 
+/// Nearer of two lines.
 pub fn pair_distance<const LINES: usize, const GLYPHS: usize>(
     text: &Text<LINES, GLYPHS>,
-    indices: [u32; 2],
+    first: usize,
+    second: usize,
     glyphs: &[Glyph],
     edges: &[Edge],
     local: Vec2,
 ) -> f32 {
-    let mut distance: f32 = -1e6;
-    let mut index = 0;
-    while index < 2 {
-        distance = distance.max(line_distance(text, indices[index] as usize, glyphs, edges, local));
-        index += 1;
-    }
-    distance
+    line_distance(text, first, glyphs, edges, local)
+        .max(line_distance(text, second, glyphs, edges, local))
 }
 
 pub fn alpha(distance: f32) -> f32 {
@@ -337,8 +335,8 @@ impl OutlineBuilder for Outline {
 pub struct Font {
     characters: Vec<Character>,
     baseline: f32,
-    pub(crate) edges: isthmus::Storage<Edge>,
-    pub(crate) glyphs: isthmus::Storage<Glyph>,
+    pub(crate) edges: Storage<Edge>,
+    pub(crate) glyphs: Storage<Glyph>,
 }
 
 #[cfg(feature = "cpu")]
@@ -436,8 +434,14 @@ impl Font {
         }
     }
 
+    /// Laid-out width, for callers sizing a box before any text is written.
     pub fn width(&self, text: &str, style: TextStyle) -> f32 {
-        self.metrics(text, style).0
+        let weight = style.normalized_weight();
+        text.nfc()
+            .filter_map(|character| self.glyph(character))
+            .map(|meta| meta.advance_at(weight))
+            .sum::<f32>()
+            * style.size
     }
 
     fn glyph(&self, character: char) -> Option<Meta> {
@@ -445,17 +449,6 @@ impl Font {
             .binary_search_by_key(&character, |glyph| glyph.character)
             .ok()
             .map(|index| self.characters[index].meta)
-    }
-
-    fn metrics(&self, text: &str, style: TextStyle) -> (f32, f32) {
-        let weight = style.normalized_weight();
-        let width = text
-            .nfc()
-            .filter_map(|character| self.glyph(character))
-            .map(|meta| meta.advance_at(weight))
-            .sum::<f32>()
-            * style.size;
-        (width, self.baseline * style.size)
     }
 }
 
@@ -466,15 +459,13 @@ impl<const LINES: usize, const GLYPHS: usize> Text<LINES, GLYPHS> {
     }
 
     pub fn centered(&mut self, font: &Font, text: &str, style: TextStyle, center: Vec2) -> usize {
-        let (width, baseline) = font.metrics(text, style);
-        self.write(
-            font,
-            text,
-            vec2(center.x - width * 0.5, center.y + baseline),
-            style,
-        )
+        let baseline = font.baseline * style.size;
+        self.write(font, text, style, |width| {
+            vec2(center.x - width * 0.5, center.y + baseline)
+        })
     }
 
+    /// Centres `text` between `left` and `right`, or left-aligns it when it overflows.
     pub fn fit(
         &mut self,
         font: &Font,
@@ -484,16 +475,25 @@ impl<const LINES: usize, const GLYPHS: usize> Text<LINES, GLYPHS> {
         left: f32,
         right: f32,
     ) -> usize {
-        let (width, baseline) = font.metrics(text, style);
-        let x = if width <= right - left + 0.5 {
-            (left + right - width) * 0.5
-        } else {
-            left
-        };
-        self.write(font, text, vec2(x, y + baseline), style)
+        let baseline = font.baseline * style.size;
+        self.write(font, text, style, |width| {
+            let x = if width <= right - left + 0.5 {
+                (left + right - width) * 0.5
+            } else {
+                left
+            };
+            vec2(x, y + baseline)
+        })
     }
 
-    fn write(&mut self, font: &Font, text: &str, origin: Vec2, style: TextStyle) -> usize {
+    /// Shapes `text` in one pass, then asks `place` where to put it given its width.
+    fn write(
+        &mut self,
+        font: &Font,
+        text: &str,
+        style: TextStyle,
+        place: impl FnOnce(f32) -> Vec2,
+    ) -> usize {
         let line = self.line_count as usize;
         assert!(line < LINES, "text line capacity exceeded");
         let first = if line == 0 {
@@ -510,28 +510,22 @@ impl<const LINES: usize, const GLYPHS: usize> Text<LINES, GLYPHS> {
         for meta in text.nfc().filter_map(|character| font.glyph(character)) {
             if count < MAX_LINE_GLYPHS {
                 assert!(first + count != GLYPHS, "text glyph capacity exceeded");
-                let screen_min = vec2(
-                    origin.x + (x + meta.data.min.x) * style.size,
-                    origin.y - meta.data.max.y * style.size,
-                );
-                let screen_max = vec2(
-                    origin.x + (x + meta.data.max.x) * style.size,
-                    origin.y - meta.data.min.y * style.size,
-                );
-                min = min.min(screen_min);
-                max = max.max(screen_max);
+                min = min.min(vec2(x + meta.data.min.x, -meta.data.max.y));
+                max = max.max(vec2(x + meta.data.max.x, -meta.data.min.y));
                 self.glyphs[first + count] = PlacedGlyph { x, glyph: meta.glyph };
                 count += 1;
             }
             x += meta.advance_at(weight);
         }
-        if count == 0 {
-            min = Vec2::ZERO;
-            max = Vec2::ZERO;
+        let origin = place(x * style.size);
+        let (min, max) = if count == 0 {
+            (Vec2::ZERO, Vec2::ZERO)
         } else {
-            min -= EFFECT_PADDING;
-            max += EFFECT_PADDING;
-        }
+            (
+                origin + min * style.size - EFFECT_PADDING,
+                origin + max * style.size + EFFECT_PADDING,
+            )
+        };
         self.lines[line] = Line {
             min,
             max,

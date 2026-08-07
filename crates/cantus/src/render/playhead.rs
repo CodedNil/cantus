@@ -1,17 +1,16 @@
 use crate::render::{
     shader::{pixel_to_ndc, quad_coord, sd_capsule_box, sd_rounded_triangle},
-    shared::{FrameData, smoothstep},
+    shared::{FrameData, PANEL_START, smoothstep},
 };
 use isthmus::glam::{Vec2, Vec3, Vec4, vec2, vec3};
 use spirv_std::arch::kill;
 
+use isthmus::Vertex;
 #[cfg(feature = "cpu")]
 use {
     crate::{
-        PANEL_START,
-        interaction::Rect,
-        render::{Frame, Passes, approach},
-        spotify::PlaybackState,
+        app::{interaction::Rect, spotify::PlaybackState},
+        render::cpu::{Frame, Passes, approach},
     },
     isthmus::StatePass,
 };
@@ -97,13 +96,13 @@ impl PlayheadPass {
     pub fn vertex(
         #[gpu(vertex_index)] vertex: u32,
         #[gpu(shared)] frame: FrameData,
-    ) -> isthmus::Vertex<Varyings> {
+    ) -> Vertex<Varyings> {
         let uv = quad_coord(vertex);
         let world_pos = vec2(
             frame.playhead_x + (uv.x * 2.0 - 1.0) * frame.panel_height * 0.4,
-            frame.panel_top - 5.0 + uv.y * (frame.panel_height + 10.0),
+            PANEL_START - 5.0 + uv.y * (frame.panel_height + 10.0),
         );
-        isthmus::Vertex {
+        Vertex {
             position: pixel_to_ndc(world_pos, frame.screen_size),
             varyings: Varyings { world_pos },
         }
@@ -115,7 +114,7 @@ impl PlayheadPass {
         #[gpu(shared)] frame: FrameData,
         #[gpu(instance)] state: PlayheadState,
     ) -> Vec4 {
-        let center = vec2(frame.playhead_x, frame.panel_top + frame.panel_height * 0.5);
+        let center = vec2(frame.playhead_x, PANEL_START + frame.panel_height * 0.5);
         let pause = (world_pos - center).abs();
 
         // Bar splits into two capsule segments straddling the center as bar_split grows.

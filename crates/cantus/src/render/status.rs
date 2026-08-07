@@ -14,13 +14,16 @@ use spirv_std::arch::kill;
 #[cfg(target_arch = "spirv")]
 use spirv_std::num_traits::Float;
 
+use isthmus::Vertex;
 #[cfg(feature = "cpu")]
 use {
     crate::{
-        AppUpdater,
-        interaction::Rect,
-        platform::linux as platform,
-        render::{Frame, Passes, text::TextStyle},
+        app::{AppUpdater, interaction::Rect, platform::linux as platform},
+        render::{
+            cpu::{Frame, Passes},
+            shared::PANEL_START,
+            text::TextStyle,
+        },
     },
     arrayvec::ArrayString,
     isthmus::StatePass,
@@ -58,14 +61,6 @@ enum StatusSection {
 }
 
 impl StatusSection {
-    const ALL: [Self; 6] = [
-        Self::Cpu,
-        Self::Gpu,
-        Self::Battery,
-        Self::Audio,
-        Self::Reboot,
-        Self::Power,
-    ];
     #[cfg(feature = "cpu")]
     const POWER_ACTIONS: [Self; 2] = [Self::Power, Self::Reboot];
 
@@ -77,6 +72,15 @@ impl StatusSection {
         }
     }
 }
+
+/// Width the battery slot adds to every section after it when shown.
+const BATTERY_SLOT: f32 = DATA_WIDTH + GAP;
+const CPU_X: f32 = PADDING;
+const GPU_X: f32 = CPU_X + GRAPH_WIDTH + GAP;
+const BATTERY_X: f32 = GPU_X + GRAPH_WIDTH + GAP;
+const AUDIO_X: f32 = BATTERY_X;
+const REBOOT_X: f32 = AUDIO_X + DATA_WIDTH + GAP;
+const POWER_X: f32 = REBOOT_X + ACTION_WIDTH + GAP;
 
 #[isthmus::data]
 #[derive(Default)]
@@ -93,10 +97,12 @@ pub struct StatusPill {
     pub cpu: ProcessorStatus,
     /// GPU temperature and usage history.
     pub gpu: ProcessorStatus,
-    /// Action ID plus hold progress; zero means no action is active.
-    pub power_state: f32,
-    /// One-based hovered power action index; zero means neither action is hovered.
-    pub power_hover: u32,
+    /// Power action being held, or -1 when none is.
+    pub power_action: i32,
+    /// How far through its hold `power_action` is.
+    pub power_progress: f32,
+    /// Power action under the pointer, or -1 when none is.
+    pub power_hover: i32,
     /// Current sun height and decoded sky condition.
     pub sun_height: f32,
     pub conditions: WeatherCondition,
@@ -116,41 +122,47 @@ impl StatusPill {
         self.battery_level.abs()
     }
 
+    /// Left edge of `section`; everything after the battery shifts when it is shown.
+    const fn section_x(&self, section: StatusSection) -> f32 {
+        let shift = if self.battery_present() { BATTERY_SLOT } else { 0.0 };
+        match section {
+            StatusSection::Cpu => CPU_X,
+            StatusSection::Gpu => GPU_X,
+            StatusSection::Battery => BATTERY_X,
+            StatusSection::Audio => AUDIO_X + shift,
+            StatusSection::Reboot => REBOOT_X + shift,
+            StatusSection::Power => POWER_X + shift,
+        }
+    }
+
     const fn section_center(&self, section: StatusSection) -> f32 {
-        let mut x = PADDING;
-        let mut index = 0;
-        while index < section as usize {
-            let previous = StatusSection::ALL[index];
-            if self.battery_present() || !matches!(previous, StatusSection::Battery) {
-                x += previous.width() + GAP;
-            }
-            index += 1;
-        }
-        x + section.width() * 0.5
+        self.section_x(section) + section.width() * 0.5
     }
 
-    /// Total on-screen width of the pill; grows to include the battery slot when present.
+    /// Total on-screen width of the pill; grows to include the battery slot when shown.
     pub const fn width(&self) -> f32 {
-        self.section_center(StatusSection::Power) + StatusSection::Power.width() * 0.5 + PADDING
+        self.section_x(StatusSection::Power) + ACTION_WIDTH + PADDING
     }
 
-    fn section_at(&self, x: f32) -> (StatusSection, f32) {
-        let mut edge = PADDING;
-        let mut center = 0.0;
-        let mut index = 0;
-        while index < StatusSection::ALL.len() {
-            let section = StatusSection::ALL[index];
-            if !matches!(section, StatusSection::Battery) || self.battery_present() {
-                let width = section.width();
-                edge += width + GAP;
-                center = edge - GAP - width * 0.5;
-                if x < edge - GAP * 0.5 {
-                    return (section, center);
-                }
-            }
-            index += 1;
-        }
-        (StatusSection::Power, center)
+    const fn ends_before(&self, section: StatusSection, x: f32) -> bool {
+        x < self.section_x(section) + section.width() + GAP * 0.5
+    }
+
+    const fn section_at(&self, x: f32) -> (StatusSection, f32) {
+        let section = if self.ends_before(StatusSection::Cpu, x) {
+            StatusSection::Cpu
+        } else if self.ends_before(StatusSection::Gpu, x) {
+            StatusSection::Gpu
+        } else if self.battery_present() && self.ends_before(StatusSection::Battery, x) {
+            StatusSection::Battery
+        } else if self.ends_before(StatusSection::Audio, x) {
+            StatusSection::Audio
+        } else if self.ends_before(StatusSection::Reboot, x) {
+            StatusSection::Reboot
+        } else {
+            StatusSection::Power
+        };
+        (section, self.section_center(section))
     }
 }
 
@@ -190,10 +202,7 @@ impl UsageHistory {
 #[cfg(feature = "cpu")]
 fn section_rect(pill: &StatusPill, x: f32, height: f32, section: StatusSection) -> Rect {
     Rect::from_center(
-        vec2(
-            x + pill.section_center(section),
-            crate::PANEL_START + height * 0.5,
-        ),
+        vec2(x + pill.section_center(section), PANEL_START + height * 0.5),
         vec2((section.width() + GAP) * 0.5, height * 0.5),
     )
 }
@@ -419,9 +428,8 @@ fn reboot_icon(point: Vec2, progress: f32) -> f32 {
 
 fn action_icon(point: Vec2, time: f32, action: f32, hover: f32, pill: &StatusPill) -> Vec3 {
     let point = point / (1.0 + hover * 0.07);
-    let action_state = pill.power_state;
-    let selected = smoothstep(0.4, 0.05, (action_state.floor() - action - 1.0).abs());
-    let charge = action_state.fract() * selected;
+    let selected = smoothstep(0.4, 0.05, (pill.power_action as f32 - action).abs());
+    let charge = pill.power_progress * selected;
     let icon = if action < 0.5 {
         power_icon(point, time, charge)
     } else {
@@ -455,6 +463,8 @@ impl StatusPass {
             },
             StatusPill {
                 battery_level: BATTERY_HIDDEN,
+                power_action: -1,
+                power_hover: -1,
                 ..Default::default()
             },
         );
@@ -474,7 +484,7 @@ impl StatusPass {
         .saturate();
 
         let width = pill.width();
-        let x = pill_x(frame.screen_width, width);
+        let x = pill_x(frame.shared.screen_size.x, width);
         let scroll = frame
             .interaction
             .scroll(section_rect(pill, x, height, StatusSection::Audio));
@@ -489,20 +499,21 @@ impl StatusPass {
         pill.power_hover = buttons
             .iter()
             .position(|response| response.hovered)
-            .map_or(0, |action| action as u32 + 1);
+            .map_or(-1, |action| action as i32);
         if let Some(action) = buttons.iter().position(|response| response.pressed) {
-            pill.power_state = action as f32 + 1.0;
+            pill.power_action = action as i32;
+            pill.power_progress = 0.0;
         }
-        if pill.power_state > 0.0 {
-            let action = pill.power_state.floor() as usize - 1;
-            let progress = pill.power_state.fract() + frame.delta_time / 1.5;
+        if pill.power_action >= 0 {
+            let action = pill.power_action as usize;
+            let progress = pill.power_progress + frame.delta_time / 1.5;
             if !frame.interaction.down() || !buttons[action].hovered {
-                pill.power_state = 0.0;
+                pill.power_action = -1;
             } else if progress >= 1.0 {
-                pill.power_state = 0.0;
+                pill.power_action = -1;
                 platform::run_power_action(action);
             } else {
-                pill.power_state = action as f32 + 1.0 + progress;
+                pill.power_progress = progress;
             }
         }
         frame.interaction.surface(Rect::pill(x, width, height));
@@ -548,11 +559,11 @@ impl StatusPass {
         #[gpu(vertex_index)] vertex: u32,
         #[gpu(shared)] frame: FrameData,
         #[gpu(instance)] pill: StatusPill,
-    ) -> isthmus::Vertex<Varyings> {
+    ) -> Vertex<Varyings> {
         let width = pill.width();
         let x = pill_x(frame.screen_size.x, width);
         let (position, pixel) = pill_vertex(vertex, frame, x, vec2(width, 0.0));
-        isthmus::Vertex {
+        Vertex {
             position,
             varyings: Varyings { pixel },
         }
@@ -623,7 +634,7 @@ impl StatusPass {
             StatusSection::Audio => background + audio_icon(point, pill),
             StatusSection::Reboot | StatusSection::Power => {
                 let action = if section == StatusSection::Power { 0.0 } else { 1.0 };
-                let hover = smoothstep(0.4, 0.05, (pill.power_hover as f32 - action - 1.0).abs());
+                let hover = smoothstep(0.4, 0.05, (pill.power_hover as f32 - action).abs());
                 background + action_icon(point, frame.time, action, hover, pill)
             }
         };

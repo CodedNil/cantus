@@ -1,11 +1,16 @@
 use super::buffer::DataBuffer;
-use crate::{
-    Binding, BufferData, FilterableFloatFormat, PassContract, PassShared, Render, ResourceBindings,
-    SampledTexture, SampledTextureDimension,
-};
+use crate::contract::{PassContract, PassShared};
+use crate::cpu::Binding;
+use crate::cpu::FilteringSampler;
+use crate::cpu::ResourceBindings;
+use crate::cpu::Storage;
+use crate::cpu::context::Render;
+use crate::cpu::texture::FilterableFloatFormat;
+use crate::cpu::texture::{SampledTexture, SampledTextureDimension};
+use crate::data::BufferData;
 use core::{
     marker::PhantomData,
-    ops::{Deref, DerefMut, Range},
+    ops::{Deref, DerefMut},
     slice,
 };
 use std::{format, vec::Vec};
@@ -64,8 +69,8 @@ impl<'a, Shared: BufferData> PassBuilder<'a, Shared> {
         SampledTexture::new(self.device, self.queue, label, size, format)
     }
 
-    pub fn filtering_sampler(&self, label: &str) -> crate::FilteringSampler {
-        crate::FilteringSampler::new(self.device.create_sampler(&wgpu::SamplerDescriptor {
+    pub fn filtering_sampler(&self, label: &str) -> FilteringSampler {
+        FilteringSampler::new(self.device.create_sampler(&wgpu::SamplerDescriptor {
             label: Some(label),
             mag_filter: wgpu::FilterMode::Linear,
             min_filter: wgpu::FilterMode::Linear,
@@ -77,9 +82,9 @@ impl<'a, Shared: BufferData> PassBuilder<'a, Shared> {
         &self,
         label: &str,
         values: impl IntoIterator<Item = T>,
-    ) -> crate::Storage<T> {
+    ) -> Storage<T> {
         let values = values.into_iter().collect::<Vec<_>>();
-        crate::Storage::new(self.device, self.queue, label, &values)
+        Storage::new(self.device, self.queue, label, &values)
     }
 
     pub fn instances<S: PassContract + PassShared<Shared>>(
@@ -88,9 +93,8 @@ impl<'a, Shared: BufferData> PassBuilder<'a, Shared> {
         resources: S::Resources<'_>,
     ) -> Pass<S> {
         Pass {
-            core: self.build::<S>(count.max(1), resources.into_bindings()),
+            core: self.build::<S>(count, resources.into_bindings()),
             instances: Vec::with_capacity(count),
-            draw_instances: count as u32,
         }
     }
 
@@ -122,8 +126,7 @@ impl<'a, Shared: BufferData> PassBuilder<'a, Shared> {
     ) -> Pass<S> {
         let instances = instances.into_iter().collect::<Vec<_>>();
         Pass {
-            core: self.build::<S>(instances.len().max(1), resources.into_bindings()),
-            draw_instances: instances.len() as u32,
+            core: self.build::<S>(instances.len(), resources.into_bindings()),
             instances,
         }
     }
@@ -163,18 +166,15 @@ impl<'a, Shared: BufferData> PassBuilder<'a, Shared> {
             multiview_mask: None,
             cache: None,
         });
-        let buffer = S::INSTANCE_BUFFER.then(|| {
-            DataBuffer::new::<S::Instance>(self.device, self.queue, &format!("{name} Instances"), count)
-        });
-        let shared = S::SHARED_BUFFER.then(|| self.shared.clone());
-        let bind_group = create_bind_group(
+        let buffer = DataBuffer::new::<S::Instance>(
             self.device,
-            name,
-            &pipeline,
-            shared.as_ref(),
-            buffer.as_ref(),
-            &resources,
+            self.queue,
+            &format!("{name} Instances"),
+            count.max(1),
         );
+        let shared = S::SHARED_BUFFER.then(|| self.shared.clone());
+        let bind_group =
+            create_bind_group(self.device, name, &pipeline, shared.as_ref(), &buffer, &resources);
         PassCore {
             pipeline,
             vertices: S::PIPELINE.vertices,
@@ -189,37 +189,31 @@ impl<'a, Shared: BufferData> PassBuilder<'a, Shared> {
 struct PassCore {
     pipeline: RenderPipeline,
     vertices: u32,
-    buffer: Option<DataBuffer>,
+    buffer: DataBuffer,
     bind_group: BindGroup,
     shared: Option<Buffer>,
     resources: Vec<Binding>,
 }
 
 impl PassCore {
-    fn draw<'pass>(&'pass self, pass: &mut RenderPass<'pass>, instances: Range<u32>) {
+    fn draw<'pass>(&'pass self, pass: &mut RenderPass<'pass>, instances: u32) {
         pass.set_pipeline(&self.pipeline);
         pass.set_bind_group(0, &self.bind_group, &[]);
-        pass.draw(0..self.vertices, instances);
+        pass.draw(0..self.vertices, 0..instances);
     }
 
     fn upload<S: PassContract>(&mut self, instances: &[S::Instance]) {
-        let grew = self
-            .buffer
-            .as_mut()
-            .is_some_and(|buffer| buffer.grow::<S::Instance>(instances.len()));
-        if let Some(buffer) = self.buffer.as_ref().filter(|_| grew) {
+        if self.buffer.grow::<S::Instance>(instances.len()) {
             self.bind_group = create_bind_group(
-                buffer.device(),
+                self.buffer.device(),
                 S::NAME,
                 &self.pipeline,
                 self.shared.as_ref(),
-                Some(buffer),
+                &self.buffer,
                 &self.resources,
             );
         }
-        if let Some(buffer) = &mut self.buffer {
-            buffer.upload(instances);
-        }
+        self.buffer.upload(instances);
     }
 }
 
@@ -227,26 +221,6 @@ impl PassCore {
 pub struct Pass<S: PassContract> {
     core: PassCore,
     pub instances: Vec<S::Instance>,
-    draw_instances: u32,
-}
-
-impl<S: PassContract> Pass<S> {
-    /// Draws a subset of this pass's instances.
-    ///
-    /// # Panics
-    /// Panics when the range exceeds the instances owned by the pass.
-    pub fn draw_range<'pass>(&'pass self, pass: &mut RenderPass<'pass>, instances: Range<u32>) {
-        let count = if S::INSTANCE_BUFFER {
-            self.instances.len() as u32
-        } else {
-            self.draw_instances
-        };
-        assert!(
-            instances.start <= instances.end && instances.end <= count,
-            "draw range exceeds pass instances"
-        );
-        self.core.draw(pass, instances);
-    }
 }
 
 impl<S: PassContract> Render for Pass<S> {
@@ -255,12 +229,7 @@ impl<S: PassContract> Render for Pass<S> {
     }
 
     fn draw<'pass>(&'pass self, pass: &mut RenderPass<'pass>) {
-        let count = if S::INSTANCE_BUFFER {
-            self.instances.len() as u32
-        } else {
-            self.draw_instances
-        };
-        self.draw_range(pass, 0..count);
+        self.core.draw(pass, self.instances.len() as u32);
     }
 }
 
@@ -269,7 +238,7 @@ fn create_bind_group(
     name: &str,
     pipeline: &RenderPipeline,
     shared: Option<&Buffer>,
-    buffer: Option<&DataBuffer>,
+    buffer: &DataBuffer,
     resources: &[Binding],
 ) -> BindGroup {
     let mut entries = Vec::with_capacity(2 + resources.len());
@@ -279,12 +248,10 @@ fn create_bind_group(
             resource: shared.as_entire_binding(),
         });
     }
-    if let Some(buffer) = buffer {
-        entries.push(BindGroupEntry {
-            binding: 1,
-            resource: buffer.raw().as_entire_binding(),
-        });
-    }
+    entries.push(BindGroupEntry {
+        binding: 1,
+        resource: buffer.raw().as_entire_binding(),
+    });
     entries.extend(
         resources
             .iter()
@@ -312,7 +279,7 @@ impl<S: PassContract> Render for StatePass<S> {
     }
 
     fn draw<'pass>(&'pass self, pass: &mut RenderPass<'pass>) {
-        self.core.draw(pass, 0..1);
+        self.core.draw(pass, 1);
     }
 }
 

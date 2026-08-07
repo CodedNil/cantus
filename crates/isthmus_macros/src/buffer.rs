@@ -36,9 +36,15 @@ fn implementation(input: &DeriveInput) -> TokenStream2 {
             .push(parse_quote!(#ty: #isthmus::BufferData));
     }
     let (impl_generics, type_generics, where_clause) = generics.split_for_impl();
+    // Generic types are checked through whichever concrete struct embeds them.
+    let force_check = input
+        .generics
+        .params
+        .is_empty()
+        .then(|| quote!(const _: () = <#name as #isthmus::BufferData>::ASSERT_LAYOUT;));
 
     quote! {
-        #[cfg(feature = "cpu")]
+        #force_check
         impl #impl_generics #isthmus::BufferData for #name #type_generics #where_clause {
             const ASSERT_LAYOUT: () = {
                 #(

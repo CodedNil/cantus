@@ -1,5 +1,7 @@
-use crate::render::tempestas::WeatherCondition;
-use crate::{AppUpdater, send_update};
+use crate::{
+    app::{AppUpdater, send_update},
+    render::tempestas::WeatherCondition,
+};
 use jiff::civil::DateTime;
 use serde::Deserialize;
 use std::{thread, time::Duration};

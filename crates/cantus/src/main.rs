@@ -1,3 +1,5 @@
+use cantus::app::run;
+
 fn main() {
-    cantus::run();
+    run();
 }

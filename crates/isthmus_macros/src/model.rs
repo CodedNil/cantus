@@ -10,7 +10,7 @@ pub struct PassModel {
     pub vertex: StageContract,
     pub fragment: StageContract,
     pub shared: Option<Type>,
-    pub instance: Option<Type>,
+    pub instance: Type,
     pub resources: Vec<(Ident, TokenStream)>,
     pub carry_instance: bool,
 }
@@ -75,6 +75,12 @@ impl PassModel {
                 }
             }
         }
+        let instance = instance.ok_or_else(|| {
+            syn::Error::new_spanned(
+                fragment,
+                "a pass must declare `#[gpu(instance)]` data in at least one stage",
+            )
+        })?;
         Ok(Self {
             vertex,
             fragment: fragment_contract,
@@ -116,8 +122,6 @@ fn resource_cpu_type(ty: &Type) -> Result<TokenStream> {
     let name = &path.path.segments.last().unwrap().ident;
     if name == "Sampler" {
         Ok(quote!(#isthmus::FilteringSampler))
-    } else if name == "Image2d" {
-        Ok(quote!(#isthmus::TextureView<#isthmus::Texture2D>))
     } else if name == "Image2dArray" {
         Ok(quote!(#isthmus::TextureView<#isthmus::Texture2DArray>))
     } else {

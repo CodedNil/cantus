@@ -1,4 +1,6 @@
-use crate::render::RenderState;
+#![allow(clippy::missing_panics_doc)]
+
+use crate::render::cpu::RenderState;
 use interaction::InteractionState;
 use spotify::PlaybackState;
 use std::{
@@ -19,9 +21,7 @@ pub mod platform;
 #[path = "spotify.rs"]
 pub mod spotify;
 
-pub const PANEL_START: f32 = 6.0;
 pub const PANEL_OVERFLOW: f32 = 16.0;
-pub const PARTICLE_COUNT: usize = 64;
 pub const MAX_RENDER_INSTANCES: usize = 32;
 pub const TRACK_SPACING_MS: f32 = 4000.0;
 

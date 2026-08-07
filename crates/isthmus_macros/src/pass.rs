@@ -124,7 +124,6 @@ fn expand_pass_impl(mut implementation: ItemImpl, options: &TokenStream2) -> Syn
     Ok(quote!(#bridge! { #implementation }))
 }
 
-#[doc(hidden)]
 pub fn lower(input: TokenStream) -> TokenStream {
     let file = parse_macro_input!(input as File);
     match lower_pass_impl(file) {
@@ -245,7 +244,6 @@ fn expand_pass(file: &mut File, options: &PassOptions, pass_type: &Type) -> SynR
         },
         |module| {
             quote! {
-                #[doc(hidden)]
                 pub mod #module {
                     use super::*;
                     #vertex_impl
@@ -305,8 +303,7 @@ fn pass_declaration(
 ) -> TokenStream2 {
     let isthmus = isthmus_path();
     let resources_type_name = &pass_names.resources;
-    let instance_buffer = model.instance.is_some();
-    let data = model.instance.clone().unwrap_or_else(|| parse_quote!(()));
+    let data = &model.instance;
     let shared_impl = model.shared.as_ref().map_or_else(
         || {
             quote! {
@@ -374,7 +371,6 @@ fn pass_declaration(
             type Instance = #data;
             type Resources<'a> = #resources_type;
             const NAME: &'static str = #pass_name;
-            const INSTANCE_BUFFER: bool = #instance_buffer;
             const PIPELINE: #isthmus::Pipeline = #isthmus::Pipeline {
                 topology: #isthmus::wgpu::PrimitiveTopology::#topology,
                 blend: #blend,
