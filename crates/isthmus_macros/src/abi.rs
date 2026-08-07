@@ -178,11 +178,12 @@ pub fn vertex_functions(
     } else {
         None
     };
+    let isthmus = isthmus_path();
     let wrapper = quote! {
-        #[spirv_std::spirv(vertex)]
+        #[#isthmus::spirv_std::spirv(vertex)]
         pub fn vertex(
             #(#wrapper_inputs,)*
-            #[spirv(position)] out_position: &mut spirv_std::glam::Vec4,
+            #[spirv(position)] out_position: &mut #isthmus::glam::Vec4,
             #(#output_parameters,)*
             #instance_output
         ) {
@@ -253,13 +254,14 @@ pub fn fragment_functions(
             __isthmus_instance_index: u32,
         )
     });
+    let isthmus = isthmus_path();
     let wrapper = quote! {
-        #[spirv_std::spirv(fragment)]
+        #[#isthmus::spirv_std::spirv(fragment)]
         pub fn fragment(
             #(#varying_parameters,)*
             #instance_input
             #(#other_inputs,)*
-            #[spirv(location = 0)] out_color: &mut spirv_std::glam::Vec4
+            #[spirv(location = 0)] out_color: &mut #isthmus::glam::Vec4
         ) {
             #(#initializers)*
             *out_color = fragment_impl(#varying { #(#names),* }, #(#other_names),*);

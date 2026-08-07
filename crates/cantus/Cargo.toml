@@ -43,14 +43,11 @@ cpu = [
     "dep:wayland-protocols-wlr",
     "isthmus/vulkan",
 ]
-shader = ["dep:spirv-std"]
+shader = []
 generate-nix = ["cpu", "dep:schemars"]
 
 [dependencies]
 isthmus = { path = "../isthmus" }
-spirv-std = { git = "https://github.com/Rust-GPU/rust-gpu", rev = "c1acf6e4b2d338b0f822457350ea91db21757f1a", features = [
-    "glam_0_33",
-], optional = true }
 
 # CPU application
 bytemuck = { workspace = true, optional = true }

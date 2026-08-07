@@ -2,8 +2,10 @@ use crate::render::{
     shader::{pixel_to_ndc, quad_coord, sd_capsule_box, sd_rounded_triangle},
     shared::{FrameData, PANEL_START, smoothstep},
 };
-use isthmus::glam::{Vec2, Vec3, Vec4, vec2, vec3};
-use spirv_std::arch::kill;
+use isthmus::{
+    glam::{Vec2, Vec3, Vec4, vec2, vec3},
+    spirv_std::arch::kill,
+};
 
 use isthmus::Vertex;
 #[cfg(feature = "cpu")]

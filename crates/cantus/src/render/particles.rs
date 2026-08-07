@@ -4,9 +4,9 @@ use crate::render::{
 };
 use isthmus::{
     glam::{Vec2, Vec3, Vec4, vec2, vec3},
+    spirv_std::arch::kill,
     {contract::Vertex, data::Unorm8x4},
 };
-use spirv_std::arch::kill;
 
 #[cfg(feature = "cpu")]
 use {

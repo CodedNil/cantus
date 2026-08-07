@@ -70,7 +70,7 @@ rec {
           cargoLock = {
             lockFile = ./Cargo.lock;
             outputHashes = {
-              "rustc_codegen_spirv-0.10.0-alpha.1" = "sha256-1RuZqIq1sp2+tGz4Qhnr/vTPLseNauLTOd5fOxpJ/Xk=";
+              "rustc_codegen_spirv-0.10.0-alpha.1" = "sha256-M3/puV8CnGDp4I4C/F4lrH/Dfbs6Lj4T4j4vwdBMzrU=";
               "sysinfo-0.39.6" = "sha256-HgD13E5L5Gtwj1I1mD+vU3ln0dfj61Zeet8LHyUIdkk=";
             };
           };

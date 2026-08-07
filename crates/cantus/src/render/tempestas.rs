@@ -7,11 +7,13 @@ use crate::render::{
     text,
 };
 use core::f32::consts::PI;
-use isthmus::glam::{FloatExt, Vec2, Vec3, Vec4, vec2, vec3};
-use spirv_std::arch::kill;
+use isthmus::{
+    glam::{FloatExt, Vec2, Vec3, Vec4, vec2, vec3},
+    spirv_std::arch::kill,
+};
 
 #[cfg(target_arch = "spirv")]
-use spirv_std::num_traits::Float;
+use isthmus::spirv_std::num_traits::Float;
 
 use isthmus::Vertex;
 #[cfg(feature = "cpu")]

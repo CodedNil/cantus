@@ -11,15 +11,15 @@ use isthmus::{
     contract::Vertex,
     data::Unorm8x4,
     glam::{FloatExt, UVec2, Vec2, Vec3, Vec4, uvec2, vec2, vec3},
-};
-use spirv_std::{
-    Sampler,
-    arch::{Derivative, kill},
-    image::Image2dArray,
+    spirv_std::{
+        Sampler,
+        arch::{Derivative, kill},
+        image::Image2dArray,
+    },
 };
 
 #[cfg(target_arch = "spirv")]
-use spirv_std::num_traits::Float;
+use isthmus::spirv_std::num_traits::Float;
 
 #[cfg(feature = "cpu")]
 use {

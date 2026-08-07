@@ -1,7 +1,7 @@
 use isthmus::glam::{Vec2, vec2};
 
 #[cfg(target_arch = "spirv")]
-use spirv_std::num_traits::Float;
+use isthmus::spirv_std::num_traits::Float;
 
 #[cfg(feature = "cpu")]
 use {

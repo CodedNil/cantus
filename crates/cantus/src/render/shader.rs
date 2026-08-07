@@ -1,9 +1,11 @@
 use crate::render::shared::{FrameData, PANEL_START, smoothstep};
-use isthmus::glam::{FloatExt, UVec2, Vec2, Vec4, uvec2, vec2, vec4};
-use spirv_std::arch::Derivative;
+use isthmus::{
+    glam::{FloatExt, UVec2, Vec2, Vec4, uvec2, vec2, vec4},
+    spirv_std::arch::Derivative,
+};
 
 #[cfg(target_arch = "spirv")]
-use spirv_std::num_traits::Float;
+use isthmus::spirv_std::num_traits::Float;
 
 /// Shared hover/click deformation used by every pill-shaped surface.
 #[derive(Clone, Copy)]

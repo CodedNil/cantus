@@ -12,6 +12,8 @@ pub mod data;
 pub mod cpu;
 
 pub use glam;
+pub use spirv_std;
+
 #[doc(hidden)]
 pub use isthmus_macros::lower_pass;
 pub use isthmus_macros::{Render, Varyings, data, outline, pass, shader_module};

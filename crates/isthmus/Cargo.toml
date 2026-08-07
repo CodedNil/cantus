@@ -6,11 +6,11 @@ edition = "2024"
 [dependencies]
 bytemuck = { version = "1.25.2", optional = true }
 isthmus_macros = { path = "../isthmus_macros" }
+spirv-std = { git = "https://github.com/Rust-GPU/rust-gpu", rev = "9453497884c28bd52405f0abc9bfc7d0b3374666" }
 wgpu = { workspace = true, optional = true }
 
 [target.'cfg(target_arch = "spirv")'.dependencies]
 glam = { workspace = true, features = ["libm"] }
-spirv-std = { git = "https://github.com/Rust-GPU/rust-gpu", rev = "c1acf6e4b2d338b0f822457350ea91db21757f1a", features = ["glam_0_33"] }
 
 [target.'cfg(not(target_arch = "spirv"))'.dependencies]
 glam = { workspace = true, features = ["std"] }
