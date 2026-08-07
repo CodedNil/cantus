@@ -1,4 +1,4 @@
-use crate::render::tempo::WeatherCondition;
+use crate::render::tempestas::WeatherCondition;
 use crate::{AppUpdater, send_update};
 use jiff::civil::DateTime;
 use serde::Deserialize;
@@ -7,23 +7,29 @@ use tracing::warn;
 
 const WEATHER_FIELDS: &str = "temperature_2m,weather_code";
 
-/// Fetches and applies a forecast every 15 minutes.
+/// Fetches and applies a forecast every 15 minutes, retrying every 30 seconds until the first fetch succeeds.
 pub fn spawn_refresh_loop(latitude: f32, longitude: f32, updater: AppUpdater) {
     thread::spawn(move || {
-        while fetch(latitude, longitude).map_or_else(
-            |error| {
-                warn!(%error, "Failed to refresh weather");
-                true
-            },
-            |forecast| {
+        let mut has_data = false;
+        while match fetch(latitude, longitude) {
+            Ok(forecast) => {
+                has_data = true;
                 send_update(&updater, move |app| {
-                    if let Some(tempo) = app.render.program().passes_mut().tempo.as_mut() {
-                        tempo.apply_forecast(&forecast);
+                    if let Some(tempestas) = app.render.program().passes_mut().tempestas.as_mut() {
+                        tempestas.apply_forecast(&forecast);
                     }
                 })
-            },
-        ) {
-            thread::sleep(Duration::from_mins(15));
+            }
+            Err(error) => {
+                warn!(%error, "Failed to refresh weather");
+                true
+            }
+        } {
+            thread::sleep(if has_data {
+                Duration::from_mins(15)
+            } else {
+                Duration::from_secs(30)
+            });
         }
     });
 }

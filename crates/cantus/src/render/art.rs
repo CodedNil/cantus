@@ -68,15 +68,17 @@ impl CantusApp {
     pub fn start_missing_art_downloads(&mut self) {
         let now = Instant::now();
         loop {
-            let url = self
+            let Some(url) = self
                 .art_slots()
-                .find_map(|(url, state)| state.needs_fetch(now).then(|| url.to_owned()));
-            let Some(url) = url else { break };
+                .find_map(|(url, state)| state.needs_fetch(now).then(|| url.to_owned()))
+            else {
+                break;
+            };
             // Share art another slot already holds for the same URL, else fetch it.
-            let existing = self
+            let state = if let Some(art) = self
                 .art_slots()
-                .find_map(|(other, state)| (other == url).then(|| state.ready().cloned())?);
-            let state = if let Some(art) = existing {
+                .find_map(|(other, state)| (other == url).then(|| state.ready().cloned())?)
+            {
                 ArtState::Ready(art)
             } else {
                 self.spotify.download_image(url.clone());

@@ -10,7 +10,7 @@ use {
     crate::{
         PANEL_START,
         interaction::Rect,
-        render::{Passes, approach, frame::Frame},
+        render::{Frame, Passes, approach},
         spotify::PlaybackState,
     },
     isthmus::StatePass,

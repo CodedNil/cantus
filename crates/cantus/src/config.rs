@@ -1,4 +1,4 @@
-use crate::render::{shared::GAP, tempo, track::MAX_PILL_PLAYLIST_ICONS};
+use crate::render::{shared::GAP, tempestas, track::MAX_PILL_PLAYLIST_ICONS};
 use arrayvec::ArrayVec;
 use serde::{Deserialize, Serialize};
 use std::{env, fs, path::PathBuf};
@@ -31,7 +31,7 @@ pub struct Config {
     pub ratings_enabled: bool,
 
     /// Whether to show the weather and calendar module.
-    pub tempo_enabled: bool,
+    pub tempestas_enabled: bool,
     /// Latitude and longitude used for the weather pill.
     pub location: [f32; 2],
 
@@ -64,7 +64,7 @@ impl Default for Config {
             monitor: None,
             height: 50.0,
             location: [51.5074, -0.1278],
-            tempo_enabled: true,
+            tempestas_enabled: true,
             status_enabled: true,
             layer: Layer::Top,
             layer_anchor: LayerAnchor::Top,
@@ -81,7 +81,7 @@ impl Config {
     pub fn timeline_px_per_ms(&self, screen_width: f32, status_width: f32) -> f32 {
         let reserved = self.history_width
             + GAP
-            + f32::from(self.tempo_enabled) * (tempo::WIDTH + GAP)
+            + f32::from(self.tempestas_enabled) * (tempestas::WIDTH + GAP)
             + status_width;
         (screen_width - reserved).max(84.0) / (self.timeline_future_minutes * 60_000.0)
     }

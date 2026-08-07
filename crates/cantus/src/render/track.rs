@@ -24,9 +24,8 @@ use {
         config::Config,
         interaction::{InteractionState, Rect},
         render::{
-            Passes, approach,
+            Frame, Passes, approach,
             art::{AlbumArt, ArtState},
-            frame::Frame,
             shared::GAP,
             text::TextStyle,
         },
@@ -169,6 +168,14 @@ impl PillIconRow {
             self.center.y + 2.0,
         )
     }
+
+    fn surface(self, offset: Vec2, radius: f32, pixel_pos: Vec2, mouse_pos: Vec2) -> SdfSurface {
+        let center = self.backplate_center() + offset;
+        SdfSurface::new(
+            sd_capsule_box(pixel_pos - center, self.half_span(), radius),
+            sd_capsule_box(mouse_pos - center, self.half_span(), radius),
+        )
+    }
 }
 
 #[isthmus::outline]
@@ -266,14 +273,12 @@ impl TrackPass {
         let pill_origin = vec2(pill.x, frame.panel_top);
 
         let (primary_row, secondary_row) = pill.icon_rows(frame.panel_top, frame.panel_height);
-        let primary_alpha = pill.primary_alpha;
-        let secondary_expansion = pill.secondary_expansion;
 
         let icon_row_radius = ICON_WIDTH * 1.5;
         let row_bounds =
             |row: PillIconRow, alpha| row.half_size(icon_row_radius) * presence(row.count * alpha);
-        let icon_half_size =
-            row_bounds(primary_row, primary_alpha).max(row_bounds(secondary_row, secondary_expansion));
+        let icon_half_size = row_bounds(primary_row, pill.primary_alpha)
+            .max(row_bounds(secondary_row, pill.secondary_expansion));
         let render_min = vec2(
             (pill_origin.x - margin).min(primary_row.center.x - icon_half_size.x),
             pill_origin.y - margin,
@@ -316,24 +321,9 @@ impl TrackPass {
         let primary_alpha = pill.primary_alpha;
         let secondary_expansion = pill.secondary_expansion;
 
-        let primary_center = primary_row.backplate_center() - vec2(0.0, 2.0);
-        let primary_surface = SdfSurface::new(
-            sd_capsule_box(pixel_pos - primary_center, primary_row.half_span(), 9.0),
-            sd_capsule_box(frame.mouse_pos - primary_center, primary_row.half_span(), 9.0),
-        );
-        let secondary_center = secondary_row.backplate_center();
-        let secondary_surface = SdfSurface::new(
-            sd_capsule_box(
-                pixel_pos - secondary_center,
-                secondary_row.half_span(),
-                10.5 * secondary_expansion,
-            ),
-            sd_capsule_box(
-                frame.mouse_pos - secondary_center,
-                secondary_row.half_span(),
-                10.5 * secondary_expansion,
-            ),
-        );
+        let primary_surface = primary_row.surface(vec2(0.0, -2.0), 9.0, pixel_pos, frame.mouse_pos);
+        let secondary_surface =
+            secondary_row.surface(Vec2::ZERO, 10.5 * secondary_expansion, pixel_pos, frame.mouse_pos);
         let surface = body_surface
             .smooth_union(primary_surface, 10.0, primary_alpha)
             .smooth_union(secondary_surface, ICON_WIDTH * 0.5, presence(secondary_expansion));
@@ -383,10 +373,13 @@ impl TrackPass {
             pill.colors[3].rgb.rgb().lerp(Vec3::ONE, 0.25) * speckle(local_pixel, frame.time, effects);
 
         let image_left = pill_size.x - pill_size.y;
-        if pill.image_index >= 0 && local_pixel.x >= image_left {
-            let uv_img = (refracted - vec2(image_left, 0.0)) / pill_size.y;
+        let image_center = vec2(image_left, 0.0) + Vec2::splat(pill_size.y * 0.5);
+        if pill.image_index >= 0 && (local_pixel - image_center).abs().max_element() < pill_size.y {
+            let offset = local_pixel - image_center;
+            let radius = pill_size.y * 0.5 + interaction.bulge(surface) * 0.5;
+            let image_dist = offset.length() - radius;
+            let uv_img = offset / (radius * 2.0) + 0.5;
             let tex = images.sample(*sampler, uv_img.extend(pill.image_index as f32));
-            let image_dist = sd_capsule_box((uv_img - 0.5) * pill_size.y, 0.0, pill_size.y * 0.5);
             let img_mask = (1.0 - smoothstep(-4.0, 0.0, image_dist))
                 * (1.0 - smoothstep(-0.5, 0.5, interaction.expand(body_surface)));
             color = color.lerp(tex.truncate(), img_mask * tex.w);
@@ -459,7 +452,6 @@ impl TrackPass {
         }
 
         let distance = text::pair_distance(&pill.text, [0, 1], glyphs, edges, refracted);
-        let image_center = vec2(image_left + pill_size.y * 0.5, pill_size.y * 0.5);
         let image_fade = smoothstep(
             0.0,
             8.0,

@@ -19,7 +19,7 @@ use {
         AppUpdater,
         interaction::{InteractionState, Rect},
         openmeteo::{self, Forecast},
-        render::{Passes, approach, frame::Frame, status, text::TextStyle},
+        render::{Frame, Passes, approach, status, text::TextStyle},
     },
     arrayvec::ArrayString,
     isthmus::StatePass,
@@ -221,7 +221,7 @@ fn precipitation(p: Vec2, time: f32, kind: i32, weather: WeatherCondition) -> Ve
     color.extend((particle * strength * if snow { 0.92 } else { 0.7 }).saturate())
 }
 
-/// Sky backdrop for the status pill; also returns the refracted pixel position.
+/// Sky backdrop for the status pill.
 pub fn scene(
     frame: &FrameData,
     refracted: Vec2,
@@ -421,7 +421,7 @@ struct ForecastItem {
 }
 
 #[isthmus::pass]
-pub struct TempoPass {
+pub struct TempestasPass {
     pub pill: StatePass<Self>,
     temperature: String,
     utc_offset: Option<Offset>,
@@ -439,7 +439,7 @@ pub struct Varyings {
 }
 
 #[isthmus::pass]
-impl TempoPass {
+impl TempestasPass {
     #[gpu]
     pub fn vertex(
         #[gpu(vertex_index)] vertex: u32,
@@ -490,7 +490,7 @@ impl TempoPass {
         );
         let main_surface = body_surface.smooth_union(
             SdfSurface::new(popup_distance, mouse_popup_distance),
-            32.0,
+            56.0,
             expansion,
         );
         let interaction = pill_interaction(pixel, frame);
@@ -507,12 +507,9 @@ impl TempoPass {
 
         let current = pill.hourly_conditions[0];
         let edge = ((body_local.x / body_size.x).clamp(0.0, 1.0) - 0.5).abs();
-        let body_conditions = current.lerp(pill.hourly_conditions[1], smoothstep(0.2, 0.3, edge));
-        let main_conditions = body_conditions.lerp(current, smoothstep(8.0, -8.0, popup_distance));
-        let popup_blend = sdf_coverage(popup_distance) * expansion;
-        let main_local = body_local.lerp(content_local, popup_blend);
-        let main_size = body_size.lerp(vec2(body_size.x, body_size.y + popup_size.y), popup_blend);
-        let main_refracted = interaction.refract(main_local, main_size, main_surface_distance);
+        let body_conditions = current.lerp(pill.hourly_conditions[1], smoothstep(0.2, 0.25, edge));
+        let main_conditions = body_conditions.lerp(current, expansion);
+        let main_refracted = interaction.refract(body_local, body_size, main_surface_distance);
         let row_refracted = if row.reveal > 0.001 {
             interaction.refract(row.local, row.size, row_surface_distance)
         } else {
@@ -521,7 +518,7 @@ impl TempoPass {
         let row_blend = sdf_coverage(row_surface_distance) * row.reveal;
         let (row_conditions, row_sun_height) = row.weather(pill);
         let refracted = main_refracted.lerp(row_refracted, row_blend);
-        let scene_size = main_size.lerp(row.size, row_blend);
+        let scene_size = body_size.lerp(row.size, row_blend);
         let scene_distance = main_surface_distance
             + (row_surface_distance.min(1000.0) - main_surface_distance) * row_blend;
         let conditions = main_conditions.lerp(row_conditions, row_blend);
@@ -544,7 +541,7 @@ impl TempoPass {
                     body_conditions.cloud,
                     frame.time,
                 ),
-                smoothstep(1.0, -1.0, body_surface.distance),
+                smoothstep(1.0, -body_size.y * 0.25, body_surface.distance),
             );
         }
         let mut line = WEATHER_TEXT;
@@ -631,7 +628,7 @@ impl TempoPass {
         );
         Self {
             pill,
-            temperature: "--.-°C".into(),
+            temperature: String::new(),
             utc_offset: None,
             details: "Weather unavailable".into(),
             hourly: Default::default(),
@@ -657,7 +654,11 @@ impl TempoPass {
         self.pill.x = x;
         let clock = time.strftime("%a %d %b  %H:%M:%S");
         let mut label = ArrayString::new();
-        write!(label, "{}   {clock}", self.temperature).unwrap();
+        if self.temperature.is_empty() {
+            write!(label, "{clock}").unwrap();
+        } else {
+            write!(label, "{}   {clock}", self.temperature).unwrap();
+        }
         (label, hour)
     }
 

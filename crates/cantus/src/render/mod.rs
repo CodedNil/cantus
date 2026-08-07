@@ -4,21 +4,17 @@
 pub mod art;
 #[cfg(feature = "cpu")]
 mod cpu;
-#[cfg(feature = "cpu")]
-pub mod frame;
 
 pub mod particles;
 pub mod playhead;
 pub(crate) mod shader;
 pub(crate) mod shared;
 pub mod status;
-pub mod tempo;
+pub mod tempestas;
 pub mod text;
 pub mod track;
 
 #[cfg(feature = "cpu")]
-pub(crate) use cpu::Passes;
+pub(crate) use cpu::{Frame, Passes, approach};
 #[cfg(feature = "cpu")]
 pub use cpu::{RenderState, Systems};
-#[cfg(feature = "cpu")]
-pub(crate) use frame::approach;

@@ -4,7 +4,7 @@ use crate::render::{
         sd_rounded_box, segment_distance, smooth_union, stroke,
     },
     shared::{FrameData, GAP, PADDING, smoothstep},
-    tempo::WeatherCondition,
+    tempestas::WeatherCondition,
     text,
 };
 use core::f32::consts::TAU;
@@ -20,7 +20,7 @@ use {
         AppUpdater,
         interaction::Rect,
         platform::linux as platform,
-        render::{Passes, frame::Frame, text::TextStyle},
+        render::{Frame, Passes, text::TextStyle},
     },
     arrayvec::ArrayString,
     isthmus::StatePass,
@@ -568,8 +568,8 @@ impl StatusPass {
     ) -> Vec4 {
         let width = pill.width();
         let x = pill_x(frame.screen_size.x, width);
-        let (interaction, raw_local, size, dist) = pill_fragment(pixel, frame, x, width);
-        let (dist, mask, alpha) = interaction.surface(dist);
+        let (interaction, raw_local, size, surface) = pill_fragment(pixel, frame, x, width);
+        let (dist, mask, alpha) = interaction.surface(surface);
         if alpha <= 1.0 / 1024.0 {
             kill();
         }

@@ -5,6 +5,60 @@ use spirv_std::arch::Derivative;
 #[cfg(target_arch = "spirv")]
 use spirv_std::num_traits::Float;
 
+/// Shared hover/click deformation used by every pill-shaped surface.
+#[derive(Clone, Copy)]
+pub struct PillInteraction {
+    mouse_bulge: f32,
+    pub ripple: Vec2,
+    pub ripple_flash: f32,
+}
+
+#[derive(Clone, Copy)]
+pub struct SdfSurface {
+    pub distance: f32,
+    pub mouse_distance: f32,
+}
+
+impl SdfSurface {
+    pub const fn new(distance: f32, mouse_distance: f32) -> Self {
+        Self {
+            distance,
+            mouse_distance,
+        }
+    }
+
+    pub fn smooth_union(self, other: Self, radius: f32, blend: f32) -> Self {
+        Self {
+            distance: smooth_union(self.distance, other.distance, radius, blend),
+            mouse_distance: smooth_union(self.mouse_distance, other.mouse_distance, radius, blend),
+        }
+    }
+}
+
+impl PillInteraction {
+    pub fn bulge(self, surface: SdfSurface) -> f32 {
+        self.mouse_bulge * hover_mask(surface.mouse_distance) + self.ripple.length() * 22.0
+    }
+
+    /// Apply the shared hover/click expansion to an assembled signed-distance field.
+    pub fn expand(self, surface: SdfSurface) -> f32 {
+        surface.distance - self.bulge(surface) * 0.5
+    }
+
+    /// Return the expanded distance, fill coverage, and combined fill/shadow alpha.
+    pub fn surface(self, surface: SdfSurface) -> (f32, f32, f32) {
+        let distance = self.expand(surface);
+        let mask = sdf_coverage(distance);
+        let shadow = (-distance.max(0.0) * 0.3).exp() * 0.16;
+        (distance, mask, mask.max(shadow))
+    }
+
+    pub fn refract(self, local: Vec2, size: Vec2, distance: f32) -> Vec2 {
+        let uv = local / size;
+        uv - (uv - 0.5) * (1.0 + distance.min(0.0) / 120.0).clamp(0.0, 0.6) * 0.08 - self.ripple * 0.04
+    }
+}
+
 /// Core 2-lane avalanche mixer for hash functions
 pub fn avalanche(mut value: UVec2) -> UVec2 {
     value = value
@@ -103,60 +157,6 @@ pub fn direction_and_length(vector: Vec2) -> (Vec2, f32) {
     }
 }
 
-/// Shared hover/click deformation used by every pill-shaped surface.
-#[derive(Clone, Copy)]
-pub struct PillInteraction {
-    mouse_bulge: f32,
-    pub ripple: Vec2,
-    pub ripple_flash: f32,
-}
-
-#[derive(Clone, Copy)]
-pub struct SdfSurface {
-    pub distance: f32,
-    pub mouse_distance: f32,
-}
-
-impl SdfSurface {
-    pub const fn new(distance: f32, mouse_distance: f32) -> Self {
-        Self {
-            distance,
-            mouse_distance,
-        }
-    }
-
-    pub fn smooth_union(self, other: Self, radius: f32, blend: f32) -> Self {
-        Self {
-            distance: smooth_union(self.distance, other.distance, radius, blend),
-            mouse_distance: smooth_union(self.mouse_distance, other.mouse_distance, radius, blend),
-        }
-    }
-}
-
-impl PillInteraction {
-    pub fn bulge(self, surface: SdfSurface) -> f32 {
-        self.mouse_bulge * hover_mask(surface.mouse_distance) + self.ripple.length() * 22.0
-    }
-
-    /// Apply the shared hover/click expansion to an assembled signed-distance field.
-    pub fn expand(self, surface: SdfSurface) -> f32 {
-        surface.distance - self.bulge(surface) * 0.5
-    }
-
-    /// Return the expanded distance, fill coverage, and combined fill/shadow alpha.
-    pub fn surface(self, surface: SdfSurface) -> (f32, f32, f32) {
-        let distance = self.expand(surface);
-        let mask = sdf_coverage(distance);
-        let shadow = (-distance.max(0.0) * 0.3).exp() * 0.16;
-        (distance, mask, mask.max(shadow))
-    }
-
-    pub fn refract(self, local: Vec2, size: Vec2, distance: f32) -> Vec2 {
-        let uv = local / size;
-        uv - (uv - 0.5) * (1.0 + distance.min(0.0) / 120.0).clamp(0.0, 0.6) * 0.08 - self.ripple * 0.04
-    }
-}
-
 pub fn hover_mask(mouse_distance: f32) -> f32 {
     smoothstep(0.5, -0.5, mouse_distance)
 }
@@ -173,10 +173,10 @@ pub fn pill_interaction(pixel: Vec2, frame: &FrameData) -> PillInteraction {
     let mut index = 0;
     while index < frame.ripples.len() {
         let pulse = frame.ripples[index];
-        let progress = ((frame.time - pulse.animation.x) * 1.2).saturate();
+        let progress = ((frame.time - pulse.start_time) * 1.2).saturate();
         let (direction, distance) = direction_and_length(pixel - pulse.origin);
         let wave = smoothstep(80.0, 0.0, (distance - progress * 600.0).abs())
-            * pulse.animation.y
+            * pulse.strength
             * (1.0 - progress);
         ripple += direction * wave * (1.0 - progress) * 0.5;
         ripple_flash = (ripple_flash + wave * 0.5).min(1.0);

@@ -60,7 +60,7 @@
     default = builtins.fromJSON "false";
     description = "Whether star ratings should be enabled.";
   };
-  tempo_enabled = lib.mkOption {
+  tempestas_enabled = lib.mkOption {
     type = lib.types.bool;
     default = builtins.fromJSON "true";
     description = "Whether to show the weather and calendar module.";

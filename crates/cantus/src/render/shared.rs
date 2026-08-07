@@ -7,16 +7,12 @@ pub const GAP: f32 = UNIT * 2.0;
 /// The standard inset between a container edge and its contents.
 pub const PADDING: f32 = UNIT * 3.0;
 
-pub fn smoothstep(edge0: f32, edge1: f32, x: f32) -> f32 {
-    let t = ((x - edge0) / (edge1 - edge0)).saturate();
-    t * t * (3.0 - 2.0 * t)
-}
-
 #[isthmus::data]
 #[derive(Default)]
 pub struct RipplePulse {
     pub origin: Vec2,
-    pub animation: Vec2,
+    pub start_time: f32,
+    pub strength: f32,
 }
 
 #[isthmus::data]
@@ -35,4 +31,9 @@ pub struct FrameData {
     /// Current hour in the configured weather location's local time.
     pub weather_hour: f32,
     pub ripples: [RipplePulse; 4],
+}
+
+pub fn smoothstep(edge0: f32, edge1: f32, x: f32) -> f32 {
+    let t = ((x - edge0) / (edge1 - edge0)).saturate();
+    t * t * (3.0 - 2.0 * t)
 }

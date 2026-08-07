@@ -9,7 +9,7 @@ use spirv_std::arch::kill;
 use {
     crate::{
         PANEL_START, PARTICLE_COUNT,
-        render::{Passes, frame::Frame, track},
+        render::{Frame, Passes, track},
     },
     core::f32::consts::TAU,
 };
@@ -54,15 +54,13 @@ impl ParticlePass {
         let time = frame.shared.time;
         if let Some(palette) = track.current_track_palette {
             let movement_speed = track.movement_speed;
-            let emit_count = if movement_speed.abs() > 0.00001 {
-                self.accumulator += frame.delta_time * EMISSION;
-                let count = self.accumulator.floor() as u8;
-                self.accumulator -= f32::from(count);
-                count
+            self.accumulator = if movement_speed.abs() > 0.00001 {
+                self.accumulator + frame.delta_time * EMISSION
             } else {
-                self.accumulator = 0.0;
-                0
+                0.0
             };
+            let emit_count = self.accumulator.floor() as u8;
+            self.accumulator -= f32::from(emit_count);
             let horizontal_bias =
                 (movement_speed.abs().powf(0.2) * movement_speed.signum()).clamp(-3.0, 3.0);
 
