@@ -34,6 +34,8 @@ pub struct Config {
     pub tempestas_enabled: bool,
     /// Latitude and longitude used for the weather pill.
     pub location: [f32; 2],
+    /// Up to three IANA timezones shown with approximate city weather.
+    pub timezones: ArrayVec<String, { tempestas::MAX_WORLD_CLOCKS }>,
 
     /// Whether to show the system status module.
     pub status_enabled: bool,
@@ -64,6 +66,7 @@ impl Default for Config {
             monitor: None,
             height: 50.0,
             location: [51.5074, -0.1278],
+            timezones: ArrayVec::new(),
             tempestas_enabled: true,
             status_enabled: true,
             layer: Layer::Top,

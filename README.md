@@ -41,6 +41,7 @@ programs.cantus = {
     monitor = "eDP-1";
     tempestas_enabled = true;
     location = [ 51.5 (-0.1) ];
+    timezones = [ "America/Los_Angeles" "Australia/Sydney" ];
     status_enabled = true;
     height = 40.0;
     timeline_future_minutes = 12.0;

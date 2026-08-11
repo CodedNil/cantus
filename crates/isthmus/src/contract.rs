@@ -1,5 +1,9 @@
 #[cfg(feature = "cpu")]
-use crate::{cpu::ResourceBindings, data::BufferData};
+use crate::{cpu::Binding, data::BufferData};
+pub use spirv_std::Sampler;
+use spirv_std::image::Image2dArray;
+#[cfg(feature = "cpu")]
+use std::vec::Vec;
 
 /// Values produced by a vertex shader before Isthmus lowers them to the GPU ABI.
 pub struct Vertex<T> {
@@ -7,8 +11,7 @@ pub struct Vertex<T> {
     pub varyings: T,
 }
 
-#[cfg(feature = "cpu")]
-pub struct Texture2DArray;
+pub type Texture2DArray = Image2dArray;
 
 /// Borrows a value directly from a generated shader storage binding.
 pub fn reference<T>(records: &[T], index: usize) -> &T {
@@ -34,9 +37,11 @@ pub struct Pipeline {
 #[cfg(feature = "cpu")]
 pub trait PassContract {
     type Instance: BufferData;
-    type Resources<'a>: ResourceBindings;
+    type Resources<'a>;
     const NAME: &'static str;
     const PIPELINE: Pipeline;
+
+    fn bindings(resources: Self::Resources<'_>) -> Vec<Binding>;
 }
 
 /// Verifies that a pass accepts a program's shared data.

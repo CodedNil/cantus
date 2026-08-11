@@ -70,6 +70,11 @@
     default = builtins.fromJSON "[51.50740051269531,-0.12780000269412994]";
     description = "Latitude and longitude used for the weather pill.";
   };
+  timezones = lib.mkOption {
+    type = lib.types.addCheck (lib.types.listOf (lib.types.str)) (xs: builtins.length xs <= 3);
+    default = builtins.fromJSON "[]";
+    description = "Up to three IANA timezones shown with approximate city weather.";
+  };
   status_enabled = lib.mkOption {
     type = lib.types.bool;
     default = builtins.fromJSON "true";

@@ -3,9 +3,9 @@ use crate::render::{
     shared::{FrameData, smoothstep},
 };
 use isthmus::{
+    Unorm8x4, Vertex,
     glam::{Vec2, Vec3, Vec4, vec2, vec3},
     spirv_std::arch::kill,
-    {contract::Vertex, data::Unorm8x4},
 };
 
 #[cfg(feature = "cpu")]
@@ -16,14 +16,13 @@ use {
         track,
     },
     core::f32::consts::TAU,
-    isthmus::Pass,
 };
 
 pub const PARTICLE_COUNT: usize = 64;
 
 #[isthmus::pass]
 pub struct ParticlePass {
-    pass: Pass<Self>,
+    instances: isthmus::Instances<Self>,
     accumulator: f32,
 }
 
@@ -47,7 +46,7 @@ pub struct Varyings {
 impl ParticlePass {
     pub fn new(passes: &Passes<'_>) -> Self {
         Self {
-            pass: passes.with_instances((), [Particle::default(); PARTICLE_COUNT]),
+            instances: passes.instances((), [Particle::default(); PARTICLE_COUNT]),
             accumulator: 0.0,
         }
     }
@@ -99,8 +98,7 @@ impl ParticlePass {
     }
 
     fn expired(&mut self, time: f32) -> impl Iterator<Item = &mut Particle> {
-        self.pass
-            .instances
+        self.instances
             .iter_mut()
             .filter(move |particle| time > particle.end_time)
     }

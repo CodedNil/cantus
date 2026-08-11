@@ -7,10 +7,15 @@ use isthmus::{
 #[cfg(target_arch = "spirv")]
 use isthmus::spirv_std::num_traits::Float;
 
+/// Where the drop shadow fades below the fragment kill threshold, plus an AA pixel.
+const SHADOW_REACH: f32 = 18.0;
+const ANTIALIAS_WIDTH: f32 = 0.55;
+
 /// Shared hover/click deformation used by every pill-shaped surface.
 #[derive(Clone, Copy)]
 pub struct PillInteraction {
     mouse_bulge: f32,
+    ripple_bulge: f32,
     pub ripple: Vec2,
     pub ripple_flash: f32,
 }
@@ -39,7 +44,7 @@ impl SdfSurface {
 
 impl PillInteraction {
     pub fn bulge(self, surface: SdfSurface) -> f32 {
-        self.mouse_bulge * hover_mask(surface.mouse_distance) + self.ripple.length() * 22.0
+        self.mouse_bulge * hover_mask(surface.mouse_distance) + self.ripple_bulge
     }
 
     /// Apply the shared hover/click expansion to an assembled signed-distance field.
@@ -124,9 +129,6 @@ pub fn pixel_to_ndc(pixel: Vec2, screen_size: Vec2) -> Vec4 {
     vec4(ndc.x, -ndc.y, 0.0, 1.0)
 }
 
-/// Where the drop shadow fades below the fragment kill threshold, plus an AA pixel.
-const SHADOW_REACH: f32 = 18.0;
-
 /// Pixels the pill can cover beyond its bounds: shadow always, bulges only while active.
 pub fn pill_margin(frame: &FrameData) -> f32 {
     let mut bulge = frame.mouse_pressure * 8.0;
@@ -156,8 +158,12 @@ pub fn pill_fragment(
     let size = vec2(width, frame.panel_height);
     let local = pixel - vec2(x, PANEL_START);
     let distance = sd_capsule_box(local - size * 0.5, (size.x - size.y) * 0.5, size.y * 0.5);
-    let mouse = frame.mouse_pos - vec2(x, PANEL_START) - size * 0.5;
-    let mouse_distance = sd_capsule_box(mouse, (size.x - size.y) * 0.5, size.y * 0.5);
+    let mouse_distance = if frame.mouse_pressure > 0.0 {
+        let mouse = frame.mouse_pos - vec2(x, PANEL_START) - size * 0.5;
+        sd_capsule_box(mouse, (size.x - size.y) * 0.5, size.y * 0.5)
+    } else {
+        1.0
+    };
     (
         pill_interaction(pixel, frame),
         local,
@@ -198,12 +204,15 @@ pub fn pill_interaction(pixel: Vec2, frame: &FrameData) -> PillInteraction {
     while index < frame.ripples.len() {
         let pulse = frame.ripples[index];
         let progress = ((frame.time - pulse.start_time) * 1.2).saturate();
-        let (direction, distance) = direction_and_length(pixel - pulse.origin);
-        let wave = smoothstep(80.0, 0.0, (distance - progress * 600.0).abs())
-            * pulse.strength
-            * (1.0 - progress);
-        ripple += direction * wave * (1.0 - progress) * 0.5;
-        ripple_flash = (ripple_flash + wave * 0.5).min(1.0);
+        // Uniform across the draw, so expired slots skip all per-pixel distance work.
+        if pulse.strength > 0.0 && progress < 1.0 {
+            let (direction, distance) = direction_and_length(pixel - pulse.origin);
+            let wave = smoothstep(80.0, 0.0, (distance - progress * 600.0).abs())
+                * pulse.strength
+                * (1.0 - progress);
+            ripple += direction * wave * (1.0 - progress) * 0.5;
+            ripple_flash = (ripple_flash + wave * 0.5).min(1.0);
+        }
         index += 1;
     }
 
@@ -214,6 +223,11 @@ pub fn pill_interaction(pixel: Vec2, frame: &FrameData) -> PillInteraction {
     };
     PillInteraction {
         mouse_bulge,
+        ripple_bulge: if ripple == Vec2::ZERO {
+            0.0
+        } else {
+            ripple.length() * 22.0
+        },
         ripple,
         ripple_flash,
     }
@@ -269,8 +283,6 @@ pub fn segment_distance(point: Vec2, start: Vec2, end: Vec2) -> f32 {
     let along = ((point - start).dot(segment) / segment.dot(segment).max(0.001)).saturate();
     (point - start - segment * along).length()
 }
-
-const ANTIALIAS_WIDTH: f32 = 0.55;
 
 /// Antialiased coverage of the outline of a shape at the given signed `distance`, `width` pixels wide.
 pub fn stroke(distance: f32, width: f32) -> f32 {

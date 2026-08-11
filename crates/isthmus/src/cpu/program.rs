@@ -1,22 +1,21 @@
 use super::buffer::DataBuffer;
-use super::surface::Acquire;
-use crate::cpu::context::Context;
-use crate::cpu::context::{Render, SetupError};
-use crate::cpu::pass::PassBuilder;
-use crate::cpu::surface::Present;
-use crate::cpu::surface::SurfaceTarget;
-use crate::data::BufferData;
-use core::slice::from_ref;
-use wgpu::{
-    AdapterInfo, Color, Instance, PowerPreference, ShaderModuleDescriptor, Surface, TextureFormat,
+use crate::{
+    cpu::{
+        context::{Context, Render, SetupError},
+        pass::PassBuilder,
+        surface::{Present, SurfaceTarget},
+    },
+    data::BufferData,
 };
+use core::slice::from_ref;
+use wgpu::{Color, Instance, PowerPreference, ShaderModuleDescriptor, Surface, TextureFormat};
 
 /// A GPU context with typed shared data, passes, and a render target.
 pub struct Program<SharedData, Passes, Target = SurfaceTarget<'static>> {
     context: Context,
     target: Target,
     shared: SharedData,
-    shared_buffer: DataBuffer,
+    shared_buffer: DataBuffer<SharedData>,
     passes: Passes,
 }
 
@@ -37,15 +36,14 @@ impl<SharedData, Passes, Target> Program<SharedData, Passes, Target> {
     {
         let validation = context.device().push_error_scope(wgpu::ErrorFilter::Validation);
         let shared = SharedData::default();
-        let shared_buffer =
-            DataBuffer::new::<SharedData>(context.device(), context.queue(), "Shared", 1);
+        let shared_buffer = DataBuffer::new(context.device(), context.queue(), "Shared", 1);
         let shader = context.device().create_shader_module(shader);
         let passes = build(&PassBuilder::new(
             context.device(),
             context.queue(),
             &shader,
             format,
-            shared_buffer.raw(),
+            &shared_buffer,
         ));
         let program = Self {
             context,
@@ -74,6 +72,10 @@ impl<SharedData, Passes, Target> Program<SharedData, Passes, Target> {
         self.context.device()
     }
 
+    pub fn adapter_info(&self) -> wgpu::AdapterInfo {
+        self.context.adapter().get_info()
+    }
+
     pub const fn passes_mut(&mut self) -> &mut Passes {
         &mut self.passes
     }
@@ -94,11 +96,11 @@ impl<'window, SharedData: BufferData + Default, Passes: Render>
         power_preference: PowerPreference,
         shader: ShaderModuleDescriptor<'_>,
         build: impl FnOnce(&PassBuilder<'_, SharedData>) -> Passes,
-    ) -> Result<(Self, AdapterInfo), SetupError> {
-        let (context, target, info) =
-            SurfaceTarget::create(instance, surface, width, height, power_preference).await?;
+    ) -> Result<Self, SetupError> {
+        let context = Context::new(instance, Some(&surface), power_preference).await?;
+        let target = SurfaceTarget::new(&context, surface, width, height)?;
         let format = target.format();
-        Ok((Self::new(context, target, format, shader, build).await?, info))
+        Self::new(context, target, format, shader, build).await
     }
 
     pub fn resize(&mut self, width: u32, height: u32) {
@@ -119,10 +121,8 @@ impl<'window, SharedData: BufferData + Default, Passes: Render>
         update: impl FnOnce(&mut SharedData, &mut Passes),
     ) -> Present {
         let frame = match self.target.acquire(&self.context) {
-            Acquire::Frame(frame) => frame,
-            Acquire::Unavailable => return Present::Unavailable,
-            Acquire::Lost => return Present::Lost,
-            Acquire::Validation => return Present::Validation,
+            Ok(frame) => frame,
+            Err(status) => return status,
         };
         self.update(update);
         self.context.draw(&frame.view, clear, &self.passes);

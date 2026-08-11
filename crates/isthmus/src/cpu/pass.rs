@@ -1,19 +1,15 @@
 use super::buffer::DataBuffer;
-use crate::contract::{PassContract, PassShared};
-use crate::cpu::Binding;
-use crate::cpu::FilteringSampler;
-use crate::cpu::ResourceBindings;
-use crate::cpu::Storage;
-use crate::cpu::context::Render;
-use crate::cpu::texture::FilterableFloatFormat;
-use crate::cpu::texture::{SampledTexture, SampledTextureDimension};
-use crate::data::BufferData;
-use core::{
-    marker::PhantomData,
-    ops::{Deref, DerefMut},
-    slice,
+use crate::{
+    contract::{PassContract, PassShared},
+    cpu::{
+        Binding, FilteringSampler, Storage,
+        context::Render,
+        texture::{FilterableFloatFormat, SampledTexture, SampledTextureDimension},
+    },
+    data::BufferData,
 };
-use std::{format, vec::Vec};
+use core::ops::{Deref, DerefMut};
+use std::{format, ops::Range, vec::Vec};
 use wgpu::{
     BindGroup, BindGroupDescriptor, BindGroupEntry, Buffer, ColorTargetState, ColorWrites, Device,
     FragmentState, MultisampleState, PipelineCompilationOptions, PrimitiveState, Queue, RenderPass,
@@ -26,17 +22,16 @@ pub struct PassBuilder<'a, Shared> {
     queue: &'a Queue,
     shader: &'a ShaderModule,
     format: TextureFormat,
-    shared: &'a Buffer,
-    shared_type: PhantomData<Shared>,
+    shared: &'a DataBuffer<Shared>,
 }
 
 impl<'a, Shared: BufferData> PassBuilder<'a, Shared> {
-    pub(crate) const fn new(
+    pub(super) const fn new(
         device: &'a Device,
         queue: &'a Queue,
         shader: &'a ShaderModule,
         format: TextureFormat,
-        shared: &'a Buffer,
+        shared: &'a DataBuffer<Shared>,
     ) -> Self {
         Self {
             device,
@@ -44,7 +39,6 @@ impl<'a, Shared: BufferData> PassBuilder<'a, Shared> {
             shader,
             format,
             shared,
-            shared_type: PhantomData,
         }
     }
 
@@ -87,55 +81,40 @@ impl<'a, Shared: BufferData> PassBuilder<'a, Shared> {
         Storage::new(self.device, self.queue, label, &values)
     }
 
+    pub fn storage_with_capacity<T: BufferData>(&self, label: &str, capacity: usize) -> Storage<T> {
+        Storage::with_capacity(self.device, self.queue, label, capacity)
+    }
+
     pub fn instances<S: PassContract + PassShared<Shared>>(
-        &self,
-        count: usize,
-        resources: S::Resources<'_>,
-    ) -> Pass<S> {
-        Pass {
-            core: self.build::<S>(count, resources.into_bindings()),
-            instances: Vec::with_capacity(count),
-        }
-    }
-
-    pub fn state<S: PassContract + PassShared<Shared>>(
-        &self,
-        resources: S::Resources<'_>,
-    ) -> StatePass<S>
-    where
-        S::Instance: Default,
-    {
-        self.state_with(resources, S::Instance::default())
-    }
-
-    pub fn state_with<S: PassContract + PassShared<Shared>>(
-        &self,
-        resources: S::Resources<'_>,
-        state: S::Instance,
-    ) -> StatePass<S> {
-        StatePass {
-            core: self.build::<S>(1, resources.into_bindings()),
-            state,
-        }
-    }
-
-    pub fn with_instances<S: PassContract + PassShared<Shared>>(
         &self,
         resources: S::Resources<'_>,
         instances: impl IntoIterator<Item = S::Instance>,
-    ) -> Pass<S> {
+    ) -> Instances<S> {
         let instances = instances.into_iter().collect::<Vec<_>>();
-        Pass {
-            core: self.build::<S>(instances.len(), resources.into_bindings()),
-            instances,
-        }
+        self.build(S::bindings(resources), instances)
     }
 
-    fn build<S: PassContract + PassShared<Shared>>(
+    pub fn instances_with_capacity<S: PassContract + PassShared<Shared>>(
         &self,
-        count: usize,
+        resources: S::Resources<'_>,
+        capacity: usize,
+    ) -> Instances<S> {
+        self.build(S::bindings(resources), Vec::with_capacity(capacity))
+    }
+
+    pub fn instance<S: PassContract + PassShared<Shared>>(
+        &self,
+        resources: S::Resources<'_>,
+        instance: S::Instance,
+    ) -> Instance<S> {
+        self.build(S::bindings(resources), Vec::from([instance]))
+    }
+
+    fn build<S: PassContract + PassShared<Shared>, const ONE: bool>(
+        &self,
         resources: Vec<Binding>,
-    ) -> PassCore {
+        instances: Vec<S::Instance>,
+    ) -> Instances<S, ONE> {
         let name = S::NAME;
         let entry = name.replace("::", "_");
         let pipeline = self.device.create_render_pipeline(&RenderPipelineDescriptor {
@@ -166,44 +145,39 @@ impl<'a, Shared: BufferData> PassBuilder<'a, Shared> {
             multiview_mask: None,
             cache: None,
         });
-        let buffer = DataBuffer::new::<S::Instance>(
+        let buffer = DataBuffer::new(
             self.device,
             self.queue,
             &format!("{name} Instances"),
-            count.max(1),
+            instances.capacity().max(instances.len()).max(1),
         );
-        let shared = S::SHARED_BUFFER.then(|| self.shared.clone());
+        let shared = S::SHARED_BUFFER.then(|| self.shared.raw().clone());
         let bind_group =
             create_bind_group(self.device, name, &pipeline, shared.as_ref(), &buffer, &resources);
-        PassCore {
+        Instances {
             pipeline,
-            vertices: S::PIPELINE.vertices,
             buffer,
             bind_group,
             shared,
             resources,
+            values: instances,
         }
     }
 }
 
-struct PassCore {
+/// The instance data and GPU state for one typed shader pass.
+pub struct Instances<S: PassContract, const ONE: bool = false> {
     pipeline: RenderPipeline,
-    vertices: u32,
-    buffer: DataBuffer,
+    buffer: DataBuffer<S::Instance>,
     bind_group: BindGroup,
     shared: Option<Buffer>,
     resources: Vec<Binding>,
+    values: Vec<S::Instance>,
 }
 
-impl PassCore {
-    fn draw<'pass>(&'pass self, pass: &mut RenderPass<'pass>, instances: u32) {
-        pass.set_pipeline(&self.pipeline);
-        pass.set_bind_group(0, &self.bind_group, &[]);
-        pass.draw(0..self.vertices, 0..instances);
-    }
-
-    fn upload<S: PassContract>(&mut self, instances: &[S::Instance]) {
-        if self.buffer.grow::<S::Instance>(instances.len()) {
+impl<S: PassContract, const ONE: bool> Render for Instances<S, ONE> {
+    fn prepare(&mut self) {
+        if self.buffer.grow(self.values.len()) {
             self.bind_group = create_bind_group(
                 self.buffer.device(),
                 S::NAME,
@@ -213,23 +187,19 @@ impl PassCore {
                 &self.resources,
             );
         }
-        self.buffer.upload(instances);
-    }
-}
-
-/// A GPU pass with a dynamic instance list.
-pub struct Pass<S: PassContract> {
-    core: PassCore,
-    pub instances: Vec<S::Instance>,
-}
-
-impl<S: PassContract> Render for Pass<S> {
-    fn prepare(&mut self) {
-        self.core.upload::<S>(&self.instances);
+        self.buffer.upload(&self.values);
     }
 
     fn draw<'pass>(&'pass self, pass: &mut RenderPass<'pass>) {
-        self.core.draw(pass, self.instances.len() as u32);
+        self.draw_range(pass, 0..self.values.len() as u32);
+    }
+}
+
+impl<S: PassContract, const ONE: bool> Instances<S, ONE> {
+    pub fn draw_range<'pass>(&'pass self, pass: &mut RenderPass<'pass>, instances: Range<u32>) {
+        pass.set_pipeline(&self.pipeline);
+        pass.set_bind_group(0, &self.bind_group, &[]);
+        pass.draw(0..S::PIPELINE.vertices, instances);
     }
 }
 
@@ -238,7 +208,7 @@ fn create_bind_group(
     name: &str,
     pipeline: &RenderPipeline,
     shared: Option<&Buffer>,
-    buffer: &DataBuffer,
+    buffer: &DataBuffer<impl BufferData>,
     resources: &[Binding],
 ) -> BindGroup {
     let mut entries = Vec::with_capacity(2 + resources.len());
@@ -268,31 +238,33 @@ fn create_bind_group(
     })
 }
 
-pub struct StatePass<S: PassContract> {
-    core: PassCore,
-    state: S::Instance,
-}
+impl<S: PassContract> Deref for Instances<S> {
+    type Target = Vec<S::Instance>;
 
-impl<S: PassContract> Render for StatePass<S> {
-    fn prepare(&mut self) {
-        self.core.upload::<S>(slice::from_ref(&self.state));
-    }
-
-    fn draw<'pass>(&'pass self, pass: &mut RenderPass<'pass>) {
-        self.core.draw(pass, 1);
+    fn deref(&self) -> &Self::Target {
+        &self.values
     }
 }
 
-impl<S: PassContract> Deref for StatePass<S> {
+impl<S: PassContract> DerefMut for Instances<S> {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        &mut self.values
+    }
+}
+
+/// A typed shader pass containing exactly one instance-data value.
+pub type Instance<S> = Instances<S, true>;
+
+impl<S: PassContract> Deref for Instance<S> {
     type Target = S::Instance;
 
     fn deref(&self) -> &Self::Target {
-        &self.state
+        &self.values[0]
     }
 }
 
-impl<S: PassContract> DerefMut for StatePass<S> {
+impl<S: PassContract> DerefMut for Instance<S> {
     fn deref_mut(&mut self) -> &mut Self::Target {
-        &mut self.state
+        &mut self.values[0]
     }
 }

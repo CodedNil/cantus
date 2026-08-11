@@ -1,7 +1,7 @@
 use core::{error::Error, fmt};
 use wgpu::{
-    Adapter, AdapterInfo, Color, CommandEncoderDescriptor, Device, DeviceDescriptor, Instance, Limits,
-    LoadOp, MemoryHints, Operations, PowerPreference, Queue, RenderPass, RenderPassColorAttachment,
+    Adapter, Color, CommandEncoderDescriptor, Device, DeviceDescriptor, Instance, Limits, LoadOp,
+    MemoryHints, Operations, PowerPreference, Queue, RenderPass, RenderPassColorAttachment,
     RenderPassDescriptor, RequestAdapterError, RequestAdapterOptions, RequestDeviceError, StoreOp,
     Surface, TextureView,
 };
@@ -64,7 +64,7 @@ impl Context {
         instance: &Instance,
         compatible_surface: Option<&Surface<'_>>,
         power_preference: PowerPreference,
-    ) -> Result<(Self, AdapterInfo), SetupError> {
+    ) -> Result<Self, SetupError> {
         let adapter = instance
             .request_adapter(&RequestAdapterOptions {
                 power_preference,
@@ -73,7 +73,6 @@ impl Context {
             })
             .await
             .map_err(SetupError::Adapter)?;
-        let info = adapter.get_info();
         let (device, queue) = adapter
             .request_device(&DeviceDescriptor {
                 required_limits: Limits::default().using_resolution(adapter.limits()),
@@ -82,14 +81,11 @@ impl Context {
             })
             .await
             .map_err(SetupError::Device)?;
-        Ok((
-            Self {
-                adapter,
-                device,
-                queue,
-            },
-            info,
-        ))
+        Ok(Self {
+            adapter,
+            device,
+            queue,
+        })
     }
 
     pub const fn device(&self) -> &Device {

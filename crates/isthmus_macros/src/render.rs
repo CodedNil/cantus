@@ -1,7 +1,8 @@
 use crate::isthmus_path;
 use proc_macro::TokenStream;
-use quote::quote;
-use syn::{Data, DeriveInput, Fields, parse_macro_input};
+use proc_macro2::TokenStream as TokenStream2;
+use quote::{ToTokens, quote};
+use syn::{Data, DeriveInput, Fields, Generics, Ident, parse_macro_input};
 
 pub fn derive(input: TokenStream) -> TokenStream {
     let input = parse_macro_input!(input as DeriveInput);
@@ -19,15 +20,21 @@ pub fn derive(input: TokenStream) -> TokenStream {
     let fields = fields.named.iter().filter_map(|field| {
         let skipped = field.attrs.iter().any(|attribute| {
             attribute.path().is_ident("render")
-                && attribute
-                    .parse_args::<syn::Ident>()
-                    .is_ok_and(|value| value == "skip")
+                && attribute.parse_args::<Ident>().is_ok_and(|value| value == "skip")
         });
         (!skipped).then(|| field.ident.as_ref().unwrap())
     });
-    let fields = fields.collect::<Vec<_>>();
+    implementation(name, &input.generics, fields).into()
+}
+
+pub fn implementation(
+    name: &Ident,
+    generics: &Generics,
+    fields: impl IntoIterator<Item = impl ToTokens>,
+) -> TokenStream2 {
+    let fields = fields.into_iter().collect::<Vec<_>>();
     let isthmus = isthmus_path();
-    let (impl_generics, type_generics, where_clause) = input.generics.split_for_impl();
+    let (impl_generics, type_generics, where_clause) = generics.split_for_impl();
     quote! {
         impl #impl_generics #isthmus::Render for #name #type_generics #where_clause {
             fn prepare(&mut self) {
@@ -42,5 +49,4 @@ pub fn derive(input: TokenStream) -> TokenStream {
             }
         }
     }
-    .into()
 }

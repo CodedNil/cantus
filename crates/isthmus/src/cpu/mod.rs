@@ -1,7 +1,6 @@
 use crate::data::BufferData;
 pub use ::wgpu;
 use core::marker::PhantomData;
-use std::vec::Vec;
 
 pub(crate) mod buffer;
 pub mod context;
@@ -9,10 +8,6 @@ pub mod pass;
 pub mod program;
 pub mod surface;
 pub mod texture;
-
-pub trait CpuResource {
-    fn clone_binding(&self) -> Binding;
-}
 
 pub enum Binding {
     Texture(wgpu::TextureView),
@@ -60,46 +55,48 @@ impl FilteringSampler {
     }
 }
 
-impl<D> CpuResource for TextureView<D> {
-    fn clone_binding(&self) -> Binding {
-        Binding::Texture(self.raw.clone())
+impl<D> From<&TextureView<D>> for Binding {
+    fn from(view: &TextureView<D>) -> Self {
+        Self::Texture(view.raw.clone())
     }
 }
 
-impl CpuResource for FilteringSampler {
-    fn clone_binding(&self) -> Binding {
-        Binding::Sampler(self.0.clone())
+impl From<&FilteringSampler> for Binding {
+    fn from(sampler: &FilteringSampler) -> Self {
+        Self::Sampler(sampler.0.clone())
     }
 }
 
-impl<T: BufferData> CpuResource for Storage<T> {
-    fn clone_binding(&self) -> Binding {
-        Binding::Storage(self.raw.clone())
+impl<T: BufferData> From<&Storage<T>> for Binding {
+    fn from(storage: &Storage<T>) -> Self {
+        Self::Storage(storage.buffer.raw().clone())
     }
 }
 
-/// Immutable typed data uploaded once and shared by any number of passes.
+/// Typed storage shared by any number of passes.
 pub struct Storage<T: BufferData> {
-    raw: wgpu::Buffer,
-    marker: PhantomData<T>,
+    buffer: buffer::DataBuffer<T>,
 }
 
 impl<T: BufferData> Storage<T> {
     pub(crate) fn new(device: &wgpu::Device, queue: &wgpu::Queue, label: &str, values: &[T]) -> Self {
-        let raw = buffer::storage(device, queue, label, values);
+        let mut storage = Self::with_capacity(device, queue, label, values.len());
+        storage.upload(values);
+        storage
+    }
+
+    pub(crate) fn with_capacity(
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        label: &str,
+        capacity: usize,
+    ) -> Self {
         Self {
-            raw,
-            marker: PhantomData,
+            buffer: buffer::DataBuffer::new(device, queue, label, capacity),
         }
     }
-}
 
-pub trait ResourceBindings {
-    fn into_bindings(self) -> Vec<Binding>;
-}
-
-impl ResourceBindings for () {
-    fn into_bindings(self) -> Vec<Binding> {
-        Vec::new()
+    pub fn upload(&mut self, values: &[T]) {
+        self.buffer.upload(values);
     }
 }

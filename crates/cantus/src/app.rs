@@ -28,10 +28,6 @@ pub const TRACK_SPACING_MS: f32 = 4000.0;
 pub type Update<T> = Box<dyn FnOnce(&mut T) + Send>;
 pub type AppUpdater = Sender<Update<CantusApp>>;
 
-pub fn send_update<T>(sender: &Sender<Update<T>>, update: impl FnOnce(&mut T) + Send + 'static) -> bool {
-    sender.send(Box::new(update)).is_ok()
-}
-
 pub struct CantusApp {
     pub(crate) render: RenderState,
     pub(crate) interaction: InteractionState,
@@ -57,6 +53,10 @@ impl Default for CantusApp {
             config,
         }
     }
+}
+
+pub fn send_update<T>(sender: &Sender<Update<T>>, update: impl FnOnce(&mut T) + Send + 'static) -> bool {
+    sender.send(Box::new(update)).is_ok()
 }
 
 pub fn run() {

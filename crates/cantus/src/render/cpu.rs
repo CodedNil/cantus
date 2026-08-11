@@ -6,20 +6,16 @@ use crate::{
         particles::ParticlePass,
         playhead::PlayheadPass,
         shared::{FrameData, GAP, PANEL_START, RipplePulse},
-        status::StatusPass,
-        tempestas::{EXTENSION, TempestasPass},
-        text::Font,
-        track::TrackPass,
+        status::{self, StatusPass},
+        tempestas::{self, EXTENSION, TempestasPass},
+        text::Renderer as TextRenderer,
+        track::{self, TrackPass},
     },
 };
 use isthmus::{
-    cpu::{
-        pass::PassBuilder,
-        program::Program,
-        surface::Present,
-        wgpu::{Color, Instance, PowerPreference, Surface},
-    },
+    PassBuilder, Present, Program, Render,
     glam::{Vec2, vec2},
+    wgpu::{Color, Instance, PowerPreference, RenderPass, Surface},
 };
 use std::{sync::Arc, time::Instant};
 
@@ -34,15 +30,13 @@ pub struct Frame<'a> {
     pub interaction: &'a mut InteractionState,
 }
 
-#[derive(isthmus::Render)]
 pub struct Systems {
     pub tempestas: Option<TempestasPass>,
     pub status: Option<StatusPass>,
     pub track: TrackPass,
     pub particles: ParticlePass,
     pub playhead: PlayheadPass,
-    #[render(skip)]
-    pub text_font: Font,
+    pub text: TextRenderer,
 }
 
 pub struct RenderState {
@@ -127,20 +121,30 @@ impl RenderState {
 
 impl Systems {
     fn new(passes: &Passes<'_>, app: &CantusApp) -> Self {
-        let sampler = passes.filtering_sampler("Linear Sampler");
-        let text_font = Font::new(passes);
+        let text = TextRenderer::new(
+            passes,
+            track::TEXT_GLYPHS + status::TEXT_GLYPHS + tempestas::TEXT_GLYPHS,
+        );
+        let tempestas = app.config.tempestas_enabled.then(|| {
+            TempestasPass::new(
+                passes,
+                &text,
+                app.config.location,
+                &app.config.timezones,
+                app.updater.clone(),
+            )
+        });
+        let status = app
+            .config
+            .status_enabled
+            .then(|| StatusPass::new(passes, &text, app.updater.clone()));
         Self {
-            tempestas: app.config.tempestas_enabled.then(|| {
-                TempestasPass::new(passes, app.config.location, app.updater.clone(), &text_font)
-            }),
-            status: app
-                .config
-                .status_enabled
-                .then(|| StatusPass::new(passes, app.updater.clone(), &text_font)),
-            track: TrackPass::new(passes, &sampler, &text_font),
+            tempestas,
+            status,
+            track: TrackPass::new(passes, &text),
             particles: ParticlePass::new(passes),
             playhead: PlayheadPass::new(passes),
-            text_font,
+            text,
         }
     }
 
@@ -148,9 +152,9 @@ impl Systems {
         &mut self,
         frame: &mut Frame<'_>,
         playback: &mut PlaybackState,
-
         last_toggle_time: &mut f32,
     ) {
+        self.text.begin();
         let status_width = self
             .status
             .as_ref()
@@ -161,21 +165,40 @@ impl Systems {
             .timeline_px_per_ms(frame.shared.screen_size.x, status_width);
         frame.shared.playhead_x = frame.config.playhead_x(frame.shared.px_per_ms);
         if let Some(tempestas) = self.tempestas.as_mut() {
-            tempestas.update(&self.text_font, self.status.as_mut(), frame);
+            tempestas.update(&mut self.text, self.status.as_mut(), frame);
         }
         if let Some(status) = self.status.as_mut() {
-            status.update(&self.text_font, frame);
+            status.update(&mut self.text, frame);
         }
         self.playhead.update(frame, playback, last_toggle_time);
-        self.track.update(&self.text_font, playback, frame);
+        self.track.update(&mut self.text, playback, frame);
         self.particles.update(&self.track, frame);
+        self.text.upload();
+    }
+}
+
+impl Render for Systems {
+    fn prepare(&mut self) {
+        Render::prepare(&mut self.tempestas);
+        Render::prepare(&mut self.status);
+        Render::prepare(&mut self.track);
+        Render::prepare(&mut self.particles);
+        Render::prepare(&mut self.playhead);
+    }
+
+    fn draw<'pass>(&'pass self, pass: &mut RenderPass<'pass>) {
+        Render::draw(&self.tempestas, pass);
+        Render::draw(&self.status, pass);
+        Render::draw(&self.track, pass);
+        Render::draw(&self.particles, pass);
+        Render::draw(&self.playhead, pass);
     }
 }
 
 impl CantusApp {
     pub fn initialize_gpu(&mut self, surface: Surface<'static>, width: u32, height: u32) {
         assert!(self.render.program.is_none(), "GPU initialized twice");
-        let (program, info) = pollster::block_on(Program::surface(
+        let program = pollster::block_on(Program::surface(
             &self.render.instance,
             surface,
             width,
@@ -185,6 +208,7 @@ impl CantusApp {
             |passes| Systems::new(passes, self),
         ))
         .expect("failed to initialize renderer");
+        let info = program.adapter_info();
         tracing::info!("Using adapter: {} ({:?})", info.name, info.device_type);
         program
             .device()
@@ -220,9 +244,6 @@ impl CantusApp {
     }
 
     pub fn render(&mut self) -> bool {
-        if self.render.program.is_none() {
-            return false;
-        }
         while let Ok(update) = self.app_updates.try_recv() {
             update(self);
         }

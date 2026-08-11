@@ -5,14 +5,8 @@ use crate::{
 use arrayvec::ArrayVec;
 use image::{DynamicImage, RgbaImage, imageops};
 use isthmus::{
-    Unorm8x4,
-    contract::Texture2DArray,
-    cpu::{
-        TextureView,
-        texture::{FilterableFloatFormat, SampledTexture},
-        wgpu::Extent3d,
-    },
-    glam::Vec3,
+    FilterableFloatFormat, SampledTexture, Texture2DArray, TextureView, Unorm8x4, glam::Vec3,
+    wgpu::Extent3d,
 };
 use palette::{Clamp, IntoColor, Lch, color_theory::Analogous};
 use std::{
@@ -22,6 +16,9 @@ use std::{
     sync::{Arc, Weak},
     time::Instant,
 };
+
+const MAX_TEXTURE_IMAGES: u32 = 32;
+pub const IMAGE_SIZE: u32 = 64;
 
 /// Album art for one slot, held beside the track or playlist that wants it.
 #[derive(Clone, Default)]
@@ -57,9 +54,6 @@ pub struct AlbumArt {
     /// RGB swatches with their relative influence.
     palette: [Unorm8x4; PALETTE_COLORS],
 }
-
-const MAX_TEXTURE_IMAGES: u32 = 32;
-pub const IMAGE_SIZE: u32 = 64;
 
 /// The album-art texture array the track shader samples from.
 pub struct ImageAtlas {

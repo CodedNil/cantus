@@ -1,22 +1,12 @@
 use crate::data::BufferData;
+use core::marker::PhantomData;
 use std::{string::String, vec::Vec};
 use wgpu::{Buffer, BufferDescriptor, BufferUsages, Device, Queue};
 
-pub(super) fn storage<T: BufferData>(device: &Device, queue: &Queue, label: &str, data: &[T]) -> Buffer {
-    let mut words = Vec::new();
-    encode(data, &mut words);
-    let raw = create::<T>(device, label, data.len());
-    if !words.is_empty() {
-        queue.write_buffer(&raw, 0, bytemuck::cast_slice(&words));
-    }
-    raw
-}
-
 fn create<T: BufferData>(device: &Device, label: &str, capacity: usize) -> Buffer {
-    let () = T::ASSERT_LAYOUT;
     device.create_buffer(&BufferDescriptor {
         label: Some(label),
-        size: (T::BUFFER_STRIDE * capacity.max(1)) as u64,
+        size: (T::BUFFER_STRIDE * capacity.max(1)).max(4) as u64,
         usage: BufferUsages::STORAGE | BufferUsages::COPY_DST,
         mapped_at_creation: false,
     })
@@ -30,29 +20,32 @@ fn encode<T: BufferData>(data: &[T], words: &mut Vec<u32>) {
     }
 }
 
-pub(super) struct DataBuffer {
+pub(super) struct DataBuffer<T> {
     device: Device,
     queue: Queue,
     label: String,
     raw: Buffer,
-    capacity: usize,
     words: Vec<u32>,
+    marker: PhantomData<T>,
 }
 
-impl DataBuffer {
-    pub fn new<T: BufferData>(device: &Device, queue: &Queue, label: &str, capacity: usize) -> Self {
+impl<T: BufferData> DataBuffer<T> {
+    pub fn new(device: &Device, queue: &Queue, label: &str, capacity: usize) -> Self {
         Self {
             device: device.clone(),
             queue: queue.clone(),
             label: label.into(),
             raw: create::<T>(device, label, capacity),
-            capacity,
             words: Vec::with_capacity(T::BUFFER_WORDS * capacity),
+            marker: PhantomData,
         }
     }
 
-    pub fn upload<T: BufferData>(&mut self, data: &[T]) {
-        assert!(data.len() <= self.capacity, "buffer capacity exceeded");
+    pub fn upload(&mut self, data: &[T]) {
+        assert!(
+            data.len() * T::BUFFER_STRIDE <= self.raw.size() as usize,
+            "buffer capacity exceeded"
+        );
         encode(data, &mut self.words);
         if !self.words.is_empty() {
             self.queue
@@ -60,14 +53,14 @@ impl DataBuffer {
         }
     }
 
-    pub fn grow<T: BufferData>(&mut self, capacity: usize) -> bool {
-        if capacity <= self.capacity {
+    pub fn grow(&mut self, capacity: usize) -> bool {
+        if capacity * T::BUFFER_STRIDE <= self.raw.size() as usize {
             return false;
         }
-        self.capacity = capacity.next_power_of_two();
-        self.raw = create::<T>(&self.device, &self.label, self.capacity);
+        let capacity = capacity.next_power_of_two();
+        self.raw = create::<T>(&self.device, &self.label, capacity);
         self.words
-            .reserve((T::BUFFER_WORDS * self.capacity).saturating_sub(self.words.capacity()));
+            .reserve((T::BUFFER_WORDS * capacity).saturating_sub(self.words.capacity()));
         true
     }
 

@@ -122,7 +122,7 @@ fn resource_cpu_type(ty: &Type) -> Result<TokenStream> {
     let name = &path.path.segments.last().unwrap().ident;
     if name == "Sampler" {
         Ok(quote!(#isthmus::FilteringSampler))
-    } else if name == "Image2dArray" {
+    } else if name == "Texture2DArray" {
         Ok(quote!(#isthmus::TextureView<#isthmus::Texture2DArray>))
     } else {
         Err(syn::Error::new_spanned(ty, "unsupported GPU resource type"))

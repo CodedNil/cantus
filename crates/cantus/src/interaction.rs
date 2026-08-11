@@ -17,25 +17,6 @@ pub struct Rect {
     pub y1: f32,
 }
 
-impl Rect {
-    pub const fn new(x0: f32, y0: f32, x1: f32, y1: f32) -> Self {
-        Self { x0, y0, x1, y1 }
-    }
-
-    pub const fn pill(x: f32, width: f32, height: f32) -> Self {
-        Self::new(x, PANEL_START, x + width, PANEL_START + height)
-    }
-
-    pub fn from_center(center: Vec2, half_size: Vec2) -> Self {
-        let (min, max) = (center - half_size, center + half_size);
-        Self::new(min.x, min.y, max.x, max.y)
-    }
-
-    pub fn contains(self, point: Vec2) -> bool {
-        point.x >= self.x0 && point.x <= self.x1 && point.y >= self.y0 && point.y <= self.y1
-    }
-}
-
 /// Where the pointer sits relative to the bar.
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Pointer {
@@ -70,6 +51,25 @@ pub struct Response {
     pub hovered: bool,
     pub pressed: bool,
     pub clicked: bool,
+}
+
+impl Rect {
+    pub const fn new(x0: f32, y0: f32, x1: f32, y1: f32) -> Self {
+        Self { x0, y0, x1, y1 }
+    }
+
+    pub const fn pill(x: f32, width: f32, height: f32) -> Self {
+        Self::new(x, PANEL_START, x + width, PANEL_START + height)
+    }
+
+    pub fn from_center(center: Vec2, half_size: Vec2) -> Self {
+        let (min, max) = (center - half_size, center + half_size);
+        Self::new(min.x, min.y, max.x, max.y)
+    }
+
+    pub fn contains(self, point: Vec2) -> bool {
+        point.x >= self.x0 && point.x <= self.x1 && point.y >= self.y0 && point.y <= self.y1
+    }
 }
 
 impl InteractionState {

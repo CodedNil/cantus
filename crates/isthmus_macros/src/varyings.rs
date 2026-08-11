@@ -23,6 +23,9 @@ pub fn derive(input: TokenStream) -> TokenStream {
                 }
             };
         }
+        #[doc(hidden)]
+        #[allow(unused_imports)]
+        pub(crate) use #bridge;
     }
     .into()
 }

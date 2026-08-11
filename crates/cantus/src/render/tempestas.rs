@@ -8,6 +8,7 @@ use crate::render::{
 };
 use core::f32::consts::PI;
 use isthmus::{
+    Unorm8x4, Vertex,
     glam::{FloatExt, Vec2, Vec3, Vec4, vec2, vec3},
     spirv_std::arch::kill,
 };
@@ -15,7 +16,6 @@ use isthmus::{
 #[cfg(target_arch = "spirv")]
 use isthmus::spirv_std::num_traits::Float;
 
-use isthmus::Vertex;
 #[cfg(feature = "cpu")]
 use {
     crate::{
@@ -30,14 +30,15 @@ use {
             text::TextStyle,
         },
     },
-    arrayvec::ArrayString,
-    isthmus::StatePass,
+    arrayvec::{ArrayString, ArrayVec},
+    isthmus::Storage,
     jiff::{
-        Span, Zoned,
+        Span, Timestamp, Zoned,
         civil::{DateTime, Time},
-        tz::Offset,
+        tz::{Offset, TimeZone},
     },
     std::{array::from_fn, fmt::Write},
+    tracing::warn,
 };
 
 /// Number of conditions shown in the hourly forecast row.
@@ -45,6 +46,38 @@ const HOURLY_FORECASTS: usize = 6;
 /// Hours between adjacent conditions in the hourly forecast row.
 const HOURLY_STEP_HOURS: usize = 4;
 const DAILY_FORECASTS: usize = 5;
+pub const MAX_WORLD_CLOCKS: usize = 3;
+pub const WIDTH: f32 = UNIT * 77.0;
+pub const FORECAST_X: f32 = WIDTH + GAP;
+pub const EXTENSION: f32 = UNIT * 61.0;
+const WEEKDAY_COUNT: usize = 7;
+const GRID_ROWS: usize = 6;
+const GRID_CELLS: usize = WEEKDAY_COUNT * GRID_ROWS;
+const GRID_ROW_HEIGHT: f32 = UNIT * 6.0;
+const GRID_TOP_Y: f32 = UNIT * 24.0;
+const WEEKDAY_Y: f32 = UNIT * 17.0;
+const TITLE: Vec2 = Vec2::new(WIDTH * 0.5, UNIT * 10.0);
+const TITLE_LINE: usize = 1;
+const ARROW_LINES: usize = 2;
+const DETAILS_LINE: usize = 4;
+const FORECAST_LINES: usize = 5;
+const DAILY_LINES: usize = FORECAST_LINES + HOURLY_FORECASTS * 2;
+const WEEKDAY_LINES: usize = DAILY_LINES + DAILY_FORECASTS * 2;
+const GRID_LINES: usize = WEEKDAY_LINES + WEEKDAY_COUNT;
+const WORLD_CLOCK_LINES: usize = GRID_LINES + GRID_CELLS;
+#[cfg(feature = "cpu")]
+const MAX_TEXT_LINES: usize = WORLD_CLOCK_LINES + MAX_WORLD_CLOCKS * 2;
+#[cfg(feature = "cpu")]
+pub(crate) const TEXT_GLYPHS: usize = 768;
+
+#[cfg(feature = "cpu")]
+const DETAILS_STYLE: TextStyle = TextStyle::new(14.0, 700.0);
+#[cfg(feature = "cpu")]
+const WEATHER_STYLE: TextStyle = TextStyle::new(24.0, 600.0);
+#[cfg(feature = "cpu")]
+const TITLE_STYLE: TextStyle = TextStyle::new(20.0, 750.0);
+#[cfg(feature = "cpu")]
+const CLOCK_STYLE: TextStyle = TextStyle::new(12.0, 700.0);
 
 #[isthmus::data]
 #[derive(Default)]
@@ -53,78 +86,9 @@ pub struct WeatherSurface {
     pub calendar_expansion: f32,
     pub sun_hours: [f32; 2],
     pub hourly_start: f32,
-    pub today_index: i32,
-    pub month_range: [u32; 2],
     pub text_hover: [f32; 3],
     pub hourly_conditions: [WeatherCondition; HOURLY_FORECASTS],
     pub daily_conditions: [WeatherCondition; DAILY_FORECASTS],
-    pub text: text::Text<{ DAY_TEXT + GRID_CELLS }, 512>,
-}
-
-const WEEKDAY_COUNT: usize = 7;
-const GRID_ROWS: usize = 6;
-const GRID_CELLS: usize = WEEKDAY_COUNT * GRID_ROWS;
-const GRID_ROW_HEIGHT: f32 = UNIT * 6.0;
-const GRID_TOP_Y: f32 = UNIT * 24.0;
-const WEEKDAY_Y: f32 = UNIT * 17.0;
-const TITLE: Vec2 = Vec2::new(WIDTH * 0.5, UNIT * 10.0);
-const DETAILS_POS: Vec2 = Vec2::new(FORECAST_X + WIDTH * 0.5, TITLE.y);
-/// Month title's zone; fits the title at hover scale and clears the arrows.
-const TITLE_HALF_WIDTH: f32 = UNIT * 26.0;
-
-const WEATHER_TEXT: usize = 0;
-const TITLE_TEXT: usize = WEATHER_TEXT + 1;
-const ARROW_TEXT: usize = TITLE_TEXT + 1;
-const DETAILS_TEXT: usize = ARROW_TEXT + 2;
-const HOURLY_TEXT: usize = DETAILS_TEXT + 1;
-const DAILY_TEXT: usize = HOURLY_TEXT + HOURLY_FORECASTS * 2;
-const WEEKDAY_TEXT: usize = DAILY_TEXT + DAILY_FORECASTS * 2;
-const DAY_TEXT: usize = WEEKDAY_TEXT + WEEKDAY_COUNT;
-const TEXT_COLOR: Vec3 = Vec3::splat(0.94);
-const TODAY_COLOR: Vec3 = Vec3::new(1.0, 0.68, 0.68);
-#[cfg(feature = "cpu")]
-const PRIMARY_STYLE: TextStyle = TextStyle::new(16.0, 700.0);
-#[cfg(feature = "cpu")]
-const TODAY_STYLE: TextStyle = TextStyle::new(16.0, 900.0);
-#[cfg(feature = "cpu")]
-const DETAILS_STYLE: TextStyle = TextStyle::new(14.0, 700.0);
-#[cfg(feature = "cpu")]
-const WEATHER_STYLE: TextStyle = TextStyle::new(24.0, 600.0);
-#[cfg(feature = "cpu")]
-const TITLE_STYLE: TextStyle = TextStyle::new(20.0, 750.0);
-
-fn grid_cell(index: usize) -> Vec2 {
-    let column_width = WIDTH / WEEKDAY_COUNT as f32;
-    vec2(
-        (index % WEEKDAY_COUNT) as f32 * column_width + column_width * 0.5,
-        GRID_TOP_Y + (index / WEEKDAY_COUNT) as f32 * GRID_ROW_HEIGHT,
-    )
-}
-
-fn grid_column(x: f32) -> usize {
-    let column_width = WIDTH / WEEKDAY_COUNT as f32;
-    (x / column_width).floor().clamp(0.0, WEEKDAY_COUNT as f32 - 1.0) as usize
-}
-
-fn grid_index(local: Vec2) -> usize {
-    let row = ((local.y - GRID_TOP_Y) / GRID_ROW_HEIGHT + 0.5)
-        .floor()
-        .clamp(0.0, GRID_ROWS as f32 - 1.0) as usize;
-    row * WEEKDAY_COUNT + grid_column(local.x)
-}
-
-fn forecast_index(local: Vec2, row_height: f32) -> (bool, usize) {
-    let daily = local.y > forecast_split(row_height);
-    let count = if daily { DAILY_FORECASTS } else { HOURLY_FORECASTS };
-    let column = forecast_position(local.x - FORECAST_X, count)
-        .round()
-        .clamp(0.0, (count - 1) as f32) as usize;
-    // Not `f32::from(bool)`: it lowers through a `u8` cast, which needs `OpCapability Int8`.
-    let row = if daily { 1.0 } else { 0.0 };
-    (
-        daily,
-        column * 2 + usize::from(local.y >= forecast_center(row_height, row)),
-    )
 }
 
 #[isthmus::data]
@@ -136,6 +100,76 @@ pub struct WeatherCondition {
     pub snow: f32,
     pub lightning: f32,
     pub hail: f32,
+}
+
+#[cfg(feature = "cpu")]
+#[derive(Default)]
+struct ForecastItem {
+    text: [String; 2],
+    hover_text: String,
+}
+
+#[cfg(feature = "cpu")]
+struct WorldClock {
+    label: String,
+    timezone: TimeZone,
+    weather: String,
+}
+
+#[isthmus::pass]
+pub struct TempestasPass {
+    pub pill: isthmus::Instance<Self>,
+    text_lines: Storage<WeatherLine>,
+    labels: Vec<WeatherLine>,
+    temperature: String,
+    utc_offset: Option<Offset>,
+    details: String,
+    hourly: [ForecastItem; HOURLY_FORECASTS],
+    daily: [ForecastItem; DAILY_FORECASTS],
+    timezones: ArrayVec<WorldClock, MAX_WORLD_CLOCKS>,
+    month_offset: i32,
+}
+
+#[derive(isthmus::Varyings)]
+pub struct TempestasVaryings {
+    pub pixel: Vec2,
+    #[gpu(flat)]
+    pub weather: Vec4,
+}
+
+#[isthmus::data]
+#[derive(Default)]
+pub struct WeatherLine {
+    pub line: text::Line,
+    pub color: Unorm8x4,
+}
+
+#[cfg(feature = "cpu")]
+struct Labels<'a> {
+    lines: &'a mut Vec<WeatherLine>,
+    text: &'a mut text::Renderer,
+    origin: Vec2,
+}
+
+#[cfg(feature = "cpu")]
+impl Labels<'_> {
+    fn centered(&mut self, content: &str, style: TextStyle, center: Vec2, color: Vec4) {
+        self.lines.push(WeatherLine {
+            line: self.text.centered(content, style, self.origin + center),
+            color: Unorm8x4::from_vec4(color),
+        });
+    }
+
+    fn pair(&mut self, content: [&str; 2], style: TextStyle, center: Vec2, opacity: [f32; 2]) {
+        for (line, content) in content.into_iter().enumerate() {
+            self.centered(
+                content,
+                style,
+                center + vec2(0.0, (line as f32 * 2.0 - 1.0) * GAP),
+                text::COLOR.extend(opacity[line]),
+            );
+        }
+    }
 }
 
 impl WeatherCondition {
@@ -152,13 +186,14 @@ impl WeatherCondition {
     }
 }
 
-pub const WIDTH: f32 = UNIT * 77.0;
-pub const FORECAST_X: f32 = WIDTH + GAP;
-pub const EXTENSION: f32 = UNIT * 61.0;
-const HEADER_BOTTOM: f32 = UNIT * 14.0;
-const REVEAL_START: f32 = 0.5;
-const REVEAL_SPREAD: f32 = 0.18;
-const REVEAL_DURATION: f32 = 0.24;
+#[cfg(feature = "cpu")]
+fn grid_cell(index: usize) -> Vec2 {
+    let column_width = WIDTH / WEEKDAY_COUNT as f32;
+    vec2(
+        (index % WEEKDAY_COUNT) as f32 * column_width + column_width * 0.5,
+        GRID_TOP_Y + (index / WEEKDAY_COUNT) as f32 * GRID_ROW_HEIGHT,
+    )
+}
 
 fn expanded_x(x: f32, expansion: f32) -> f32 {
     x - FORECAST_X * expansion * 0.5
@@ -169,7 +204,7 @@ fn popup_size(expansion: f32) -> Vec2 {
 }
 
 fn forecast_center(height: f32, row: f32) -> f32 {
-    HEADER_BOTTOM + height * 0.5 + row * (height + GAP)
+    UNIT * 14.0 + height * 0.5 + row * (height + GAP)
 }
 
 /// The y that divides the hourly forecast row from the daily one.
@@ -183,9 +218,18 @@ fn forecast_row(height: f32, row: f32) -> (Vec2, Vec2) {
     (center - size * 0.5, size)
 }
 
+fn world_clock_center(height: f32, index: usize) -> f32 {
+    forecast_center(height, 1.0) + height * 0.5 + UNIT * (3.5 + index as f32 * 7.0)
+}
+
 fn reveal_progress(expansion: f32, y: f32) -> f32 {
-    let delay = REVEAL_START + (y / EXTENSION) * REVEAL_SPREAD;
-    smoothstep(delay, delay + REVEAL_DURATION, expansion)
+    let delay = 0.5 + (y / EXTENSION) * 0.18;
+    smoothstep(delay, delay + 0.24, expansion)
+}
+
+#[isthmus::outline]
+fn cell_index(value: f32, start: f32, size: f32, last: f32) -> usize {
+    ((value - start) / size).floor().max(0.0).min(last) as usize
 }
 
 /// Sun phase (0 at sunrise, 1 at sunset) and height (-1 to 1) for the given hour.
@@ -240,7 +284,7 @@ fn precipitation(p: Vec2, time: f32, kind: i32, strength: f32) -> Vec4 {
 
 /// How much each sky palette contributes at a given sun height.
 #[derive(Clone, Copy)]
-pub struct SkyPhase {
+struct SkyPhase {
     daylight: f32,
     blue_hour: f32,
     twilight: f32,
@@ -267,8 +311,7 @@ impl SkyPhase {
     }
 }
 
-/// Sky backdrop for the status pill, sampled at pixel position `p`.
-pub fn scene(
+fn scene(
     frame: &FrameData,
     p: Vec2,
     width: f32,
@@ -383,98 +426,167 @@ fn forecast_position(x: f32, count: usize) -> f32 {
     (x / WIDTH * count as f32 - 0.5).clamp(0.0, (count - 1) as f32)
 }
 
+fn main_surface(
+    pixel: Vec2,
+    frame: &FrameData,
+    pill_x: f32,
+    expansion: f32,
+    body: SdfSurface,
+) -> SdfSurface {
+    let size = popup_size(expansion);
+    let origin = vec2(expanded_x(pill_x, expansion), PANEL_START + frame.panel_height);
+    let gap = GAP * expansion;
+    let box_size = vec2(size.x, (size.y - gap).max(0.0));
+    let popup = |point: Vec2| {
+        sd_rounded_box(
+            point - origin - vec2(size.x * 0.5, gap + box_size.y * 0.5),
+            box_size * 0.5,
+            (box_size.y * 0.5).min(18.0),
+        )
+    };
+    body.smooth_union(
+        SdfSurface::new(popup(pixel), popup(frame.mouse_pos)),
+        56.0,
+        expansion,
+    )
+}
+
+fn forecast_geometry(
+    pixel: Vec2,
+    frame: &FrameData,
+    pill_x: f32,
+    expansion: f32,
+    row: f32,
+) -> (Vec2, Vec2, SdfSurface, f32) {
+    let reveal = reveal_progress(expansion, forecast_center(frame.panel_height, row));
+    let (row_origin, full_size) = forecast_row(frame.panel_height, row);
+    let size = full_size * reveal;
+    let origin = vec2(expanded_x(pill_x, 1.0), PANEL_START + frame.panel_height)
+        + row_origin
+        + (full_size - size) * 0.5;
+    let capsule = |point: Vec2| {
+        if reveal <= 0.001 {
+            f32::MAX
+        } else {
+            sd_capsule_box(point - origin - size * 0.5, (size.x - size.y) * 0.5, size.y * 0.5)
+        }
+    };
+    (
+        pixel - origin,
+        size,
+        SdfSurface::new(capsule(pixel), capsule(frame.mouse_pos)),
+        reveal,
+    )
+}
+
 struct ForecastSample {
     local: Vec2,
     size: Vec2,
     surface: SdfSurface,
     reveal: f32,
-    position: f32,
-    daily: bool,
-}
-
-impl ForecastSample {
-    fn weather(&self, pill: &WeatherSurface) -> (WeatherCondition, f32) {
-        let index = self.position.floor() as usize;
-        if self.daily {
-            (
-                pill.daily_conditions[index].lerp(
-                    pill.daily_conditions[(index + 1).min(DAILY_FORECASTS - 1)],
-                    smoothstep(0.0, 1.0, self.position.fract()),
-                ),
-                sun_position(12.0, pill.sun_hours)[1],
-            )
-        } else {
-            (
-                pill.hourly_conditions[index].lerp(
-                    pill.hourly_conditions[(index + 1).min(HOURLY_FORECASTS - 1)],
-                    smoothstep(0.0, 1.0, self.position.fract()),
-                ),
-                sun_position(
-                    (pill.hourly_start + self.position * HOURLY_STEP_HOURS as f32) % 24.0,
-                    pill.sun_hours,
-                )[1],
-            )
-        }
-    }
+    conditions: WeatherCondition,
+    sun_height: f32,
 }
 
 fn sample_forecast(pixel: Vec2, frame: &FrameData, pill: &WeatherSurface) -> ForecastSample {
-    let body_bottom = PANEL_START + frame.panel_height;
-    let content_origin = vec2(expanded_x(pill.x, 1.0), body_bottom);
-    let content = pixel - content_origin;
-    let daily = content.y > forecast_split(frame.panel_height);
+    let daily = pixel.y - PANEL_START - frame.panel_height > forecast_split(frame.panel_height);
     let row = if daily { 1.0 } else { 0.0 };
-    let reveal = reveal_progress(pill.calendar_expansion, forecast_center(frame.panel_height, row));
-    let (full_origin, full_size) = forecast_row(frame.panel_height, row);
-    let size = full_size * reveal;
-    let origin = full_origin + (full_size - size) * 0.5;
-    let local = content - origin;
-    let capsule = |point: Vec2| {
-        if reveal <= 0.001 {
-            f32::MAX
-        } else {
-            sd_capsule_box(point - size * 0.5, (size.x - size.y) * 0.5, size.y * 0.5)
-        }
-    };
+    let (local, size, surface, reveal) =
+        forecast_geometry(pixel, frame, pill.x, pill.calendar_expansion, row);
     let forecast_x = local.x / size.x.max(0.001) * WIDTH;
     let position = if daily {
         forecast_position(forecast_x, DAILY_FORECASTS)
     } else {
         forecast_position(forecast_x, HOURLY_FORECASTS)
     };
+    let index = position.floor() as usize;
+    let amount = smoothstep(0.0, 1.0, position.fract());
+    let (conditions, next, hour) = if daily {
+        (
+            pill.daily_conditions[index],
+            pill.daily_conditions[(index + 1).min(DAILY_FORECASTS - 1)],
+            12.0,
+        )
+    } else {
+        (
+            pill.hourly_conditions[index],
+            pill.hourly_conditions[(index + 1).min(HOURLY_FORECASTS - 1)],
+            (pill.hourly_start + position * HOURLY_STEP_HOURS as f32) % 24.0,
+        )
+    };
     ForecastSample {
         local,
         size,
-        surface: SdfSurface::new(capsule(local), capsule(frame.mouse_pos - content_origin - origin)),
+        surface,
         reveal,
-        position,
-        daily,
+        conditions: conditions.lerp(next, amount),
+        sun_height: sun_position(hour, pill.sun_hours)[1],
     }
 }
 
-#[cfg(feature = "cpu")]
-#[derive(Default)]
-struct ForecastItem {
-    text: [String; 2],
-    hover_text: String,
-}
-
-#[isthmus::pass]
-pub struct TempestasPass {
-    pub pill: StatePass<Self>,
-    temperature: String,
-    utc_offset: Option<Offset>,
-    details: String,
-    hourly: [ForecastItem; HOURLY_FORECASTS],
-    daily: [ForecastItem; DAILY_FORECASTS],
-    month_offset: i32,
-}
-
-#[derive(isthmus::Varyings)]
-pub struct Varyings {
-    pub pixel: Vec2,
-    #[gpu(flat)]
-    pub weather: Vec4,
+/// Selects the only text line whose spatial cell can cover `pixel`.
+fn text_line_index(pixel: Vec2, frame: &FrameData, pill: &WeatherSurface) -> usize {
+    let popup_origin = vec2(expanded_x(pill.x, 1.0), PANEL_START + frame.panel_height);
+    if pixel.y < popup_origin.y {
+        return 0;
+    }
+    let local = pixel - popup_origin;
+    if local.x >= FORECAST_X {
+        let first_forecast = forecast_center(frame.panel_height, 0.0);
+        if local.y < (TITLE.y + first_forecast) * 0.5 {
+            return DETAILS_LINE;
+        }
+        let first_clock = world_clock_center(frame.panel_height, 0);
+        if local.y > first_clock - UNIT * 3.5 {
+            let clock = cell_index(
+                local.y,
+                first_clock - UNIT * 3.5,
+                UNIT * 7.0,
+                (MAX_WORLD_CLOCKS - 1) as f32,
+            );
+            let center = world_clock_center(frame.panel_height, clock);
+            return WORLD_CLOCK_LINES + clock * 2 + usize::from(local.y > center);
+        }
+        let daily = local.y > forecast_split(frame.panel_height);
+        let (base, count, center) = if daily {
+            (
+                DAILY_LINES,
+                DAILY_FORECASTS,
+                forecast_center(frame.panel_height, 1.0),
+            )
+        } else {
+            (FORECAST_LINES, HOURLY_FORECASTS, first_forecast)
+        };
+        let column = cell_index(local.x, FORECAST_X, WIDTH / count as f32, (count - 1) as f32);
+        return base + column * 2 + usize::from(local.y > center);
+    }
+    if local.y < (TITLE.y + WEEKDAY_Y) * 0.5 {
+        let reveal = reveal_progress(pill.calendar_expansion, TITLE.y);
+        let offset = (WIDTH * 0.5 - UNIT * 7.0) * reveal;
+        if (local.x - (TITLE.x - offset)).abs() < UNIT * 5.0 {
+            return ARROW_LINES;
+        }
+        if (local.x - (TITLE.x + offset)).abs() < UNIT * 5.0 {
+            return ARROW_LINES + 1;
+        }
+        return TITLE_LINE;
+    }
+    let column = cell_index(
+        local.x,
+        0.0,
+        WIDTH / WEEKDAY_COUNT as f32,
+        (WEEKDAY_COUNT - 1) as f32,
+    );
+    if local.y < (WEEKDAY_Y + GRID_TOP_Y) * 0.5 {
+        return WEEKDAY_LINES + column;
+    }
+    let row = cell_index(
+        local.y,
+        GRID_TOP_Y - GRID_ROW_HEIGHT * 0.5,
+        GRID_ROW_HEIGHT,
+        (GRID_ROWS - 1) as f32,
+    );
+    GRID_LINES + row * WEEKDAY_COUNT + column
 }
 
 #[isthmus::pass]
@@ -484,7 +596,7 @@ impl TempestasPass {
         #[gpu(vertex_index)] vertex: u32,
         #[gpu(shared)] frame: FrameData,
         #[gpu(instance)] pill: WeatherSurface,
-    ) -> Vertex<Varyings> {
+    ) -> Vertex<TempestasVaryings> {
         let expansion = smoothstep(0.0, 1.0, pill.calendar_expansion);
         let sun = sun_position(frame.weather_hour, pill.sun_hours);
         let weather = vec3(sun[0], sun[1], sun_position(12.0, pill.sun_hours)[1]).extend(expansion);
@@ -497,39 +609,23 @@ impl TempestasPass {
         );
         Vertex {
             position,
-            varyings: Varyings { pixel, weather },
+            varyings: TempestasVaryings { pixel, weather },
         }
     }
 
     #[gpu]
     pub fn fragment(
-        Varyings { pixel, weather }: Varyings,
+        TempestasVaryings { pixel, weather }: TempestasVaryings,
         #[gpu(shared)] frame: FrameData,
         #[gpu(instance)] pill: WeatherSurface,
+        #[gpu(resource)] text_lines: &[WeatherLine],
+        #[gpu(resource)] placed_glyphs: &[text::PlacedGlyph],
         #[gpu(resource)] glyphs: &[text::Glyph],
         #[gpu(resource)] edges: &[text::Edge],
     ) -> Vec4 {
         let (_, body_local, body_size, body_surface) = pill_fragment(pixel, frame, pill.x, WIDTH);
         let expansion = weather.w;
-        let body_bottom = PANEL_START + frame.panel_height;
-        let popup_size = popup_size(expansion);
-        let popup_origin = vec2(expanded_x(pill.x, expansion), body_bottom);
-        let popup_local = pixel - popup_origin;
-        let content_local = pixel - vec2(expanded_x(pill.x, 1.0), body_bottom);
-        let top_gap = GAP * expansion;
-        let box_size = vec2(popup_size.x, (popup_size.y - top_gap).max(0.0));
-        let popup = |point: Vec2| {
-            sd_rounded_box(
-                point - vec2(popup_size.x * 0.5, top_gap + box_size.y * 0.5),
-                box_size * 0.5,
-                (box_size.y * 0.5).min(18.0),
-            )
-        };
-        let main_surface = body_surface.smooth_union(
-            SdfSurface::new(popup(popup_local), popup(frame.mouse_pos - popup_origin)),
-            56.0,
-            expansion,
-        );
+        let main_surface = main_surface(pixel, frame, pill.x, expansion, body_surface);
         let interaction = pill_interaction(pixel, frame);
         let main_surface_distance = interaction.expand(main_surface);
 
@@ -553,13 +649,12 @@ impl TempestasPass {
             main_refracted
         };
         let row_blend = sdf_coverage(row_surface_distance) * row.reveal;
-        let (row_conditions, row_sun_height) = row.weather(pill);
         let sample = (main_refracted * body_size).lerp(row_refracted * row.size, row_blend);
         let scene_width = body_size.x + (row.size.x - body_size.x) * row_blend;
         let scene_distance = main_surface_distance
             + (row_surface_distance.min(1000.0) - main_surface_distance) * row_blend;
-        let conditions = main_conditions.lerp(row_conditions, row_blend);
-        let phase = SkyPhase::new(weather.y).lerp(SkyPhase::new(row_sun_height), row_blend);
+        let conditions = main_conditions.lerp(row.conditions, row_blend);
+        let phase = SkyPhase::new(weather.y).lerp(SkyPhase::new(row.sun_height), row_blend);
         let mut color = scene(frame, sample, scene_width, scene_distance, phase, conditions);
         if body_surface.distance < 1.0 {
             color = color.lerp(
@@ -574,52 +669,12 @@ impl TempestasPass {
                 smoothstep(1.0, -body_size.y * 0.25, body_surface.distance),
             );
         }
-        let mut line = WEATHER_TEXT;
-        let mut line_local = body_local;
-        let mut line_color = TEXT_COLOR;
-        let line_visibility = if pill.calendar_expansion > 0.0 && content_local.y >= 0.0 {
-            line = DETAILS_TEXT;
-            line_local = content_local;
-            let mut line_y = DETAILS_POS.y;
-            let mut line_opacity = 1.0;
-            if content_local.x < WIDTH {
-                if content_local.y < (TITLE.y + WEEKDAY_Y) * 0.5 {
-                    let side = content_local.x - WIDTH * 0.5;
-                    line = if side < -TITLE_HALF_WIDTH {
-                        ARROW_TEXT
-                    } else if side > TITLE_HALF_WIDTH {
-                        ARROW_TEXT + 1
-                    } else {
-                        TITLE_TEXT
-                    };
-                    line_y = TITLE.y;
-                } else if content_local.y < (WEEKDAY_Y + GRID_TOP_Y) * 0.5 {
-                    line = WEEKDAY_TEXT + grid_column(content_local.x);
-                    line_y = WEEKDAY_Y;
-                    line_opacity = 0.75;
-                } else {
-                    let day = grid_index(content_local);
-                    line = DAY_TEXT + day;
-                    line_y = grid_cell(day).y;
-                    if day as i32 == pill.today_index {
-                        line_color = TODAY_COLOR;
-                    }
-                    if day < pill.month_range[0] as usize || day >= pill.month_range[1] as usize {
-                        line_opacity = 0.32;
-                    }
-                }
-            } else if content_local.x >= FORECAST_X && content_local.y >= HEADER_BOTTOM {
-                let (daily, index) = forecast_index(content_local, frame.panel_height);
-                line = if daily { DAILY_TEXT } else { HOURLY_TEXT } + index;
-                line_y = forecast_center(frame.panel_height, if daily { 1.0 } else { 0.0 });
-            }
-            reveal_progress(pill.calendar_expansion, line_y) * line_opacity
-        } else {
-            1.0
-        };
-        let distance = text::line_distance(&pill.text, line, glyphs, edges, line_local);
-        color = color.lerp(line_color, text::alpha(distance) * line_visibility);
         color = color.lerp(color * 1.5 + 0.1, interaction.ripple_flash);
+        let label = text_lines[text_line_index(pixel, frame, pill)];
+        let label_color = label.color.to_vec4();
+        let text_alpha =
+            text::line_alpha(label.line, placed_glyphs, glyphs, edges, pixel) * label_color.w;
+        color = color * (1.0 - text_alpha) + label_color.truncate() * text_alpha;
         (color * mask).extend(alpha)
     }
 
@@ -642,27 +697,51 @@ impl TempestasPass {
         [pill, Rect::new(x, pill.y1, x + size.x, pill.y1 + size.y)]
     }
 
-    pub fn new(passes: &Passes<'_>, location: [f32; 2], updater: AppUpdater, font: &text::Font) -> Self {
-        let [latitude, longitude] = location;
-        openmeteo::spawn_refresh_loop(latitude, longitude, updater);
-        let pill = passes.state_with(
-            Resources {
-                glyphs: &font.glyphs,
-                edges: &font.edges,
-            },
+    pub fn new(
+        passes: &Passes<'_>,
+        text: &text::Renderer,
+        location: [f32; 2],
+        timezones: &[String],
+        updater: AppUpdater,
+    ) -> Self {
+        let mut forecast_timezones = Vec::with_capacity(timezones.len());
+        let timezones: ArrayVec<_, MAX_WORLD_CLOCKS> = timezones
+            .iter()
+            .filter_map(|name| match TimeZone::get(name) {
+                Ok(timezone) => {
+                    forecast_timezones.push(name.clone());
+                    Some(WorldClock {
+                        label: name.rsplit('/').next().unwrap_or(name).replace('_', " "),
+                        timezone,
+                        weather: String::from("Weather unavailable"),
+                    })
+                }
+                Err(error) => {
+                    warn!(timezone = name, %error, "Ignoring invalid timezone");
+                    None
+                }
+            })
+            .collect();
+        openmeteo::spawn_refresh_loop(location, forecast_timezones, updater);
+        let text_lines = passes.storage_with_capacity("Tempestas Text", MAX_TEXT_LINES);
+        let (placed_glyphs, glyphs, edges) = text.resources();
+        let pill = passes.instance(
+            (&text_lines, placed_glyphs, glyphs, edges),
             WeatherSurface {
                 sun_hours: [6.0, 18.0],
-                today_index: -1,
                 ..Default::default()
             },
         );
         Self {
             pill,
+            text_lines,
+            labels: Vec::with_capacity(MAX_TEXT_LINES),
             temperature: String::new(),
             utc_offset: None,
             details: "Weather unavailable".into(),
             hourly: Default::default(),
             daily: Default::default(),
+            timezones,
             month_offset: 0,
         }
     }
@@ -694,7 +773,7 @@ impl TempestasPass {
 
     pub fn update(
         &mut self,
-        font: &text::Font,
+        text: &mut text::Renderer,
         status: Option<&mut status::StatusPass>,
         frame: &mut Frame,
     ) {
@@ -706,19 +785,28 @@ impl TempestasPass {
             status.pill.sun_height = sun_position(hour, self.pill.sun_hours)[1];
             status.pill.conditions = self.pill.hourly_conditions[0];
         }
-        self.pill.text.clear();
-        self.pill.text.centered(
-            font,
+        let mut lines = std::mem::take(&mut self.labels);
+        lines.clear();
+        let mut labels = Labels {
+            lines: &mut lines,
+            text,
+            origin: vec2(x, PANEL_START),
+        };
+        labels.centered(
             &weather_label,
             WEATHER_STYLE,
             vec2(WIDTH * 0.5, height * 0.46),
+            text::COLOR.extend(1.0),
         );
-        self.calendar_labels(font, x, height, frame.delta_time, frame.interaction);
+        self.calendar_labels(&mut labels, x, height, frame.delta_time, frame.interaction);
+        lines.resize_with(MAX_TEXT_LINES, WeatherLine::default);
+        self.text_lines.upload(&lines);
+        self.labels = lines;
     }
 
     fn calendar_labels(
         &mut self,
-        font: &text::Font,
+        text: &mut Labels<'_>,
         x: f32,
         height: f32,
         delta_time: f32,
@@ -731,10 +819,11 @@ impl TempestasPass {
             return;
         }
         let origin = Vec2::new(expanded_x(bounds.x0, 1.0), bounds.y1);
+        text.origin = origin;
         let reveal = reveal_progress(self.pill.calendar_expansion, TITLE.y);
         let title = interaction.surface(Rect::from_center(
             origin + TITLE,
-            Vec2::new(TITLE_HALF_WIDTH, UNIT * 4.0),
+            Vec2::new(UNIT * 26.0, UNIT * 4.0),
         ));
         if title.clicked {
             self.month_offset = 0;
@@ -763,23 +852,24 @@ impl TempestasPass {
             .first_of_month()
             .saturating_add(Span::new().months(self.month_offset));
         let title_hover = self.pill.text_hover[0];
-        self.pill.text.centered(
-            font,
+        let expansion = self.pill.calendar_expansion;
+        text.centered(
             &month.strftime("%B %Y").to_string(),
             TITLE_STYLE
                 .scaled(1.0 + title_hover * 0.2)
                 .with_weight_mix(0.5 + title_hover * 0.5),
             TITLE,
+            text::COLOR.extend(reveal_progress(expansion, TITLE.y)),
         );
         for (index, (content, position)) in ["<", ">"].into_iter().zip(arrows).enumerate() {
             let hover = self.pill.text_hover[index + 1];
-            self.pill.text.centered(
-                font,
+            text.centered(
                 content,
                 TITLE_STYLE
                     .scaled(1.0 + hover * 0.35)
                     .with_weight_mix(0.5 + hover * 0.5),
                 position,
+                text::COLOR.extend(reveal_progress(expansion, TITLE.y)),
             );
         }
 
@@ -804,54 +894,70 @@ impl TempestasPass {
         } else {
             None
         };
-        self.pill.text.centered(
-            font,
+        let details = Vec2::new(FORECAST_X + WIDTH * 0.5, TITLE.y);
+        text.centered(
             hovered_forecast.unwrap_or(&self.details),
             DETAILS_STYLE,
-            DETAILS_POS,
+            details,
+            text::COLOR.extend(reveal_progress(expansion, details.y)),
         );
 
         for (row, forecasts) in forecasts.into_iter().enumerate() {
+            let center = forecast_center(height, row as f32);
+            let opacity = reveal_progress(expansion, center);
             for (column, forecast) in forecasts.iter().enumerate() {
-                for (line, content) in forecast.text.iter().enumerate() {
-                    let position = Vec2::new(
-                        FORECAST_X + (column as f32 + 0.5) * WIDTH / forecasts.len() as f32,
-                        forecast_center(height, row as f32) + (line as f32 * 2.0 - 1.0) * GAP,
-                    );
-                    self.pill.text.centered(font, content, DETAILS_STYLE, position);
-                }
+                let x = FORECAST_X + (column as f32 + 0.5) * WIDTH / forecasts.len() as f32;
+                text.pair(
+                    [&forecast.text[0], &forecast.text[1]],
+                    DETAILS_STYLE,
+                    vec2(x, center),
+                    [opacity; 2],
+                );
             }
         }
 
         for (column, weekday) in Self::WEEKDAYS.iter().enumerate() {
-            self.pill.text.centered(
-                font,
+            text.centered(
                 weekday,
                 DETAILS_STYLE,
                 Vec2::new(grid_cell(column).x, WEEKDAY_Y),
+                text::COLOR.extend(reveal_progress(expansion, WEEKDAY_Y) * 0.75),
             );
         }
 
         let grid_start = month.saturating_sub(Span::new().days(month.weekday().to_monday_zero_offset()));
-        self.pill.today_index = -1;
-        self.pill.month_range = [GRID_CELLS as u32, 0];
         for index in 0..GRID_CELLS {
             let date = grid_start.saturating_add(Span::new().days(index as i64));
-            let mut text = ArrayString::<2>::new();
-            write!(text, "{}", date.day()).unwrap();
-            if date.month() == month.month() {
-                self.pill.month_range[0] = self.pill.month_range[0].min(index as u32);
-                self.pill.month_range[1] = index as u32 + 1;
-            }
-            if date == today {
-                self.pill.today_index = index as i32;
-            }
+            let mut label = ArrayString::<2>::new();
+            write!(label, "{}", date.day()).unwrap();
             let today = date == today;
-            self.pill.text.centered(
-                font,
-                &text,
-                if today { TODAY_STYLE } else { PRIMARY_STYLE },
-                grid_cell(index),
+            let (color, style) = if today {
+                (vec3(1.0, 0.68, 0.68), TextStyle::new(16.0, 900.0))
+            } else {
+                (text::COLOR, TextStyle::new(16.0, 700.0))
+            };
+            let month_opacity = if date.month() == month.month() { 1.0 } else { 0.32 };
+            let position = grid_cell(index);
+            text.centered(
+                &label,
+                style,
+                position,
+                color.extend(reveal_progress(expansion, position.y) * month_opacity),
+            );
+        }
+
+        let now = Timestamp::now();
+        for (index, timezone) in self.timezones.iter().enumerate() {
+            let center = world_clock_center(height, index);
+            let local = now.to_zoned(timezone.timezone.clone());
+            let mut clock = ArrayString::<64>::new();
+            write!(clock, "{} · {}", timezone.label, local.strftime("%H:%M")).unwrap();
+            let opacity = reveal_progress(expansion, center);
+            text.pair(
+                [&clock, &timezone.weather],
+                CLOCK_STYLE,
+                vec2(FORECAST_X + WIDTH * 0.5, center),
+                [opacity, opacity * 0.75],
             );
         }
 
@@ -860,7 +966,22 @@ impl TempestasPass {
         }
     }
 
-    pub fn apply_forecast(&mut self, forecast: &Forecast) {
+    pub fn apply_forecast(&mut self, index: usize, forecast: &Forecast) {
+        if let Some(timezone) = index
+            .checked_sub(1)
+            .and_then(|index| self.timezones.get_mut(index))
+        {
+            timezone.weather = format!(
+                "{} · {:.0}°/{:.0}°",
+                openmeteo::weather_code(forecast.daily.weather_code[0]),
+                forecast.daily.temperature_2m_max[0],
+                forecast.daily.temperature_2m_min[0],
+            );
+            return;
+        }
+        if index != 0 {
+            return;
+        }
         let raw = &forecast.current;
         self.utc_offset = Offset::from_seconds(forecast.utc_offset_seconds).ok();
         self.temperature = format!("{:.1}°C", raw.temperature_2m);

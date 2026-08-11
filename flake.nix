@@ -141,6 +141,8 @@ rec {
 
             cfg = config.programs.cantus;
             settingsFormat = pkgs.formats.toml { };
+            settingsOptions = import ./generated-options.nix { inherit lib; };
+            settingsDefaults = lib.mapAttrs (_: option: option.default) settingsOptions;
           in
           {
             options.programs.cantus = {
@@ -162,30 +164,12 @@ rec {
               settings = mkOption {
                 type = types.nullOr (
                   types.submodule {
-                    options = import ./generated-options.nix { inherit lib; };
+                    options = settingsOptions;
                   }
                 );
                 default = null;
                 description = "Settings written as TOML to `~/.config/cantus/cantus.toml`.";
-                example = {
-                  monitor = "eDP-1";
-                  weather_enabled = true;
-                  location = [
-                    51.5
-                    (-0.1)
-                  ];
-                  status_enabled = true;
-                  height = 40.0;
-                  timeline_future_minutes = 12.0;
-                  timeline_past_minutes = 1.5;
-                  history_width = 100.0;
-                  playlists = [
-                    "Rock & Roll"
-                    "Instrumental"
-                    "Pop"
-                  ];
-                  ratings_enabled = true;
-                };
+                example = settingsDefaults;
               };
             };
 

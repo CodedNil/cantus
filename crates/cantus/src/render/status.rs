@@ -9,6 +9,7 @@ use crate::render::{
 };
 use core::f32::consts::TAU;
 use isthmus::{
+    Vertex,
     glam::{FloatExt, Vec2, Vec3, Vec4, vec2, vec3},
     spirv_std::arch::kill,
 };
@@ -16,7 +17,6 @@ use isthmus::{
 #[cfg(target_arch = "spirv")]
 use isthmus::spirv_std::num_traits::Float;
 
-use isthmus::Vertex;
 #[cfg(feature = "cpu")]
 use {
     crate::{
@@ -28,7 +28,6 @@ use {
         },
     },
     arrayvec::ArrayString,
-    isthmus::StatePass,
     std::{
         fmt::Write,
         sync::{
@@ -46,10 +45,25 @@ const DATA_WIDTH: f32 = 32.0;
 const ACTION_WIDTH: f32 = 24.0;
 /// CPU/GPU graphs stay this wide regardless of whether the battery slot is present.
 const GRAPH_WIDTH: f32 = 60.0 + (DATA_WIDTH + GAP) * 0.5;
-
-const fn pill_x(screen_width: f32, width: f32) -> f32 {
-    screen_width - width - GAP
-}
+/// Width the battery slot adds to every section after it when shown.
+const BATTERY_SLOT: f32 = DATA_WIDTH + GAP;
+const CPU_X: f32 = PADDING;
+const GPU_X: f32 = CPU_X + GRAPH_WIDTH + GAP;
+const BATTERY_X: f32 = GPU_X + GRAPH_WIDTH + GAP;
+const AUDIO_X: f32 = BATTERY_X;
+const REBOOT_X: f32 = AUDIO_X + DATA_WIDTH + GAP;
+const POWER_X: f32 = REBOOT_X + ACTION_WIDTH + GAP;
+#[cfg(feature = "cpu")]
+const MAX_LABEL_CHARS: usize = 16;
+const CHART_LINE_WIDTH: f32 = 0.85;
+const USAGE_COLOR: Vec3 = Vec3::new(0.32, 0.68, 1.0);
+const MEMORY_COLOR: Vec3 = Vec3::new(0.78, 0.3, 1.0);
+const MUTED_COLOR: Vec3 = Vec3::new(1.0, 0.24, 0.3);
+#[cfg(feature = "cpu")]
+const LABEL_STYLE: TextStyle = TextStyle::new(11.0, 700.0);
+const HISTORY_END: usize = STATUS_HISTORY_SAMPLES - 1;
+#[cfg(feature = "cpu")]
+pub(crate) const TEXT_GLYPHS: usize = 2 * MAX_LABEL_CHARS;
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 #[repr(u32)]
@@ -75,14 +89,18 @@ impl StatusSection {
     }
 }
 
-/// Width the battery slot adds to every section after it when shown.
-const BATTERY_SLOT: f32 = DATA_WIDTH + GAP;
-const CPU_X: f32 = PADDING;
-const GPU_X: f32 = CPU_X + GRAPH_WIDTH + GAP;
-const BATTERY_X: f32 = GPU_X + GRAPH_WIDTH + GAP;
-const AUDIO_X: f32 = BATTERY_X;
-const REBOOT_X: f32 = AUDIO_X + DATA_WIDTH + GAP;
-const POWER_X: f32 = REBOOT_X + ACTION_WIDTH + GAP;
+#[isthmus::data]
+pub struct UsageHistory {
+    samples: [f32; STATUS_HISTORY_SAMPLES],
+}
+
+#[isthmus::data]
+#[derive(Default)]
+pub struct ProcessorStatus {
+    pub temperature: f32,
+    pub usage: UsageHistory,
+    pub memory: UsageHistory,
+}
 
 #[isthmus::data]
 #[derive(Default)]
@@ -108,12 +126,19 @@ pub struct StatusPill {
     /// Current sun height and decoded sky condition.
     pub sun_height: f32,
     pub conditions: WeatherCondition,
-    pub text: text::Text<2, { MAX_LABEL_CHARS * 2 }>,
+    pub labels: [text::Line; 2],
 }
 
-const MAX_LABEL_CHARS: usize = 16;
-const CPU_TEXT: usize = 0;
-const GPU_TEXT: usize = 1;
+#[derive(isthmus::Varyings)]
+pub struct StatusVaryings {
+    pub pixel: Vec2,
+}
+
+#[isthmus::pass]
+pub struct StatusPass {
+    pub pill: isthmus::Instance<Self>,
+    audio_spectrum: Arc<[AtomicU32; AUDIO_SPECTRUM_BANDS]>,
+}
 
 impl StatusPill {
     const fn battery_present(&self) -> bool {
@@ -168,25 +193,12 @@ impl StatusPill {
     }
 }
 
-#[isthmus::data]
-pub struct UsageHistory {
-    samples: [f32; STATUS_HISTORY_SAMPLES],
-}
-
 impl Default for UsageHistory {
     fn default() -> Self {
         Self {
             samples: [0.0; STATUS_HISTORY_SAMPLES],
         }
     }
-}
-
-#[isthmus::data]
-#[derive(Default)]
-pub struct ProcessorStatus {
-    pub temperature: f32,
-    pub usage: UsageHistory,
-    pub memory: UsageHistory,
 }
 
 #[cfg(feature = "cpu")]
@@ -201,6 +213,10 @@ impl UsageHistory {
     }
 }
 
+const fn pill_x(screen_width: f32, width: f32) -> f32 {
+    screen_width - width - GAP
+}
+
 #[cfg(feature = "cpu")]
 fn section_rect(pill: &StatusPill, x: f32, height: f32, section: StatusSection) -> Rect {
     Rect::from_center(
@@ -208,15 +224,6 @@ fn section_rect(pill: &StatusPill, x: f32, height: f32, section: StatusSection) 
         vec2((section.width() + GAP) * 0.5, height * 0.5),
     )
 }
-
-const CHART_LINE_WIDTH: f32 = 0.85;
-const USAGE_COLOR: Vec3 = Vec3::new(0.32, 0.68, 1.0);
-const MEMORY_COLOR: Vec3 = Vec3::new(0.78, 0.3, 1.0);
-const MUTED_COLOR: Vec3 = Vec3::new(1.0, 0.24, 0.3);
-const TEXT_COLOR: Vec3 = Vec3::splat(0.94);
-#[cfg(feature = "cpu")]
-const LABEL_STYLE: TextStyle = TextStyle::new(11.0, 700.0);
-const HISTORY_END: usize = STATUS_HISTORY_SAMPLES - 1;
 
 fn status_sky(local: Vec2, distance: f32, sun: f32, weather: WeatherCondition, time: f32) -> Vec3 {
     let WeatherCondition {
@@ -364,14 +371,13 @@ fn battery_icon(point: Vec2, time: f32, pill: &StatusPill) -> Vec3 {
         .lerp(vec3(1.0, 0.72, 0.12), smoothstep(0.08, 0.28, battery_level))
         .lerp(vec3(0.22, 0.95, 0.55), smoothstep(0.18, 0.72, battery_level));
 
-    let cell_size = vec2(3.0, 3.4);
-    let cell = (point / cell_size).floor();
-    let seed = hash(cell);
-    let center = (cell + 0.2 + seed * 0.6) * cell_size;
-    let cycle = (time * (0.5 + seed.y) + seed.x * 11.0).fract();
-    let distance = (point - center + vec2(0.0, cycle * 5.0)).length() - (0.4 + seed.y * 0.5);
+    let column = (point.x / 3.0).floor();
+    let seed = hash(vec2(column, 0.0));
+    let cycle = (time * (0.35 + seed.y * 0.5) + seed.x * 7.0).fract();
+    let center = vec2((column + 0.2 + seed.x * 0.6) * 3.0, 13.0 - cycle * 24.0);
+    let distance = (point - center).length() - (0.4 + seed.y * 0.5);
     let fade = smoothstep(0.0, 0.25, cycle) * smoothstep(1.0, 0.7, cycle);
-    let bubble = stroke(distance, 0.45) * fade * liquid * charging;
+    let bubble = stroke(distance, 0.45) * fade * inside * charging;
     Vec3::splat(shell * 0.43 + terminal * 0.38)
         + liquid_color * liquid * 0.78
         + liquid_color.lerp(Vec3::ONE, 0.72) * bubble * 0.9
@@ -442,27 +448,13 @@ fn action_icon(point: Vec2, time: f32, action: f32, hover: f32, pill: &StatusPil
     color * icon * (1.0 + charge * 0.45)
 }
 
-#[derive(isthmus::Varyings)]
-pub struct Varyings {
-    pub pixel: Vec2,
-}
-
-#[isthmus::pass]
-pub struct StatusPass {
-    pub pill: StatePass<Self>,
-    audio_spectrum: Arc<[AtomicU32; AUDIO_SPECTRUM_BANDS]>,
-}
-
 #[isthmus::pass]
 impl StatusPass {
-    pub fn new(passes: &Passes<'_>, updater: AppUpdater, font: &text::Font) -> Self {
+    pub fn new(passes: &Passes<'_>, text: &text::Renderer, updater: AppUpdater) -> Self {
         let audio_spectrum = Arc::<[AtomicU32; AUDIO_SPECTRUM_BANDS]>::default();
         platform::start_status_monitor(updater, Arc::clone(&audio_spectrum));
-        let pill = passes.state_with(
-            Resources {
-                glyphs: &font.glyphs,
-                edges: &font.edges,
-            },
+        let pill = passes.instance(
+            text.resources(),
             StatusPill {
                 battery_level: BATTERY_HIDDEN,
                 power_action: -1,
@@ -473,7 +465,7 @@ impl StatusPass {
         Self { pill, audio_spectrum }
     }
 
-    pub fn update(&mut self, font: &text::Font, frame: &mut Frame) {
+    pub fn update(&mut self, text: &mut text::Renderer, frame: &mut Frame) {
         let height = frame.config.height;
         let pill = &mut *self.pill;
         for (damped, level) in pill.audio_spectrum.iter_mut().zip(self.audio_spectrum.iter()) {
@@ -520,8 +512,7 @@ impl StatusPass {
         }
         frame.interaction.surface(Rect::pill(x, width, height));
 
-        pill.text.clear();
-        for section in [StatusSection::Cpu, StatusSection::Gpu] {
+        pill.labels = [StatusSection::Cpu, StatusSection::Gpu].map(|section| {
             let processor = match section {
                 StatusSection::Cpu => &pill.cpu,
                 _ => &pill.gpu,
@@ -537,23 +528,14 @@ impl StatusPass {
             .unwrap();
             let section_center = pill.section_center(section);
             let half_width = section.width() * 0.5 - GAP * 0.5;
-            let offset = pill.text.fit(
-                font,
+            text.fit(
                 &label,
                 LABEL_STYLE,
                 GAP + 5.0,
                 section_center - half_width,
                 section_center + half_width,
-            );
-            debug_assert_eq!(
-                offset,
-                if section == StatusSection::Cpu {
-                    CPU_TEXT
-                } else {
-                    GPU_TEXT
-                }
-            );
-        }
+            )
+        });
     }
 
     #[gpu]
@@ -561,21 +543,22 @@ impl StatusPass {
         #[gpu(vertex_index)] vertex: u32,
         #[gpu(shared)] frame: FrameData,
         #[gpu(instance)] pill: StatusPill,
-    ) -> Vertex<Varyings> {
+    ) -> Vertex<StatusVaryings> {
         let width = pill.width();
         let x = pill_x(frame.screen_size.x, width);
         let (position, pixel) = pill_vertex(vertex, frame, x, vec2(width, 0.0));
         Vertex {
             position,
-            varyings: Varyings { pixel },
+            varyings: StatusVaryings { pixel },
         }
     }
 
     #[gpu]
     pub fn fragment(
-        Varyings { pixel }: Varyings,
+        StatusVaryings { pixel }: StatusVaryings,
         #[gpu(shared)] frame: FrameData,
         #[gpu(instance)] pill: StatusPill,
+        #[gpu(resource)] placed_glyphs: &[text::PlacedGlyph],
         #[gpu(resource)] glyphs: &[text::Glyph],
         #[gpu(resource)] edges: &[text::Edge],
     ) -> Vec4 {
@@ -641,19 +624,18 @@ impl StatusPass {
             }
         };
 
-        let text_offset = if section == StatusSection::Cpu {
-            CPU_TEXT
-        } else {
-            GPU_TEXT
-        };
-        let text_distance = if matches!(section, StatusSection::Cpu | StatusSection::Gpu) {
-            text::line_distance(&pill.text, text_offset, glyphs, edges, raw_local)
-        } else {
-            -1e6
-        };
-        let color = color.lerp(TEXT_COLOR, text::alpha(text_distance));
-
         let color = color.lerp(Vec3::splat(0.95), interaction.ripple_flash * 0.35);
+        let label = match section {
+            StatusSection::Cpu => pill.labels[0],
+            StatusSection::Gpu => pill.labels[1],
+            _ => text::Line::default(),
+        };
+        let text_alpha = if matches!(section, StatusSection::Cpu | StatusSection::Gpu) {
+            text::line_alpha(label, placed_glyphs, glyphs, edges, local)
+        } else {
+            0.0
+        };
+        let color = color * (1.0 - text_alpha) + text::COLOR * text_alpha;
         (color * mask).extend(alpha)
     }
 }

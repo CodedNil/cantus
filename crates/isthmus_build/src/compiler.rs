@@ -124,7 +124,7 @@ fn translate_shader(bytes: &[u8]) -> Result<String, String> {
     }
     Validator::new(ValidationFlags::all(), Capabilities::empty())
         .validate(&module)
-        .map_err(|error| std::format!("WGPU cannot validate shader before compaction: {error}"))?;
+        .map_err(|error| std::format!("WGPU cannot validate shader before compaction: {error:?}"))?;
     compact(&mut module, KeepUnused::No);
     let info = Validator::new(ValidationFlags::all(), Capabilities::empty())
         .validate(&module)

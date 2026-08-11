@@ -58,7 +58,7 @@ fn lower_parameters<'a>(
         ));
         *argument.ty = Type::Verbatim(quote!(&[#ty]));
         initializers.push(parse_quote!(
-            let #name = #isthmus::reference(#name, #index);
+            let #name = #isthmus::__private::reference(#name, #index);
         ));
     }
     initializers
@@ -201,7 +201,7 @@ pub fn fragment_functions(
     mut function: ItemFn,
     contract: &StageContract,
     fields: &[(Ident, Type, bool)],
-    varying: &Ident,
+    varying: &Type,
     carry_instance: bool,
 ) -> SynResult<(ItemFn, TokenStream2)> {
     let first = function

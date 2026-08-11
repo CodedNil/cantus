@@ -1,15 +1,8 @@
 use crate::cpu::context::{Context, SetupError};
 use wgpu::{
-    AdapterInfo, CompositeAlphaMode, CurrentSurfaceTexture, Instance, PowerPreference, Surface,
-    SurfaceConfiguration, SurfaceTexture, TextureFormat, TextureView, TextureViewDescriptor,
+    CompositeAlphaMode, CurrentSurfaceTexture, Surface, SurfaceConfiguration, SurfaceTexture,
+    TextureFormat, TextureView, TextureViewDescriptor,
 };
-
-pub(super) enum Acquire {
-    Frame(SurfaceFrame),
-    Unavailable,
-    Lost,
-    Validation,
-}
 
 pub(super) struct SurfaceFrame {
     pub(super) texture: SurfaceTexture,
@@ -30,18 +23,6 @@ pub struct SurfaceTarget<'window> {
 }
 
 impl<'window> SurfaceTarget<'window> {
-    pub(super) async fn create(
-        instance: &Instance,
-        surface: Surface<'window>,
-        width: u32,
-        height: u32,
-        power_preference: PowerPreference,
-    ) -> Result<(Context, Self, AdapterInfo), SetupError> {
-        let (context, info) = Context::new(instance, Some(&surface), power_preference).await?;
-        let target = Self::new(&context, surface, width, height)?;
-        Ok((context, target, info))
-    }
-
     /// Configures a surface for an existing context.
     ///
     /// # Errors
@@ -102,17 +83,19 @@ impl<'window> SurfaceTarget<'window> {
         Ok(())
     }
 
-    pub(super) fn acquire(&self, context: &Context) -> Acquire {
+    pub(super) fn acquire(&self, context: &Context) -> Result<SurfaceFrame, Present> {
         match self.surface.get_current_texture() {
-            CurrentSurfaceTexture::Success(texture) => Acquire::Frame(Self::frame(texture, false)),
-            CurrentSurfaceTexture::Suboptimal(texture) => Acquire::Frame(Self::frame(texture, true)),
-            CurrentSurfaceTexture::Timeout | CurrentSurfaceTexture::Occluded => Acquire::Unavailable,
+            CurrentSurfaceTexture::Success(texture) => Ok(Self::frame(texture, false)),
+            CurrentSurfaceTexture::Suboptimal(texture) => Ok(Self::frame(texture, true)),
+            CurrentSurfaceTexture::Timeout | CurrentSurfaceTexture::Occluded => {
+                Err(Present::Unavailable)
+            }
             CurrentSurfaceTexture::Outdated => {
                 self.configure(context);
-                Acquire::Unavailable
+                Err(Present::Unavailable)
             }
-            CurrentSurfaceTexture::Lost => Acquire::Lost,
-            CurrentSurfaceTexture::Validation => Acquire::Validation,
+            CurrentSurfaceTexture::Lost => Err(Present::Lost),
+            CurrentSurfaceTexture::Validation => Err(Present::Validation),
         }
     }
 

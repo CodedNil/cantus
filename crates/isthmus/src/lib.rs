@@ -5,8 +5,8 @@ extern crate std;
 
 extern crate self as isthmus;
 
-pub mod contract;
-pub mod data;
+mod contract;
+mod data;
 
 #[cfg(feature = "cpu")]
 pub mod cpu;
@@ -18,17 +18,25 @@ pub use spirv_std;
 pub use isthmus_macros::lower_pass;
 pub use isthmus_macros::{Render, Varyings, data, outline, pass, shader_module};
 
-#[cfg(feature = "cpu")]
-pub use contract::{PassContract, PassShared, Pipeline, Texture2DArray, pass_module_name};
-pub use contract::{Vertex, reference};
+pub use contract::{Sampler, Texture2DArray, Vertex};
 #[cfg(feature = "cpu")]
 pub use cpu::{
-    Binding, CpuResource, FilteringSampler, ResourceBindings, Storage, TextureView,
+    FilteringSampler, Storage, TextureView,
     context::{Context, Render, SetupError},
-    pass::{Pass, PassBuilder, StatePass},
+    pass::{Instance, Instances, PassBuilder},
     program::Program,
     surface::{Present, SurfaceTarget},
     texture::{FilterableFloatFormat, SampledTexture, SampledTextureDimension, TextureWriteError},
     wgpu,
 };
-pub use data::{BufferCursor, BufferData, Unorm8x4};
+pub use data::{BufferData, Unorm8x4};
+
+#[doc(hidden)]
+pub mod __private {
+    pub use crate::{contract::reference, data::align_to};
+    #[cfg(feature = "cpu")]
+    pub use crate::{
+        contract::{PassContract, PassShared, Pipeline, pass_module_name},
+        cpu::Binding,
+    };
+}

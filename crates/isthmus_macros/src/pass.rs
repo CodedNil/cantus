@@ -2,26 +2,33 @@ use crate::{
     abi::{fragment_functions, vertex_functions},
     isthmus_path,
     model::PassModel,
+    render,
     syntax::{GpuParameter, GpuRole, PassOptions, gpu_attribute},
 };
 use proc_macro::TokenStream;
 use proc_macro2::TokenStream as TokenStream2;
 use quote::{format_ident, quote};
 use syn::{
-    Fields, File, FnArg, Ident, ImplItem, Item, ItemFn, ItemImpl, Result as SynResult, Type,
-    parse_macro_input, parse_quote,
+    Fields, File, FnArg, GenericArgument, ImplItem, Item, ItemFn, ItemImpl, PathArguments,
+    Result as SynResult, Type, parse_macro_input, parse_quote,
 };
 
 #[allow(clippy::missing_panics_doc)]
 pub fn expand(args: TokenStream, input: TokenStream) -> TokenStream {
-    let option_tokens = TokenStream2::from(args.clone());
+    let option_tokens = TokenStream2::from(args);
     let item = parse_macro_input!(input as Item);
     let result = match item {
-        Item::Impl(implementation) => syn::parse::<PassOptions>(args)
-            .and_then(|_| expand_pass_impl(implementation, &option_tokens)),
+        Item::Impl(implementation) => expand_pass_impl(implementation, &option_tokens),
         Item::Struct(mut pass) => {
             if option_tokens.is_empty() {
-                let isthmus = isthmus_path();
+                if !pass.generics.params.is_empty() {
+                    return syn::Error::new_spanned(
+                        &pass.generics,
+                        "render pass types cannot be generic",
+                    )
+                    .to_compile_error()
+                    .into();
+                }
                 let pass_fields = match &pass.fields {
                     Fields::Named(fields) => fields
                         .named
@@ -30,12 +37,15 @@ pub fn expand(args: TokenStream, input: TokenStream) -> TokenStream {
                             let Type::Path(path) = &field.ty else {
                                 return None;
                             };
-                            path.path
-                                .segments
-                                .last()
-                                .map(|segment| segment.ident.to_string())
-                                .filter(|name| name == "Pass" || name == "StatePass")
-                                .map(|_| field.ident.as_ref().unwrap())
+                            let segment = path.path.segments.last()?;
+                            let name = segment.ident.to_string();
+                            let PathArguments::AngleBracketed(arguments) = &segment.arguments else {
+                                return None;
+                            };
+                            ((name == "Instances" || name == "Instance")
+                                && matches!(arguments.args.first(), Some(GenericArgument::Type(_)))
+                                && arguments.args.len() == 1)
+                                .then(|| field.ident.as_ref().unwrap())
                         })
                         .collect::<Vec<_>>(),
                     _ => Vec::new(),
@@ -43,37 +53,23 @@ pub fn expand(args: TokenStream, input: TokenStream) -> TokenStream {
                 if pass_fields.len() > 1 {
                     return syn::Error::new_spanned(
                         &pass.fields,
-                        "a pass can own at most one runtime pass; use a system to coordinate multiple passes",
+                        "a shader pass can own at most one instance container; use a system to coordinate multiple passes",
                     )
                     .to_compile_error()
                     .into();
                 }
                 let name = &pass.ident;
-                let (impl_generics, type_generics, where_clause) = pass.generics.split_for_impl();
                 let visibility = &pass.vis;
                 pass.attrs.push(parse_quote!(#[cfg(feature = "cpu")]));
-                let runtime_impls = (!pass_fields.is_empty()).then(|| {
-                    quote! {
-                        #[cfg(feature = "cpu")]
-                        impl #impl_generics #isthmus::Render for #name #type_generics #where_clause {
-                            fn prepare(&mut self) {
-                                #(#isthmus::Render::prepare(&mut self.#pass_fields);)*
-                            }
-
-                            fn draw<'pass>(
-                                &'pass self,
-                                pass: &mut #isthmus::wgpu::RenderPass<'pass>,
-                            ) {
-                                #(#isthmus::Render::draw(&self.#pass_fields, pass);)*
-                            }
-                        }
-                    }
+                let runtime_impl = (!pass_fields.is_empty()).then(|| {
+                    let implementation = render::implementation(name, &pass.generics, pass_fields);
+                    quote!(#[cfg(feature = "cpu")] #implementation)
                 });
                 Ok(quote! {
                     #pass
                     #[cfg(not(feature = "cpu"))]
-                    #visibility struct #name #impl_generics #where_clause;
-                    #runtime_impls
+                    #visibility struct #name;
+                    #runtime_impl
                 })
             } else {
                 Err(syn::Error::new_spanned(
@@ -91,6 +87,12 @@ pub fn expand(args: TokenStream, input: TokenStream) -> TokenStream {
 }
 
 fn expand_pass_impl(mut implementation: ItemImpl, options: &TokenStream2) -> SynResult<TokenStream2> {
+    if !implementation.generics.params.is_empty() {
+        return Err(syn::Error::new_spanned(
+            &implementation.generics,
+            "render pass implementations cannot be generic",
+        ));
+    }
     let fragment = implementation
         .items
         .iter()
@@ -103,13 +105,13 @@ fn expand_pass_impl(mut implementation: ItemImpl, options: &TokenStream2) -> Syn
             _ => None,
         })
         .ok_or_else(|| syn::Error::new_spanned(&implementation, "missing `fragment` function"))?;
-    let varying = fragment
+    let mut bridge = fragment
         .sig
         .inputs
         .first()
         .and_then(|argument| match argument {
             FnArg::Typed(argument) => match argument.ty.as_ref() {
-                Type::Path(path) => path.path.segments.last().map(|segment| segment.ident.clone()),
+                Type::Path(path) => Some(path.path.clone()),
                 _ => None,
             },
             FnArg::Receiver(_) => None,
@@ -117,7 +119,8 @@ fn expand_pass_impl(mut implementation: ItemImpl, options: &TokenStream2) -> Syn
         .ok_or_else(|| {
             syn::Error::new_spanned(&fragment.sig, "fragment must accept a named varying type")
         })?;
-    let bridge = format_ident!("__isthmus_varyings_{varying}");
+    let varying = bridge.segments.last().unwrap().ident.clone();
+    bridge.segments.last_mut().unwrap().ident = format_ident!("__isthmus_varyings_{varying}");
     implementation
         .attrs
         .push(parse_quote!(#[isthmus_pass_options(#options)]));
@@ -173,6 +176,18 @@ fn lower_pass_impl(mut file: File) -> SynResult<TokenStream2> {
 }
 
 fn expand_pass(file: &mut File, options: &PassOptions, pass_type: &Type) -> SynResult<TokenStream2> {
+    let pass_name = match pass_type {
+        Type::Path(path) => path
+            .path
+            .segments
+            .last()
+            .map(|segment| &segment.ident)
+            .ok_or_else(|| syn::Error::new_spanned(pass_type, "pass requires a named type"))?,
+        _ => {
+            return Err(syn::Error::new_spanned(pass_type, "pass requires a named type"));
+        }
+    };
+    let shader_module = format_ident!("isthmus_{}", pass_name.to_string().to_lowercase());
     let varying_indices = file
         .items
         .iter()
@@ -191,7 +206,6 @@ fn expand_pass(file: &mut File, options: &PassOptions, pass_type: &Type) -> SynR
     let Item::Struct(varyings) = &mut file.items[*varying_index] else {
         unreachable!()
     };
-    let varying_name = varyings.ident.clone();
     take_gpu_marker(&mut varyings.attrs);
     let Fields::Named(fields) = &mut varyings.fields else {
         return Err(syn::Error::new_spanned(
@@ -220,101 +234,61 @@ fn expand_pass(file: &mut File, options: &PassOptions, pass_type: &Type) -> SynR
 
     let vertex = take_function(&mut file.items, "vertex")?;
     let fragment = take_function(&mut file.items, "fragment")?;
+    let varying_type = match fragment.sig.inputs.first() {
+        Some(FnArg::Typed(argument)) => argument.ty.as_ref().clone(),
+        _ => {
+            return Err(syn::Error::new_spanned(
+                &fragment.sig,
+                "fragment must accept a named varying type",
+            ));
+        }
+    };
     let model = PassModel::parse(&vertex, &fragment)?;
-    let names = PassNames::from_varyings(&varying_name);
-    let pass = pass_declaration(&model, options, &names, pass_type);
+    let pass = pass_declaration(&model, options, pass_type, &shader_module);
     let (vertex_impl, vertex_entry) =
         vertex_functions(vertex, &model.vertex, &varying_fields, model.carry_instance)?;
     let (fragment_impl, fragment_entry) = fragment_functions(
         fragment,
         &model.fragment,
         &varying_fields,
-        &varying_name,
+        &varying_type,
         model.carry_instance,
     )?;
     let remaining = &file.items;
-    let entry_functions = names.module.as_ref().map_or_else(
-        || {
-            quote! {
-                #vertex_impl
-                #fragment_impl
-                #vertex_entry
-                #fragment_entry
-            }
-        },
-        |module| {
-            quote! {
-                pub mod #module {
-                    use super::*;
-                    #vertex_impl
-                    #fragment_impl
-                    #vertex_entry
-                    #fragment_entry
-                }
-            }
-        },
-    );
     Ok(quote! {
         #pass
         #(#remaining)*
-        #entry_functions
+        #[doc(hidden)]
+        pub mod #shader_module {
+            use super::*;
+
+            #vertex_impl
+            #fragment_impl
+            #vertex_entry
+            #fragment_entry
+        }
     })
-}
-
-struct PassNames {
-    resources: Ident,
-    module: Option<Ident>,
-}
-
-impl PassNames {
-    fn from_varyings(varyings: &Ident) -> Self {
-        let name = varyings.to_string();
-        let prefix = name.strip_suffix("Varyings").unwrap_or(&name);
-        if prefix.is_empty() {
-            Self {
-                resources: format_ident!("Resources"),
-                module: None,
-            }
-        } else {
-            Self {
-                resources: format_ident!("{prefix}Resources"),
-                module: Some(format_ident!("{}", snake_case(prefix))),
-            }
-        }
-    }
-}
-
-fn snake_case(name: &str) -> String {
-    let mut output = String::new();
-    for (index, character) in name.chars().enumerate() {
-        if index > 0 && character.is_uppercase() {
-            output.push('_');
-        }
-        output.extend(character.to_lowercase());
-    }
-    output
 }
 
 fn pass_declaration(
     model: &PassModel,
     options: &PassOptions,
-    pass_names: &PassNames,
     pass_type: &Type,
+    shader_module: &syn::Ident,
 ) -> TokenStream2 {
     let isthmus = isthmus_path();
-    let resources_type_name = &pass_names.resources;
     let data = &model.instance;
     let shared_impl = model.shared.as_ref().map_or_else(
         || {
             quote! {
-                impl<T: #isthmus::BufferData> #isthmus::PassShared<T> for #pass_type {
+                impl<T: #isthmus::BufferData> #isthmus::__private::PassShared<T> for #pass_type {
                     const SHARED_BUFFER: bool = false;
                 }
             }
         },
         |shared| {
             quote! {
-                impl #isthmus::PassShared<#shared> for #pass_type {
+                impl #isthmus::__private::PassShared<#shared> for #pass_type {
                     const SHARED_BUFFER: bool = true;
                 }
             }
@@ -323,25 +297,17 @@ fn pass_declaration(
     let resources_type = if model.resources.is_empty() {
         quote!(())
     } else {
-        quote!(#resources_type_name<'a>)
+        let kinds = model.resources.iter().map(|(_, kind)| kind);
+        quote!((#(&'a #kinds,)*))
     };
-    let resources_declaration = if model.resources.is_empty() {
-        quote!()
+    let resource_bindings = if model.resources.is_empty() {
+        quote!(std::vec::Vec::new())
     } else {
-        let (names, kinds): (Vec<_>, Vec<_>) =
-            model.resources.iter().map(|(name, kind)| (name, kind)).unzip();
+        let names = model.resources.iter().map(|(name, _)| name).collect::<Vec<_>>();
+        let binding_names = names.clone();
         quote! {
-            #[cfg(feature = "cpu")]
-            pub struct #resources_type_name<'a> {
-                #(pub #names: &'a #kinds),*
-            }
-
-            #[cfg(feature = "cpu")]
-            impl #isthmus::ResourceBindings for #resources_type_name<'_> {
-                fn into_bindings(self) -> std::vec::Vec<#isthmus::Binding> {
-                    std::vec![#(<#kinds as #isthmus::CpuResource>::clone_binding(self.#names)),*]
-                }
-            }
+            let (#(#names,)*) = resources;
+            std::vec![#(#isthmus::__private::Binding::from(#binding_names)),*]
         }
     };
     let topology = format_ident!("{}", options.topology);
@@ -355,32 +321,29 @@ fn pass_declaration(
         _ => unreachable!(),
     };
     let vertices = options.vertices;
-    let pass_name = pass_names.module.as_ref().map_or_else(
-        || quote!(#isthmus::pass_module_name(module_path!())),
-        |module| {
-            quote!(#isthmus::pass_module_name(concat!(
-                module_path!(),
-                "::",
-                stringify!(#module)
-            )))
-        },
-    );
     quote! {
         #[cfg(feature = "cpu")]
-        impl #isthmus::PassContract for #pass_type {
+        impl #isthmus::__private::PassContract for #pass_type {
             type Instance = #data;
             type Resources<'a> = #resources_type;
-            const NAME: &'static str = #pass_name;
-            const PIPELINE: #isthmus::Pipeline = #isthmus::Pipeline {
+            const NAME: &'static str = #isthmus::__private::pass_module_name(concat!(
+                module_path!(),
+                "::",
+                stringify!(#shader_module),
+            ));
+            const PIPELINE: #isthmus::__private::Pipeline = #isthmus::__private::Pipeline {
                 topology: #isthmus::wgpu::PrimitiveTopology::#topology,
                 blend: #blend,
                 vertices: #vertices,
             };
+
+            fn bindings(resources: Self::Resources<'_>) -> std::vec::Vec<#isthmus::__private::Binding> {
+                #resource_bindings
+            }
         }
 
         #[cfg(feature = "cpu")]
         #shared_impl
-        #resources_declaration
     }
 }
 

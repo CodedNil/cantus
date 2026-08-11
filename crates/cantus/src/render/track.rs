@@ -8,35 +8,27 @@ use crate::render::{
 };
 use core::f32::consts::{FRAC_PI_2, TAU};
 use isthmus::{
-    contract::Vertex,
-    data::Unorm8x4,
+    Sampler, Texture2DArray, Unorm8x4, Vertex,
     glam::{FloatExt, UVec2, Vec2, Vec3, Vec4, uvec2, vec2, vec3},
-    spirv_std::{
-        Sampler,
-        arch::{Derivative, kill},
-        image::Image2dArray,
-    },
+    spirv_std::arch::{Derivative, kill},
 };
 
 #[cfg(target_arch = "spirv")]
 use isthmus::spirv_std::num_traits::Float;
 
 #[cfg(feature = "cpu")]
-use {
-    crate::{
-        app::{
-            MAX_RENDER_INSTANCES, TRACK_SPACING_MS,
-            interaction::Rect,
-            spotify::{CondensedPlaylist, PlaybackState, QueuePosition, Track, playlist_icons},
-        },
-        render::{
-            art::ImageAtlas,
-            cpu::{Frame, Passes, approach},
-            shared::GAP,
-            text::TextStyle,
-        },
+use crate::{
+    app::{
+        MAX_RENDER_INSTANCES, TRACK_SPACING_MS,
+        interaction::Rect,
+        spotify::{CondensedPlaylist, PlaybackState, QueuePosition, Track, playlist_icons},
     },
-    isthmus::cpu::{FilteringSampler, pass::Pass},
+    render::{
+        art::ImageAtlas,
+        cpu::{Frame, Passes, approach},
+        shared::GAP,
+        text::TextStyle,
+    },
 };
 
 /// Maximum number of playlist artwork icons carried by one pill instance.
@@ -49,9 +41,6 @@ const ICON_WIDTH: f32 = 21.6;
 const ICON_SPACING: f32 = 18.0;
 /// Stars in the rating row; each holds a half-star either side of its centre.
 const STAR_RATINGS: usize = 5;
-
-const TEXT_COLOR: Vec3 = Vec3::splat(0.94);
-
 #[cfg(feature = "cpu")]
 const TITLE_STYLE: TextStyle = TextStyle::new(16.0, 700.0);
 #[cfg(feature = "cpu")]
@@ -60,10 +49,12 @@ const DETAILS_STYLE: TextStyle = TextStyle::new(14.0, 700.0);
 const DETAIL_FADE_DURATION: f32 = 0.2;
 #[cfg(feature = "cpu")]
 const PLAYLIST_EXPANSION_DURATION: f32 = 1.0 / 6.0;
+#[cfg(feature = "cpu")]
+pub(crate) const TEXT_GLYPHS: usize = MAX_RENDER_INSTANCES * 2 * text::MAX_LINE_GLYPHS;
 
 #[isthmus::pass]
 pub struct TrackPass {
-    pass: Pass<Self>,
+    pub(crate) instances: isthmus::Instances<Self>,
     images: ImageAtlas,
     pub offset: f32,
     pub movement_speed: f32,
@@ -71,7 +62,7 @@ pub struct TrackPass {
 }
 
 #[derive(isthmus::Varyings)]
-pub struct Varyings {
+pub struct TrackVaryings {
     pub pixel_pos: Vec2,
     #[gpu(flat)]
     pub pill_idx: u32,
@@ -93,7 +84,7 @@ pub struct TrackPill {
     pub seed: f32,
     pub effects: AudioFeatures,
     pub playlist_images: [i32; MAX_PILL_PLAYLIST_ICONS],
-    pub text: text::Text<2, { text::MAX_LINE_GLYPHS * 2 }>,
+    pub lines: [text::Line; 2],
 }
 
 impl TrackPill {
@@ -178,6 +169,17 @@ struct PillIconRow {
     center: Vec2,
     count: f32,
     expansion: f32,
+}
+
+/// Where one queued track sits on the timeline this frame.
+#[cfg(feature = "cpu")]
+#[derive(Clone, Copy)]
+struct TrackLayout {
+    start_ms: f32,
+    x: f32,
+    width: f32,
+    natural_start: f32,
+    natural_end: f32,
 }
 
 impl PillIconRow {
@@ -295,31 +297,14 @@ fn caustics(p: Vec2, time: f32, seed: f32, effects: AudioFeatures) -> f32 {
     web * amount * 0.06
 }
 
-/// Where one queued track sits on the timeline this frame.
-#[cfg(feature = "cpu")]
-#[derive(Clone, Copy)]
-struct TrackLayout {
-    start_ms: f32,
-    x: f32,
-    width: f32,
-    natural_start: f32,
-    natural_end: f32,
-}
-
 #[isthmus::pass]
 impl TrackPass {
-    pub fn new(passes: &Passes<'_>, sampler: &FilteringSampler, font: &text::Font) -> Self {
+    pub fn new(passes: &Passes<'_>, text: &text::Renderer) -> Self {
         let images = ImageAtlas::new(passes);
+        let sampler = passes.filtering_sampler("Linear Sampler");
+        let (placed_glyphs, glyphs, edges) = text.resources();
         Self {
-            pass: passes.instances(
-                MAX_RENDER_INSTANCES,
-                Resources {
-                    images: images.view(),
-                    glyphs: &font.glyphs,
-                    edges: &font.edges,
-                    sampler,
-                },
-            ),
+            instances: passes.instances((images.view(), &sampler, placed_glyphs, glyphs, edges), []),
             images,
             offset: 0.0,
             movement_speed: 0.0,
@@ -341,7 +326,7 @@ impl TrackPass {
 
     fn draw_pill(
         &mut self,
-        font: &text::Font,
+        text: &mut text::Renderer,
         track: &mut Track,
         layout: &mut TrackLayout,
         playlists: &mut [CondensedPlaylist],
@@ -361,15 +346,19 @@ impl TrackPass {
         } else {
             title
         };
-        let playlist_expansion = track.runtime.playlist_expansion_curve();
-        if playlist_expansion > 0.0 {
-            // Grow toward the width the labels would need at full size.
+        let playlist_expansion = smoothstep(0.0, 1.0, track.runtime.playlist_expansion);
+        let labels = (layout.width > height + 26.0 || playlist_expansion > 0.0).then(|| {
             let details = Self::track_details(track, layout.start_ms);
-            let target = font
-                .width(title, TITLE_STYLE)
-                .max(font.width(&details, DETAILS_STYLE))
-                + height
-                + 20.0;
+            (
+                text.shape(title, TITLE_STYLE),
+                text.shape(&details, DETAILS_STYLE),
+            )
+        });
+        if playlist_expansion > 0.0
+            && let Some((title, details)) = &labels
+        {
+            // Grow toward the width the labels would need at full size.
+            let target = title.width.max(details.width) + height + 20.0;
             let extra_width = (target - layout.width).max(0.0) * playlist_expansion;
             layout.x -= extra_width * 0.5;
             layout.width += extra_width;
@@ -382,26 +371,15 @@ impl TrackPass {
         );
         let detail_alpha = track.runtime.detail_alpha;
 
-        // Labels are only shaped when the pill is wide enough to show them.
-        let (left, right) = (12.0, layout.width - height - 8.0);
-        let details = (right > left).then(|| Self::track_details(track, layout.start_ms));
-        let mut text = text::Text::default();
-        text.fit(
-            font,
-            if details.is_some() { title } else { "" },
-            TITLE_STYLE,
-            (height * 0.26).floor(),
-            left,
-            right,
-        );
-        text.fit(
-            font,
-            details.as_deref().unwrap_or(""),
-            DETAILS_STYLE,
-            (height * 0.57).floor(),
-            left,
-            right,
-        );
+        let (left, right) = (18.0, layout.width - height - 8.0);
+        let visible = right > left && labels.is_some();
+        let lines = match labels {
+            Some((title, details)) if visible => [
+                text.fit_shaped(title, (height * 0.26).floor(), left, right),
+                text.fit_shaped(details, (height * 0.57).floor(), left, right),
+            ],
+            _ => [text::Line::default(); 2],
+        };
 
         // Icon slots hold the primary playlists first, then the secondary ones.
         let mut playlist_images = [-1; MAX_PILL_PLAYLIST_ICONS];
@@ -467,9 +445,9 @@ impl TrackPass {
                 .max(playlist_expansion * f32::from(primary_icons > 0.0)),
             secondary_expansion: playlist_expansion,
             seed,
-            effects: track.audio_features.unwrap_or_default(),
+            effects: track.runtime.audio_features.unwrap_or_default(),
             playlist_images,
-            text,
+            lines,
         };
 
         let mut hovered = false;
@@ -536,11 +514,16 @@ impl TrackPass {
         (pill, hovered)
     }
 
-    pub fn update(&mut self, font: &text::Font, playback: &mut PlaybackState, frame: &mut Frame) {
+    pub fn update(
+        &mut self,
+        text: &mut text::Renderer,
+        playback: &mut PlaybackState,
+        frame: &mut Frame,
+    ) {
         self.images.begin_frame();
         if playback.queue.is_empty() {
             self.current_track_palette = None;
-            self.pass.instances.clear();
+            self.instances.clear();
             return;
         }
         let cur_idx = playback.position.index.min(playback.queue.len() - 1);
@@ -568,7 +551,7 @@ impl TrackPass {
         );
         self.offset = current_ms;
 
-        self.pass.instances.clear();
+        self.instances.clear();
         let mut foreground = None;
         let mut current_track = None;
         if frame.interaction.dragging {
@@ -615,10 +598,10 @@ impl TrackPass {
             }
             let is_current = layout.start_ms <= 0.0 && layout.start_ms + track.duration_ms as f32 >= 0.0;
             let can_render =
-                self.pass.instances.len() + usize::from(foreground.is_some()) < MAX_RENDER_INSTANCES;
+                self.instances.len() + usize::from(foreground.is_some()) < MAX_RENDER_INSTANCES;
             if can_render && layout.width > 0.0 && layout.x + layout.width > 0.0 {
                 let (pill, hovered) = self.draw_pill(
-                    font,
+                    text,
                     track,
                     &mut layout,
                     &mut playback.playlists,
@@ -629,16 +612,16 @@ impl TrackPass {
                 if hovered {
                     foreground = Some(pill);
                 } else {
-                    self.pass.instances.push(pill);
+                    self.instances.push(pill);
                 }
             }
             if is_current {
                 current_track = Some((pill_queue_index, layout));
             }
         }
-        self.pass.instances.reverse();
-        if let Some(track) = foreground {
-            self.pass.instances.push(track);
+        self.instances.reverse();
+        if let Some(pill) = foreground {
+            self.instances.push(pill);
         }
         if frame.interaction.released() {
             if frame.interaction.dragging
@@ -664,7 +647,7 @@ impl TrackPass {
         #[gpu(instance_index)] instance: u32,
         #[gpu(shared)] frame: FrameData,
         #[gpu(instance)] pill: TrackPill,
-    ) -> Vertex<Varyings> {
+    ) -> Vertex<TrackVaryings> {
         let margin = pill_margin(frame);
         let pill_size = vec2(pill.width, frame.panel_height);
         let pill_origin = vec2(pill.x, PANEL_START);
@@ -689,7 +672,7 @@ impl TrackPass {
         let pixel_pos = render_min + quad_coord(vertex) * (render_max - render_min);
         Vertex {
             position: pixel_to_ndc(pixel_pos, frame.screen_size),
-            varyings: Varyings {
+            varyings: TrackVaryings {
                 pixel_pos,
                 pill_idx: instance,
             },
@@ -698,16 +681,17 @@ impl TrackPass {
 
     #[gpu]
     pub fn fragment(
-        Varyings {
+        TrackVaryings {
             pixel_pos,
             pill_idx: _,
-        }: Varyings,
+        }: TrackVaryings,
         #[gpu(shared)] frame: FrameData,
         #[gpu(instance = pill_idx as usize)] pill: TrackPill,
+        #[gpu(resource)] images: &Texture2DArray,
+        #[gpu(resource)] sampler: &Sampler,
+        #[gpu(resource)] placed_glyphs: &[text::PlacedGlyph],
         #[gpu(resource)] glyphs: &[text::Glyph],
         #[gpu(resource)] edges: &[text::Edge],
-        #[gpu(resource)] images: &Image2dArray,
-        #[gpu(resource)] sampler: &Sampler,
     ) -> Vec4 {
         let (interaction, local_pixel, pill_size, body_surface) =
             pill_fragment(pixel_pos, frame, pill.x, pill.width);
@@ -854,14 +838,14 @@ impl TrackPass {
             index += 1;
         }
 
-        let distance = text::pair_distance(&pill.text, 0, 1, glyphs, edges, refracted);
-        let image_fade = smoothstep(
-            0.0,
-            8.0,
+        let text_alpha = text::line_alpha(pill.lines[0], placed_glyphs, glyphs, edges, refracted).max(
+            text::line_alpha(pill.lines[1], placed_glyphs, glyphs, edges, refracted),
+        ) * smoothstep(
+            2.0,
+            18.0,
             sd_capsule_box(refracted - image_center, 0.0, pill_size.y * 0.5),
-        );
-        let text_alpha = text::alpha(distance) * image_fade * mask;
-        output = output * (1.0 - text_alpha) + (TEXT_COLOR * text_alpha).extend(text_alpha);
+        ) * mask;
+        output = output * (1.0 - text_alpha) + (text::COLOR * text_alpha).extend(text_alpha);
 
         output *= pill.visibility;
         if output.w <= 0.0 {

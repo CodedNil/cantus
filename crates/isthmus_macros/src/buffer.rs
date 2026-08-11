@@ -7,7 +7,10 @@ use syn::{Data, DeriveInput, Fields, parse_macro_input, parse_quote};
 #[allow(clippy::missing_panics_doc)]
 pub fn attribute(input: TokenStream) -> TokenStream {
     let mut input = parse_macro_input!(input as DeriveInput);
-    input.attrs.push(parse_quote!(#[repr(C, align(16))]));
+    input.attrs.push(parse_quote!(#[repr(C)]));
+    input
+        .attrs
+        .push(parse_quote!(#[cfg_attr(target_arch = "spirv", repr(align(16)))]));
     input.attrs.push(parse_quote!(#[derive(Clone, Copy)]));
     let implementation = implementation(&input);
     quote!(#input #implementation).into()
@@ -36,51 +39,43 @@ fn implementation(input: &DeriveInput) -> TokenStream2 {
             .push(parse_quote!(#ty: #isthmus::BufferData));
     }
     let (impl_generics, type_generics, where_clause) = generics.split_for_impl();
-    // Generic types are checked through whichever concrete struct embeds them.
-    let force_check = input
-        .generics
-        .params
-        .is_empty()
-        .then(|| quote!(const _: () = <#name as #isthmus::BufferData>::ASSERT_LAYOUT;));
-
     quote! {
-        #force_check
         impl #impl_generics #isthmus::BufferData for #name #type_generics #where_clause {
-            const ASSERT_LAYOUT: () = {
-                #(
-                    let () = <#types as #isthmus::BufferData>::ASSERT_LAYOUT;
-                    assert!(
-                        core::mem::offset_of!(Self, #names)
-                            .is_multiple_of(<#types as #isthmus::BufferData>::BUFFER_ALIGN),
-                        concat!(
-                            stringify!(#name),
-                            "::",
-                            stringify!(#names),
-                            " is not aligned for WGSL; move vector and nested data fields before scalars"
-                        )
-                    );
-                )*
-            };
             const BUFFER_ALIGN: usize = {
                 let mut alignment = 1;
-                #(if <#types as #isthmus::BufferData>::BUFFER_ALIGN > alignment {
-                    alignment = <#types as #isthmus::BufferData>::BUFFER_ALIGN;
-                })*
+                #(
+                    if <#types as #isthmus::BufferData>::BUFFER_ALIGN > alignment {
+                        alignment = <#types as #isthmus::BufferData>::BUFFER_ALIGN;
+                    }
+                )*
                 alignment
             };
             const BUFFER_SIZE: usize = {
-                let mut cursor = #isthmus::BufferCursor::new(0);
-                #(cursor.field::<#types>();)*
-                cursor.finish(Self::BUFFER_ALIGN)
+                let mut offset = 0;
+                #(
+                    offset = #isthmus::__private::align_to(
+                        offset,
+                        <#types as #isthmus::BufferData>::BUFFER_ALIGN,
+                    );
+                    offset += <#types as #isthmus::BufferData>::BUFFER_SIZE;
+                )*
+                #isthmus::__private::align_to(offset, Self::BUFFER_ALIGN)
             };
 
             fn write_at(&self, words: &mut [u32], byte: usize) {
-                let mut cursor = #isthmus::BufferCursor::new(byte);
-                #(<#types as #isthmus::BufferData>::write_at(
-                    &self.#names,
-                    words,
-                    cursor.field::<#types>(),
-                );)*
+                let mut offset = 0;
+                #(
+                    offset = #isthmus::__private::align_to(
+                        offset,
+                        <#types as #isthmus::BufferData>::BUFFER_ALIGN,
+                    );
+                    <#types as #isthmus::BufferData>::write_at(
+                        &self.#names,
+                        words,
+                        byte + offset,
+                    );
+                    offset += <#types as #isthmus::BufferData>::BUFFER_SIZE;
+                )*
             }
         }
     }

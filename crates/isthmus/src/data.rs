@@ -1,4 +1,3 @@
-use core::mem::size_of;
 use glam::{UVec2, UVec3, UVec4, Vec2, Vec3, Vec4};
 
 /// Four normalized channels stored in one 32-bit word.
@@ -39,12 +38,10 @@ impl Unorm8x4 {
 
 /// A value with a generated WGSL storage-buffer layout.
 pub trait BufferData: Copy {
-    /// Proves that Rust-GPU's Rust layout is legal as a WGSL storage layout.
-    const ASSERT_LAYOUT: ();
     const BUFFER_ALIGN: usize;
     const BUFFER_SIZE: usize;
     const BUFFER_STRIDE: usize = align_to(Self::BUFFER_SIZE, Self::BUFFER_ALIGN);
-    const BUFFER_WORDS: usize = Self::BUFFER_STRIDE.div_ceil(size_of::<u32>());
+    const BUFFER_WORDS: usize = Self::BUFFER_STRIDE.div_ceil(4);
 
     fn write_at(&self, words: &mut [u32], byte: usize);
 
@@ -53,31 +50,12 @@ pub trait BufferData: Copy {
     }
 }
 
-const fn align_to(value: usize, alignment: usize) -> usize {
+#[doc(hidden)]
+pub const fn align_to(value: usize, alignment: usize) -> usize {
     value.div_ceil(alignment) * alignment
 }
 
-pub struct BufferCursor(usize);
-
-impl BufferCursor {
-    pub const fn new(byte: usize) -> Self {
-        Self(byte)
-    }
-
-    pub const fn field<T: BufferData>(&mut self) -> usize {
-        self.0 = align_to(self.0, T::BUFFER_ALIGN);
-        let byte = self.0;
-        self.0 += T::BUFFER_SIZE;
-        byte
-    }
-
-    pub const fn finish(self, alignment: usize) -> usize {
-        align_to(self.0, alignment)
-    }
-}
-
 impl BufferData for () {
-    const ASSERT_LAYOUT: () = ();
     const BUFFER_ALIGN: usize = 1;
     const BUFFER_SIZE: usize = 0;
 
@@ -87,7 +65,6 @@ impl BufferData for () {
 macro_rules! scalar {
     ($ty:ty, $encode:expr) => {
         impl BufferData for $ty {
-            const ASSERT_LAYOUT: () = ();
             const BUFFER_ALIGN: usize = 4;
             const BUFFER_SIZE: usize = 4;
 
@@ -103,7 +80,6 @@ scalar!(i32, |value| value as u32);
 scalar!(f32, f32::to_bits);
 
 impl BufferData for Unorm8x4 {
-    const ASSERT_LAYOUT: () = ();
     const BUFFER_ALIGN: usize = 4;
     const BUFFER_SIZE: usize = 4;
 
@@ -115,7 +91,6 @@ impl BufferData for Unorm8x4 {
 macro_rules! vector {
     ($ty:ty, $align:literal, $size:literal, $($field:ident: $offset:literal),+) => {
         impl BufferData for $ty {
-            const ASSERT_LAYOUT: () = ();
             const BUFFER_ALIGN: usize = $align;
             const BUFFER_SIZE: usize = $size;
 
@@ -134,14 +109,6 @@ vector!(UVec3, 16, 12, x: 0, y: 4, z: 8);
 vector!(UVec4, 16, 16, x: 0, y: 4, z: 8, w: 12);
 
 impl<T: BufferData, const N: usize> BufferData for [T; N] {
-    const ASSERT_LAYOUT: () = {
-        let () = T::ASSERT_LAYOUT;
-        assert!(N > 0, "BufferData arrays cannot be empty");
-        assert!(
-            size_of::<T>() >= T::BUFFER_SIZE && size_of::<T>().is_multiple_of(T::BUFFER_ALIGN),
-            "BufferData array element has an invalid WGSL stride"
-        );
-    };
     const BUFFER_ALIGN: usize = {
         assert!(N > 0, "BufferData arrays cannot be empty");
         T::BUFFER_ALIGN
@@ -169,9 +136,23 @@ mod tests {
         tail: u32,
     }
 
+    #[crate::data]
+    #[derive(Default)]
+    struct NestedLine {
+        vectors: [Vec2; 3],
+        scalars: [u32; 4],
+    }
+
+    #[crate::data]
+    #[derive(Default)]
+    struct NestedText {
+        lines: [NestedLine; 2],
+        glyphs: [Vec2; 2],
+        count: u32,
+    }
+
     #[test]
-    fn derive_matches_wgsl_alignment() {
-        let () = Layout::ASSERT_LAYOUT;
+    fn storage_layout_matches_wgsl() {
         assert_eq!(Layout::BUFFER_ALIGN, 16);
         assert_eq!(Layout::BUFFER_SIZE, 32);
         let value = Layout {
@@ -186,13 +167,15 @@ mod tests {
         assert_eq!(words[4], 6.0f32.to_bits());
         assert_eq!(words[6], 1.0f32.to_bits());
         assert_eq!(words[7], 8);
-    }
 
-    #[test]
-    fn arrays_use_padded_element_stride() {
         assert_eq!(Vec3::BUFFER_SIZE, 12);
         assert_eq!(Vec3::BUFFER_STRIDE, 16);
         assert_eq!(<[Vec3; 2]>::BUFFER_SIZE, 32);
+        assert_eq!(<[[f32; 3]; 2]>::BUFFER_SIZE, 24);
+        assert_eq!(NestedLine::BUFFER_ALIGN, 8);
+        assert_eq!(NestedLine::BUFFER_SIZE, 40);
+        assert_eq!(NestedText::BUFFER_ALIGN, 8);
+        assert_eq!(NestedText::BUFFER_SIZE, 104);
     }
 
     #[test]

@@ -1,5 +1,4 @@
-use crate::contract::Texture2DArray;
-use crate::cpu::TextureView;
+use crate::{contract::Texture2DArray, cpu::TextureView};
 use core::{error::Error, fmt};
 use wgpu::{
     Device, Extent3d, Origin3d, Queue, TexelCopyBufferLayout, TexelCopyTextureInfo, Texture,

@@ -1,4 +1,8 @@
-use isthmus::glam::{Vec2, vec2};
+use crate::render::{
+    shader::{pill_margin, pixel_to_ndc, quad_coord},
+    shared::FrameData,
+};
+use isthmus::glam::{Vec2, Vec3, vec2};
 
 #[cfg(target_arch = "spirv")]
 use isthmus::spirv_std::num_traits::Float;
@@ -6,12 +10,13 @@ use isthmus::spirv_std::num_traits::Float;
 #[cfg(feature = "cpu")]
 use {
     crate::render::cpu::Passes,
+    arrayvec::ArrayVec,
     isthmus::Storage,
     ttf_parser::{Face, GlyphId, OutlineBuilder, Tag},
-    unicode_normalization::UnicodeNormalization,
 };
 
 pub const MAX_LINE_GLYPHS: usize = 64;
+pub const COLOR: Vec3 = Vec3::splat(0.94);
 const EFFECT_PADDING: f32 = 3.5;
 
 #[isthmus::data]
@@ -27,13 +32,13 @@ pub struct Edge {
 #[isthmus::data]
 #[derive(Default)]
 pub struct Line {
-    min: Vec2,
-    max: Vec2,
-    origin: Vec2,
-    size: f32,
-    weight: f32,
-    count: u32,
-    first: u32,
+    pub min: Vec2,
+    pub max: Vec2,
+    pub origin: Vec2,
+    pub size: f32,
+    pub weight: f32,
+    pub count: u32,
+    pub first: u32,
 }
 
 #[isthmus::data]
@@ -48,25 +53,13 @@ pub struct Glyph {
 #[isthmus::data]
 #[derive(Default)]
 pub struct PlacedGlyph {
-    x: f32,
-    glyph: u32,
+    pub x: f32,
+    pub glyph: u32,
 }
 
-#[isthmus::data]
-pub struct Text<const LINES: usize, const GLYPHS: usize> {
-    lines: [Line; LINES],
-    glyphs: [PlacedGlyph; GLYPHS],
-    line_count: u32,
-}
-
-impl<const LINES: usize, const GLYPHS: usize> Default for Text<LINES, GLYPHS> {
-    fn default() -> Self {
-        Self {
-            lines: [Line::default(); LINES],
-            glyphs: [PlacedGlyph::default(); GLYPHS],
-            line_count: 0,
-        }
-    }
+#[derive(isthmus::Varyings)]
+pub struct Varyings {
+    pub pixel: Vec2,
 }
 
 #[derive(Clone, Copy)]
@@ -98,24 +91,76 @@ impl TextStyle {
     }
 }
 
+#[isthmus::outline]
 fn quadratic(a: Vec2, control: Vec2, b: Vec2, t: f32) -> Vec2 {
     let u = 1.0 - t;
     a * u * u + control * (2.0 * u * t) + b * t * t
 }
 
 #[isthmus::outline]
+fn ray_crossing(a: Vec2, control: Vec2, b: Vec2, point: Vec2, t: f32) -> i32 {
+    if t < 0.0 || t >= 1.0 {
+        return 0;
+    }
+    let curve = quadratic(a, control, b, t);
+    if curve.x <= point.x {
+        return 0;
+    }
+    let vertical_tangent = ((control.y - a.y) * (1.0 - t) + (b.y - control.y) * t) * 2.0;
+    if vertical_tangent > 0.0 {
+        1
+    } else if vertical_tangent < 0.0 {
+        -1
+    } else {
+        0
+    }
+}
+
+/// Exact non-zero winding contribution of a quadratic to a rightward ray from `point`.
+fn edge_winding(a: Vec2, control: Vec2, b: Vec2, point: Vec2) -> i32 {
+    let quadratic = a.y - control.y * 2.0 + b.y;
+    let linear = (control.y - a.y) * 2.0;
+    let constant = a.y - point.y;
+    if quadratic.abs() < 1e-7 {
+        return if linear.abs() < 1e-7 {
+            0
+        } else {
+            ray_crossing(a, control, b, point, -constant / linear)
+        };
+    }
+    let discriminant = linear * linear - 4.0 * quadratic * constant;
+    if discriminant <= 0.0 {
+        return 0;
+    }
+    let root = discriminant.sqrt();
+    let divisor = quadratic * 2.0;
+    ray_crossing(a, control, b, point, (-linear - root) / divisor)
+        + ray_crossing(a, control, b, point, (-linear + root) / divisor)
+}
+
+#[isthmus::outline]
 #[allow(clippy::manual_clamp)]
-fn edge_distance(edge: Edge, weight: f32, point: Vec2) -> (f32, i32) {
+fn edge_distance(edge: Edge, weight: f32, point: Vec2, best_distance: f32) -> (f32, i32) {
     let a = edge.low_start.lerp(edge.high_start, weight);
     let control = edge.low_control.lerp(edge.high_control, weight);
     let b = edge.low_end.lerp(edge.high_end, weight);
+    let bounds_min = a.min(control).min(b);
+    let bounds_max = a.max(control).max(b);
+    let winding = if point.x >= bounds_max.x || point.y < bounds_min.y || point.y >= bounds_max.y {
+        0
+    } else {
+        edge_winding(a, control, b, point)
+    };
+    if (point - point.clamp(bounds_min, bounds_max)).length_squared() >= best_distance {
+        return (best_distance, winding);
+    }
     let chord = b - a;
     let mut t = ((point - a).dot(chord) / chord.length_squared().max(1e-8))
         .max(0.0)
         .min(1.0);
     let second = (a - control * 2.0 + b) * 2.0;
     let mut iteration = 0;
-    while iteration < 3 {
+    while iteration < 2 {
         let curve = quadratic(a, control, b, t);
         let tangent = ((control - a) * (1.0 - t) + (b - control) * t) * 2.0;
         let delta = curve - point;
@@ -128,23 +173,6 @@ fn edge_distance(edge: Edge, weight: f32, point: Vec2) -> (f32, i32) {
         .length_squared()
         .min((point - b).length_squared())
         .min((point - quadratic(a, control, b, t)).length_squared());
-    let mut winding = 0;
-    let mut previous = a;
-    let mut step = 1;
-    while step <= 3 {
-        let next = quadratic(a, control, b, step as f32 / 3.0);
-        let segment = next - previous;
-        let orientation = segment.x * (point.y - previous.y) - segment.y * (point.x - previous.x);
-        if previous.y <= point.y {
-            if next.y > point.y && orientation > 0.0 {
-                winding += 1;
-            }
-        } else if next.y <= point.y && orientation < 0.0 {
-            winding -= 1;
-        }
-        previous = next;
-        step += 1;
-    }
     (distance, winding)
 }
 
@@ -153,32 +181,31 @@ fn glyph_distance(edges: &[Edge], start: u32, count: u32, weight: f32, point: Ve
     let mut winding = 0;
     let mut index = 0;
     while index < count {
-        let (distance, edge_winding) = edge_distance(edges[(start + index) as usize], weight, point);
-        distance_squared = distance_squared.min(distance);
+        let (distance, edge_winding) =
+            edge_distance(edges[(start + index) as usize], weight, point, distance_squared);
+        distance_squared = distance;
         winding += edge_winding;
         index += 1;
     }
     distance_squared.sqrt() * size * if winding == 0 { -1.0 } else { 1.0 }
 }
 
-/// Signed pixel distance for the glyph under `local`, or a large negative value outside the line.
 #[allow(clippy::suspicious_operation_groupings)]
-pub fn line_distance<const LINES: usize, const GLYPHS: usize>(
-    text: &Text<LINES, GLYPHS>,
-    index: usize,
+pub fn line_alpha(
+    line: Line,
+    placed_glyphs: &[PlacedGlyph],
     glyphs: &[Glyph],
     edges: &[Edge],
     local: Vec2,
 ) -> f32 {
-    let line = text.lines[index];
     if (local.x < line.min.x || local.x > line.max.x) || (local.y < line.min.y || local.y > line.max.y) {
-        return -1e6;
+        return 0.0;
     }
     let mut low = 0;
     let mut high = line.count;
     while low < high {
         let middle = low + (high - low) / 2;
-        let placed = text.glyphs[(line.first + middle) as usize];
+        let placed = placed_glyphs[(line.first + middle) as usize];
         if placed.x <= (local.x - line.origin.x) / line.size {
             low = middle + 1;
         } else {
@@ -190,7 +217,7 @@ pub fn line_distance<const LINES: usize, const GLYPHS: usize>(
     let mut glyph_index = (low + 1).min(line.count);
     while glyph_index > 0 {
         glyph_index -= 1;
-        let placed = text.glyphs[(line.first + glyph_index) as usize];
+        let placed = placed_glyphs[(line.first + glyph_index) as usize];
         let glyph = glyphs[placed.glyph as usize];
         let point = vec2(
             (local.x - line.origin.x) / line.size - placed.x,
@@ -215,25 +242,17 @@ pub fn line_distance<const LINES: usize, const GLYPHS: usize>(
             ));
         }
     }
-    best
-}
-
-/// Nearer of two lines.
-pub fn pair_distance<const LINES: usize, const GLYPHS: usize>(
-    text: &Text<LINES, GLYPHS>,
-    first: usize,
-    second: usize,
-    glyphs: &[Glyph],
-    edges: &[Edge],
-    local: Vec2,
-) -> f32 {
-    line_distance(text, first, glyphs, edges, local)
-        .max(line_distance(text, second, glyphs, edges, local))
-}
-
-pub fn alpha(distance: f32) -> f32 {
-    let coverage = (distance * 1.25 + 0.5).clamp(0.0, 1.0);
+    let coverage = (best * 1.25 + 0.5).clamp(0.0, 1.0);
     coverage * coverage * (3.0 - 2.0 * coverage)
+}
+
+pub fn vertex(line: Line, origin: Vec2, vertex: u32, frame: &FrameData) -> isthmus::Vertex<Varyings> {
+    let margin = pill_margin(frame);
+    let pixel = origin + line.min - margin + quad_coord(vertex) * (line.max - line.min + margin * 2.0);
+    isthmus::Vertex {
+        position: pixel_to_ndc(pixel, frame.screen_size),
+        varyings: Varyings { pixel },
+    }
 }
 
 #[cfg(feature = "cpu")]
@@ -261,21 +280,6 @@ struct Meta {
     glyph: u32,
     data: Glyph,
     advance: [f32; 2],
-}
-
-#[cfg(feature = "cpu")]
-impl Meta {
-    /// Advance width interpolated between the light and bold variable-font weights.
-    fn advance_at(self, weight: f32) -> f32 {
-        self.advance[0] + (self.advance[1] - self.advance[0]) * weight
-    }
-}
-
-#[cfg(feature = "cpu")]
-#[derive(Clone, Copy)]
-struct Character {
-    character: char,
-    meta: Meta,
 }
 
 #[cfg(feature = "cpu")]
@@ -332,16 +336,29 @@ impl OutlineBuilder for Outline {
 }
 
 #[cfg(feature = "cpu")]
-pub struct Font {
-    characters: Vec<Character>,
+pub struct ShapedLine {
+    glyphs: ArrayVec<PlacedGlyph, MAX_LINE_GLYPHS>,
+    min: Vec2,
+    max: Vec2,
+    pub(crate) width: f32,
     baseline: f32,
-    pub(crate) edges: Storage<Edge>,
-    pub(crate) glyphs: Storage<Glyph>,
+    size: f32,
+    weight: f32,
 }
 
 #[cfg(feature = "cpu")]
-impl Font {
-    pub fn new(passes: &Passes<'_>) -> Self {
+pub struct Renderer {
+    characters: Vec<(char, Meta)>,
+    baseline: f32,
+    edges: Storage<Edge>,
+    glyphs: Storage<Glyph>,
+    storage: Storage<PlacedGlyph>,
+    placed: Vec<PlacedGlyph>,
+}
+
+#[cfg(feature = "cpu")]
+impl Renderer {
+    pub fn new(passes: &Passes<'_>, capacity: usize) -> Self {
         let mut face = Face::parse(FONT, 0).expect("parse variable font");
         let characters = RANGES
             .iter()
@@ -418,10 +435,7 @@ impl Font {
                 metadata
                     .binary_search_by_key(&id, |&(id, _)| id)
                     .ok()
-                    .map(|index| Character {
-                        character,
-                        meta: metadata[index].1,
-                    })
+                    .map(|index| (character, metadata[index].1))
             })
             .collect();
         let edges = passes.storage("Vector Font Edges", curves);
@@ -431,111 +445,95 @@ impl Font {
             baseline,
             edges,
             glyphs,
+            storage: passes.storage_with_capacity("Text Glyphs", capacity),
+            placed: Vec::with_capacity(capacity),
         }
-    }
-
-    /// Laid-out width, for callers sizing a box before any text is written.
-    pub fn width(&self, text: &str, style: TextStyle) -> f32 {
-        let weight = style.normalized_weight();
-        text.nfc()
-            .filter_map(|character| self.glyph(character))
-            .map(|meta| meta.advance_at(weight))
-            .sum::<f32>()
-            * style.size
     }
 
     fn glyph(&self, character: char) -> Option<Meta> {
         self.characters
-            .binary_search_by_key(&character, |glyph| glyph.character)
+            .binary_search_by_key(&character, |glyph| glyph.0)
             .ok()
-            .map(|index| self.characters[index].meta)
-    }
-}
-
-#[cfg(feature = "cpu")]
-impl<const LINES: usize, const GLYPHS: usize> Text<LINES, GLYPHS> {
-    pub const fn clear(&mut self) {
-        self.line_count = 0;
+            .map(|index| self.characters[index].1)
     }
 
-    pub fn centered(&mut self, font: &Font, text: &str, style: TextStyle, center: Vec2) -> usize {
-        let baseline = font.baseline * style.size;
-        self.write(font, text, style, |width| {
-            vec2(center.x - width * 0.5, center.y + baseline)
-        })
-    }
-
-    /// Centres `text` between `left` and `right`, or left-aligns it when it overflows.
-    pub fn fit(
-        &mut self,
-        font: &Font,
-        text: &str,
-        style: TextStyle,
-        y: f32,
-        left: f32,
-        right: f32,
-    ) -> usize {
-        let baseline = font.baseline * style.size;
-        self.write(font, text, style, |width| {
-            let x = if width <= right - left + 0.5 {
-                (left + right - width) * 0.5
-            } else {
-                left
-            };
-            vec2(x, y + baseline)
-        })
-    }
-
-    /// Shapes `text` in one pass, then asks `place` where to put it given its width.
-    fn write(
-        &mut self,
-        font: &Font,
-        text: &str,
-        style: TextStyle,
-        place: impl FnOnce(f32) -> Vec2,
-    ) -> usize {
-        let line = self.line_count as usize;
-        assert!(line < LINES, "text line capacity exceeded");
-        let first = if line == 0 {
-            0
-        } else {
-            let previous = self.lines[line - 1];
-            (previous.first + previous.count) as usize
-        };
+    pub fn shape(&self, text: &str, style: TextStyle) -> ShapedLine {
         let mut min = Vec2::splat(f32::MAX);
         let mut max = Vec2::splat(f32::MIN);
         let weight = style.normalized_weight();
         let mut x = 0.0;
-        let mut count = 0;
-        for meta in text.nfc().filter_map(|character| font.glyph(character)) {
-            if count < MAX_LINE_GLYPHS {
-                assert!(first + count != GLYPHS, "text glyph capacity exceeded");
+        let mut glyphs = ArrayVec::new();
+        for meta in text.chars().filter_map(|character| self.glyph(character)) {
+            if glyphs.len() < MAX_LINE_GLYPHS {
                 min = min.min(vec2(x + meta.data.min.x, -meta.data.max.y));
                 max = max.max(vec2(x + meta.data.max.x, -meta.data.min.y));
-                self.glyphs[first + count] = PlacedGlyph { x, glyph: meta.glyph };
-                count += 1;
+                glyphs.push(PlacedGlyph { x, glyph: meta.glyph });
             }
-            x += meta.advance_at(weight);
+            x += meta.advance[0] + (meta.advance[1] - meta.advance[0]) * weight;
         }
-        let origin = place(x * style.size);
+        ShapedLine {
+            glyphs,
+            min,
+            max,
+            width: x * style.size,
+            baseline: self.baseline * style.size,
+            size: style.size,
+            weight,
+        }
+    }
+    pub const fn resources(&self) -> (&Storage<PlacedGlyph>, &Storage<Glyph>, &Storage<Edge>) {
+        (&self.storage, &self.glyphs, &self.edges)
+    }
+
+    pub fn begin(&mut self) {
+        self.placed.clear();
+    }
+
+    pub fn upload(&mut self) {
+        self.storage.upload(&self.placed);
+    }
+
+    pub fn centered(&mut self, text: &str, style: TextStyle, center: Vec2) -> Line {
+        let shaped = self.shape(text, style);
+        let origin = vec2(center.x - shaped.width * 0.5, center.y + shaped.baseline);
+        self.place(shaped, origin)
+    }
+
+    pub fn fit(&mut self, text: &str, style: TextStyle, y: f32, left: f32, right: f32) -> Line {
+        let shaped = self.shape(text, style);
+        self.fit_shaped(shaped, y, left, right)
+    }
+
+    pub fn fit_shaped(&mut self, shaped: ShapedLine, y: f32, left: f32, right: f32) -> Line {
+        let x = if shaped.width <= right - left + 0.5 {
+            (left + right - shaped.width) * 0.5
+        } else {
+            left
+        };
+        let baseline = shaped.baseline;
+        self.place(shaped, vec2(x, y + baseline))
+    }
+
+    fn place(&mut self, shaped: ShapedLine, origin: Vec2) -> Line {
+        let first = self.placed.len();
+        let count = shaped.glyphs.len();
         let (min, max) = if count == 0 {
             (Vec2::ZERO, Vec2::ZERO)
         } else {
             (
-                origin + min * style.size - EFFECT_PADDING,
-                origin + max * style.size + EFFECT_PADDING,
+                origin + shaped.min * shaped.size - EFFECT_PADDING,
+                origin + shaped.max * shaped.size + EFFECT_PADDING,
             )
         };
-        self.lines[line] = Line {
+        self.placed.extend(shaped.glyphs);
+        Line {
             min,
             max,
             origin,
-            size: style.size,
-            weight,
+            size: shaped.size,
+            weight: shaped.weight,
             count: count as u32,
             first: first as u32,
-        };
-        self.line_count += 1;
-        line
+        }
     }
 }

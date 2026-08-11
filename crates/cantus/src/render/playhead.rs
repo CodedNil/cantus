@@ -3,23 +3,20 @@ use crate::render::{
     shared::{FrameData, PANEL_START, smoothstep},
 };
 use isthmus::{
+    Vertex,
     glam::{Vec2, Vec3, Vec4, vec2, vec3},
     spirv_std::arch::kill,
 };
 
-use isthmus::Vertex;
 #[cfg(feature = "cpu")]
-use {
-    crate::{
-        app::{interaction::Rect, spotify::PlaybackState},
-        render::cpu::{Frame, Passes, approach},
-    },
-    isthmus::StatePass,
+use crate::{
+    app::{interaction::Rect, spotify::PlaybackState},
+    render::cpu::{Frame, Passes, approach},
 };
 
 #[isthmus::pass]
 pub struct PlayheadPass {
-    pill: StatePass<Self>,
+    pill: isthmus::Instance<Self>,
 }
 
 #[isthmus::data]
@@ -39,7 +36,7 @@ pub struct Varyings {
 impl PlayheadPass {
     pub fn new(passes: &Passes<'_>) -> Self {
         Self {
-            pill: passes.state(()),
+            pill: passes.instance((), PlayheadState::default()),
         }
     }
 
