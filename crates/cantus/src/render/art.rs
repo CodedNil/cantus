@@ -1,5 +1,5 @@
 use crate::{
-    app::{CantusApp, spotify::PlaybackState},
+    app::{CantusApp, Fetch, spotify::PlaybackState},
     render::{cpu::Passes, track::PALETTE_COLORS},
 };
 use arrayvec::ArrayVec;
@@ -20,31 +20,12 @@ use std::{
 const MAX_TEXTURE_IMAGES: u32 = 32;
 pub const IMAGE_SIZE: u32 = 64;
 
-/// Album art for one slot, held beside the track or playlist that wants it.
-#[derive(Clone, Default)]
-pub enum ArtState {
-    #[default]
-    Missing,
-    Fetching,
-    RetryAt(Instant),
-    Ready(Arc<AlbumArt>),
-}
+pub type ArtState = Fetch<Arc<AlbumArt>>;
 
-impl ArtState {
-    pub const fn ready(&self) -> Option<&Arc<AlbumArt>> {
-        match self {
-            Self::Ready(art) => Some(art),
-            _ => None,
-        }
-    }
-
+impl Fetch<Arc<AlbumArt>> {
     pub fn palette(&self) -> [Unorm8x4; PALETTE_COLORS] {
         self.ready()
             .map_or_else(|| [Unorm8x4::default(); PALETTE_COLORS], |art| art.palette)
-    }
-
-    fn wanted(&self, now: Instant) -> bool {
-        matches!(self, Self::Missing) || matches!(self, Self::RetryAt(at) if *at <= now)
     }
 }
 
@@ -149,21 +130,21 @@ impl CantusApp {
             .collect::<HashMap<_, _>>();
         let mut download = Vec::new();
         for (url, state) in art_slots(&mut self.playback) {
-            if !state.wanted(now) {
+            if !state.request(now) {
                 continue;
             }
-            *state = shared.get(url).map_or_else(
-                || {
-                    download.push(url.to_owned());
-                    ArtState::Fetching
-                },
-                |art| ArtState::Ready(Arc::clone(art)),
-            );
+            if let Some(art) = shared.get(url) {
+                *state = Fetch::Ready(Arc::clone(art));
+            } else {
+                download.push(url.to_owned());
+            }
         }
         download.sort_unstable();
         download.dedup();
         for url in download {
-            self.spotify.download_image(url);
+            if !self.spotify.download_image(&url) {
+                self.set_art_state(&url, &Fetch::Missing(now));
+            }
         }
     }
 

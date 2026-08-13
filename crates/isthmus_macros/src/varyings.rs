@@ -3,7 +3,6 @@ use proc_macro::TokenStream;
 use quote::{format_ident, quote};
 use syn::{Fields, ItemStruct, parse_macro_input, parse_quote};
 
-#[allow(clippy::missing_panics_doc)]
 pub fn derive(input: TokenStream) -> TokenStream {
     let mut item = parse_macro_input!(input as ItemStruct);
     let Fields::Named(_) = &item.fields else {

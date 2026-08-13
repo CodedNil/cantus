@@ -18,7 +18,7 @@ pub use spirv_std;
 pub use isthmus_macros::lower_pass;
 pub use isthmus_macros::{Render, Varyings, data, outline, pass, shader_module};
 
-pub use contract::{Sampler, Texture2DArray, Vertex};
+pub use contract::{Sampler, Texture2DArray, Vertex, reference};
 #[cfg(feature = "cpu")]
 pub use cpu::{
     FilteringSampler, Storage, TextureView,

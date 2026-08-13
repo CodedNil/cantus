@@ -59,6 +59,7 @@ pub struct TrackPass {
     pub offset: f32,
     pub movement_speed: f32,
     pub current_track_palette: Option<[Unorm8x4; PALETTE_COLORS]>,
+    pub timeline_track: Option<(usize, f32)>,
 }
 
 #[derive(isthmus::Varyings)]
@@ -309,6 +310,7 @@ impl TrackPass {
             offset: 0.0,
             movement_speed: 0.0,
             current_track_palette: None,
+            timeline_track: None,
         }
     }
 
@@ -320,7 +322,7 @@ impl TrackPass {
         } else {
             format!("{}s", seconds.round())
         };
-        let artist = track.artists.first().map_or("", |artist| &artist.name);
+        let artist = track.artist();
         format!("{time}\u{2004}•\u{2004}{artist}")
     }
 
@@ -375,8 +377,8 @@ impl TrackPass {
         let visible = right > left && labels.is_some();
         let lines = match labels {
             Some((title, details)) if visible => [
-                text.fit_shaped(title, (height * 0.26).floor(), left, right),
-                text.fit_shaped(details, (height * 0.57).floor(), left, right),
+                text.fit_shaped(&title, (height * 0.26).floor(), left, right),
+                text.fit_shaped(&details, (height * 0.57).floor(), left, right),
             ],
             _ => [text::Line::default(); 2],
         };
@@ -445,7 +447,7 @@ impl TrackPass {
                 .max(playlist_expansion * f32::from(primary_icons > 0.0)),
             secondary_expansion: playlist_expansion,
             seed,
-            effects: track.runtime.audio_features.unwrap_or_default(),
+            effects: track.runtime.audio_features.ready().copied().unwrap_or_default(),
             playlist_images,
             lines,
         };
@@ -523,6 +525,7 @@ impl TrackPass {
         self.images.begin_frame();
         if playback.queue.is_empty() {
             self.current_track_palette = None;
+            self.timeline_track = None;
             self.instances.clear();
             return;
         }
@@ -639,6 +642,7 @@ impl TrackPass {
         }
         self.current_track_palette =
             current_track.map(|(index, _)| playback.queue[index].runtime.art.palette());
+        self.timeline_track = current_track.map(|(index, layout)| (index, -layout.start_ms));
     }
 
     #[gpu]

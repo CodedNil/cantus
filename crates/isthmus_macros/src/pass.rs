@@ -13,7 +13,6 @@ use syn::{
     Result as SynResult, Type, parse_macro_input, parse_quote,
 };
 
-#[allow(clippy::missing_panics_doc)]
 pub fn expand(args: TokenStream, input: TokenStream) -> TokenStream {
     let option_tokens = TokenStream2::from(args);
     let item = parse_macro_input!(input as Item);

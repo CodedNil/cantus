@@ -287,15 +287,16 @@ impl InteractionState {
                 clicked_duration_ms as f32 * fraction
             }
             .round() as u32;
-            position.progress = milliseconds;
+            position.progress = milliseconds as f32;
             self.spotify.player_parameter("seek", "position_ms", milliseconds);
         } else {
             let was_before = position.index < clicked_index;
             position.index = clicked_index;
-            position.progress = 0;
+            position.progress = 0.0;
             self.spotify.skip(was_before, skip_count.min(10));
         }
         position.updated = Instant::now();
+        position.reset_rate();
         position.hold_until = Instant::now() + Duration::from_secs(2);
     }
 }

@@ -1,9 +1,8 @@
-#![allow(clippy::missing_panics_doc)]
-
 #[cfg(feature = "cpu")]
 pub mod art;
 #[cfg(feature = "cpu")]
 pub mod cpu;
+pub mod lyrics;
 pub mod particles;
 pub mod playhead;
 pub(crate) mod shader;

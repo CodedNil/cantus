@@ -147,9 +147,6 @@ pub fn vertex_functions(
     );
     function.sig.ident = format_ident!("vertex_impl");
     borrow_data_parameters(&mut function, contract);
-    function
-        .attrs
-        .push(parse_quote!(#[allow(clippy::needless_pass_by_value)]));
     strip_gpu_attributes(&mut function);
     let output_parameters = fields.iter().enumerate().map(|(location, (name, ty, flat))| {
         let output = format_ident!("out_{name}");
@@ -234,10 +231,10 @@ pub fn fragment_functions(
     let other_names = argument_names(&other_inputs)?;
     function.sig.ident = format_ident!("fragment_impl");
     borrow_data_parameters(&mut function, contract);
-    function.attrs.push(parse_quote!(#[allow(
-        clippy::needless_pass_by_value,
-        clippy::trivially_copy_pass_by_ref
-    )]));
+    // Stage inputs are values in the shader ABI, even when the Rust body only reads them.
+    function
+        .attrs
+        .push(parse_quote!(#[cfg_attr(feature = "cpu", allow(clippy::needless_pass_by_value))]));
     strip_gpu_attributes(&mut function);
     let varying_parameters = fields.iter().enumerate().map(|(location, (name, ty, flat))| {
         if *flat {

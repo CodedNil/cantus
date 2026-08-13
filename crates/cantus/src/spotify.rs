@@ -1,11 +1,12 @@
 use crate::{
     app::{
-        AppUpdater, TRACK_SPACING_MS, Update,
+        AppUpdater, Background, CantusApp, Fetch, TRACK_SPACING_MS, Update,
         config::{self, Config},
         send_update,
     },
     render::{
         art::{self, ArtState},
+        lyrics::Lyrics,
         track::{AudioFeatures, MAX_PILL_PLAYLIST_ICONS},
     },
 };
@@ -65,8 +66,9 @@ pub struct PlaybackState {
 /// Where playback currently is, and when that last moved.
 pub struct QueuePosition {
     pub index: usize,
-    pub progress: u32,
+    pub progress: f32,
     pub updated: Instant,
+    rate: f32,
     /// Server updates are ignored until this time, so a local seek is not clobbered.
     pub hold_until: Instant,
 }
@@ -76,17 +78,26 @@ impl Default for QueuePosition {
         let now = Instant::now();
         Self {
             index: 0,
-            progress: 0,
+            progress: 0.0,
             updated: now,
+            rate: 1.0,
             hold_until: now,
         }
     }
 }
 
+impl QueuePosition {
+    pub const fn reset_rate(&mut self) {
+        self.rate = 1.0;
+    }
+}
+
 impl PlaybackState {
     pub fn estimated_progress(&self) -> f32 {
-        self.position.progress as f32
-            + self.position.updated.elapsed().as_millis() as f32 * f32::from(self.playing)
+        self.position.progress
+            + self.position.updated.elapsed().as_millis() as f32
+                * self.position.rate
+                * f32::from(self.playing)
     }
 
     fn replace_queue(
@@ -131,10 +142,15 @@ pub struct TrackRuntime {
     pub playlist_expansion: f32,
     pub detail_alpha: f32,
     pub primary_icon_alpha: f32,
-    pub audio_features: Option<AudioFeatures>,
+    pub audio_features: Fetch<AudioFeatures>,
+    pub lyrics: Fetch<Lyrics>,
 }
 
 impl Track {
+    pub fn artist(&self) -> &str {
+        self.artists.first().map_or("", |artist| &artist.name)
+    }
+
     pub fn queue_span_ms(&self) -> f32 {
         self.duration_ms as f32 + TRACK_SPACING_MS
     }
@@ -188,6 +204,7 @@ where
 
 #[derive(Deserialize)]
 pub struct Album {
+    pub name: String,
     #[serde(default, deserialize_with = "deserialize_images", rename = "images")]
     pub image: Option<String>,
 }
@@ -246,7 +263,7 @@ struct Context {
 #[derive(Deserialize)]
 #[serde(tag = "type", rename_all = "lowercase")]
 enum PlaybackItem {
-    Track(Track),
+    Track(Box<Track>),
     #[serde(other)]
     Other,
 }
@@ -254,7 +271,7 @@ enum PlaybackItem {
 impl PlaybackItem {
     fn into_track(self) -> Option<Track> {
         match self {
-            Self::Track(track) => Some(track),
+            Self::Track(track) => Some(*track),
             Self::Other => None,
         }
     }
@@ -467,8 +484,7 @@ impl SpotifyClient {
         }
     }
 
-    fn new(client_id: String, cache_path: PathBuf) -> ClientResult<Self> {
-        let agent = Agent::new_with_defaults();
+    fn new(client_id: String, cache_path: PathBuf, agent: Agent) -> ClientResult<Self> {
         let token =
             read_token_cache(&cache_path).map_or_else(|| prompt_for_token(&client_id, &agent), Ok)?;
         write_cache(&cache_path, &token)?;
@@ -517,36 +533,38 @@ type PlaylistCache = HashMap<PlaylistId, (String, PlaylistTracks)>;
 #[derive(Clone)]
 pub struct SpotifyBackend {
     commands: Sender<Update<SpotifyClient>>,
-    updater: AppUpdater,
-    http: Agent,
+    background: Background,
 }
 
 impl SpotifyBackend {
-    pub fn new(config: &mut Config, updater: AppUpdater) -> Self {
+    /// Starts the authenticated Spotify client and its polling worker.
+    ///
+    /// # Panics
+    ///
+    /// Panics when configuration or Spotify authentication cannot be initialized.
+    pub fn new(config: &mut Config, updater: &AppUpdater, background: Background) -> Self {
         fs::create_dir_all(config::directory()).expect("Failed to create Cantus config directory");
         let client_id = config.spotify_client_id.take().expect(
             "Spotify client ID not set, set it in the config file under key `spotify_client_id`.",
         );
-        let client = SpotifyClient::new(client_id, config_path(SPOTIFY_TOKEN_CACHE))
-            .expect("Failed to initialize Spotify client");
+        let client = SpotifyClient::new(
+            client_id,
+            config_path(SPOTIFY_TOKEN_CACHE),
+            background.http.clone(),
+        )
+        .expect("Failed to initialize Spotify client");
         let (commands, receiver) = mpsc::channel();
-        let http = client.http.clone();
-        let features = audio_features_backend(http.clone(), updater.clone());
         let worker = SpotifyWorker {
             client,
             updater: updater.clone(),
-            features,
+            background: background.clone(),
             current_context: None,
             playlist_targets: mem::take(&mut config.playlists),
             playlist_cache: read_cache(&config_path(PLAYLIST_TRACKS_CACHE)).unwrap_or_default(),
             ratings_enabled: config.ratings_enabled,
         };
         spawn(move || worker.run(&receiver));
-        Self {
-            commands,
-            updater,
-            http,
-        }
+        Self { commands, background }
     }
 
     pub fn skip(&self, forward: bool, count: usize) {
@@ -599,23 +617,23 @@ impl SpotifyBackend {
         });
     }
 
-    pub fn download_image(&self, url: String) {
-        let updater = self.updater.clone();
-        let http = self.http.clone();
-        spawn(move || {
+    pub fn download_image(&self, url: &str) -> bool {
+        let url = url.to_owned();
+        let http = self.background.http.clone();
+        self.background.submit(move || {
             let result = (|| -> ClientResult<_> {
                 let bytes = http.get(&url).call()?.body_mut().read_to_vec()?;
                 Ok(Arc::new(art::prepare(&image::load_from_memory(&bytes)?)))
             })();
             let state = match result {
-                Ok(art) => ArtState::Ready(art),
+                Ok(art) => Fetch::Ready(art),
                 Err(err) => {
                     warn!("Failed to load image {url}: {err}");
-                    ArtState::RetryAt(Instant::now() + Duration::from_secs(30))
+                    Fetch::Missing(Instant::now() + Duration::from_secs(30))
                 }
             };
-            send_update(&updater, move |app| app.set_art_state(&url, &state));
-        });
+            move |app: &mut CantusApp| app.set_art_state(&url, &state)
+        })
     }
 
     fn request(&self, method: Method, path: impl Into<String>) {
@@ -633,7 +651,7 @@ impl SpotifyBackend {
 struct SpotifyWorker {
     client: SpotifyClient,
     updater: AppUpdater,
-    features: Sender<Vec<TrackId>>,
+    background: Background,
     current_context: Option<String>,
     playlist_targets: ArrayVec<String, MAX_PILL_PLAYLIST_ICONS>,
     playlist_cache: PlaylistCache,
@@ -695,18 +713,31 @@ impl SpotifyWorker {
             let state = &mut app.playback;
             state.volume = current_playback.device.volume_percent;
             if now < state.position.hold_until {
-                state.position.updated = now;
                 return;
             }
+            let previous_index = state.position.index;
             if let Some(track) = current_playback.item.and_then(PlaybackItem::into_track) {
                 state.position.index = track_index(&state.queue, track.id, &track.name).unwrap_or(0);
             }
             if current_playback.is_playing && !state.playing {
                 app.render.last_toggle_time = app.render.start_time.elapsed().as_secs_f32();
             }
-            state.playing = current_playback.is_playing;
-            state.position.progress = current_playback.progress_ms.unwrap_or_default();
+            let server = current_playback.progress_ms.unwrap_or_default() as f32
+                + now.elapsed().as_millis() as f32 * f32::from(current_playback.is_playing);
+            let local = state.estimated_progress();
+            let discontinuity = server - local;
+            if previous_index != state.position.index
+                || state.playing != current_playback.is_playing
+                || discontinuity.abs() > 2_000.0
+            {
+                state.position.progress = server;
+                state.position.rate = 1.0;
+            } else {
+                state.position.progress = local;
+                state.position.rate = (1.0 + discontinuity / 5_000.0).clamp(0.95, 1.05);
+            }
             state.position.updated = now;
+            state.playing = current_playback.is_playing;
         });
         context_changed
     }
@@ -719,17 +750,31 @@ impl SpotifyWorker {
         let current_track_id = currently_playing.id;
         let mut new_queue = vec![currently_playing];
         new_queue.extend(q.queue.into_iter().filter_map(PlaybackItem::into_track));
-        let feature_ids = new_queue.iter().filter_map(|track| track.id).collect::<Vec<_>>();
+        let background = self.background.clone();
 
         send_update(&self.updater, move |app| {
             app.playback
                 .replace_queue(new_queue, current_track_id, context_changed);
+            let now = Instant::now();
+            let feature_ids = app
+                .playback
+                .queue
+                .iter_mut()
+                .filter_map(|track| {
+                    let id = track.id.filter(|_| track.runtime.audio_features.request(now))?;
+                    Some(id)
+                })
+                .collect::<Vec<_>>();
+            if !feature_ids.is_empty() && !fetch_audio_features(&background, feature_ids.clone()) {
+                warn!("Discarded audio-feature request after workers stopped");
+                for track in &mut app.playback.queue {
+                    if track.id.is_some_and(|id| feature_ids.contains(&id)) {
+                        track.runtime.audio_features = Fetch::Missing(now);
+                    }
+                }
+            }
             app.refresh_art();
         });
-
-        if self.features.send(feature_ids).is_err() {
-            warn!("Discarded audio-feature request after its worker stopped");
-        }
         Some(())
     }
 
@@ -801,60 +846,41 @@ impl SpotifyWorker {
     }
 }
 
-fn audio_features_backend(http: Agent, updater: AppUpdater) -> Sender<Vec<TrackId>> {
-    let (sender, receiver) = mpsc::channel::<Vec<TrackId>>();
-    spawn(move || {
-        let mut cache = HashMap::new();
-        for ids in receiver {
-            resolve_audio_features(&http, &ids, &mut cache);
-            let features: HashMap<_, _> = ids
-                .into_iter()
-                .filter_map(|id| Some((id, *cache.get(&id)?)))
-                .collect();
-            send_update(&updater, move |app| {
-                for track in &mut app.playback.queue {
-                    track.runtime.audio_features = track
-                        .id
-                        .and_then(|id| features.get(&id).copied())
-                        .map(AudioFeatures::normalized);
+fn fetch_audio_features(background: &Background, ids: Vec<TrackId>) -> bool {
+    let http = background.http.clone();
+    background.submit(move || {
+        let features = resolve_audio_features(&http, &ids);
+        move |app: &mut CantusApp| {
+            for track in &mut app.playback.queue {
+                let Some(id) = track.id.filter(|id| ids.contains(id)) else {
+                    continue;
+                };
+                if let Some(features) = features.get(&id).copied() {
+                    track.runtime.audio_features = Fetch::Ready(features);
+                } else {
+                    track.runtime.audio_features = Fetch::default();
                 }
-            });
+            }
         }
-    });
-    sender
+    })
 }
 
-fn resolve_audio_features(
-    http: &Agent,
-    track_ids: &[TrackId],
-    cache: &mut HashMap<TrackId, AudioFeatures>,
-) {
-    if cache.len() > 1024 {
-        cache.retain(|id, _| track_ids.contains(id));
-    }
-    let mut missing = track_ids
-        .iter()
-        .copied()
-        .filter(|id| !cache.contains_key(id))
-        .collect::<HashSet<_>>();
-    if missing.is_empty() {
-        return;
-    }
+fn resolve_audio_features(http: &Agent, track_ids: &[TrackId]) -> HashMap<TrackId, AudioFeatures> {
     let Ok(page) = request_json::<Page<ReccoTrack>>(
         http.get(RECCO_TRACK_URL)
             .query("size", "50")
-            .query_pairs(missing.iter().map(|id| ("ids", id.as_str()))),
+            .query_pairs(track_ids.iter().map(|id| ("ids", id.as_str()))),
     )
     .inspect_err(|err| warn!("Failed to resolve Spotify tracks with ReccoBeats: {err}")) else {
-        return;
+        return HashMap::new();
     };
+    let mut resolved = HashMap::new();
     for recco_track in page.items {
         let Some(spotify_id) = recco_track
             .href
             .rsplit('/')
             .next()
             .and_then(|id| id.parse::<TrackId>().ok())
-            .filter(|id| missing.remove(id))
         else {
             continue;
         };
@@ -862,9 +888,10 @@ fn resolve_audio_features(
         if let Ok(features) = request_json::<AudioFeatures>(http.get(url)).inspect_err(|err| {
             warn!("Failed to fetch ReccoBeats features for {spotify_id}: {err}");
         }) {
-            cache.insert(spotify_id, features);
+            resolved.insert(spotify_id, features.normalized());
         }
     }
+    resolved
 }
 
 fn fetch_playlist_tracks(client: &mut SpotifyClient, playlist: &Playlist) -> Option<PlaylistTracks> {

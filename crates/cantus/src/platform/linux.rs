@@ -5,6 +5,7 @@ use crate::{
         send_update,
     },
     render::{
+        lyrics::EXTENSION as LYRICS_EXTENSION,
         shared::PANEL_START,
         status::{AUDIO_SPECTRUM_BANDS, BATTERY_HIDDEN, ProcessorStatus},
     },
@@ -315,6 +316,11 @@ fn capture_playback(levels: &[AtomicU32; AUDIO_SPECTRUM_BANDS]) -> io::Result<()
     Ok(())
 }
 
+/// Runs the Wayland application event loop.
+///
+/// # Panics
+///
+/// Panics when required Wayland globals or rendering resources cannot be initialized.
 pub fn run() {
     let connection = Connection::connect_to_env().expect("Failed to connect to Wayland display");
     let (globals, mut event_queue) =
@@ -394,7 +400,7 @@ pub fn run() {
         ConfigLayerAnchor::Top => LayerAnchor::Top | LayerAnchor::Left | LayerAnchor::Right,
         ConfigLayerAnchor::Bottom => LayerAnchor::Bottom | LayerAnchor::Left | LayerAnchor::Right,
     });
-    layer_surface.set_exclusive_zone((PANEL_START + app.cantus.config.height) as i32);
+    layer_surface.set_exclusive_zone((PANEL_START + app.cantus.config.height + LYRICS_EXTENSION) as i32);
 
     surface.commit();
     connection.flush().expect("Failed to flush initial commit");

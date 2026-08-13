@@ -3,6 +3,7 @@ use crate::{
         CantusApp, PANEL_OVERFLOW, config::Config, interaction::InteractionState, spotify::PlaybackState,
     },
     render::{
+        lyrics::{self, LyricsPass},
         particles::ParticlePass,
         playhead::PlayheadPass,
         shared::{FrameData, GAP, PANEL_START, RipplePulse},
@@ -31,6 +32,7 @@ pub struct Frame<'a> {
 }
 
 pub struct Systems {
+    pub lyrics: LyricsPass,
     pub tempestas: Option<TempestasPass>,
     pub status: Option<StatusPass>,
     pub track: TrackPass,
@@ -81,13 +83,13 @@ impl<'a> Frame<'a> {
             self.interaction.pressure(),
             5.0 * self.delta_time,
         );
-        if let Some(origin) = self.interaction.end_frame() {
-            let ripple = self
+        if let Some(origin) = self.interaction.end_frame()
+            && let Some(ripple) = self
                 .shared
                 .ripples
                 .iter_mut()
                 .min_by(|a, b| a.start_time.total_cmp(&b.start_time))
-                .unwrap();
+        {
             *ripple = RipplePulse {
                 origin,
                 start_time: self.shared.time,
@@ -112,6 +114,10 @@ impl Default for RenderState {
 
 impl RenderState {
     /// The GPU device and its dependent resources, valid once the Wayland surface is configured.
+    ///
+    /// # Panics
+    ///
+    /// Panics if called before GPU initialization.
     pub const fn program(&mut self) -> &mut RenderProgram {
         self.program
             .as_mut()
@@ -123,7 +129,7 @@ impl Systems {
     fn new(passes: &Passes<'_>, app: &CantusApp) -> Self {
         let text = TextRenderer::new(
             passes,
-            track::TEXT_GLYPHS + status::TEXT_GLYPHS + tempestas::TEXT_GLYPHS,
+            lyrics::TEXT_GLYPHS + track::TEXT_GLYPHS + status::TEXT_GLYPHS + tempestas::TEXT_GLYPHS,
         );
         let tempestas = app
             .config
@@ -134,6 +140,7 @@ impl Systems {
             .status_enabled
             .then(|| StatusPass::new(passes, &text, app.updater.clone()));
         Self {
+            lyrics: LyricsPass::new(passes, &text, app.background.clone()),
             tempestas,
             status,
             track: TrackPass::new(passes, &text),
@@ -167,6 +174,7 @@ impl Systems {
         }
         self.playhead.update(frame, playback, last_toggle_time);
         self.track.update(&mut self.text, playback, frame);
+        self.lyrics.update(&mut self.text, playback, &self.track, frame);
         self.particles.update(&self.track, frame);
         self.text.upload();
     }
@@ -174,6 +182,7 @@ impl Systems {
 
 impl Render for Systems {
     fn prepare(&mut self) {
+        Render::prepare(&mut self.lyrics);
         Render::prepare(&mut self.tempestas);
         Render::prepare(&mut self.status);
         Render::prepare(&mut self.track);
@@ -182,6 +191,7 @@ impl Render for Systems {
     }
 
     fn draw<'pass>(&'pass self, pass: &mut RenderPass<'pass>) {
+        Render::draw(&self.lyrics, pass);
         Render::draw(&self.tempestas, pass);
         Render::draw(&self.status, pass);
         Render::draw(&self.track, pass);
@@ -191,6 +201,11 @@ impl Render for Systems {
 }
 
 impl CantusApp {
+    /// Initializes the GPU and renderer for the first configured surface.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the GPU was already initialized or no compatible adapter, device, or surface configuration is available.
     pub fn initialize_gpu(&mut self, surface: Surface<'static>, width: u32, height: u32) {
         assert!(self.render.program.is_none(), "GPU initialized twice");
         let program = pollster::block_on(Program::surface(
@@ -211,6 +226,11 @@ impl CantusApp {
         self.render.program = Some(program);
     }
 
+    /// Replaces a lost or recreated presentation surface without rebuilding renderer services.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the renderer is not initialized or the replacement surface is incompatible.
     pub fn replace_render_surface(&mut self, surface: Surface<'static>) {
         self.render
             .program()
@@ -220,10 +240,10 @@ impl CantusApp {
 
     pub fn logical_surface_size(&self) -> (f32, f32) {
         let extension = if self.config.tempestas_enabled {
-            EXTENSION + PANEL_OVERFLOW
+            EXTENSION
         } else {
-            PANEL_OVERFLOW
-        };
+            lyrics::EXTENSION
+        } + PANEL_OVERFLOW;
         (
             self.render.surface_width.unwrap_or(1920.0),
             self.config.height + PANEL_START + extension,

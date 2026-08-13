@@ -1,14 +1,18 @@
-#![allow(clippy::missing_panics_doc)]
-
 use crate::render::cpu::RenderState;
 use interaction::InteractionState;
 use spotify::PlaybackState;
 use std::{
     io,
-    sync::mpsc::{self, Sender},
+    sync::{
+        Arc, Mutex,
+        mpsc::{self, Sender},
+    },
+    thread,
+    time::Instant,
 };
 use tracing::{Level, level_filters::LevelFilter};
 use tracing_subscriber::{filter::Targets, fmt, layer::SubscriberExt, util::SubscriberInitExt};
+use ureq::Agent;
 
 #[path = "config.rs"]
 pub mod config;
@@ -25,6 +29,82 @@ pub const TRACK_SPACING_MS: f32 = 4000.0;
 
 pub type Update<T> = Box<dyn FnOnce(&mut T) + Send>;
 pub type AppUpdater = Sender<Update<CantusApp>>;
+type Job = Box<dyn FnOnce() -> Update<CantusApp> + Send>;
+
+#[derive(Clone)]
+pub struct Background {
+    sender: Sender<Job>,
+    pub http: Agent,
+}
+
+impl Background {
+    fn new(updater: &AppUpdater) -> Self {
+        let (sender, receiver) = mpsc::channel::<Job>();
+        let receiver = Arc::new(Mutex::new(receiver));
+        for _ in 0..8 {
+            let receiver = Arc::clone(&receiver);
+            let updater = updater.clone();
+            thread::spawn(move || {
+                loop {
+                    let job = receiver.lock().expect("worker queue poisoned").recv();
+                    let Ok(job) = job else { break };
+                    send_update(&updater, job());
+                }
+            });
+        }
+        Self {
+            sender,
+            http: Agent::config_builder()
+                .user_agent(concat!("Cantus/", env!("CARGO_PKG_VERSION")))
+                .build()
+                .into(),
+        }
+    }
+
+    pub fn submit<U>(&self, work: impl FnOnce() -> U + Send + 'static) -> bool
+    where
+        U: FnOnce(&mut CantusApp) + Send + 'static,
+    {
+        self.sender.send(Box::new(move || Box::new(work()))).is_ok()
+    }
+}
+
+#[derive(Clone)]
+pub enum Fetch<T> {
+    Missing(Instant),
+    Fetching,
+    Ready(T),
+}
+
+impl<T> Default for Fetch<T> {
+    fn default() -> Self {
+        Self::Missing(Instant::now())
+    }
+}
+
+impl<T> Fetch<T> {
+    pub fn request(&mut self, now: Instant) -> bool {
+        if !matches!(self, Self::Missing(retry_at) if *retry_at <= now) {
+            return false;
+        }
+        *self = Self::Fetching;
+        true
+    }
+
+    pub const fn ready(&self) -> Option<&T> {
+        match self {
+            Self::Ready(value) => Some(value),
+            _ => None,
+        }
+    }
+
+    pub const fn ready_mut(&mut self) -> Option<&mut T> {
+        match self {
+            Self::Ready(value) => Some(value),
+            _ => None,
+        }
+    }
+}
 
 pub struct CantusApp {
     pub(crate) render: RenderState,
@@ -34,13 +114,15 @@ pub struct CantusApp {
     pub(crate) config: config::Config,
     pub(crate) spotify: spotify::SpotifyBackend,
     pub(crate) updater: AppUpdater,
+    pub(crate) background: Background,
 }
 
 impl Default for CantusApp {
     fn default() -> Self {
         let (updater, app_updates) = mpsc::channel();
+        let background = Background::new(&updater);
         let mut config = config::load();
-        let spotify = spotify::SpotifyBackend::new(&mut config, updater.clone());
+        let spotify = spotify::SpotifyBackend::new(&mut config, &updater, background.clone());
         Self {
             render: RenderState::default(),
             interaction: InteractionState::new(spotify.clone()),
@@ -48,6 +130,7 @@ impl Default for CantusApp {
             app_updates,
             spotify,
             updater,
+            background,
             config,
         }
     }

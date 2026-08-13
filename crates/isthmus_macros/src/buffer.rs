@@ -4,7 +4,6 @@ use proc_macro2::TokenStream as TokenStream2;
 use quote::quote;
 use syn::{Data, DeriveInput, Fields, parse_macro_input, parse_quote};
 
-#[allow(clippy::missing_panics_doc)]
 pub fn attribute(input: TokenStream) -> TokenStream {
     let mut input = parse_macro_input!(input as DeriveInput);
     input.attrs.push(parse_quote!(#[repr(C)]));
