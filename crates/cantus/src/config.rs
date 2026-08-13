@@ -32,8 +32,6 @@ pub struct Config {
 
     /// Whether to show the weather and calendar module.
     pub tempestas_enabled: bool,
-    /// Latitude and longitude used for the weather pill.
-    pub location: [f32; 2],
     /// Up to three IANA timezones shown with approximate city weather.
     pub timezones: ArrayVec<String, { tempestas::MAX_WORLD_CLOCKS }>,
 
@@ -65,7 +63,6 @@ impl Default for Config {
             spotify_client_id: None,
             monitor: None,
             height: 50.0,
-            location: [51.5074, -0.1278],
             timezones: ArrayVec::new(),
             tempestas_enabled: true,
             status_enabled: true,

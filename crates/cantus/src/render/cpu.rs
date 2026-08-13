@@ -125,15 +125,10 @@ impl Systems {
             passes,
             track::TEXT_GLYPHS + status::TEXT_GLYPHS + tempestas::TEXT_GLYPHS,
         );
-        let tempestas = app.config.tempestas_enabled.then(|| {
-            TempestasPass::new(
-                passes,
-                &text,
-                app.config.location,
-                &app.config.timezones,
-                app.updater.clone(),
-            )
-        });
+        let tempestas = app
+            .config
+            .tempestas_enabled
+            .then(|| TempestasPass::new(passes, &text, &app.config.timezones));
         let status = app
             .config
             .status_enabled

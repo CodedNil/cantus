@@ -29,7 +29,7 @@ pub struct FrameData {
     /// Space reserved for the status pill this frame (its current width plus a gap), or 0 if hidden.
     pub status_width: f32,
     pub time: f32,
-    /// Current hour in the configured weather location's local time.
+    /// Current hour at the detected weather location.
     pub weather_hour: f32,
     pub ripples: [RipplePulse; 4],
 }

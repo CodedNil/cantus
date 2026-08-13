@@ -65,11 +65,6 @@
     default = builtins.fromJSON "true";
     description = "Whether to show the weather and calendar module.";
   };
-  location = lib.mkOption {
-    type = lib.types.addCheck (lib.types.listOf (lib.types.number)) (xs: builtins.length xs == 2);
-    default = builtins.fromJSON "[51.50740051269531,-0.12780000269412994]";
-    description = "Latitude and longitude used for the weather pill.";
-  };
   timezones = lib.mkOption {
     type = lib.types.addCheck (lib.types.listOf (lib.types.str)) (xs: builtins.length xs <= 3);
     default = builtins.fromJSON "[]";

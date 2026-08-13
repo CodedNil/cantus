@@ -14,8 +14,6 @@ use tracing_subscriber::{filter::Targets, fmt, layer::SubscriberExt, util::Subsc
 pub mod config;
 #[path = "interaction.rs"]
 pub mod interaction;
-#[path = "openmeteo.rs"]
-pub mod openmeteo;
 #[path = "platform/mod.rs"]
 pub mod platform;
 #[path = "spotify.rs"]

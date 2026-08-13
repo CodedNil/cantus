@@ -2,7 +2,10 @@ use crate::render::{
     shader::{pill_margin, pixel_to_ndc, quad_coord},
     shared::FrameData,
 };
-use isthmus::glam::{Vec2, Vec3, vec2};
+use isthmus::{
+    Unorm8x4,
+    glam::{Vec2, Vec3, vec2},
+};
 
 #[cfg(target_arch = "spirv")]
 use isthmus::spirv_std::num_traits::Float;
@@ -12,6 +15,7 @@ use {
     crate::render::cpu::Passes,
     arrayvec::ArrayVec,
     isthmus::Storage,
+    isthmus::glam::Vec4,
     ttf_parser::{Face, GlyphId, OutlineBuilder, Tag},
 };
 
@@ -21,12 +25,12 @@ const EFFECT_PADDING: f32 = 3.5;
 
 #[isthmus::data]
 pub struct Edge {
-    low_start: Vec2,
-    low_control: Vec2,
-    low_end: Vec2,
-    high_start: Vec2,
-    high_control: Vec2,
-    high_end: Vec2,
+    start: Vec2,
+    control: Vec2,
+    end: Vec2,
+    start_delta: Vec2,
+    control_delta: Vec2,
+    end_delta: Vec2,
 }
 
 #[isthmus::data]
@@ -39,6 +43,16 @@ pub struct Line {
     pub weight: f32,
     pub count: u32,
     pub first: u32,
+    pub color: Unorm8x4,
+}
+
+impl Line {
+    #[cfg(feature = "cpu")]
+    #[must_use]
+    pub fn with_color(mut self, color: Vec4) -> Self {
+        self.color = Unorm8x4::from_vec4(color);
+        self
+    }
 }
 
 #[isthmus::data]
@@ -92,21 +106,19 @@ impl TextStyle {
 }
 
 #[isthmus::outline]
-fn quadratic(a: Vec2, control: Vec2, b: Vec2, t: f32) -> Vec2 {
-    let u = 1.0 - t;
-    a * u * u + control * (2.0 * u * t) + b * t * t
+fn curve_at(a: Vec2, linear: Vec2, quadratic: Vec2, t: f32) -> Vec2 {
+    a + (linear + quadratic * t) * t
 }
 
 #[isthmus::outline]
-fn ray_crossing(a: Vec2, control: Vec2, b: Vec2, point: Vec2, t: f32) -> i32 {
-    if t < 0.0 || t >= 1.0 {
+fn ray_crossing(a: Vec2, linear: Vec2, quadratic: Vec2, point: Vec2, t: f32) -> i32 {
+    if !(0.0..1.0).contains(&t) {
         return 0;
     }
-    let curve = quadratic(a, control, b, t);
-    if curve.x <= point.x {
+    if a.x + (linear.x + quadratic.x * t) * t <= point.x {
         return 0;
     }
-    let vertical_tangent = ((control.y - a.y) * (1.0 - t) + (b.y - control.y) * t) * 2.0;
+    let vertical_tangent = linear.y + quadratic.y * (2.0 * t);
     if vertical_tangent > 0.0 {
         1
     } else if vertical_tangent < 0.0 {
@@ -117,39 +129,39 @@ fn ray_crossing(a: Vec2, control: Vec2, b: Vec2, point: Vec2, t: f32) -> i32 {
 }
 
 /// Exact non-zero winding contribution of a quadratic to a rightward ray from `point`.
-fn edge_winding(a: Vec2, control: Vec2, b: Vec2, point: Vec2) -> i32 {
-    let quadratic = a.y - control.y * 2.0 + b.y;
-    let linear = (control.y - a.y) * 2.0;
+fn edge_winding(a: Vec2, linear: Vec2, quadratic: Vec2, point: Vec2) -> i32 {
     let constant = a.y - point.y;
-    if quadratic.abs() < 1e-7 {
-        return if linear.abs() < 1e-7 {
+    if quadratic.y.abs() < 1e-7 {
+        return if linear.y.abs() < 1e-7 {
             0
         } else {
-            ray_crossing(a, control, b, point, -constant / linear)
+            ray_crossing(a, linear, quadratic, point, -constant / linear.y)
         };
     }
-    let discriminant = linear * linear - 4.0 * quadratic * constant;
+    let discriminant = linear.y * linear.y - 4.0 * quadratic.y * constant;
     if discriminant <= 0.0 {
         return 0;
     }
     let root = discriminant.sqrt();
-    let divisor = quadratic * 2.0;
-    ray_crossing(a, control, b, point, (-linear - root) / divisor)
-        + ray_crossing(a, control, b, point, (-linear + root) / divisor)
+    let divisor = quadratic.y * 2.0;
+    ray_crossing(a, linear, quadratic, point, (-linear.y - root) / divisor)
+        + ray_crossing(a, linear, quadratic, point, (-linear.y + root) / divisor)
 }
 
 #[isthmus::outline]
 #[allow(clippy::manual_clamp)]
 fn edge_distance(edge: Edge, weight: f32, point: Vec2, best_distance: f32) -> (f32, i32) {
-    let a = edge.low_start.lerp(edge.high_start, weight);
-    let control = edge.low_control.lerp(edge.high_control, weight);
-    let b = edge.low_end.lerp(edge.high_end, weight);
+    let a = edge.start + edge.start_delta * weight;
+    let control = edge.control + edge.control_delta * weight;
+    let b = edge.end + edge.end_delta * weight;
+    let linear = (control - a) * 2.0;
+    let quadratic = a - control * 2.0 + b;
     let bounds_min = a.min(control).min(b);
     let bounds_max = a.max(control).max(b);
     let winding = if point.x >= bounds_max.x || point.y < bounds_min.y || point.y >= bounds_max.y {
         0
     } else {
-        edge_winding(a, control, b, point)
+        edge_winding(a, linear, quadratic, point)
     };
     if (point - point.clamp(bounds_min, bounds_max)).length_squared() >= best_distance {
         return (best_distance, winding);
@@ -158,11 +170,11 @@ fn edge_distance(edge: Edge, weight: f32, point: Vec2, best_distance: f32) -> (f
     let mut t = ((point - a).dot(chord) / chord.length_squared().max(1e-8))
         .max(0.0)
         .min(1.0);
-    let second = (a - control * 2.0 + b) * 2.0;
+    let second = quadratic * 2.0;
     let mut iteration = 0;
     while iteration < 2 {
-        let curve = quadratic(a, control, b, t);
-        let tangent = ((control - a) * (1.0 - t) + (b - control) * t) * 2.0;
+        let curve = curve_at(a, linear, quadratic, t);
+        let tangent = linear + second * t;
         let delta = curve - point;
         let denominator = tangent.length_squared() + delta.dot(second);
         let denominator = denominator.abs().max(1e-8).copysign(denominator);
@@ -172,7 +184,7 @@ fn edge_distance(edge: Edge, weight: f32, point: Vec2, best_distance: f32) -> (f
     let distance = (point - a)
         .length_squared()
         .min((point - b).length_squared())
-        .min((point - quadratic(a, control, b, t)).length_squared());
+        .min((point - curve_at(a, linear, quadratic, t)).length_squared());
     (distance, winding)
 }
 
@@ -203,41 +215,40 @@ pub fn line_alpha(
     }
     let mut low = 0;
     let mut high = line.count;
+    let inverse_size = 1.0 / line.size;
+    let line_point = (local - line.origin) * inverse_size;
     while low < high {
         let middle = low + (high - low) / 2;
         let placed = placed_glyphs[(line.first + middle) as usize];
-        if placed.x <= (local.x - line.origin.x) / line.size {
+        if placed.x <= line_point.x {
             low = middle + 1;
         } else {
             high = middle;
         }
     }
     let mut best: f32 = -1e6;
+    let padding = EFFECT_PADDING * inverse_size;
     // Include the next origin too: italic/curved glyphs and the effect padding can overhang left.
     let mut glyph_index = (low + 1).min(line.count);
     while glyph_index > 0 {
         glyph_index -= 1;
         let placed = placed_glyphs[(line.first + glyph_index) as usize];
         let glyph = glyphs[placed.glyph as usize];
-        let point = vec2(
-            (local.x - line.origin.x) / line.size - placed.x,
-            -(local.y - line.origin.y) / line.size,
-        );
-        let padding = EFFECT_PADDING / line.size;
-        if point.x > glyph.max.x + padding {
+        let glyph_point = vec2(line_point.x - placed.x, -line_point.y);
+        if glyph_point.x > glyph.max.x + padding {
             break;
         }
-        if point.x >= glyph.min.x - padding
-            && point.y >= glyph.min.y - padding
-            && point.x <= glyph.max.x + padding
-            && point.y <= glyph.max.y + padding
+        if glyph_point.x >= glyph.min.x - padding
+            && glyph_point.y >= glyph.min.y - padding
+            && glyph_point.x <= glyph.max.x + padding
+            && glyph_point.y <= glyph.max.y + padding
         {
             best = best.max(glyph_distance(
                 edges,
                 glyph.start,
                 glyph.count,
                 line.weight,
-                point,
+                glyph_point,
                 line.size,
             ));
         }
@@ -407,12 +418,12 @@ impl Renderer {
             let start = curves.len() as u32;
             for (&[a, b, c], &[d, e, f]) in low.iter().zip(high) {
                 curves.push(Edge {
-                    low_start: a,
-                    low_control: b,
-                    low_end: c,
-                    high_start: d,
-                    high_control: e,
-                    high_end: f,
+                    start: a,
+                    control: b,
+                    end: c,
+                    start_delta: d - a,
+                    control_delta: e - b,
+                    end_delta: f - c,
                 });
             }
             metadata.push((
@@ -534,6 +545,7 @@ impl Renderer {
             weight: shaped.weight,
             count: count as u32,
             first: first as u32,
+            color: Unorm8x4::from_vec3(COLOR),
         }
     }
 }
