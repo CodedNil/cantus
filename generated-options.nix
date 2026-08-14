@@ -60,6 +60,11 @@
     default = builtins.fromJSON "false";
     description = "Whether star ratings should be enabled.";
   };
+  lyrics_enabled = lib.mkOption {
+    type = lib.types.bool;
+    default = builtins.fromJSON "true";
+    description = "Whether to show synchronized lyrics.";
+  };
   tempestas_enabled = lib.mkOption {
     type = lib.types.bool;
     default = builtins.fromJSON "true";

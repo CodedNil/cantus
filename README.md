@@ -42,6 +42,7 @@ programs.cantus = {
     tempestas_enabled = true;
     timezones = [ "America/Los_Angeles" "Australia/Sydney" ];
     status_enabled = true;
+    lyrics_enabled = true;
     height = 40.0;
     timeline_future_minutes = 12.0;
     timeline_past_minutes = 1.5;

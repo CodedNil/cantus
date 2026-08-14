@@ -395,6 +395,7 @@ dependencies = [
  "microfft",
  "palette",
  "pollster",
+ "quick-xml",
  "schemars",
  "serde",
  "serde_json",

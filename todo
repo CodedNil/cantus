@@ -1,7 +1,9 @@
 playlist buttons which starts playing that in shuffle
 repeat/shuffle button
-show lyrics scrolling left declaratively
 
+make it work with local music playing via spotify
 use local playing media metadata to show youtube video etc playing
 
 launcher
+
+optimise text bezier rendering

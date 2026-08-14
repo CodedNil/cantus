@@ -7,6 +7,7 @@ use tracing::warn;
 #[derive(Deserialize)]
 #[cfg_attr(all(debug_assertions, feature = "generate-nix"), derive(schemars::JsonSchema))]
 #[serde(default)]
+#[expect(clippy::struct_excessive_bools, reason = "independent user-facing toggles")]
 pub struct Config {
     /// The monitor to display on.
     pub monitor: Option<String>,
@@ -29,6 +30,8 @@ pub struct Config {
     pub playlists: ArrayVec<String, MAX_PILL_PLAYLIST_ICONS>,
     /// Whether star ratings should be enabled.
     pub ratings_enabled: bool,
+    /// Whether to show synchronized lyrics.
+    pub lyrics_enabled: bool,
 
     /// Whether to show the weather and calendar module.
     pub tempestas_enabled: bool,
@@ -73,6 +76,7 @@ impl Default for Config {
             history_width: 100.0,
             playlists: ArrayVec::new(),
             ratings_enabled: false,
+            lyrics_enabled: true,
         }
     }
 }

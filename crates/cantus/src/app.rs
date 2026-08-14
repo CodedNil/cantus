@@ -1,4 +1,5 @@
 use crate::render::cpu::RenderState;
+use enrichment::Enrichment;
 use interaction::InteractionState;
 use spotify::PlaybackState;
 use std::{
@@ -8,7 +9,7 @@ use std::{
         mpsc::{self, Sender},
     },
     thread,
-    time::Instant,
+    time::{Duration, Instant},
 };
 use tracing::{Level, level_filters::LevelFilter};
 use tracing_subscriber::{filter::Targets, fmt, layer::SubscriberExt, util::SubscriberInitExt};
@@ -16,6 +17,8 @@ use ureq::Agent;
 
 #[path = "config.rs"]
 pub mod config;
+#[path = "enrichment.rs"]
+pub mod enrichment;
 #[path = "interaction.rs"]
 pub mod interaction;
 #[path = "platform/mod.rs"]
@@ -26,10 +29,11 @@ pub mod spotify;
 pub const PANEL_OVERFLOW: f32 = 16.0;
 pub const MAX_RENDER_INSTANCES: usize = 32;
 pub const TRACK_SPACING_MS: f32 = 4000.0;
+const ENRICHMENT_RETRY: Duration = Duration::from_secs(30);
 
 pub type Update<T> = Box<dyn FnOnce(&mut T) + Send>;
 pub type AppUpdater = Sender<Update<CantusApp>>;
-type Job = Box<dyn FnOnce() -> Update<CantusApp> + Send>;
+type Job = Box<dyn FnOnce() -> Enrichment + Send>;
 
 #[derive(Clone)]
 pub struct Background {
@@ -48,7 +52,8 @@ impl Background {
                 loop {
                     let job = receiver.lock().expect("worker queue poisoned").recv();
                     let Ok(job) = job else { break };
-                    send_update(&updater, job());
+                    let enrichment = job();
+                    send_update(&updater, move |app| enrichment.apply(app));
                 }
             });
         }
@@ -61,11 +66,8 @@ impl Background {
         }
     }
 
-    pub fn submit<U>(&self, work: impl FnOnce() -> U + Send + 'static) -> bool
-    where
-        U: FnOnce(&mut CantusApp) + Send + 'static,
-    {
-        self.sender.send(Box::new(move || Box::new(work()))).is_ok()
+    pub(crate) fn submit(&self, work: impl FnOnce() -> Enrichment + Send + 'static) -> bool {
+        self.sender.send(Box::new(work)).is_ok()
     }
 }
 
@@ -83,6 +85,10 @@ impl<T> Default for Fetch<T> {
 }
 
 impl<T> Fetch<T> {
+    pub fn retry() -> Self {
+        Self::Missing(Instant::now() + ENRICHMENT_RETRY)
+    }
+
     pub fn request(&mut self, now: Instant) -> bool {
         if !matches!(self, Self::Missing(retry_at) if *retry_at <= now) {
             return false;
@@ -97,13 +103,6 @@ impl<T> Fetch<T> {
             _ => None,
         }
     }
-
-    pub const fn ready_mut(&mut self) -> Option<&mut T> {
-        match self {
-            Self::Ready(value) => Some(value),
-            _ => None,
-        }
-    }
 }
 
 pub struct CantusApp {
@@ -112,7 +111,6 @@ pub struct CantusApp {
     pub(crate) playback: PlaybackState,
     pub(crate) app_updates: mpsc::Receiver<Update<Self>>,
     pub(crate) config: config::Config,
-    pub(crate) spotify: spotify::SpotifyBackend,
     pub(crate) updater: AppUpdater,
     pub(crate) background: Background,
 }
@@ -125,10 +123,9 @@ impl Default for CantusApp {
         let spotify = spotify::SpotifyBackend::new(&mut config, &updater, background.clone());
         Self {
             render: RenderState::default(),
-            interaction: InteractionState::new(spotify.clone()),
+            interaction: InteractionState::new(spotify),
             playback: PlaybackState::default(),
             app_updates,
-            spotify,
             updater,
             background,
             config,

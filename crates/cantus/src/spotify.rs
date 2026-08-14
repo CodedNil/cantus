@@ -1,11 +1,11 @@
 use crate::{
     app::{
-        AppUpdater, Background, CantusApp, Fetch, TRACK_SPACING_MS, Update,
+        AppUpdater, Background, Fetch, TRACK_SPACING_MS, Update,
         config::{self, Config},
+        enrichment::{ArtState, Enrichment},
         send_update,
     },
     render::{
-        art::{self, ArtState},
         lyrics::Lyrics,
         track::{AudioFeatures, MAX_PILL_PLAYLIST_ICONS},
     },
@@ -60,44 +60,77 @@ pub struct PlaybackState {
     pub volume: Option<u8>,
     pub queue: Vec<Track>,
     pub playlists: Vec<CondensedPlaylist>,
-    pub position: QueuePosition,
+    pub timeline: Timeline,
 }
 
-/// Where playback currently is, and when that last moved.
-pub struct QueuePosition {
+/// The observed and visually smoothed position of the playback queue.
+pub struct Timeline {
     pub index: usize,
-    pub progress: f32,
-    pub updated: Instant,
+    pub position_ms: f32,
+    pub observed_at: Instant,
     rate: f32,
     /// Server updates are ignored until this time, so a local seek is not clobbered.
     pub hold_until: Instant,
+    pub queue_start_ms: f32,
+    pub movement: f32,
 }
 
-impl Default for QueuePosition {
+impl Default for Timeline {
     fn default() -> Self {
         let now = Instant::now();
         Self {
             index: 0,
-            progress: 0.0,
-            updated: now,
+            position_ms: 0.0,
+            observed_at: now,
             rate: 1.0,
             hold_until: now,
+            queue_start_ms: 0.0,
+            movement: 0.0,
         }
     }
 }
 
-impl QueuePosition {
+impl Timeline {
     pub const fn reset_rate(&mut self) {
         self.rate = 1.0;
+    }
+
+    pub fn estimated_position(&self, playing: bool) -> f32 {
+        self.position_ms + self.observed_at.elapsed().as_millis() as f32 * self.rate * f32::from(playing)
+    }
+
+    pub fn track_at_playhead(&self, queue: &[Track]) -> Option<(usize, f32)> {
+        let mut start_ms = self.queue_start_ms;
+        queue.iter().enumerate().find_map(|(index, track)| {
+            let current = (start_ms <= 0.0 && start_ms + track.duration_ms as f32 >= 0.0)
+                .then_some((index, -start_ms));
+            start_ms += track.queue_span_ms();
+            current
+        })
     }
 }
 
 impl PlaybackState {
-    pub fn estimated_progress(&self) -> f32 {
-        self.position.progress
-            + self.position.updated.elapsed().as_millis() as f32
-                * self.position.rate
-                * f32::from(self.playing)
+    pub fn update_timeline(&mut self, drag_offset_ms: f32, dragging: bool, delta_time: f32) {
+        if self.queue.is_empty() {
+            self.timeline.queue_start_ms = 0.0;
+            self.timeline.movement = 0.0;
+            return;
+        }
+        let index = self.timeline.index.min(self.queue.len() - 1);
+        let target = -self.timeline.estimated_position(self.playing)
+            - self.queue[..index].iter().map(Track::queue_span_ms).sum::<f32>()
+            + drag_offset_ms;
+        let difference = target - self.timeline.queue_start_ms;
+        let next = if !dragging && difference.abs() > 200.0 {
+            self.timeline.queue_start_ms + difference * 3.5 * delta_time
+        } else {
+            target
+        };
+        let target_movement = (next - self.timeline.queue_start_ms) * delta_time;
+        self.timeline.movement +=
+            (target_movement - self.timeline.movement) * (delta_time * 10.0).min(1.0);
+        self.timeline.queue_start_ms = next;
     }
 
     fn replace_queue(
@@ -112,7 +145,7 @@ impl PlaybackState {
             .unwrap_or(0);
         let mut remaining = old_queue.split_off(history_len);
         old_queue.drain(..history_len.saturating_sub(MAX_HISTORY_TRACKS));
-        self.position.index = old_queue.len();
+        self.timeline.index = old_queue.len();
 
         for mut track in new_queue {
             if let Some(index) = remaining.iter().position(|old| old.id == track.id) {
@@ -143,7 +176,7 @@ pub struct TrackRuntime {
     pub detail_alpha: f32,
     pub primary_icon_alpha: f32,
     pub audio_features: Fetch<AudioFeatures>,
-    pub lyrics: Fetch<Lyrics>,
+    pub(crate) lyrics: Fetch<Lyrics>,
 }
 
 impl Track {
@@ -530,10 +563,8 @@ const RATING_PLAYLISTS: [&str; 10] = [
 
 type PlaylistCache = HashMap<PlaylistId, (String, PlaylistTracks)>;
 
-#[derive(Clone)]
 pub struct SpotifyBackend {
     commands: Sender<Update<SpotifyClient>>,
-    background: Background,
 }
 
 impl SpotifyBackend {
@@ -557,14 +588,14 @@ impl SpotifyBackend {
         let worker = SpotifyWorker {
             client,
             updater: updater.clone(),
-            background: background.clone(),
+            background,
             current_context: None,
             playlist_targets: mem::take(&mut config.playlists),
             playlist_cache: read_cache(&config_path(PLAYLIST_TRACKS_CACHE)).unwrap_or_default(),
             ratings_enabled: config.ratings_enabled,
         };
         spawn(move || worker.run(&receiver));
-        Self { commands, background }
+        Self { commands }
     }
 
     pub fn skip(&self, forward: bool, count: usize) {
@@ -615,25 +646,6 @@ impl SpotifyBackend {
                 client.run_request(&method, &path, None);
             }
         });
-    }
-
-    pub fn download_image(&self, url: &str) -> bool {
-        let url = url.to_owned();
-        let http = self.background.http.clone();
-        self.background.submit(move || {
-            let result = (|| -> ClientResult<_> {
-                let bytes = http.get(&url).call()?.body_mut().read_to_vec()?;
-                Ok(Arc::new(art::prepare(&image::load_from_memory(&bytes)?)))
-            })();
-            let state = match result {
-                Ok(art) => Fetch::Ready(art),
-                Err(err) => {
-                    warn!("Failed to load image {url}: {err}");
-                    Fetch::Missing(Instant::now() + Duration::from_secs(30))
-                }
-            };
-            move |app: &mut CantusApp| app.set_art_state(&url, &state)
-        })
     }
 
     fn request(&self, method: Method, path: impl Into<String>) {
@@ -712,31 +724,31 @@ impl SpotifyWorker {
         send_update(&self.updater, move |app| {
             let state = &mut app.playback;
             state.volume = current_playback.device.volume_percent;
-            if now < state.position.hold_until {
+            if now < state.timeline.hold_until {
                 return;
             }
-            let previous_index = state.position.index;
+            let previous_index = state.timeline.index;
             if let Some(track) = current_playback.item.and_then(PlaybackItem::into_track) {
-                state.position.index = track_index(&state.queue, track.id, &track.name).unwrap_or(0);
+                state.timeline.index = track_index(&state.queue, track.id, &track.name).unwrap_or(0);
             }
             if current_playback.is_playing && !state.playing {
                 app.render.last_toggle_time = app.render.start_time.elapsed().as_secs_f32();
             }
             let server = current_playback.progress_ms.unwrap_or_default() as f32
                 + now.elapsed().as_millis() as f32 * f32::from(current_playback.is_playing);
-            let local = state.estimated_progress();
+            let local = state.timeline.estimated_position(state.playing);
             let discontinuity = server - local;
-            if previous_index != state.position.index
+            if previous_index != state.timeline.index
                 || state.playing != current_playback.is_playing
                 || discontinuity.abs() > 2_000.0
             {
-                state.position.progress = server;
-                state.position.rate = 1.0;
+                state.timeline.position_ms = server;
+                state.timeline.rate = 1.0;
             } else {
-                state.position.progress = local;
-                state.position.rate = (1.0 + discontinuity / 5_000.0).clamp(0.95, 1.05);
+                state.timeline.position_ms = local;
+                state.timeline.rate = (1.0 + discontinuity / 5_000.0).clamp(0.95, 1.05);
             }
-            state.position.updated = now;
+            state.timeline.observed_at = now;
             state.playing = current_playback.is_playing;
         });
         context_changed
@@ -850,18 +862,7 @@ fn fetch_audio_features(background: &Background, ids: Vec<TrackId>) -> bool {
     let http = background.http.clone();
     background.submit(move || {
         let features = resolve_audio_features(&http, &ids);
-        move |app: &mut CantusApp| {
-            for track in &mut app.playback.queue {
-                let Some(id) = track.id.filter(|id| ids.contains(id)) else {
-                    continue;
-                };
-                if let Some(features) = features.get(&id).copied() {
-                    track.runtime.audio_features = Fetch::Ready(features);
-                } else {
-                    track.runtime.audio_features = Fetch::default();
-                }
-            }
-        }
+        Enrichment::AudioFeatures(ids, features)
     })
 }
 

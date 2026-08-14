@@ -1,5 +1,5 @@
 use crate::{
-    app::spotify::{CondensedPlaylist, PlaylistId, QueuePosition, SpotifyBackend, TrackId},
+    app::spotify::{CondensedPlaylist, PlaylistId, SpotifyBackend, Timeline, TrackId},
     render::shared::PANEL_START,
 };
 use isthmus::glam::Vec2;
@@ -274,12 +274,12 @@ impl InteractionState {
     /// Seeks within `clicked_index`, or skips to it when it is not the current track.
     pub fn seek(
         &self,
-        position: &mut QueuePosition,
+        timeline: &mut Timeline,
         clicked_index: usize,
         clicked_duration_ms: u32,
         fraction: f32,
     ) {
-        let skip_count = clicked_index.abs_diff(position.index);
+        let skip_count = clicked_index.abs_diff(timeline.index);
         if skip_count == 0 {
             let milliseconds = if fraction < 0.05 {
                 0.0
@@ -287,16 +287,16 @@ impl InteractionState {
                 clicked_duration_ms as f32 * fraction
             }
             .round() as u32;
-            position.progress = milliseconds as f32;
+            timeline.position_ms = milliseconds as f32;
             self.spotify.player_parameter("seek", "position_ms", milliseconds);
         } else {
-            let was_before = position.index < clicked_index;
-            position.index = clicked_index;
-            position.progress = 0.0;
+            let was_before = timeline.index < clicked_index;
+            timeline.index = clicked_index;
+            timeline.position_ms = 0.0;
             self.spotify.skip(was_before, skip_count.min(10));
         }
-        position.updated = Instant::now();
-        position.reset_rate();
-        position.hold_until = Instant::now() + Duration::from_secs(2);
+        timeline.observed_at = Instant::now();
+        timeline.reset_rate();
+        timeline.hold_until = Instant::now() + Duration::from_secs(2);
     }
 }

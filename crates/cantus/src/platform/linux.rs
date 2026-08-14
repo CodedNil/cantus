@@ -400,7 +400,11 @@ pub fn run() {
         ConfigLayerAnchor::Top => LayerAnchor::Top | LayerAnchor::Left | LayerAnchor::Right,
         ConfigLayerAnchor::Bottom => LayerAnchor::Bottom | LayerAnchor::Left | LayerAnchor::Right,
     });
-    layer_surface.set_exclusive_zone((PANEL_START + app.cantus.config.height + LYRICS_EXTENSION) as i32);
+    layer_surface.set_exclusive_zone(
+        (PANEL_START
+            + app.cantus.config.height
+            + f32::from(app.cantus.config.lyrics_enabled) * LYRICS_EXTENSION) as i32,
+    );
 
     surface.commit();
     connection.flush().expect("Failed to flush initial commit");

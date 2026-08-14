@@ -10,10 +10,13 @@ use isthmus::{
 
 #[cfg(feature = "cpu")]
 use {
-    crate::render::{
-        cpu::{Frame, Passes},
-        shared::PANEL_START,
-        track,
+    crate::{
+        app::spotify::PlaybackState,
+        render::{
+            cpu::{Frame, Passes},
+            shared::PANEL_START,
+            track,
+        },
     },
     core::f32::consts::TAU,
 };
@@ -51,7 +54,7 @@ impl ParticlePass {
         }
     }
 
-    pub fn update(&mut self, track: &track::TrackPass, frame: &mut Frame<'_>) {
+    pub fn update(&mut self, track: &track::TrackPass, playback: &PlaybackState, frame: &mut Frame<'_>) {
         const EMISSION: f32 = 20.0;
         const VELOCITY_Y: f32 = 5.0;
         const LIFETIME_START: f32 = 1.2;
@@ -59,15 +62,15 @@ impl ParticlePass {
 
         let time = frame.shared.time;
         if let Some(palette) = track.current_track_palette {
-            self.accumulator = if track.movement_speed.abs() > 0.00001 {
+            let movement = playback.timeline.movement;
+            self.accumulator = if movement.abs() > 0.00001 {
                 self.accumulator + frame.delta_time * EMISSION
             } else {
                 0.0
             };
             let emit_count = self.accumulator.floor() as u8;
             self.accumulator -= f32::from(emit_count);
-            let horizontal_bias =
-                (track.movement_speed.abs().powf(0.2) * track.movement_speed.signum()).clamp(-3.0, 3.0);
+            let horizontal_bias = (movement.abs().powf(0.2) * movement.signum()).clamp(-3.0, 3.0);
 
             for particle in self.expired(time).take(emit_count as usize) {
                 let y_fraction = fastrand::f32();

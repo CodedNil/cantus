@@ -1,6 +1,4 @@
 #[cfg(feature = "cpu")]
-pub mod art;
-#[cfg(feature = "cpu")]
 pub mod cpu;
 pub mod lyrics;
 pub mod particles;

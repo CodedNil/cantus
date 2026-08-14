@@ -32,7 +32,7 @@ pub struct Frame<'a> {
 }
 
 pub struct Systems {
-    pub lyrics: LyricsPass,
+    pub lyrics: Option<LyricsPass>,
     pub tempestas: Option<TempestasPass>,
     pub status: Option<StatusPass>,
     pub track: TrackPass,
@@ -129,7 +129,10 @@ impl Systems {
     fn new(passes: &Passes<'_>, app: &CantusApp) -> Self {
         let text = TextRenderer::new(
             passes,
-            lyrics::TEXT_GLYPHS + track::TEXT_GLYPHS + status::TEXT_GLYPHS + tempestas::TEXT_GLYPHS,
+            usize::from(app.config.lyrics_enabled) * lyrics::TEXT_GLYPHS
+                + track::TEXT_GLYPHS
+                + usize::from(app.config.status_enabled) * status::TEXT_GLYPHS
+                + usize::from(app.config.tempestas_enabled) * tempestas::TEXT_GLYPHS,
         );
         let tempestas = app
             .config
@@ -140,7 +143,10 @@ impl Systems {
             .status_enabled
             .then(|| StatusPass::new(passes, &text, app.updater.clone()));
         Self {
-            lyrics: LyricsPass::new(passes, &text, app.background.clone()),
+            lyrics: app
+                .config
+                .lyrics_enabled
+                .then(|| LyricsPass::new(passes, &text, app.background.clone())),
             tempestas,
             status,
             track: TrackPass::new(passes, &text),
@@ -166,6 +172,12 @@ impl Systems {
             .config
             .timeline_px_per_ms(frame.shared.screen_size.x, status_width);
         frame.shared.playhead_x = frame.config.playhead_x(frame.shared.px_per_ms);
+        let drag_offset_ms = if frame.interaction.dragging {
+            (frame.shared.mouse_pos.x - frame.interaction.press_origin.x) / frame.shared.px_per_ms
+        } else {
+            0.0
+        };
+        playback.update_timeline(drag_offset_ms, frame.interaction.dragging, frame.delta_time);
         if let Some(tempestas) = self.tempestas.as_mut() {
             tempestas.update(&mut self.text, self.status.as_mut(), frame);
         }
@@ -174,8 +186,10 @@ impl Systems {
         }
         self.playhead.update(frame, playback, last_toggle_time);
         self.track.update(&mut self.text, playback, frame);
-        self.lyrics.update(&mut self.text, playback, &self.track, frame);
-        self.particles.update(&self.track, frame);
+        if let Some(lyrics) = self.lyrics.as_mut() {
+            lyrics.update(&mut self.text, playback, frame);
+        }
+        self.particles.update(&self.track, playback, frame);
         self.text.upload();
     }
 }
@@ -241,8 +255,10 @@ impl CantusApp {
     pub fn logical_surface_size(&self) -> (f32, f32) {
         let extension = if self.config.tempestas_enabled {
             EXTENSION
-        } else {
+        } else if self.config.lyrics_enabled {
             lyrics::EXTENSION
+        } else {
+            0.0
         } + PANEL_OVERFLOW;
         (
             self.render.surface_width.unwrap_or(1920.0),

@@ -15,6 +15,10 @@ use {
     crate::render::cpu::Passes,
     isthmus::Storage,
     isthmus::glam::Vec4,
+    std::{
+        ops::{Deref, Range},
+        sync::Arc,
+    },
     ttf_parser::{Face, GlyphId, OutlineBuilder, Tag},
 };
 
@@ -206,6 +210,20 @@ fn glyph_distance(edges: &[Edge], start: u32, count: u32, weight: f32, point: Ve
     distance_squared.sqrt() * size * if winding == 0 { -1.0 } else { 1.0 }
 }
 
+fn glyph_after(placed_glyphs: &[PlacedGlyph], first: u32, count: u32, x: f32) -> u32 {
+    let mut low = 0;
+    let mut high = count;
+    while low < high {
+        let middle = low + (high - low) / 2;
+        if isthmus::reference(placed_glyphs, (first + middle) as usize).x <= x {
+            low = middle + 1;
+        } else {
+            high = middle;
+        }
+    }
+    low
+}
+
 pub fn line_alpha(
     line: Line,
     placed_glyphs: &[PlacedGlyph],
@@ -216,23 +234,13 @@ pub fn line_alpha(
     if (local.x < line.min.x || local.x > line.max.x) || (local.y < line.min.y || local.y > line.max.y) {
         return 0.0;
     }
-    let mut low = 0;
-    let mut high = line.count;
     let inverse_size = 1.0 / line.size;
     let line_point = (local - line.origin) * inverse_size;
-    while low < high {
-        let middle = low + (high - low) / 2;
-        let placed = *isthmus::reference(placed_glyphs, (line.first + middle) as usize);
-        if placed.x <= line_point.x {
-            low = middle + 1;
-        } else {
-            high = middle;
-        }
-    }
+    let after = glyph_after(placed_glyphs, line.first, line.count, line_point.x);
     let mut best: f32 = -1e6;
     let padding = EFFECT_PADDING * inverse_size;
     // Include the next origin too: italic/curved glyphs and the effect padding can overhang left.
-    let mut glyph_index = (low + 1).min(line.count);
+    let mut glyph_index = (after + 1).min(line.count);
     while glyph_index > 0 {
         glyph_index -= 1;
         let placed = *isthmus::reference(placed_glyphs, (line.first + glyph_index) as usize);
@@ -276,7 +284,7 @@ const FONT: &[u8] = include_bytes!(concat!(
 #[cfg(feature = "cpu")]
 const WGHT: Tag = Tag::from_bytes(b"wght");
 #[cfg(feature = "cpu")]
-const RANGES: [(u32, u32); 8] = [
+const RANGES: &[(u32, u32)] = &[
     (0x20, 0x7e),
     (0xa0, 0xff),
     (0x100, 0x17f),
@@ -285,6 +293,7 @@ const RANGES: [(u32, u32); 8] = [
     (0x400, 0x4ff),
     (0x2000, 0x206f),
     (0x20ac, 0x20ac),
+    (0x266a, 0x266b),
 ];
 
 #[cfg(feature = "cpu")]
@@ -351,6 +360,7 @@ impl OutlineBuilder for Outline {
 }
 
 #[cfg(feature = "cpu")]
+#[derive(Default)]
 pub struct ShapedLine {
     glyphs: Vec<PlacedGlyph>,
     min: Vec2,
@@ -362,9 +372,15 @@ pub struct ShapedLine {
 }
 
 #[cfg(feature = "cpu")]
-pub struct Renderer {
-    characters: Vec<(char, Meta)>,
+#[derive(Clone)]
+pub struct Shaper {
+    characters: Arc<[(char, Meta)]>,
     baseline: f32,
+}
+
+#[cfg(feature = "cpu")]
+pub struct Renderer {
+    shaper: Shaper,
     edges: Storage<Edge>,
     glyphs: Storage<Glyph>,
     storage: Storage<PlacedGlyph>,
@@ -457,12 +473,14 @@ impl Renderer {
                     .ok()
                     .map(|index| (character, metadata[index].1))
             })
-            .collect();
+            .collect::<Vec<_>>();
         let edges = passes.storage("Vector Font Edges", curves);
         let glyphs = passes.storage("Vector Font Glyphs", metadata.iter().map(|(_, meta)| meta.data));
         Self {
-            characters,
-            baseline,
+            shaper: Shaper {
+                characters: characters.into(),
+                baseline,
+            },
             edges,
             glyphs,
             storage: passes.storage_with_capacity("Text Glyphs", capacity),
@@ -470,55 +488,10 @@ impl Renderer {
         }
     }
 
-    fn glyph(&self, character: char) -> Option<Meta> {
-        self.characters
-            .binary_search_by_key(&character, |glyph| glyph.0)
-            .ok()
-            .map(|index| self.characters[index].1)
+    pub fn shaper(&self) -> Shaper {
+        self.shaper.clone()
     }
 
-    pub fn shape(&self, text: &str, style: TextStyle) -> ShapedLine {
-        self.shape_up_to(text, style, MAX_LINE_GLYPHS)
-    }
-
-    pub fn shape_up_to(&self, text: &str, style: TextStyle, max_glyphs: usize) -> ShapedLine {
-        self.shape_positioned([(text, 0.0)], style, max_glyphs)
-    }
-
-    pub fn shape_positioned<'a>(
-        &self,
-        parts: impl IntoIterator<Item = (&'a str, f32)>,
-        style: TextStyle,
-        max_glyphs: usize,
-    ) -> ShapedLine {
-        let mut min = Vec2::splat(f32::MAX);
-        let mut max = Vec2::splat(f32::MIN);
-        let weight = style.normalized_weight();
-        let mut width: f32 = 0.0;
-        let mut glyphs = Vec::with_capacity(max_glyphs);
-        for (text, position) in parts {
-            let mut x = position / style.size;
-            for meta in text.chars().filter_map(|character| self.glyph(character)) {
-                if glyphs.len() == max_glyphs {
-                    break;
-                }
-                min = min.min(vec2(x + meta.data.min.x, -meta.data.max.y));
-                max = max.max(vec2(x + meta.data.max.x, -meta.data.min.y));
-                glyphs.push(PlacedGlyph { x, glyph: meta.glyph });
-                x += meta.advance[0] + (meta.advance[1] - meta.advance[0]) * weight;
-            }
-            width = width.max(x * style.size);
-        }
-        ShapedLine {
-            glyphs,
-            min,
-            max,
-            width,
-            baseline: self.baseline * style.size,
-            size: style.size,
-            weight,
-        }
-    }
     pub const fn resources(&self) -> (&Storage<PlacedGlyph>, &Storage<Glyph>, &Storage<Edge>) {
         (&self.storage, &self.glyphs, &self.edges)
     }
@@ -533,12 +506,26 @@ impl Renderer {
 
     pub fn centered(&mut self, text: &str, style: TextStyle, center: Vec2) -> Line {
         let shaped = self.shape(text, style);
-        self.place_centered(&shaped, center)
+        let origin = vec2(center.x - shaped.width * 0.5, center.y + shaped.baseline);
+        self.place(&shaped, origin)
     }
 
-    pub fn place_centered(&mut self, shaped: &ShapedLine, center: Vec2) -> Line {
-        let origin = vec2(center.x - shaped.width * 0.5, center.y + shaped.baseline);
-        self.place(shaped, origin)
+    pub fn place_visible(&mut self, shaped: &ShapedLine, left: Vec2, clip: Range<f32>) -> Line {
+        let origin = vec2(left.x, left.y + shaped.baseline);
+        let local = |x| (x - origin.x) / shaped.size;
+        let start = shaped
+            .glyphs
+            .partition_point(|glyph| glyph.x < local(clip.start - EFFECT_PADDING))
+            .saturating_sub(1);
+        let end = (shaped
+            .glyphs
+            .partition_point(|glyph| glyph.x <= local(clip.end + EFFECT_PADDING))
+            + 1)
+        .min(shaped.glyphs.len());
+        let mut line = self.place_range(shaped, origin, start..end);
+        line.min.x = line.min.x.max(clip.start);
+        line.max.x = line.max.x.min(clip.end);
+        line
     }
 
     pub fn fit(&mut self, text: &str, style: TextStyle, y: f32, left: f32, right: f32) -> Line {
@@ -557,8 +544,12 @@ impl Renderer {
     }
 
     fn place(&mut self, shaped: &ShapedLine, origin: Vec2) -> Line {
+        self.place_range(shaped, origin, 0..shaped.glyphs.len())
+    }
+
+    fn place_range(&mut self, shaped: &ShapedLine, origin: Vec2, range: Range<usize>) -> Line {
         let first = self.placed.len();
-        let count = shaped.glyphs.len();
+        let count = range.len();
         let (min, max) = if count == 0 {
             (Vec2::ZERO, Vec2::ZERO)
         } else {
@@ -567,7 +558,7 @@ impl Renderer {
                 origin + shaped.max * shaped.size + EFFECT_PADDING,
             )
         };
-        self.placed.extend_from_slice(&shaped.glyphs);
+        self.placed.extend_from_slice(&shaped.glyphs[range]);
         Line {
             min,
             max,
@@ -577,6 +568,75 @@ impl Renderer {
             count: count as u32,
             first: first as u32,
             color: Unorm8x4::from_vec3(COLOR),
+        }
+    }
+}
+
+#[cfg(feature = "cpu")]
+impl Deref for Renderer {
+    type Target = Shaper;
+
+    fn deref(&self) -> &Self::Target {
+        &self.shaper
+    }
+}
+
+#[cfg(feature = "cpu")]
+impl Shaper {
+    fn glyph(&self, character: char) -> Option<Meta> {
+        self.characters
+            .binary_search_by_key(&character, |glyph| glyph.0)
+            .ok()
+            .map(|index| self.characters[index].1)
+    }
+
+    pub fn shape(&self, text: &str, style: TextStyle) -> ShapedLine {
+        self.shape_positioned([(text, 0.0)], style, MAX_LINE_GLYPHS)
+    }
+
+    pub fn width(&self, text: &str, style: TextStyle) -> f32 {
+        let weight = style.normalized_weight();
+        text.chars()
+            .filter_map(|character| self.glyph(character))
+            .map(|meta| meta.advance[0] + (meta.advance[1] - meta.advance[0]) * weight)
+            .sum::<f32>()
+            * style.size
+    }
+
+    pub fn shape_positioned<'a>(
+        &self,
+        parts: impl IntoIterator<Item = (&'a str, f32)>,
+        style: TextStyle,
+        max_glyphs: usize,
+    ) -> ShapedLine {
+        let mut min = Vec2::splat(f32::MAX);
+        let mut max = Vec2::splat(f32::MIN);
+        let weight = style.normalized_weight();
+        let mut width: f32 = 0.0;
+        let mut glyphs = Vec::with_capacity(max_glyphs.min(MAX_LINE_GLYPHS));
+        for (text, position) in parts {
+            let mut x = position / style.size;
+            for meta in text.chars().filter_map(|character| self.glyph(character)) {
+                if glyphs.len() == max_glyphs {
+                    break;
+                }
+                if meta.data.count > 0 {
+                    min = min.min(vec2(x + meta.data.min.x, -meta.data.max.y));
+                    max = max.max(vec2(x + meta.data.max.x, -meta.data.min.y));
+                    glyphs.push(PlacedGlyph { x, glyph: meta.glyph });
+                }
+                x += meta.advance[0] + (meta.advance[1] - meta.advance[0]) * weight;
+            }
+            width = width.max(x * style.size);
+        }
+        ShapedLine {
+            glyphs,
+            min,
+            max,
+            width,
+            baseline: self.baseline * style.size,
+            size: style.size,
+            weight,
         }
     }
 }

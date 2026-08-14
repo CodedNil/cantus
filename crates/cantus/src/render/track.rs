@@ -20,21 +20,28 @@ use isthmus::spirv_std::num_traits::Float;
 use crate::{
     app::{
         MAX_RENDER_INSTANCES, TRACK_SPACING_MS,
+        enrichment::{AlbumArt, IMAGE_SIZE},
         interaction::Rect,
-        spotify::{CondensedPlaylist, PlaybackState, QueuePosition, Track, playlist_icons},
+        spotify::{CondensedPlaylist, PlaybackState, Timeline, Track, playlist_icons},
     },
     render::{
-        art::ImageAtlas,
         cpu::{Frame, Passes, approach},
         shared::GAP,
         text::TextStyle,
     },
 };
 
+#[cfg(feature = "cpu")]
+use isthmus::{FilterableFloatFormat, SampledTexture, TextureView, wgpu::Extent3d};
+#[cfg(feature = "cpu")]
+use std::sync::{Arc, Weak};
+
 /// Maximum number of playlist artwork icons carried by one pill instance.
 pub const MAX_PILL_PLAYLIST_ICONS: usize = 8;
 /// Number of colors extracted from album artwork.
 pub const PALETTE_COLORS: usize = 4;
+#[cfg(feature = "cpu")]
+const MAX_TEXTURE_IMAGES: u32 = 32;
 /// Visual width, in pixels, of rating and playlist icons before hover growth.
 const ICON_WIDTH: f32 = 21.6;
 /// Center-to-center icon spacing for rating stars and playlist artwork.
@@ -52,14 +59,69 @@ const PLAYLIST_EXPANSION_DURATION: f32 = 1.0 / 6.0;
 #[cfg(feature = "cpu")]
 pub(crate) const TEXT_GLYPHS: usize = MAX_RENDER_INSTANCES * 2 * text::MAX_LINE_GLYPHS;
 
+#[cfg(feature = "cpu")]
+struct ImageAtlas {
+    texture: SampledTexture<Texture2DArray>,
+    slots: [Weak<AlbumArt>; MAX_TEXTURE_IMAGES as usize],
+    used: u32,
+}
+
+#[cfg(feature = "cpu")]
+impl ImageAtlas {
+    fn new(passes: &Passes<'_>) -> Self {
+        Self {
+            texture: passes.sampled_texture::<Texture2DArray>(
+                "Images",
+                Extent3d {
+                    width: IMAGE_SIZE,
+                    height: IMAGE_SIZE,
+                    depth_or_array_layers: MAX_TEXTURE_IMAGES,
+                },
+                FilterableFloatFormat::Rgba8Unorm,
+            ),
+            slots: [const { Weak::new() }; MAX_TEXTURE_IMAGES as usize],
+            used: 0,
+        }
+    }
+
+    const fn view(&self) -> &TextureView<Texture2DArray> {
+        self.texture.view()
+    }
+
+    const fn begin_frame(&mut self) {
+        self.used = 0;
+    }
+
+    fn index_of(&mut self, art: Option<&Arc<AlbumArt>>) -> i32 {
+        let Some(art) = art else { return -1 };
+        if let Some(index) = self
+            .slots
+            .iter()
+            .position(|slot| slot.as_ptr() == Arc::as_ptr(art))
+        {
+            self.used |= 1 << index;
+            return index as i32;
+        }
+        let index = (!self.used).trailing_zeros();
+        if index >= MAX_TEXTURE_IMAGES
+            || self
+                .texture
+                .write([0, 0, index], [IMAGE_SIZE; 2], &art.pixels)
+                .is_err()
+        {
+            return -1;
+        }
+        self.used |= 1 << index;
+        self.slots[index as usize] = Arc::downgrade(art);
+        index as i32
+    }
+}
+
 #[isthmus::pass]
 pub struct TrackPass {
     pub(crate) instances: isthmus::Instances<Self>,
     images: ImageAtlas,
-    pub offset: f32,
-    pub movement_speed: f32,
     pub current_track_palette: Option<[Unorm8x4; PALETTE_COLORS]>,
-    pub timeline_track: Option<(usize, f32)>,
 }
 
 #[derive(isthmus::Varyings)]
@@ -179,8 +241,6 @@ struct TrackLayout {
     start_ms: f32,
     x: f32,
     width: f32,
-    natural_start: f32,
-    natural_end: f32,
 }
 
 impl PillIconRow {
@@ -307,10 +367,7 @@ impl TrackPass {
         Self {
             instances: passes.instances((images.view(), &sampler, placed_glyphs, glyphs, edges), []),
             images,
-            offset: 0.0,
-            movement_speed: 0.0,
             current_track_palette: None,
-            timeline_track: None,
         }
     }
 
@@ -326,13 +383,13 @@ impl TrackPass {
         format!("{time}\u{2004}•\u{2004}{artist}")
     }
 
-    fn draw_pill(
+    fn prepare_pill(
         &mut self,
         text: &mut text::Renderer,
         track: &mut Track,
         layout: &mut TrackLayout,
         playlists: &mut [CondensedPlaylist],
-        position: &mut QueuePosition,
+        timeline: &mut Timeline,
         frame: &mut Frame,
         pill_queue_index: usize,
     ) -> (TrackPill, bool) {
@@ -498,15 +555,16 @@ impl TrackPass {
             frame.interaction.enable_drag();
         }
         if body.clicked && track.id.is_some() {
+            let natural_start = frame.shared.playhead_x + layout.start_ms * frame.shared.px_per_ms;
             let fraction = if frame.interaction.pointer.x < frame.config.history_width + 40.0 {
                 0.0
             } else {
-                (frame.interaction.pointer.x - layout.natural_start)
-                    / (layout.natural_end - layout.natural_start)
+                (frame.interaction.pointer.x - natural_start)
+                    / (track.duration_ms as f32 * frame.shared.px_per_ms)
             };
             frame
                 .interaction
-                .seek(position, pill_queue_index, track.duration_ms, fraction);
+                .seek(timeline, pill_queue_index, track.duration_ms, fraction);
         }
         approach(
             &mut track.runtime.playlist_expansion,
@@ -525,34 +583,14 @@ impl TrackPass {
         self.images.begin_frame();
         if playback.queue.is_empty() {
             self.current_track_palette = None;
-            self.timeline_track = None;
             self.instances.clear();
             return;
         }
-        let cur_idx = playback.position.index.min(playback.queue.len() - 1);
-        let drag_offset_ms = if frame.interaction.dragging {
-            (frame.shared.mouse_pos.x - frame.interaction.press_origin.x) / frame.shared.px_per_ms
-        } else {
-            0.0
-        };
-        let current_ms = -playback.estimated_progress()
-            - playback.queue[..cur_idx]
-                .iter()
-                .map(Track::queue_span_ms)
-                .sum::<f32>()
-            + drag_offset_ms;
-
-        let diff = current_ms - self.offset;
-        let current_ms = if !frame.interaction.dragging && diff.abs() > 200.0 {
-            self.offset + diff * 3.5 * frame.delta_time
-        } else {
-            current_ms
-        };
-        self.movement_speed = self.movement_speed.lerp(
-            (current_ms - self.offset) * frame.delta_time,
-            (frame.delta_time * 10.0).min(1.0),
-        );
-        self.offset = current_ms;
+        let current_ms = playback.timeline.queue_start_ms;
+        let current_index = playback
+            .timeline
+            .track_at_playhead(&playback.queue)
+            .map(|(index, _)| index);
 
         self.instances.clear();
         let mut foreground = None;
@@ -582,8 +620,6 @@ impl TrackPass {
                 start_ms: queue_end_ms,
                 x: 0.0,
                 width: panel_height,
-                natural_start,
-                natural_end,
             };
             if layout.start_ms > end_ms {
                 layout.width = 0.0;
@@ -599,16 +635,15 @@ impl TrackPass {
                 compact_slot += 1;
                 layout.x = right - panel_height;
             }
-            let is_current = layout.start_ms <= 0.0 && layout.start_ms + track.duration_ms as f32 >= 0.0;
             let can_render =
                 self.instances.len() + usize::from(foreground.is_some()) < MAX_RENDER_INSTANCES;
             if can_render && layout.width > 0.0 && layout.x + layout.width > 0.0 {
-                let (pill, hovered) = self.draw_pill(
+                let (pill, hovered) = self.prepare_pill(
                     text,
                     track,
                     &mut layout,
                     &mut playback.playlists,
-                    &mut playback.position,
+                    &mut playback.timeline,
                     frame,
                     pill_queue_index,
                 );
@@ -618,7 +653,7 @@ impl TrackPass {
                     self.instances.push(pill);
                 }
             }
-            if is_current {
+            if current_index == Some(pill_queue_index) {
                 current_track = Some((pill_queue_index, layout));
             }
         }
@@ -631,18 +666,18 @@ impl TrackPass {
                 && let Some((index, layout)) = current_track
                 && playback.queue[index].id.is_some()
             {
-                let fraction = (frame.shared.playhead_x.max(layout.x) - layout.natural_start)
-                    / (layout.natural_end - layout.natural_start);
                 let duration_ms = playback.queue[index].duration_ms;
+                let natural_start = frame.shared.playhead_x + layout.start_ms * frame.shared.px_per_ms;
+                let fraction = (frame.shared.playhead_x.max(layout.x) - natural_start)
+                    / (duration_ms as f32 * frame.shared.px_per_ms);
                 frame
                     .interaction
-                    .seek(&mut playback.position, index, duration_ms, fraction);
+                    .seek(&mut playback.timeline, index, duration_ms, fraction);
             }
             frame.interaction.cancel_drag();
         }
         self.current_track_palette =
             current_track.map(|(index, _)| playback.queue[index].runtime.art.palette());
-        self.timeline_track = current_track.map(|(index, layout)| (index, -layout.start_ms));
     }
 
     #[gpu]
