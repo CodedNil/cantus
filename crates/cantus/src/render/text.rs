@@ -174,6 +174,9 @@ fn edge_distance(edge: Edge, weight: f32, point: Vec2, best_distance: f32) -> (f
     let mut t = ((point - a).dot(chord) / chord.length_squared().max(1e-8))
         .max(0.0)
         .min(1.0);
+    if quadratic.length_squared() < 1e-12 {
+        return ((point - (a + linear * t)).length_squared(), winding);
+    }
     let second = quadratic * 2.0;
     let mut iteration = 0;
     while iteration < 2 {
@@ -207,7 +210,13 @@ fn glyph_distance(edges: &[Edge], start: u32, count: u32, weight: f32, point: Ve
         winding += edge_winding;
         index += 1;
     }
-    distance_squared.sqrt() * size * if winding == 0 { -1.0 } else { 1.0 }
+    let scaled_squared = distance_squared * size * size;
+    let distance = if scaled_squared >= EFFECT_PADDING * EFFECT_PADDING {
+        EFFECT_PADDING
+    } else {
+        scaled_squared.sqrt()
+    };
+    distance * if winding == 0 { -1.0 } else { 1.0 }
 }
 
 fn glyph_after(placed_glyphs: &[PlacedGlyph], first: u32, count: u32, x: f32) -> u32 {
@@ -224,7 +233,7 @@ fn glyph_after(placed_glyphs: &[PlacedGlyph], first: u32, count: u32, x: f32) ->
     low
 }
 
-pub fn line_alpha(
+pub fn line_distance(
     line: Line,
     placed_glyphs: &[PlacedGlyph],
     glyphs: &[Glyph],
@@ -232,7 +241,7 @@ pub fn line_alpha(
     local: Vec2,
 ) -> f32 {
     if (local.x < line.min.x || local.x > line.max.x) || (local.y < line.min.y || local.y > line.max.y) {
-        return 0.0;
+        return -1e6;
     }
     let inverse_size = 1.0 / line.size;
     let line_point = (local - line.origin) * inverse_size;
@@ -264,8 +273,22 @@ pub fn line_alpha(
             ));
         }
     }
-    let coverage = (best * 1.25 + 0.5).clamp(0.0, 1.0);
+    best
+}
+
+pub fn coverage(distance: f32) -> f32 {
+    let coverage = (distance * 1.25 + 0.5).clamp(0.0, 1.0);
     coverage * coverage * (3.0 - 2.0 * coverage)
+}
+
+pub fn line_alpha(
+    line: Line,
+    placed_glyphs: &[PlacedGlyph],
+    glyphs: &[Glyph],
+    edges: &[Edge],
+    local: Vec2,
+) -> f32 {
+    coverage(line_distance(line, placed_glyphs, glyphs, edges, local))
 }
 
 pub fn vertex(line: Line, vertex: u32, frame: &FrameData) -> isthmus::Vertex<Varyings> {

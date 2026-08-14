@@ -7,11 +7,7 @@ use isthmus::glam::{Vec2, Vec4};
 #[cfg(feature = "cpu")]
 use {
     crate::{
-        app::{
-            Background, Fetch,
-            enrichment::fetch_lyrics,
-            music::{LyricSegment, MusicBackend, PlaybackState},
-        },
+        app::music::{Enrichment, Fetch, LyricSegment, MusicBackend, PlaybackState},
         render::{
             cpu::{Frame, Passes},
             shared::PANEL_START,
@@ -41,7 +37,7 @@ const GAP: f32 = 4.0;
 #[isthmus::pass]
 pub struct LyricsPass {
     lines: isthmus::Instances<Self>,
-    background: Background,
+    enrichment: Enrichment,
     music: MusicBackend,
 }
 
@@ -97,13 +93,13 @@ impl LyricsPass {
     pub fn new(
         passes: &Passes<'_>,
         text: &text::Renderer,
-        background: Background,
+        enrichment: Enrichment,
         music: MusicBackend,
     ) -> Self {
         let (placed_glyphs, glyphs, edges) = text.resources();
         Self {
             lines: passes.instances_with_capacity((placed_glyphs, glyphs, edges), 6),
-            background,
+            enrichment,
             music,
         }
     }
@@ -126,33 +122,12 @@ impl LyricsPass {
             .skip(start.saturating_sub(1))
             .take(PREFETCH_TRACKS)
         {
-            if track.runtime.lyrics.request(now) {
-                let uri = track.uri.clone();
-                let (id, name, artist, album, duration_ms) = (
-                    track.id,
-                    track.name.clone(),
-                    track.artist.clone(),
-                    track.album.clone(),
-                    track.duration_ms,
-                );
-                let agent = self.background.http.clone();
-                let music = self.music.clone();
-                let shaper = text.shaper();
-                if !self.background.submit(move || {
-                    fetch_lyrics(
-                        uri,
-                        &agent,
-                        &music,
-                        id,
-                        &shaper,
-                        &name,
-                        &artist,
-                        &album,
-                        duration_ms,
-                    )
-                }) {
-                    track.runtime.lyrics = Fetch::Missing(now);
-                }
+            if track.runtime.lyrics.request(now)
+                && !self
+                    .enrichment
+                    .request_lyrics(track, self.music.clone(), text.shaper())
+            {
+                track.runtime.lyrics = Fetch::Missing(now);
             }
         }
 
@@ -217,9 +192,18 @@ impl LyricsPass {
     ) -> Vec4 {
         let edge_fade = smoothstep(0.0, 32.0, pixel.x)
             * smoothstep(frame.screen_size.x, frame.screen_size.x - 32.0, pixel.x);
-        let alpha = text::line_alpha(*line, placed_glyphs, glyphs, edges, pixel) * edge_fade;
+        let emphasis = smoothstep(110.0, 0.0, (pixel.x - frame.playhead_x).abs());
+        let scale = 1.0 + emphasis * 0.24;
+        let sample = Vec2::new(
+            frame.playhead_x + (pixel.x - frame.playhead_x) / scale,
+            line.origin.y + (pixel.y - line.origin.y) / scale,
+        );
+        let distance = text::line_distance(*line, placed_glyphs, glyphs, edges, sample);
+        let fill = text::coverage(distance);
+        let stroke = (text::coverage(distance + 0.65) - fill) * 0.5;
+        let alpha = (fill + stroke) * edge_fade;
         let played = smoothstep(frame.playhead_x + 4.0, frame.playhead_x - 4.0, pixel.x);
         let color = line.color.to_vec3().lerp(line.color.to_vec3() * 0.42, played);
-        (color * alpha).extend(alpha)
+        (color * fill * edge_fade).extend(alpha)
     }
 }

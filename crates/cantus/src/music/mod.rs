@@ -1,23 +1,22 @@
 use crate::{
-    app::{AppUpdater, Background, Fetch, TRACK_SPACING_MS, config::Config, enrichment::ArtState},
+    app::{AppUpdater, config::Config},
     render::{lyrics::Lyrics, track::AudioFeatures},
 };
 use arrayvec::ArrayString;
-use std::{collections::HashSet, error::Error, sync::Arc, time::Instant};
+use std::{collections::HashSet, error::Error, mem, sync::Arc, time::Instant};
 
+mod enrichment;
+mod lyrics;
 mod spotify;
+
+pub use enrichment::{AlbumArt, ArtState, Enrichment, Fetch, IMAGE_SIZE};
+pub use lyrics::LyricSegment;
 
 pub type TrackId = ArrayString<22>;
 pub type PlaylistId = ArrayString<22>;
 pub type MusicResult<T> = Result<T, Box<dyn Error + Send + Sync>>;
-type PlaylistTracks = Arc<HashSet<TrackId>>;
-
-pub struct LyricSegment {
-    pub start_ms: f32,
-    pub end_ms: f32,
-    pub text: String,
-    pub lane: usize,
-}
+pub const TRACK_SPACING_MS: f32 = 4000.0;
+pub(super) type PlaylistTracks = Arc<HashSet<TrackId>>;
 
 #[derive(Default)]
 pub struct PlaybackState {
@@ -40,12 +39,11 @@ pub struct Timeline {
 
 impl Default for Timeline {
     fn default() -> Self {
-        let now = Instant::now();
         Self {
             index: 0,
             position_ms: 0.0,
             rate: 0.0,
-            observed_at: now,
+            observed_at: Instant::now(),
             queue_start_ms: 0.0,
             movement: 0.0,
         }
@@ -53,23 +51,6 @@ impl Default for Timeline {
 }
 
 impl Timeline {
-    pub fn estimated_position(&self) -> f32 {
-        self.position_ms + self.observed_at.elapsed().as_millis() as f32 * self.rate
-    }
-
-    pub const fn observe_server(
-        &mut self,
-        server_position: f32,
-        server_index: usize,
-        rate: f32,
-        now: Instant,
-    ) {
-        self.index = server_index;
-        self.position_ms = server_position;
-        self.rate = rate;
-        self.observed_at = now;
-    }
-
     pub fn track_at_playhead(&self, queue: &[Track]) -> Option<(usize, f32)> {
         let mut start_ms = self.queue_start_ms;
         queue.iter().enumerate().find_map(|(index, track)| {
@@ -82,6 +63,55 @@ impl Timeline {
 }
 
 impl PlaybackState {
+    fn observe(&mut self, index: usize, position_ms: f32, rate: f32, observed_at: Instant) {
+        self.timeline.index = index.min(self.queue.len().saturating_sub(1));
+        self.timeline.position_ms = position_ms;
+        self.timeline.rate = rate;
+        self.timeline.observed_at = observed_at;
+    }
+
+    /// Replaces an authoritative queue snapshot without moving its rendered contents.
+    pub fn replace_queue(
+        &mut self,
+        mut queue: Vec<Track>,
+        index: usize,
+        position_ms: f32,
+        rate: f32,
+        observed_at: Instant,
+    ) {
+        let old_index = self.timeline.index.min(self.queue.len().saturating_sub(1));
+        let origin = self.queue.get(old_index).map(|track| {
+            let progress = -self.timeline.queue_start_ms
+                - self.queue[..old_index]
+                    .iter()
+                    .map(Track::queue_span_ms)
+                    .sum::<f32>();
+            (track.uri.clone(), progress)
+        });
+
+        let mut old = mem::take(&mut self.queue);
+        for track in &mut queue {
+            if let Some(index) = old.iter().position(|previous| previous.uri == track.uri) {
+                track.runtime = old.remove(index).runtime;
+            }
+        }
+
+        let index = index.min(queue.len().saturating_sub(1));
+        let rebased = origin.and_then(|(uri, progress)| {
+            queue
+                .iter()
+                .enumerate()
+                .filter(|(_, track)| track.uri == uri)
+                .min_by_key(|(candidate, _)| candidate.abs_diff(index))
+                .map(|(index, _)| (index, progress))
+        });
+        let (origin, progress) = rebased.unwrap_or((index, position_ms));
+        self.timeline.queue_start_ms =
+            -progress - queue[..origin].iter().map(Track::queue_span_ms).sum::<f32>();
+        self.queue = queue;
+        self.observe(index, position_ms, rate, observed_at);
+    }
+
     pub fn update_timeline(&mut self, drag_offset_ms: f32, dragging: bool, delta_time: f32) {
         if self.queue.is_empty() {
             self.timeline.queue_start_ms = 0.0;
@@ -89,7 +119,8 @@ impl PlaybackState {
             return;
         }
         let index = self.timeline.index.min(self.queue.len() - 1);
-        let target = -self.timeline.estimated_position()
+        let target = -(self.timeline.position_ms
+            + self.timeline.observed_at.elapsed().as_millis() as f32 * self.timeline.rate)
             - self.queue[..index].iter().map(Track::queue_span_ms).sum::<f32>()
             + drag_offset_ms;
         let difference = target - self.timeline.queue_start_ms;
@@ -167,10 +198,7 @@ pub enum PlaybackCommand {
     SetPlaying(bool),
     SetVolume(u8),
     Seek(u32),
-    Skip {
-        forward: bool,
-        count: usize,
-    },
+    Skip(i8),
     UpdateLibrary {
         track_id: TrackId,
         playlists: Vec<(PlaylistId, bool)>,
@@ -193,10 +221,8 @@ pub trait MusicService: Send + Sync {
 pub struct MusicBackend(Arc<dyn MusicService>);
 
 impl MusicBackend {
-    pub fn spotify(config: &mut Config, updater: &AppUpdater, background: Background) -> Self {
-        Self(Arc::new(spotify::SpotifyBackend::new(
-            config, updater, background,
-        )))
+    pub(crate) fn spotify(config: &Config, updater: &AppUpdater, http: ureq::Agent) -> Self {
+        Self(Arc::new(spotify::SpotifyBackend::new(config, updater, http)))
     }
 
     pub fn command(&self, command: PlaybackCommand) {

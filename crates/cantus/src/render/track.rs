@@ -19,9 +19,8 @@ use isthmus::spirv_std::num_traits::Float;
 #[cfg(feature = "cpu")]
 use crate::{
     app::{
-        MAX_RENDER_INSTANCES, TRACK_SPACING_MS,
-        enrichment::{AlbumArt, IMAGE_SIZE},
         interaction::Rect,
+        music::{AlbumArt, IMAGE_SIZE, TRACK_SPACING_MS},
         music::{CondensedPlaylist, PlaybackState, Timeline, Track, playlist_icons},
     },
     render::{
@@ -42,6 +41,8 @@ pub const MAX_PILL_PLAYLIST_ICONS: usize = 8;
 pub const PALETTE_COLORS: usize = 4;
 #[cfg(feature = "cpu")]
 const MAX_TEXTURE_IMAGES: u32 = 32;
+#[cfg(feature = "cpu")]
+const MAX_RENDER_INSTANCES: usize = 32;
 /// Visual width, in pixels, of rating and playlist icons before hover growth.
 const ICON_WIDTH: f32 = 21.6;
 /// Center-to-center icon spacing for rating stars and playlist artwork.

@@ -292,11 +292,9 @@ impl InteractionState {
             .round() as u32;
             self.music.command(PlaybackCommand::Seek(milliseconds));
         } else {
-            let was_before = timeline.index < clicked_index;
-            self.music.command(PlaybackCommand::Skip {
-                forward: was_before,
-                count: skip_count.min(10),
-            });
+            let direction = if timeline.index < clicked_index { 1 } else { -1 };
+            self.music
+                .command(PlaybackCommand::Skip(direction * skip_count.min(10) as i8));
         }
     }
 }

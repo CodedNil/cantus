@@ -450,7 +450,7 @@ fn action_icon(point: Vec2, time: f32, action: f32, hover: f32, pill: &StatusPil
 
 #[isthmus::pass]
 impl StatusPass {
-    pub fn new(passes: &Passes<'_>, text: &text::Renderer, updater: AppUpdater) -> Self {
+    pub(crate) fn new(passes: &Passes<'_>, text: &text::Renderer, updater: AppUpdater) -> Self {
         let audio_spectrum = Arc::<[AtomicU32; AUDIO_SPECTRUM_BANDS]>::default();
         platform::start_status_monitor(updater, Arc::clone(&audio_spectrum));
         let pill = passes.instance(

@@ -66,7 +66,10 @@ const AUDIO_WINDOW_SIZE: usize = 1024;
 const AUDIO_BAND_EDGES: [f32; AUDIO_SPECTRUM_BANDS + 1] =
     [60.0, 120.0, 250.0, 500.0, 1_000.0, 2_000.0, 4_000.0, 12_000.0];
 
-pub fn start_status_monitor(updater: AppUpdater, spectrum: Arc<[AtomicU32; AUDIO_SPECTRUM_BANDS]>) {
+pub(crate) fn start_status_monitor(
+    updater: AppUpdater,
+    spectrum: Arc<[AtomicU32; AUDIO_SPECTRUM_BANDS]>,
+) {
     let volume_updater = updater.clone();
     thread::spawn(move || monitor_playback(&spectrum));
     thread::spawn(move || monitor_volume(&volume_updater));

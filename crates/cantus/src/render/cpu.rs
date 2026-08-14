@@ -1,7 +1,5 @@
 use crate::{
-    app::{
-        CantusApp, PANEL_OVERFLOW, config::Config, interaction::InteractionState, music::PlaybackState,
-    },
+    app::{CantusApp, config::Config, interaction::InteractionState, music::PlaybackState},
     render::{
         lyrics::{self, LyricsPass},
         particles::ParticlePass,
@@ -19,6 +17,8 @@ use isthmus::{
     wgpu::{Color, Instance, PowerPreference, RenderPass, Surface},
 };
 use std::{sync::Arc, time::Instant};
+
+const PANEL_OVERFLOW: f32 = 16.0;
 
 pub type Passes<'a> = PassBuilder<'a, FrameData>;
 type RenderProgram = Program<FrameData, Systems>;
@@ -146,7 +146,7 @@ impl Systems {
             lyrics: app
                 .config
                 .lyrics_enabled
-                .then(|| LyricsPass::new(passes, &text, app.background.clone(), app.music.clone())),
+                .then(|| LyricsPass::new(passes, &text, app.enrichment.clone(), app.music.clone())),
             tempestas,
             status,
             track: TrackPass::new(passes, &text),

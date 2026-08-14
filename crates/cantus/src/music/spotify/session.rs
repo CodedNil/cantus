@@ -1,5 +1,4 @@
-use super::{CLIENT_ID, ClientResult, read_cache, write_cache};
-use hmac::{Hmac, Mac};
+use super::{CLIENT_ID, ClientResult, random, read_cache, write_cache};
 use librespot_protocol::{
     authentication::{APWelcome, AuthenticationType, ClientResponseEncrypted, CpuFamily, Os},
     client_info::ClientInfo,
@@ -19,13 +18,15 @@ use librespot_protocol::{
 };
 use num_bigint::BigUint;
 use protobuf::{Message as _, MessageField, well_known_types::duration::Duration as ProtoDuration};
-use ring::signature::{RSA_PKCS1_2048_8192_SHA1_FOR_LEGACY_USE_ONLY, RsaPublicKeyComponents};
+use ring::{
+    digest::{self, Context},
+    hmac,
+    signature::{RSA_PKCS1_2048_8192_SHA1_FOR_LEGACY_USE_ONLY, RsaPublicKeyComponents},
+};
 use serde::{Deserialize, Serialize};
-use sha1::{Digest, Sha1};
 use shannon::Shannon;
 use std::{
     env::consts::ARCH,
-    fmt::Write as _,
     io::{self, Read, Write},
     net::TcpStream,
     path::{Path, PathBuf},
@@ -182,12 +183,7 @@ struct Credentials {
 }
 
 fn device_id() -> String {
-    let mut bytes = [0; 20];
-    getrandom::fill(&mut bytes).expect("operating-system randomness unavailable");
-    bytes.iter().fold(String::with_capacity(40), |mut id, byte| {
-        let _ = write!(id, "{byte:02x}");
-        id
-    })
+    hex::encode(random::<20>().expect("operating-system randomness unavailable"))
 }
 
 fn client_token(http: &Agent, device_id: &str) -> ClientResult<String> {
@@ -286,15 +282,14 @@ fn post_proto<T: protobuf::Message, R: protobuf::Message>(
 }
 
 fn solve_hashcash(context: &[u8], challenge: &HashcashChallenge, started: Instant) -> HashcashSolution {
-    let context_hash = Sha1::digest(context);
+    let context_hash = digest::digest(&digest::SHA1_FOR_LEGACY_USE_ONLY, context);
     let mut suffix = [0; 16];
-    suffix[..8].copy_from_slice(&context_hash[12..]);
+    suffix[..8].copy_from_slice(&context_hash.as_ref()[12..]);
     loop {
-        let hash = Sha1::new()
-            .chain_update(&challenge.prefix)
-            .chain_update(suffix)
-            .finalize();
-        if trailing_zeros(&hash) >= challenge.length as u32 {
+        let mut hash = Context::new(&digest::SHA1_FOR_LEGACY_USE_ONLY);
+        hash.update(&challenge.prefix);
+        hash.update(&suffix);
+        if trailing_zeros(hash.finish().as_ref()) >= challenge.length as u32 {
             let elapsed = started.elapsed();
             return HashcashSolution {
                 suffix: suffix.to_vec(),
@@ -357,8 +352,7 @@ fn ap_login(
         })?;
     stream.set_read_timeout(Some(Duration::from_secs(10)))?;
     stream.set_write_timeout(Some(Duration::from_secs(10)))?;
-    let mut private = [0; 95];
-    getrandom::fill(&mut private)?;
+    let private = random::<95>()?;
     let private = BigUint::from_bytes_le(&private);
     let public = BigUint::from(2u8).modpow(&private, &dh_prime()).to_bytes_be();
     let mut hello = ClientHello::new();
@@ -396,7 +390,7 @@ fn ap_login(
     let shared = BigUint::from_bytes_be(challenge.gs())
         .modpow(&private, &dh_prime())
         .to_bytes_be();
-    let (proof, send_key, receive_key) = session_keys(&shared, &transcript)?;
+    let (proof, send_key, receive_key) = session_keys(&shared, &transcript);
     let mut response = ClientResponsePlaintext::new();
     response
         .login_crypto_response
@@ -466,21 +460,24 @@ fn read_plain(stream: &mut TcpStream, transcript: &mut Vec<u8>) -> io::Result<Ve
     Ok(body)
 }
 
-fn session_keys(secret: &[u8], transcript: &[u8]) -> ClientResult<(Vec<u8>, Vec<u8>, Vec<u8>)> {
+fn session_keys(secret: &[u8], transcript: &[u8]) -> (Vec<u8>, Vec<u8>, Vec<u8>) {
     let mut keys = Vec::with_capacity(100);
+    let key = hmac::Key::new(hmac::HMAC_SHA1_FOR_LEGACY_USE_ONLY, secret);
     for index in 1..=5 {
-        let mut hmac = Hmac::<Sha1>::new_from_slice(secret)?;
-        hmac.update(transcript);
-        hmac.update(&[index]);
-        keys.extend_from_slice(&hmac.finalize().into_bytes());
+        let mut context = hmac::Context::with_key(&key);
+        context.update(transcript);
+        context.update(&[index]);
+        keys.extend_from_slice(context.sign().as_ref());
     }
-    let mut proof = Hmac::<Sha1>::new_from_slice(&keys[..20])?;
-    proof.update(transcript);
-    Ok((
-        proof.finalize().into_bytes().to_vec(),
+    let proof = hmac::sign(
+        &hmac::Key::new(hmac::HMAC_SHA1_FOR_LEGACY_USE_ONLY, &keys[..20]),
+        transcript,
+    );
+    (
+        proof.as_ref().to_vec(),
         keys[20..52].to_vec(),
         keys[52..84].to_vec(),
-    ))
+    )
 }
 
 struct ApTransport {
@@ -531,12 +528,6 @@ impl ApTransport {
         self.receive.check_mac(&mac)?;
         Ok((header[0], payload))
     }
-}
-
-fn random<const N: usize>() -> Result<[u8; N], getrandom::Error> {
-    let mut bytes = [0; N];
-    getrandom::fill(&mut bytes)?;
-    Ok(bytes)
 }
 
 fn platform() -> Platform {
