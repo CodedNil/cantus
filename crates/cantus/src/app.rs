@@ -1,7 +1,6 @@
 use crate::render::cpu::RenderState;
-use enrichment::Enrichment;
 use interaction::InteractionState;
-use spotify::PlaybackState;
+use music::{MusicBackend, PlaybackState};
 use std::{
     io,
     sync::{
@@ -21,10 +20,10 @@ pub mod config;
 pub mod enrichment;
 #[path = "interaction.rs"]
 pub mod interaction;
+#[path = "music/mod.rs"]
+pub mod music;
 #[path = "platform/mod.rs"]
 pub mod platform;
-#[path = "spotify.rs"]
-pub mod spotify;
 
 pub const PANEL_OVERFLOW: f32 = 16.0;
 pub const MAX_RENDER_INSTANCES: usize = 32;
@@ -33,7 +32,7 @@ const ENRICHMENT_RETRY: Duration = Duration::from_secs(30);
 
 pub type Update<T> = Box<dyn FnOnce(&mut T) + Send>;
 pub type AppUpdater = Sender<Update<CantusApp>>;
-type Job = Box<dyn FnOnce() -> Enrichment + Send>;
+type Job = Box<dyn FnOnce() -> Update<CantusApp> + Send>;
 
 #[derive(Clone)]
 pub struct Background {
@@ -52,8 +51,7 @@ impl Background {
                 loop {
                     let job = receiver.lock().expect("worker queue poisoned").recv();
                     let Ok(job) = job else { break };
-                    let enrichment = job();
-                    send_update(&updater, move |app| enrichment.apply(app));
+                    send_update(&updater, job());
                 }
             });
         }
@@ -66,7 +64,7 @@ impl Background {
         }
     }
 
-    pub(crate) fn submit(&self, work: impl FnOnce() -> Enrichment + Send + 'static) -> bool {
+    pub(crate) fn submit(&self, work: impl FnOnce() -> Update<CantusApp> + Send + 'static) -> bool {
         self.sender.send(Box::new(work)).is_ok()
     }
 }
@@ -113,6 +111,7 @@ pub struct CantusApp {
     pub(crate) config: config::Config,
     pub(crate) updater: AppUpdater,
     pub(crate) background: Background,
+    pub(crate) music: MusicBackend,
 }
 
 impl Default for CantusApp {
@@ -120,14 +119,15 @@ impl Default for CantusApp {
         let (updater, app_updates) = mpsc::channel();
         let background = Background::new(&updater);
         let mut config = config::load();
-        let spotify = spotify::SpotifyBackend::new(&mut config, &updater, background.clone());
+        let music = MusicBackend::spotify(&mut config, &updater, background.clone());
         Self {
             render: RenderState::default(),
-            interaction: InteractionState::new(spotify),
+            interaction: InteractionState::new(music.clone()),
             playback: PlaybackState::default(),
             app_updates,
             updater,
             background,
+            music,
             config,
         }
     }

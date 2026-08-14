@@ -9,8 +9,8 @@ use {
     crate::{
         app::{
             Background, Fetch,
-            enrichment::Enrichment,
-            spotify::{PlaybackState, Track},
+            enrichment::fetch_lyrics,
+            music::{LyricSegment, MusicBackend, PlaybackState},
         },
         render::{
             cpu::{Frame, Passes},
@@ -24,44 +24,36 @@ use {
 
 pub const EXTENSION: f32 = 10.0;
 #[cfg(feature = "cpu")]
-pub(crate) const TEXT_GLYPHS: usize = 2_048;
+pub(crate) const TEXT_GLYPHS: usize = 4_096;
 #[cfg(feature = "cpu")]
 const STYLE: TextStyle = TextStyle::new(15.0, 700.0);
 #[cfg(feature = "cpu")]
 const PREFETCH_TRACKS: usize = 4;
 #[cfg(feature = "cpu")]
-const MIN_SPEED: f32 = 0.05;
-#[cfg(feature = "cpu")]
-const WORD_GAP: f32 = 3.0;
+const SPEED: f32 = 0.06;
 #[cfg(feature = "cpu")]
 const MUSIC_GAP_MS: f32 = 5_000.0;
 #[cfg(feature = "cpu")]
 const LANE_OFFSET: f32 = 5.0;
+#[cfg(feature = "cpu")]
+const GAP: f32 = 4.0;
 
 #[isthmus::pass]
 pub struct LyricsPass {
     lines: isthmus::Instances<Self>,
     background: Background,
-}
-
-#[cfg(feature = "cpu")]
-pub(crate) struct TimedSegment {
-    pub start_ms: f32,
-    pub end_ms: f32,
-    pub text: String,
-    pub lane: usize,
+    music: MusicBackend,
 }
 
 #[cfg(feature = "cpu")]
 #[derive(Default)]
 pub(crate) struct Lyrics {
     lines: [text::ShapedLine; 2],
-    speed: f32,
 }
 
 #[cfg(feature = "cpu")]
 impl Lyrics {
-    pub(crate) fn shape(mut segments: Vec<TimedSegment>, shaper: &text::Shaper) -> Option<Self> {
+    pub(crate) fn shape(mut segments: Vec<LyricSegment>, shaper: &text::Shaper) -> Option<Self> {
         segments.retain(|segment| !segment.text.trim().is_empty());
         segments.sort_by(|left, right| left.start_ms.total_cmp(&right.start_ms));
         if segments.is_empty() {
@@ -73,7 +65,7 @@ impl Lyrics {
         for segment in &segments[1..] {
             if segment.start_ms - vocal_end >= MUSIC_GAP_MS {
                 let middle = (vocal_end + segment.start_ms) * 0.5;
-                music.push(TimedSegment {
+                music.push(LyricSegment {
                     start_ms: middle,
                     end_ms: middle + 1_000.0,
                     text: "♪".into(),
@@ -85,42 +77,34 @@ impl Lyrics {
         segments.extend(music);
         segments.sort_by(|left, right| left.start_ms.total_cmp(&right.start_ms));
 
-        let mut speed = MIN_SPEED;
-        let mut previous: [Option<(f32, f32, bool)>; 2] = [None; 2];
+        let mut positioned = [Vec::new(), Vec::new()];
+        let mut previous_end = [0.0; 2];
         for segment in &segments {
-            let lane = segment.lane;
-            if let Some((start_ms, width, ended_word)) = previous[lane] {
-                let gap =
-                    f32::from(ended_word || segment.text.starts_with(char::is_whitespace)) * WORD_GAP;
-                speed = speed.max((width + gap) / (segment.start_ms - start_ms).max(1.0));
-            }
-            previous[lane] = Some((
-                segment.start_ms,
-                shaper.width(segment.text.trim(), STYLE),
-                segment.text.ends_with(char::is_whitespace),
-            ));
+            let lane = segment.lane.min(1);
+            let text = segment.text.trim();
+            let start = segment.start_ms.max(previous_end[lane]);
+            previous_end[lane] = start + shaper.width(text, STYLE) / SPEED + GAP / SPEED;
+            positioned[lane].push((text, start * SPEED));
         }
-        let lines = [0, 1].map(|lane| {
-            shaper.shape_positioned(
-                segments
-                    .iter()
-                    .filter(move |segment| segment.lane == lane)
-                    .map(|segment| (segment.text.trim(), segment.start_ms * speed)),
-                STYLE,
-                TEXT_GLYPHS,
-            )
-        });
-        Some(Self { lines, speed })
+        let lines = [0, 1]
+            .map(|lane| shaper.shape_positioned(positioned[lane].iter().copied(), STYLE, TEXT_GLYPHS));
+        Some(Self { lines })
     }
 }
 
 #[isthmus::pass]
 impl LyricsPass {
-    pub fn new(passes: &Passes<'_>, text: &text::Renderer, background: Background) -> Self {
+    pub fn new(
+        passes: &Passes<'_>,
+        text: &text::Renderer,
+        background: Background,
+        music: MusicBackend,
+    ) -> Self {
         let (placed_glyphs, glyphs, edges) = text.resources();
         Self {
             lines: passes.instances_with_capacity((placed_glyphs, glyphs, edges), 6),
             background,
+            music,
         }
     }
 
@@ -143,20 +127,29 @@ impl LyricsPass {
             .take(PREFETCH_TRACKS)
         {
             if track.runtime.lyrics.request(now) {
-                let Some(id) = track.id else {
-                    track.runtime.lyrics = Fetch::Ready(Lyrics::default());
-                    continue;
-                };
-                let (name, artist, album, duration_ms) = (
+                let uri = track.uri.clone();
+                let (id, name, artist, album, duration_ms) = (
+                    track.id,
                     track.name.clone(),
-                    track.artist().to_owned(),
-                    track.album.name.clone(),
+                    track.artist.clone(),
+                    track.album.clone(),
                     track.duration_ms,
                 );
                 let agent = self.background.http.clone();
+                let music = self.music.clone();
                 let shaper = text.shaper();
                 if !self.background.submit(move || {
-                    Enrichment::lyrics(id, &agent, &shaper, &name, &artist, &album, duration_ms)
+                    fetch_lyrics(
+                        uri,
+                        &agent,
+                        &music,
+                        id,
+                        &shaper,
+                        &name,
+                        &artist,
+                        &album,
+                        duration_ms,
+                    )
                 }) {
                     track.runtime.lyrics = Fetch::Missing(now);
                 }
@@ -170,16 +163,9 @@ impl LyricsPass {
         let visible = index.saturating_sub(1)..(index + 2).min(playback.queue.len());
         let y = PANEL_START + frame.config.height + 10.0;
         self.lines.clear();
-        let speed = |track: &Track| {
-            track
-                .runtime
-                .lyrics
-                .ready()
-                .map_or(MIN_SPEED, |lyrics| lyrics.speed.max(MIN_SPEED))
-        };
-        let mut x = frame.shared.playhead_x - progress_ms * speed(&playback.queue[index]);
+        let mut x = frame.shared.playhead_x - progress_ms * SPEED;
         for track in &playback.queue[visible.start..index] {
-            x -= track.queue_span_ms() * speed(track);
+            x -= track.queue_span_ms() * SPEED;
         }
         for item in visible {
             let track = &playback.queue[item];
@@ -207,7 +193,7 @@ impl LyricsPass {
                     }
                 }
             }
-            x += track.queue_span_ms() * speed(track);
+            x += track.queue_span_ms() * SPEED;
         }
     }
 

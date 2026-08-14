@@ -18,8 +18,6 @@ pub struct Config {
     /// The height of the bar in logical pixels.
     pub height: f32,
 
-    /// Spotify client ID to use for authentication.
-    pub spotify_client_id: Option<String>,
     /// How many minutes in the future to display in the timeline.
     pub timeline_future_minutes: f32,
     /// How many minutes before the current time to display in the timeline.
@@ -63,7 +61,6 @@ pub enum LayerAnchor {
 impl Default for Config {
     fn default() -> Self {
         Self {
-            spotify_client_id: None,
             monitor: None,
             height: 50.0,
             timezones: ArrayVec::new(),

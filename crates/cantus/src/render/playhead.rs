@@ -10,7 +10,7 @@ use isthmus::{
 
 #[cfg(feature = "cpu")]
 use crate::{
-    app::{interaction::Rect, spotify::PlaybackState},
+    app::{interaction::Rect, music::PlaybackState},
     render::cpu::{Frame, Passes, approach},
 };
 
@@ -81,13 +81,10 @@ impl PlayheadPass {
         }
 
         if playhead.clicked {
-            frame.interaction.toggle_playing(&mut playback.playing);
-            *last_toggle_time = time;
+            frame.interaction.toggle_playing(playback.playing);
         }
         if volume_scroll != 0 {
-            frame
-                .interaction
-                .adjust_spotify_volume(&mut playback.volume, volume_scroll);
+            frame.interaction.adjust_volume(playback.volume, volume_scroll);
         }
     }
 

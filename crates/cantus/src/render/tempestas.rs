@@ -1115,6 +1115,7 @@ mod monitor {
             }
             let mut retry = false;
             let mut forecasts = Vec::with_capacity(locations.len());
+            let mut ready = Vec::with_capacity(locations.len());
             for (index, location) in locations.iter_mut().enumerate() {
                 if index > 0 && location.is_none() {
                     *location = geocode(&timezones[index - 1])
@@ -1128,8 +1129,11 @@ mod monitor {
                     retry = true;
                     continue;
                 };
-                match fetch(latitude, longitude) {
-                    Ok(forecast) => {
+                ready.push((index, [latitude, longitude]));
+            }
+            match fetch(&ready) {
+                Ok(results) => {
+                    for ((index, [latitude, longitude]), forecast) in ready.into_iter().zip(results) {
                         if index == 0 {
                             info!(
                                 source = if portal_location {
@@ -1145,10 +1149,10 @@ mod monitor {
                         }
                         forecasts.push((index, forecast));
                     }
-                    Err(error) => {
-                        retry = true;
-                        warn!(%error, index, "Failed to refresh weather");
-                    }
+                }
+                Err(error) => {
+                    retry = true;
+                    warn!(%error, "Failed to refresh weather");
                 }
             }
             if !forecasts.is_empty() && forecast_tx.send(Update(forecasts)).is_err() {
@@ -1266,10 +1270,28 @@ mod monitor {
         Ok([place.latitude, place.longitude])
     }
 
-    fn fetch(latitude: f32, longitude: f32) -> Result<Forecast, String> {
-        get_json(format!(
+    fn fetch(locations: &[(usize, [f32; 2])]) -> Result<Vec<Forecast>, String> {
+        if locations.is_empty() {
+            return Ok(Vec::new());
+        }
+        let latitude = locations
+            .iter()
+            .map(|(_, [latitude, _])| latitude.to_string())
+            .collect::<Vec<_>>()
+            .join(",");
+        let longitude = locations
+            .iter()
+            .map(|(_, [_, longitude])| longitude.to_string())
+            .collect::<Vec<_>>()
+            .join(",");
+        let url = format!(
             "https://api.open-meteo.com/v1/forecast?latitude={latitude}&longitude={longitude}&current={WEATHER_FIELDS},relative_humidity_2m,wind_speed_10m&hourly={WEATHER_FIELDS}&forecast_hours=24&daily=weather_code,temperature_2m_max,temperature_2m_min,sunrise,sunset&temperature_unit=celsius&timezone=auto&forecast_days=6"
-        ))
+        );
+        if locations.len() == 1 {
+            get_json(url).map(|forecast| vec![forecast])
+        } else {
+            get_json(url)
+        }
     }
 
     fn get_json<T: DeserializeOwned>(url: String) -> Result<T, String> {

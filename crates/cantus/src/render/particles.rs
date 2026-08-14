@@ -11,7 +11,7 @@ use isthmus::{
 #[cfg(feature = "cpu")]
 use {
     crate::{
-        app::spotify::PlaybackState,
+        app::music::PlaybackState,
         render::{
             cpu::{Frame, Passes},
             shared::PANEL_START,

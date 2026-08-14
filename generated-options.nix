@@ -30,11 +30,6 @@
     default = builtins.fromJSON "50.0";
     description = "The height of the bar in logical pixels.";
   };
-  spotify_client_id = lib.mkOption {
-    type = lib.types.nullOr (lib.types.str);
-    default = builtins.fromJSON "null";
-    description = "Spotify client ID to use for authentication.";
-  };
   timeline_future_minutes = lib.mkOption {
     type = lib.types.number;
     default = builtins.fromJSON "12.0";

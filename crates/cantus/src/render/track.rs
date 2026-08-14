@@ -22,7 +22,7 @@ use crate::{
         MAX_RENDER_INSTANCES, TRACK_SPACING_MS,
         enrichment::{AlbumArt, IMAGE_SIZE},
         interaction::Rect,
-        spotify::{CondensedPlaylist, PlaybackState, Timeline, Track, playlist_icons},
+        music::{CondensedPlaylist, PlaybackState, Timeline, Track, playlist_icons},
     },
     render::{
         cpu::{Frame, Passes, approach},
@@ -379,7 +379,7 @@ impl TrackPass {
         } else {
             format!("{}s", seconds.round())
         };
-        let artist = track.artist();
+        let artist = &track.artist;
         format!("{time}\u{2004}•\u{2004}{artist}")
     }
 
@@ -389,7 +389,7 @@ impl TrackPass {
         track: &mut Track,
         layout: &mut TrackLayout,
         playlists: &mut [CondensedPlaylist],
-        timeline: &mut Timeline,
+        timeline: &Timeline,
         frame: &mut Frame,
         pill_queue_index: usize,
     ) -> (TrackPill, bool) {
@@ -643,7 +643,7 @@ impl TrackPass {
                     track,
                     &mut layout,
                     &mut playback.playlists,
-                    &mut playback.timeline,
+                    &playback.timeline,
                     frame,
                     pill_queue_index,
                 );
@@ -672,7 +672,7 @@ impl TrackPass {
                     / (duration_ms as f32 * frame.shared.px_per_ms);
                 frame
                     .interaction
-                    .seek(&mut playback.timeline, index, duration_ms, fraction);
+                    .seek(&playback.timeline, index, duration_ms, fraction);
             }
             frame.interaction.cancel_drag();
         }

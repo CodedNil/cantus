@@ -1,12 +1,9 @@
 use crate::{
-    app::spotify::{CondensedPlaylist, PlaylistId, SpotifyBackend, Timeline, TrackId},
+    app::music::{CondensedPlaylist, MusicBackend, PlaybackCommand, PlaylistId, Timeline, TrackId},
     render::shared::PANEL_START,
 };
 use isthmus::glam::Vec2;
-use std::{
-    mem,
-    time::{Duration, Instant},
-};
+use std::mem;
 use tracing::{info, warn};
 
 #[derive(Copy, Clone)]
@@ -38,7 +35,7 @@ pub struct InteractionState {
     regions: Vec<Rect>,
     /// Set when a rate/playlist-toggle action fires this frame, for particles to burst a spark.
     rate_burst: Option<Vec2>,
-    spotify: SpotifyBackend,
+    music: MusicBackend,
 }
 
 #[derive(Clone, Copy)]
@@ -73,7 +70,7 @@ impl Rect {
 }
 
 impl InteractionState {
-    pub const fn new(spotify: SpotifyBackend) -> Self {
+    pub const fn new(music: MusicBackend) -> Self {
         Self {
             state: Pointer::Outside,
             dragging: false,
@@ -86,7 +83,7 @@ impl InteractionState {
             pulse: None,
             regions: Vec::new(),
             rate_burst: None,
-            spotify,
+            music,
         }
     }
 
@@ -156,6 +153,9 @@ impl InteractionState {
 
     pub const fn end_frame(&mut self) -> Option<Vec2> {
         let pulse = self.pulse.take();
+        if !self.down() {
+            self.cancel_drag();
+        }
         self.event = None;
         self.scroll = 0;
         pulse
@@ -219,27 +219,27 @@ impl InteractionState {
         self.drag_enabled = true;
     }
 
-    pub fn toggle_playing(&self, playing: &mut bool) {
-        *playing = !*playing;
-        info!("{} current track", if *playing { "Playing" } else { "Pausing" });
-        self.spotify.set_playing(*playing);
+    pub fn toggle_playing(&self, playing: bool) {
+        let playing = !playing;
+        info!("{} current track", if playing { "Playing" } else { "Pausing" });
+        self.music.command(PlaybackCommand::SetPlaying(playing));
     }
 
-    pub fn adjust_spotify_volume(&self, volume: &mut Option<u8>, direction: i32) {
+    pub fn adjust_volume(&self, volume: Option<u8>, direction: i32) {
         if let Some(volume) = volume {
-            *volume = volume
+            let volume = volume
                 .saturating_add_signed(if direction < 0 { 5 } else { -5 })
                 .min(100);
             info!("Setting volume to {volume}%");
-            self.spotify.player_parameter("volume", "volume_percent", volume);
+            self.music.command(PlaybackCommand::SetVolume(volume));
         }
     }
 
     /// Rates `track_id`, moving it into/out of whichever rating playlist matches `rating`.
     pub fn rate_track(&mut self, playlists: &mut [CondensedPlaylist], track_id: TrackId, rating: u8) {
-        self.spotify.update_library(
+        self.music.command(PlaybackCommand::UpdateLibrary {
             track_id,
-            playlists
+            playlists: playlists
                 .iter_mut()
                 .filter_map(|playlist| {
                     let add = playlist.rating_index? == rating;
@@ -248,8 +248,8 @@ impl InteractionState {
                         .then_some((playlist.id, add))
                 })
                 .collect(),
-            Some(rating >= 5),
-        );
+            liked: Some(rating >= 5),
+        });
         self.rate_burst = Some(self.pointer);
     }
 
@@ -266,15 +266,18 @@ impl InteractionState {
         };
         let add = !playlist.tracks.contains(&track_id);
         playlist.set_membership(track_id, add);
-        self.spotify
-            .update_library(track_id, vec![(playlist_id, add)], None);
+        self.music.command(PlaybackCommand::UpdateLibrary {
+            track_id,
+            playlists: vec![(playlist_id, add)],
+            liked: None,
+        });
         self.rate_burst = Some(self.pointer);
     }
 
     /// Seeks within `clicked_index`, or skips to it when it is not the current track.
     pub fn seek(
         &self,
-        timeline: &mut Timeline,
+        timeline: &Timeline,
         clicked_index: usize,
         clicked_duration_ms: u32,
         fraction: f32,
@@ -287,16 +290,13 @@ impl InteractionState {
                 clicked_duration_ms as f32 * fraction
             }
             .round() as u32;
-            timeline.position_ms = milliseconds as f32;
-            self.spotify.player_parameter("seek", "position_ms", milliseconds);
+            self.music.command(PlaybackCommand::Seek(milliseconds));
         } else {
             let was_before = timeline.index < clicked_index;
-            timeline.index = clicked_index;
-            timeline.position_ms = 0.0;
-            self.spotify.skip(was_before, skip_count.min(10));
+            self.music.command(PlaybackCommand::Skip {
+                forward: was_before,
+                count: skip_count.min(10),
+            });
         }
-        timeline.observed_at = Instant::now();
-        timeline.reset_rate();
-        timeline.hold_until = Instant::now() + Duration::from_secs(2);
     }
 }

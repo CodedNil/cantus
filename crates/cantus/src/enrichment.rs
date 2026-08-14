@@ -1,13 +1,9 @@
 use crate::{
     app::{
-        CantusApp, Fetch,
-        spotify::{PlaybackState, TrackId},
+        CantusApp, Fetch, Update,
+        music::{LyricSegment, MusicBackend, PlaybackState, TrackId},
     },
-    render::{
-        lyrics::{self, TimedSegment},
-        text,
-        track::{AudioFeatures, PALETTE_COLORS},
-    },
+    render::{lyrics, text, track::PALETTE_COLORS},
 };
 use arrayvec::ArrayVec;
 use image::{RgbaImage, imageops};
@@ -15,13 +11,10 @@ use isthmus::{Unorm8x4, glam::Vec3};
 use palette::{Clamp, IntoColor, Lch, color_theory::Analogous};
 use quick_xml::{Reader, XmlVersion, escape::unescape, events::Event};
 use serde::Deserialize;
-use std::{
-    array, borrow::Cow, collections::HashMap, error::Error, ops::Range, sync::Arc, time::Instant,
-};
-use tracing::{info, warn};
-use ureq::{Agent, Error as HttpError};
+use std::{array, collections::HashMap, error::Error, mem, ops::Range, sync::Arc, time::Instant};
+use tracing::warn;
+use ureq::Agent;
 
-const LRC_API: &str = "https://lrclib.net/api/get";
 const TTML_API: &str = "https://lyrics-api.binimum.org/";
 pub const IMAGE_SIZE: u32 = 64;
 pub type ArtState = Fetch<Arc<AlbumArt>>;
@@ -38,18 +31,6 @@ impl Fetch<Arc<AlbumArt>> {
     }
 }
 
-pub(crate) enum Enrichment {
-    Art(String, ArtState),
-    AudioFeatures(Vec<TrackId>, HashMap<TrackId, AudioFeatures>),
-    Lyrics(TrackId, Fetch<lyrics::Lyrics>),
-}
-
-#[derive(Deserialize)]
-#[serde(rename_all = "camelCase")]
-struct LrcResponse {
-    synced_lyrics: Option<String>,
-}
-
 #[derive(Deserialize)]
 struct TtmlResponse {
     results: Vec<TtmlResult>,
@@ -62,104 +43,65 @@ struct TtmlResult {
     timing_type: String,
 }
 
-impl Enrichment {
-    pub(crate) fn apply(self, app: &mut CantusApp) {
-        match self {
-            Self::Art(url, state) => app.set_art_state(&url, &state),
-            Self::AudioFeatures(ids, features) => {
-                for track in &mut app.playback.queue {
-                    let Some(id) = track.id.filter(|id| ids.contains(id)) else {
-                        continue;
-                    };
-                    track.runtime.audio_features = features
-                        .get(&id)
-                        .copied()
-                        .map_or_else(Fetch::default, Fetch::Ready);
-                }
+pub(crate) fn fetch_lyrics(
+    uri: String,
+    http: &Agent,
+    music: &MusicBackend,
+    track_id: Option<TrackId>,
+    shaper: &text::Shaper,
+    name: &str,
+    artist: &str,
+    album: &str,
+    duration_ms: u32,
+) -> Update<CantusApp> {
+    let ttml = http
+        .get(TTML_API)
+        .query("track", name)
+        .query("artist", artist)
+        .query("album", album)
+        .query("duration", (duration_ms / 1000).to_string())
+        .call()
+        .and_then(|mut response| response.body_mut().read_json::<TtmlResponse>())
+        .ok()
+        .and_then(|response| {
+            response
+                .results
+                .into_iter()
+                .find(|result| result.timing_type == "word")
+        })
+        .and_then(|result| {
+            let source = http
+                .get(&result.lyrics_url)
+                .call()
+                .ok()?
+                .body_mut()
+                .read_to_string()
+                .ok()?;
+            lyrics::Lyrics::shape(parse_ttml(&source), shaper)
+        });
+    let state = ttml.map_or_else(
+        || match track_id.map(|id| music.lyrics(id)) {
+            Some(Ok(segments)) => {
+                Fetch::Ready(lyrics::Lyrics::shape(segments, shaper).unwrap_or_default())
             }
-            Self::Lyrics(id, state) => {
-                if let Some(track) = app.playback.queue.iter_mut().find(|track| {
-                    track.id == Some(id) && matches!(track.runtime.lyrics, Fetch::Fetching)
-                }) {
-                    track.runtime.lyrics = state;
-                }
+            Some(Err(error)) => {
+                warn!(%error, track = name, "Failed to fetch lyrics");
+                Fetch::retry()
             }
+            None => Fetch::Ready(lyrics::Lyrics::default()),
+        },
+        Fetch::Ready,
+    );
+    Box::new(move |app| {
+        if let Some(track) = app
+            .playback
+            .queue
+            .iter_mut()
+            .find(|track| track.uri == uri && matches!(track.runtime.lyrics, Fetch::Fetching))
+        {
+            track.runtime.lyrics = state;
         }
-    }
-
-    pub(crate) fn lyrics(
-        id: TrackId,
-        http: &Agent,
-        shaper: &text::Shaper,
-        name: &str,
-        artist: &str,
-        album: &str,
-        duration_ms: u32,
-    ) -> Self {
-        let ttml = http
-            .get(TTML_API)
-            .query("track", name)
-            .query("artist", artist)
-            .query("album", album)
-            .query("duration", (duration_ms / 1000).to_string())
-            .call()
-            .and_then(|mut response| response.body_mut().read_json::<TtmlResponse>())
-            .ok()
-            .and_then(|response| {
-                response
-                    .results
-                    .into_iter()
-                    .find(|result| result.timing_type == "word")
-            })
-            .and_then(|result| {
-                let source = http
-                    .get(&result.lyrics_url)
-                    .call()
-                    .ok()?
-                    .body_mut()
-                    .read_to_string()
-                    .ok()?;
-                lyrics::Lyrics::shape(parse_ttml(&source), shaper)
-            });
-        let state = ttml.map_or_else(
-            || {
-                let response = http
-                    .get(LRC_API)
-                    .query("track_name", name)
-                    .query("artist_name", artist)
-                    .query("album_name", album)
-                    .query("duration", (duration_ms / 1000).to_string())
-                    .call()
-                    .and_then(|mut response| response.body_mut().read_json::<LrcResponse>());
-                match response {
-                    Ok(response) => {
-                        info!(track = name, provider = "LRCLIB", "Lyrics fetched");
-                        Fetch::Ready(
-                            response
-                                .synced_lyrics
-                                .as_deref()
-                                .and_then(|source| lyrics::Lyrics::shape(parse_lrc(source), shaper))
-                                .unwrap_or_default(),
-                        )
-                    }
-                    Err(HttpError::StatusCode(404)) => Fetch::Ready(lyrics::Lyrics::default()),
-                    Err(error) => {
-                        warn!(%error, track = name, "Failed to fetch lyrics");
-                        Fetch::retry()
-                    }
-                }
-            },
-            |lyrics| {
-                info!(
-                    track = name,
-                    provider = "Apple Music TTML via BiniLyrics",
-                    "Lyrics fetched"
-                );
-                Fetch::Ready(lyrics)
-            },
-        );
-        Self::Lyrics(id, state)
-    }
+    })
 }
 
 fn parse_time(time: &str) -> Option<f32> {
@@ -170,42 +112,37 @@ fn parse_time(time: &str) -> Option<f32> {
         .map(|seconds| seconds * 1000.0)
 }
 
-fn parse_lrc(source: &str) -> Vec<TimedSegment> {
-    let mut segments = source
-        .lines()
-        .filter_map(|line| {
-            let (timestamp, text) = line.strip_prefix('[')?.split_once(']')?;
-            let start_ms = parse_time(timestamp)?;
-            Some(TimedSegment {
-                start_ms,
-                end_ms: start_ms + 1_000.0,
-                text: text.trim().to_owned(),
-                lane: 0,
-            })
-        })
-        .collect::<Vec<_>>();
-    for index in 0..segments.len().saturating_sub(1) {
-        segments[index].end_ms = segments[index + 1].start_ms;
-    }
-    segments
-}
-
-fn parse_ttml(source: &str) -> Vec<TimedSegment> {
+fn parse_ttml(source: &str) -> Vec<LyricSegment> {
     let mut reader = Reader::from_str(source);
     let (mut segments, mut line_lane) = (Vec::new(), None);
     let mut line_start = 0;
+    let mut line_time = None;
+    let mut line_text = String::new();
     let mut primary_agent = None;
     let mut span_roles = Vec::new();
     loop {
         match reader.read_event() {
             Ok(Event::Start(tag)) if tag.local_name().as_ref() == b"p" => {
+                span_roles.clear();
+                line_text.clear();
                 let agent = tag
                     .attributes()
                     .flatten()
-                    .find(|attr| attr.key.local_name().as_ref() == b"agent")
-                    .and_then(|attr| attr.normalized_value(XmlVersion::Implicit1_0).ok())
-                    .map(Cow::into_owned)
-                    .unwrap_or_default();
+                    .filter_map(|attr| {
+                        let value = attr.normalized_value(XmlVersion::Implicit1_0).ok()?;
+                        Some((attr.key.local_name().as_ref().to_vec(), value.into_owned()))
+                    })
+                    .fold((String::new(), None, None), |mut values, (key, value)| {
+                        match key.as_slice() {
+                            b"agent" => values.0 = value,
+                            b"begin" => values.1 = parse_time(&value),
+                            b"end" => values.2 = parse_time(&value),
+                            _ => {}
+                        }
+                        values
+                    });
+                line_time = agent.1.zip(agent.2);
+                let agent = agent.0;
                 let lane = usize::from(primary_agent.as_ref().is_some_and(|primary| primary != &agent));
                 primary_agent.get_or_insert(agent);
                 line_lane = Some(lane);
@@ -232,7 +169,7 @@ fn parse_ttml(source: &str) -> Vec<TimedSegment> {
                 if !span_roles.iter().any(|&(_, ignored)| ignored)
                     && let Some(start_ms) = start
                 {
-                    segments.push(TimedSegment {
+                    segments.push(LyricSegment {
                         start_ms,
                         end_ms: end.unwrap_or(start_ms + 1_000.0),
                         text: String::new(),
@@ -242,9 +179,7 @@ fn parse_ttml(source: &str) -> Vec<TimedSegment> {
                 }
             }
             Ok(Event::Text(value))
-                if line_lane.is_some()
-                    && segments.len() > line_start
-                    && !span_roles.iter().any(|&(_, ignored)| ignored) =>
+                if line_lane.is_some() && !span_roles.iter().any(|&(_, ignored)| ignored) =>
             {
                 let Ok(value) = value.decode() else {
                     return Vec::new();
@@ -252,12 +187,29 @@ fn parse_ttml(source: &str) -> Vec<TimedSegment> {
                 let Ok(value) = unescape(&value) else {
                     return Vec::new();
                 };
-                segments.last_mut().unwrap().text.push_str(&value);
+                line_text.push_str(&value);
+                if segments.len() > line_start {
+                    segments.last_mut().unwrap().text.push_str(&value);
+                }
             }
             Ok(Event::End(tag)) if tag.local_name().as_ref() == b"span" => {
                 span_roles.pop();
             }
-            Ok(Event::End(tag)) if tag.local_name().as_ref() == b"p" => line_lane = None,
+            Ok(Event::End(tag)) if tag.local_name().as_ref() == b"p" => {
+                if segments.len() == line_start
+                    && let Some((start_ms, end_ms)) = line_time
+                    && !line_text.trim().is_empty()
+                {
+                    segments.push(LyricSegment {
+                        start_ms,
+                        end_ms,
+                        text: mem::take(&mut line_text),
+                        lane: line_lane.unwrap_or_default(),
+                    });
+                }
+                line_lane = None;
+                span_roles.clear();
+            }
             Ok(Event::Eof) => break,
             Err(_) => return Vec::new(),
             _ => {}
@@ -290,12 +242,11 @@ fn art_slots(playback: &mut PlaybackState) -> impl Iterator<Item = (&str, &mut A
     playback
         .queue
         .iter_mut()
-        .filter_map(|track| Some((track.album.image.as_deref()?, &mut track.runtime.art)))
+        .filter_map(|track| track.image.as_deref().map(|url| (url, &mut track.runtime.art)))
         .chain(
-            playback
-                .playlists
-                .iter_mut()
-                .filter_map(|playlist| Some((playlist.image_url.as_deref()?, &mut playlist.art))),
+            playback.playlists.iter_mut().filter_map(|playlist| {
+                playlist.image_url.as_deref().map(|url| (url, &mut playlist.art))
+            }),
         )
 }
 
@@ -321,10 +272,10 @@ impl CantusApp {
         for url in download {
             let http = self.background.http.clone();
             let requested = url.clone();
-            if !self
-                .background
-                .submit(move || Enrichment::Art(url.clone(), fetch_art(&http, &url)))
-            {
+            if !self.background.submit(move || {
+                let state = fetch_art(&http, &url);
+                Box::new(move |app| app.set_art_state(&url, &state))
+            }) {
                 self.set_art_state(&requested, &Fetch::Missing(now));
             }
         }

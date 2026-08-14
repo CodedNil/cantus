@@ -22,9 +22,7 @@ https://github.com/user-attachments/assets/86c0bc3c-8e50-49bc-a955-86975910b7ae
 
 `cantus` can be run in two different modes: Wayland native (using `layer-shell` protocol) or as a standard window using `winit`.
 
-### Getting a Spotify API key
-
-Due to Spotify's rate limiting, you will need to get an API key from https://developer.spotify.com/dashboard/applications and add it to the config file under the `spotify_client_id` key.
+Spotify authentication opens in the browser on first launch; no developer API key is required.
 
 ## Installing with Nix
 Available in nixpkgs.

@@ -1,6 +1,6 @@
 use crate::{
     app::{
-        CantusApp, PANEL_OVERFLOW, config::Config, interaction::InteractionState, spotify::PlaybackState,
+        CantusApp, PANEL_OVERFLOW, config::Config, interaction::InteractionState, music::PlaybackState,
     },
     render::{
         lyrics::{self, LyricsPass},
@@ -146,7 +146,7 @@ impl Systems {
             lyrics: app
                 .config
                 .lyrics_enabled
-                .then(|| LyricsPass::new(passes, &text, app.background.clone())),
+                .then(|| LyricsPass::new(passes, &text, app.background.clone(), app.music.clone())),
             tempestas,
             status,
             track: TrackPass::new(passes, &text),
