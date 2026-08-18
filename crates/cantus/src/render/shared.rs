@@ -11,14 +11,6 @@ pub const PADDING: f32 = UNIT * 3.0;
 
 #[isthmus::data]
 #[derive(Default)]
-pub struct RipplePulse {
-    pub origin: Vec2,
-    pub start_time: f32,
-    pub strength: f32,
-}
-
-#[isthmus::data]
-#[derive(Default)]
 pub struct FrameData {
     pub screen_size: Vec2,
     pub mouse_pos: Vec2,
@@ -32,6 +24,14 @@ pub struct FrameData {
     /// Current hour at the detected weather location.
     pub weather_hour: f32,
     pub ripples: [RipplePulse; 4],
+}
+
+#[isthmus::data]
+#[derive(Default)]
+pub struct RipplePulse {
+    pub origin: Vec2,
+    pub start_time: f32,
+    pub strength: f32,
 }
 
 pub fn smoothstep(edge0: f32, edge1: f32, x: f32) -> f32 {
