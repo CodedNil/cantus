@@ -86,7 +86,7 @@ impl Default for CantusApp {
             render: RenderState::default(),
             interaction: InteractionState::new(music.clone()),
             playback: PlaybackState::default(),
-            launcher: LauncherState::new(&background, enrichment.http.clone()),
+            launcher: LauncherState::new(&background, &enrichment.http, config.search_providers.clone()),
             app_updates,
             updater,
             enrichment,

@@ -6,11 +6,11 @@ use crate::{
     },
     render::{
         PANEL_START,
+        launcher::{BACKGROUND_RADIUS, LauncherKey, background_bounds},
         lyrics::EXTENSION as LYRICS_EXTENSION,
         status::{AUDIO_SPECTRUM_BANDS, BATTERY_HIDDEN},
     },
 };
-use ashpd::zbus::Connection as DbusConnection;
 use freedesktop_desktop_entry::{desktop_entries, get_languages_from_env};
 use isthmus::glam::vec2;
 use isthmus::wgpu::{
@@ -57,6 +57,10 @@ use wayland_client::{
         wl_surface::WlSurface,
     },
 };
+use wayland_protocols::ext::background_effect::v1::client::{
+    ext_background_effect_manager_v1::ExtBackgroundEffectManagerV1,
+    ext_background_effect_surface_v1::ExtBackgroundEffectSurfaceV1,
+};
 use wayland_protocols::wp::{
     fractional_scale::v1::client::{
         wp_fractional_scale_manager_v1::WpFractionalScaleManagerV1,
@@ -69,6 +73,7 @@ use wayland_protocols_wlr::layer_shell::v1::client::{
     zwlr_layer_surface_v1::{self, Anchor as LayerAnchor, KeyboardInteractivity, ZwlrLayerSurfaceV1},
 };
 use xkbcommon::xkb;
+use zbus::Connection as DbusConnection;
 
 const AUDIO_SAMPLE_RATE: u32 = 48_000;
 const AUDIO_WINDOW_SIZE: usize = 1024;
@@ -96,6 +101,7 @@ pub trait Platform {
     fn run_power_action(action: usize);
     fn desktop_apps() -> Vec<DesktopApp>;
     fn spawn(exec: &str);
+    fn open_url(url: &str);
     fn start_launcher_listener(updater: &AppUpdater);
     fn trigger_launcher() -> !;
 }
@@ -187,6 +193,12 @@ impl Platform for Linux {
             .spawn()
         {
             warn!(%error, program, "Failed to launch application");
+        }
+    }
+
+    fn open_url(url: &str) {
+        if let Err(error) = Command::new("xdg-open").arg(url).spawn() {
+            warn!(%error, %url, "Failed to open URL");
         }
     }
 
@@ -507,6 +519,10 @@ pub fn run() {
         app.viewport = Some(viewporter.get_viewport(surface, &qhandle, ()));
         app.fractional = Some(fractional.get_fractional_scale(surface, &qhandle, ()));
     }
+    if let Ok(manager) = globals.bind::<ExtBackgroundEffectManagerV1, _, _>(&qhandle, 1..=1, ()) {
+        app.background_effect = Some(manager.get_background_effect(surface, &qhandle, ()));
+        manager.destroy();
+    }
 
     let config = &app.cantus.config;
     let layer_surface = layer_shell.get_layer_surface(
@@ -574,6 +590,7 @@ struct LayerShellApp {
     layer_surface: Option<ZwlrLayerSurfaceV1>,
     viewport: Option<WpViewport>,
     fractional: Option<WpFractionalScaleV1>,
+    background_effect: Option<ExtBackgroundEffectSurfaceV1>,
     frame_callback: Option<WlCallback>,
 }
 
@@ -670,6 +687,7 @@ impl LayerShellApp {
             self.last_launcher_open = self.cantus.launcher.open;
             resize_layer_surface(self.layer_surface.as_ref().unwrap(), &self.cantus);
             self.update_scale_and_viewport();
+            self.update_blur_region(qhandle);
         }
 
         let (buffer_width, buffer_height) = self.cantus.buffer_size();
@@ -721,6 +739,38 @@ impl LayerShellApp {
         wl_surface.set_input_region(Some(&region));
         region.destroy();
     }
+
+    fn update_blur_region(&self, qhandle: &QueueHandle<Self>) {
+        let Some(effect) = &self.background_effect else {
+            return;
+        };
+        if !self.cantus.launcher.open {
+            effect.set_blur_region(None);
+            return;
+        }
+
+        let compositor = self.compositor.as_ref().unwrap();
+        let region = compositor.create_region(qhandle, ());
+        let (width, height) = self.cantus.logical_surface_size();
+        let (origin, size) = background_bounds(vec2(width, height), self.cantus.config.height);
+        // Regions have integer edges and no antialiasing. Keep their staircase one pixel inside
+        // the shader's smooth edge instead of letting floor/ceil extend blur beyond the panel.
+        let x = origin.x.ceil() as i32 + 1;
+        let y = origin.y.ceil() as i32 + 1;
+        let width = (origin.x + size.x).floor() as i32 - 1 - x;
+        let height = (origin.y + size.y).floor() as i32 - 1 - y;
+        let radius = (BACKGROUND_RADIUS - 1).min(width / 2).min(height / 2);
+        region.add(x, y + radius, width, height - radius * 2);
+        for row in 0..radius {
+            let dy = radius as f32 - row as f32 - 0.5;
+            let dx = ((radius * radius) as f32 - dy * dy).sqrt();
+            let inset = radius - (dx + 0.5).round() as i32;
+            region.add(x + inset, y + row, width - inset * 2, 1);
+            region.add(x + inset, y + height - row - 1, width - inset * 2, 1);
+        }
+        effect.set_blur_region(Some(&region));
+        region.destroy();
+    }
 }
 
 dispatch!(ZwlrLayerSurfaceV1, |state, proxy, event, qhandle| {
@@ -731,6 +781,7 @@ dispatch!(ZwlrLayerSurfaceV1, |state, proxy, event, qhandle| {
                 state.cantus.render.surface_width = Some(width as f32);
             }
             state.update_scale_and_viewport();
+            state.update_blur_region(qhandle);
             state.try_render_frame(qhandle);
         }
         zwlr_layer_surface_v1::Event::Closed => state.should_exit = true,
@@ -936,39 +987,29 @@ fn handle_launcher_key(state: &mut LayerShellApp, keycode: xkb::Keycode) {
         }
         return;
     }
-    let launcher = &mut state.cantus.launcher;
-    match sym.raw() {
-        xkb::keysyms::KEY_Escape => launcher.close(),
-        xkb::keysyms::KEY_Return | xkb::keysyms::KEY_KP_Enter => {
-            launcher.activate(launcher.selected, shift);
-        }
-        xkb::keysyms::KEY_Up => launcher.move_selection(-1),
-        xkb::keysyms::KEY_Down => launcher.move_selection(1),
-        xkb::keysyms::KEY_BackSpace => launcher.edit(|field| field.erase(false)),
-        xkb::keysyms::KEY_Delete => launcher.edit(|field| field.erase(true)),
-        xkb::keysyms::KEY_Left => launcher.field.move_cursor(false, shift),
-        xkb::keysyms::KEY_Right => launcher.field.move_cursor(true, shift),
-        xkb::keysyms::KEY_Home => launcher.field.set_cursor(0, shift),
-        xkb::keysyms::KEY_End => {
-            let end = launcher.field.text.len();
-            launcher.field.set_cursor(end, shift);
-        }
-        _ => match letter {
-            Some('a') if control => launcher.field.select_all(),
-            Some('c' | 'x') if control => {
-                launcher.pending_copy = Some(launcher.field.selected_text().to_owned());
-                if letter == Some('x') {
-                    launcher.edit(|field| {
-                        field.delete_selection();
-                    });
-                }
-            }
-            _ => {
-                if let Some(typed) = character.filter(|typed| !typed.is_control() && !control) {
-                    launcher.edit(|field| field.insert(typed.encode_utf8(&mut [0u8; 4])));
-                }
-            }
-        },
+    let key = match sym.raw() {
+        xkb::keysyms::KEY_Escape => Some(LauncherKey::Escape),
+        xkb::keysyms::KEY_Return | xkb::keysyms::KEY_KP_Enter => Some(LauncherKey::Activate),
+        xkb::keysyms::KEY_Up => Some(LauncherKey::Up),
+        xkb::keysyms::KEY_Down => Some(LauncherKey::Down),
+        xkb::keysyms::KEY_BackSpace => Some(LauncherKey::Backspace),
+        xkb::keysyms::KEY_Delete => Some(LauncherKey::Delete),
+        xkb::keysyms::KEY_Left => Some(LauncherKey::Left),
+        xkb::keysyms::KEY_Right => Some(LauncherKey::Right),
+        xkb::keysyms::KEY_Home => Some(LauncherKey::Home),
+        xkb::keysyms::KEY_End => Some(LauncherKey::End),
+        _ if control && letter == Some('a') => Some(LauncherKey::SelectAll),
+        _ if control && letter == Some('c') => Some(LauncherKey::Copy),
+        _ if control && letter == Some('x') => Some(LauncherKey::Cut),
+        _ => None,
+    };
+    if let Some(key) = key {
+        state.cantus.launcher.key(key, shift);
+    } else if let Some(typed) = character.filter(|typed| !typed.is_control() && !control) {
+        state
+            .cantus
+            .launcher
+            .edit(|field| field.insert(typed.encode_utf8(&mut [0u8; 4])));
     }
 }
 
@@ -1049,3 +1090,5 @@ delegate_noop!(LayerShellApp: ignore WpViewport);
 delegate_noop!(LayerShellApp: ignore WlCompositor);
 delegate_noop!(LayerShellApp: ignore WlRegion);
 delegate_noop!(LayerShellApp: ignore WlDataDeviceManager);
+delegate_noop!(LayerShellApp: ignore ExtBackgroundEffectManagerV1);
+delegate_noop!(LayerShellApp: ignore ExtBackgroundEffectSurfaceV1);

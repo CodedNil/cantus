@@ -257,8 +257,9 @@ pub fn line_quad_effect(
     scale: f32,
     padding: f32,
 ) -> isthmus::Vertex<Varyings> {
-    let min = line.origin + (line.min - line.origin) * scale - padding;
-    let max = line.origin + (line.max - line.origin) * scale + padding;
+    let margin = line.size * (scale - 1.0).max(0.0) + padding;
+    let min = line.min - margin;
+    let max = line.max + margin;
     let pixel = min + quad_coord(vertex) * (max - min);
     isthmus::Vertex {
         position: pixel_to_ndc(pixel, frame.screen_size),

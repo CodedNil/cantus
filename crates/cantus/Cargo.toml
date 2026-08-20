@@ -16,7 +16,6 @@ required-features = ["cpu"]
 default = ["cpu"]
 cpu = [
     "shader",
-    "dep:ashpd",
     "dep:arrayvec",
     "dep:base64",
     "dep:bytemuck",
@@ -25,7 +24,6 @@ cpu = [
     "dep:flate2",
     "dep:freedesktop-desktop-entry",
     "dep:freedesktop-icons",
-    "dep:futures-util",
     "dep:hex",
     "dep:image",
     "dep:jiff",
@@ -48,6 +46,7 @@ cpu = [
     "dep:tracing-subscriber",
     "dep:tungstenite",
     "dep:ureq",
+    "dep:zbus",
     "dep:wayland-client",
     "dep:wayland-protocols",
     "dep:wayland-protocols-wlr",
@@ -63,7 +62,7 @@ generate-nix = ["cpu", "dep:schemars"]
 isthmus = { path = "../isthmus" }
 
 # CPU application
-ashpd = { version = "0.13.13", default-features = false, features = ["async-io", "location"], optional = true }
+zbus = { version = "5.19.0", default-features = false, features = ["async-io", "blocking-api"], optional = true }
 bytemuck = { workspace = true, optional = true }
 arrayvec = { version = "0.7.8", features = ["serde"], optional = true }
 tracing = { version = "0.1.44", default-features = false, features = ["std"], optional = true }
@@ -85,9 +84,10 @@ wayland-protocols = { version = "0.32.13", features = ["client", "staging"], opt
 wayland-protocols-wlr = { version = "0.3.12", features = ["client"], optional = true }
 xkbcommon = { version = "0.9.0", default-features = false, features = ["wayland"], optional = true }
 fend-core = { version = "1.5.8", optional = true }
-resvg = { version = "0.48.1", default-features = false, optional = true }
+resvg = { version = "0.48.1", default-features = false, features = ["raster-images"], optional = true }
 ttf-parser = { version = "0.25.1", optional = true }
 image = { version = "0.25.10", default-features = false, features = [
+    "ico",
     "jpeg",
     "png",
 ], optional = true }
@@ -103,7 +103,6 @@ form_urlencoded = { version = "1.2.2", optional = true }
 flate2 = { version = "1.1.9", optional = true }
 freedesktop-desktop-entry = { version = "0.8.1", default-features = false, optional = true }
 freedesktop-icons = { version = "0.4.0", optional = true }
-futures-util = { version = "0.3.34", default-features = false, optional = true }
 hex = { version = "0.4.3", optional = true }
 fastrand = { version = "2.5.0", optional = true }
 microfft = { version = "0.6.0", default-features = false, features = ["size-1024", "std"], optional = true }

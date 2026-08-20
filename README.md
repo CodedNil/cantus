@@ -47,6 +47,20 @@ programs.cantus = {
     history_width = 100.0;
     playlists = [ "Rock & Roll" "Instrumental" "Pop" ];
     ratings_enabled = true;
+    search_providers = [
+      {
+        name = "DuckDuckGo";
+        url = "https://duckduckgo.com/?q={searchTerms}";
+        alias = "!ddg";
+        icon = "https://duckduckgo.com/favicon.ico";
+      }
+      {
+        name = "GitHub";
+        url = "https://github.com/search?q={searchTerms}";
+        alias = "!gh";
+        icon = "https://github.com/favicon.ico";
+      }
+    ];
   };
 };
 ```

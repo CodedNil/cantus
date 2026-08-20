@@ -38,6 +38,20 @@ pub struct Config {
 
     /// Whether to show the system status module.
     pub status_enabled: bool,
+
+    /// Web search providers; the first is the unprefixed fallback.
+    pub search_providers: Vec<SearchProvider>,
+}
+
+#[derive(Clone, Deserialize, Serialize)]
+#[cfg_attr(all(debug_assertions, feature = "generate-nix"), derive(schemars::JsonSchema))]
+pub struct SearchProvider {
+    /// Display name, such as `DuckDuckGo` or `GitHub`.
+    pub name: String,
+    /// URL containing one `{searchTerms}` placeholder.
+    pub url: String,
+    /// Prefix which selects this provider, such as `!gh`.
+    pub alias: String,
 }
 
 #[derive(Clone, Copy, Deserialize, Serialize)]
@@ -74,6 +88,11 @@ impl Default for Config {
             playlists: ArrayVec::new(),
             ratings_enabled: false,
             lyrics_enabled: true,
+            search_providers: vec![SearchProvider {
+                name: "DuckDuckGo".into(),
+                url: "https://duckduckgo.com/?q={searchTerms}".into(),
+                alias: "!ddg".into(),
+            }],
         }
     }
 }
@@ -164,14 +183,18 @@ pub mod nix_options {
             Some("boolean") => "lib.types.bool".into(),
             Some("array") => {
                 let list = format!("lib.types.listOf ({})", nix_type(&schema["items"]));
-                let max = schema["maxItems"].as_u64().unwrap();
-                let operator = if schema["minItems"] == schema["maxItems"] {
-                    "=="
+                if let Some(max) = schema["maxItems"].as_u64() {
+                    let operator = if schema["minItems"] == schema["maxItems"] {
+                        "=="
+                    } else {
+                        "<="
+                    };
+                    format!("lib.types.addCheck ({list}) (xs: builtins.length xs {operator} {max})")
                 } else {
-                    "<="
-                };
-                format!("lib.types.addCheck ({list}) (xs: builtins.length xs {operator} {max})")
+                    list
+                }
             }
+            Some("object") => "lib.types.attrs".into(),
             Some(kind) => panic!("unsupported config type: {kind}"),
         }
     }

@@ -75,4 +75,9 @@
     default = builtins.fromJSON "true";
     description = "Whether to show the system status module.";
   };
+  search_providers = lib.mkOption {
+    type = lib.types.listOf (lib.types.attrs);
+    default = builtins.fromJSON "[{\"name\":\"DuckDuckGo\",\"url\":\"https://duckduckgo.com/?q={searchTerms}\",\"alias\":\"!ddg\"}]";
+    description = "Web search providers; the first is the unprefixed fallback.";
+  };
 }

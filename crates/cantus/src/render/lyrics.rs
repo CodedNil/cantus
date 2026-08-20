@@ -447,10 +447,11 @@ impl LyricsPass {
             1.0 + emphasis * 0.2,
         );
         let fill = text::coverage(distance);
-        let outline = (text::coverage(distance + 0.8) - fill) * 0.45;
-        let alpha = (fill + outline) * edge_fade;
+
+        let outline = text::coverage(distance + 0.9) * 0.4;
+        let alpha = fill + outline * (1.0 - fill);
         let played = smoothstep(frame.playhead_x + 4.0, frame.playhead_x - 4.0, pixel.x);
         let color = line.color.to_vec3().lerp(line.color.to_vec3() * 0.42, played);
-        (color * fill * edge_fade).extend(alpha)
+        (color * fill * edge_fade).extend(alpha * edge_fade)
     }
 }

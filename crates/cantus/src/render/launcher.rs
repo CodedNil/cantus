@@ -1,8 +1,8 @@
 use crate::render::{
     FrameData, GAP, PADDING,
     shader::{
-        fill, pill_fragment, pill_vertex, pixel_to_ndc, presence, quad_coord, sd_rounded_box,
-        segment_distance, stroke,
+        fill, pill_fragment, pill_interaction, pill_vertex, pixel_to_ndc, presence, quad_coord,
+        sd_rounded_box, segment_distance, stroke,
     },
     text,
 };
@@ -17,6 +17,7 @@ use {
     crate::{
         app::{
             Background,
+            config::SearchProvider,
             interaction::Rect,
             platform::{Current as Platform, DesktopApp, Platform as _},
         },
@@ -40,6 +41,7 @@ use {
 };
 
 const PANEL_WIDTH: f32 = 520.0;
+pub(crate) const BACKGROUND_RADIUS: i32 = 16;
 /// Matched-app/calculator rows shown below the search bar.
 pub(crate) const MAX_VISIBLE: usize = 8;
 
@@ -47,6 +49,8 @@ pub(crate) const MAX_VISIBLE: usize = 8;
 /// the backdrop, which also draws the search field on itself.
 const PANEL: i32 = -3;
 const CALCULATOR_ICON: i32 = -2;
+#[cfg(feature = "cpu")]
+const SEARCH_ICON: i32 = -1;
 
 /// Side of the square icon tile at the left of every row.
 const ICON_SIZE: f32 = 32.0;
@@ -81,16 +85,16 @@ fn header_height(frame: &FrameData) -> f32 {
 }
 
 /// Origin and size of the flat background panel, centered in the surface.
-fn background_bounds(frame: &FrameData) -> (Vec2, Vec2) {
+pub(crate) fn background_bounds(screen_size: Vec2, panel_height: f32) -> (Vec2, Vec2) {
     let rows = MAX_VISIBLE as f32;
-    let height = header_height(frame) + PADDING * 2.0 + rows * frame.panel_height + (rows - 1.0) * GAP;
+    let height = panel_height + PADDING * 3.0 + rows * panel_height + (rows - 1.0) * GAP;
     let size = vec2(PANEL_WIDTH, height);
-    ((frame.screen_size - size) * 0.5, size)
+    ((screen_size - size) * 0.5, size)
 }
 
 /// Left edge and width shared by every row; only `y` varies between them.
 fn row_bounds(frame: &FrameData) -> (f32, f32) {
-    let (origin, size) = background_bounds(frame);
+    let (origin, size) = background_bounds(frame.screen_size, frame.panel_height);
     (origin.x + PADDING, size.x - PADDING * 2.0)
 }
 
@@ -239,6 +243,24 @@ impl TextField {
 }
 
 #[cfg(feature = "cpu")]
+#[derive(Clone, Copy)]
+pub(crate) enum LauncherKey {
+    Escape,
+    Activate,
+    Up,
+    Down,
+    Backspace,
+    Delete,
+    Left,
+    Right,
+    Home,
+    End,
+    SelectAll,
+    Copy,
+    Cut,
+}
+
+#[cfg(feature = "cpu")]
 pub struct LauncherState {
     pub open: bool,
     pub field: TextField,
@@ -250,22 +272,43 @@ pub struct LauncherState {
     pub selected: usize,
     /// Text waiting to be put on the system clipboard by the platform layer.
     pub pending_copy: Option<String>,
+    providers: Vec<SearchEngine>,
     calc: Context,
+}
+
+#[cfg(feature = "cpu")]
+struct SearchEngine {
+    config: SearchProvider,
+    label: String,
+    icon_layer: i32,
 }
 
 #[cfg(feature = "cpu")]
 enum LauncherEntry<'a> {
     Answer(&'a str),
     App(&'a DesktopApp),
+    Search(&'a SearchEngine),
 }
 
 #[cfg(feature = "cpu")]
 impl LauncherState {
-    pub(crate) fn new(background: &Background, http: Agent) -> Self {
+    pub(crate) fn new(
+        background: &Background,
+        http: &Agent,
+        providers: impl IntoIterator<Item = SearchProvider>,
+    ) -> Self {
         let mut calc = Context::new();
-        fetch_exchange_rates(background, http);
+        fetch_exchange_rates(background, http.clone());
         calc.set_exchange_rate_handler_v2(ExchangeRates);
-        start_scan(background);
+        let providers = providers
+            .into_iter()
+            .map(|config| SearchEngine {
+                label: format!("Search with {}", config.name),
+                config,
+                icon_layer: SEARCH_ICON,
+            })
+            .collect::<Vec<_>>();
+        start_scan(background, http.clone(), &providers);
         Self {
             open: false,
             field: TextField::default(),
@@ -274,6 +317,7 @@ impl LauncherState {
             calc_result: None,
             selected: 0,
             pending_copy: None,
+            providers,
             calc,
         }
     }
@@ -295,20 +339,48 @@ impl LauncherState {
         self.refresh_matches();
     }
 
+    pub(crate) fn key(&mut self, key: LauncherKey, shift: bool) {
+        match key {
+            LauncherKey::Escape => self.close(),
+            LauncherKey::Activate => self.activate(self.selected, shift),
+            LauncherKey::Up => self.move_selection(-1),
+            LauncherKey::Down => self.move_selection(1),
+            LauncherKey::Backspace => self.edit(|field| field.erase(false)),
+            LauncherKey::Delete => self.edit(|field| field.erase(true)),
+            LauncherKey::Left => self.field.move_cursor(false, shift),
+            LauncherKey::Right => self.field.move_cursor(true, shift),
+            LauncherKey::Home => self.field.set_cursor(0, shift),
+            LauncherKey::End => self.field.set_cursor(self.field.text.len(), shift),
+            LauncherKey::SelectAll => self.field.select_all(),
+            LauncherKey::Copy | LauncherKey::Cut => {
+                self.pending_copy = Some(self.field.selected_text().to_owned());
+                if matches!(key, LauncherKey::Cut) {
+                    self.edit(|field| {
+                        field.delete_selection();
+                    });
+                }
+            }
+        }
+    }
+
     pub fn refresh_matches(&mut self) {
-        let query = &self.field.text;
-        self.calc_result = (query.len() >= 4)
-            .then(|| fend_core::evaluate(query, &mut self.calc).ok())
+        let (provider, query) = self.search_query();
+        let explicit_search = provider.is_some();
+        let query = query.to_owned();
+        self.calc_result = (!explicit_search && query.len() >= 4)
+            .then(|| fend_core::evaluate(&query, &mut self.calc).ok())
             .flatten()
             .map(|result| result.get_main_result().to_owned())
-            .filter(|result| !result.is_empty() && result != query);
+            .filter(|result| !result.is_empty() && result != &query);
 
         let query = query.to_lowercase();
-        let visible = MAX_VISIBLE - usize::from(self.calc_result.is_some());
+        let has_search = !self.providers.is_empty() && (!query.is_empty() || explicit_search);
+        let visible = MAX_VISIBLE - usize::from(self.calc_result.is_some()) - usize::from(has_search);
         let mut scored = self
             .apps
             .iter()
             .enumerate()
+            .filter(|_| !explicit_search)
             .filter_map(|(index, app)| {
                 let name = app.name.to_lowercase();
                 name.contains(&query)
@@ -321,21 +393,29 @@ impl LauncherState {
     }
 
     pub fn entry_count(&self) -> usize {
-        usize::from(self.calc_result.is_some()) + self.matches.len()
+        usize::from(self.calc_result.is_some())
+            + self.matches.len()
+            + usize::from(self.search_provider().is_some())
     }
 
     fn entry(&self, row: usize) -> Option<LauncherEntry<'_>> {
+        let mut row = row;
         if let Some(answer) = self.calc_result.as_deref() {
             if row == 0 {
                 return Some(LauncherEntry::Answer(answer));
             }
-            row.checked_sub(1)
-        } else {
-            Some(row)
+            row -= 1;
         }
-        .and_then(|row| self.matches.get(row))
-        .and_then(|&app| self.apps.get(app as usize))
-        .map(LauncherEntry::App)
+        self.matches
+            .get(row)
+            .and_then(|&app| self.apps.get(app as usize))
+            .map(LauncherEntry::App)
+            .or_else(|| {
+                (row == self.matches.len())
+                    .then(|| self.search_provider())
+                    .flatten()
+                    .map(LauncherEntry::Search)
+            })
     }
 
     /// Moves the highlight by `delta` rows, stopping at either end.
@@ -356,11 +436,41 @@ impl LauncherState {
                     .map_or(&app.exec, |(_, exec)| exec),
             ),
             Some(LauncherEntry::Answer(answer)) => self.pending_copy = Some(answer.to_owned()),
+            Some(LauncherEntry::Search(engine)) => {
+                let terms = self.search_query().1;
+                let encoded = form_urlencoded::byte_serialize(terms.as_bytes()).collect::<String>();
+                Platform::open_url(&engine.config.url.replace("{searchTerms}", &encoded));
+            }
             None => return,
         }
         self.open = false;
         self.field.clear();
         self.refresh_matches();
+    }
+
+    fn search_query(&self) -> (Option<usize>, &str) {
+        let query = self.field.text.trim();
+        self.providers
+            .iter()
+            .position(|provider| {
+                query == provider.config.alias
+                    || query
+                        .strip_prefix(&provider.config.alias)
+                        .is_some_and(|rest| rest.starts_with(char::is_whitespace))
+            })
+            .map_or((None, query), |index| {
+                (
+                    Some(index),
+                    query[self.providers[index].config.alias.len()..].trim(),
+                )
+            })
+    }
+
+    fn search_provider(&self) -> Option<&SearchEngine> {
+        let (provider, query) = self.search_query();
+        (!query.is_empty() || provider.is_some())
+            .then(|| self.providers.get(provider.unwrap_or(0)))
+            .flatten()
     }
 }
 
@@ -474,7 +584,7 @@ impl LauncherPass {
         if !launcher.open {
             return;
         }
-        let (origin, size) = background_bounds(frame.shared);
+        let (origin, size) = background_bounds(frame.shared.screen_size, frame.shared.panel_height);
         let screen = frame.shared.screen_size;
         frame
             .interaction
@@ -556,6 +666,13 @@ impl LauncherPass {
                     app.action.as_ref().map(|(label, _)| label.as_str()),
                 ),
                 LauncherEntry::Answer(answer) => (CALCULATOR_ICON, answer, "", "Copy", None),
+                LauncherEntry::Search(engine) => (
+                    engine.icon_layer,
+                    engine.label.as_str(),
+                    launcher.search_query().1,
+                    "Search",
+                    None,
+                ),
             };
 
             // Only the highlighted row spells out what enter and shift+enter would do.
@@ -611,7 +728,7 @@ impl LauncherPass {
         #[gpu(instance)] row: LauncherRow,
     ) -> Vertex<Varyings> {
         let (position, pixel) = if row.icon == PANEL {
-            let (origin, size) = background_bounds(frame);
+            let (origin, size) = background_bounds(frame.screen_size, frame.panel_height);
             let pixel = origin + quad_coord(vertex) * size;
             (pixel_to_ndc(pixel, frame.screen_size), pixel)
         } else {
@@ -639,8 +756,12 @@ impl LauncherPass {
         #[gpu(resource)] edges: &[text::Edge],
     ) -> Vec4 {
         if row.icon == PANEL {
-            let (origin, size) = background_bounds(frame);
-            let mask = fill(sd_rounded_box(pixel - origin - size * 0.5, size * 0.5, 16.0));
+            let (origin, size) = background_bounds(frame.screen_size, frame.panel_height);
+            let mask = fill(sd_rounded_box(
+                pixel - origin - size * 0.5,
+                size * 0.5,
+                BACKGROUND_RADIUS as f32,
+            ));
             if mask <= 0.0 {
                 kill();
             }
@@ -655,6 +776,7 @@ impl LauncherPass {
                     0.0,
                 )),
             );
+            color = color.lerp(color * 1.5 + 0.1, pill_interaction(pixel, frame).ripple_flash);
             color = color.lerp(
                 ICON_COLOR,
                 magnifier_icon(local - vec2(PADDING + 11.0, header * 0.5)),
@@ -674,7 +796,8 @@ impl LauncherPass {
             color = color.lerp(text::COLOR, caret * row.caret.y);
             let query = row.lines[0];
             let alpha = text::line_alpha(query, placed_glyphs, glyphs, edges, local);
-            return ((color.lerp(query.color.to_vec3(), alpha)) * mask).extend(mask);
+            let opacity = mask * 0.82;
+            return (color.lerp(query.color.to_vec3(), alpha) * opacity).extend(opacity);
         }
 
         let (x, width) = row_bounds(frame);
@@ -721,12 +844,24 @@ impl LauncherPass {
 
 /// Scans installed apps and decodes their icons on a background thread, then applies the result.
 #[cfg(feature = "cpu")]
-fn start_scan(background: &Background) {
-    background.submit(|| {
+fn start_scan(background: &Background, http: Agent, providers: &[SearchEngine]) {
+    let provider_icon_count = providers.len().min(MAX_ICON_SLOTS);
+    let provider_icons = providers
+        .iter()
+        .take(provider_icon_count)
+        .enumerate()
+        .filter_map(|(index, provider)| {
+            let (scheme, rest) = provider.config.url.split_once("://")?;
+            let host = rest.split('/').next()?;
+            Some((index, format!("{scheme}://{host}/favicon.ico")))
+        })
+        .collect::<Vec<_>>();
+    let app_slots = MAX_ICON_SLOTS - provider_icon_count;
+    background.submit(move || {
         let mut apps = Platform::desktop_apps();
         apps.sort_by_key(|app| app.name.to_lowercase());
         let mut icon_writes = Vec::new();
-        for (index, app) in apps.iter_mut().enumerate().take(MAX_ICON_SLOTS) {
+        for (index, app) in apps.iter_mut().enumerate().take(app_slots) {
             let Some(path) = app.icon_path.as_deref() else {
                 continue;
             };
@@ -737,12 +872,31 @@ fn start_scan(background: &Background) {
                 warn!(?path, "Failed to decode app icon");
             }
         }
+        let mut provider_layers = Vec::new();
+        for (index, url) in provider_icons {
+            let pixels = http
+                .get(&url)
+                .call()
+                .ok()
+                .and_then(|mut response| response.body_mut().read_to_vec().ok())
+                .and_then(|bytes| load_raster(&bytes));
+            if let Some(pixels) = pixels {
+                let layer = (app_slots + index) as u32;
+                icon_writes.push((layer, pixels));
+                provider_layers.push((index, layer as i32));
+            } else {
+                warn!(%url, "Failed to download search provider icon");
+            }
+        }
         Box::new(move |app| {
             let passes = app.render.program().passes_mut();
             for (layer, pixels) in &icon_writes {
                 passes.launcher.write_icon(*layer, pixels);
             }
             app.launcher.apps = apps;
+            for (index, layer) in provider_layers {
+                app.launcher.providers[index].icon_layer = layer;
+            }
             app.launcher.refresh_matches();
         })
     });
@@ -760,8 +914,19 @@ fn load_icon_pixels(path: &Path) -> Option<Vec<u8>> {
         render(&tree, fit, &mut pixmap.as_mut());
         return Some(pixmap.take_demultiplied());
     }
-    let raster = image::open(path)
-        .ok()?
-        .resize_to_fill(ICON_PX, ICON_PX, FilterType::Triangle);
-    Some(raster.into_rgba8().into_raw())
+    let raster = image::open(path).ok()?;
+    Some(resize_icon(&raster))
+}
+
+#[cfg(feature = "cpu")]
+fn load_raster(bytes: &[u8]) -> Option<Vec<u8>> {
+    image::load_from_memory(bytes)
+        .ok()
+        .map(|image| resize_icon(&image))
+}
+
+#[cfg(feature = "cpu")]
+fn resize_icon(image: &image::DynamicImage) -> Vec<u8> {
+    let raster = image.resize_to_fill(ICON_PX, ICON_PX, FilterType::Triangle);
+    raster.into_rgba8().into_raw()
 }

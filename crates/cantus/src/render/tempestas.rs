@@ -882,8 +882,6 @@ impl TempestasPass {
 mod monitor {
     use super::{ForecastItem, HOURLY_STEP_HOURS, ORDINALS, TempestasPass, WeatherCondition};
     use crate::app::{AppUpdater, send_update};
-    use ashpd::desktop::location::{Accuracy, CreateSessionOptions, LocationProxy, StartOptions};
-    use futures_util::StreamExt;
     use jiff::{
         civil::DateTime,
         tz::{Offset, TimeZone},
@@ -891,12 +889,18 @@ mod monitor {
     use serde::{Deserialize, de::DeserializeOwned};
     use std::{
         array::from_fn,
+        collections::HashMap,
         sync::mpsc::{self, Receiver, Sender},
         thread,
         time::Duration,
     };
     use tracing::warn;
     use ureq::Agent;
+    use zbus::{
+        blocking::{Connection, Proxy, proxy::Builder as ProxyBuilder},
+        proxy::CacheProperties,
+        zvariant::{OwnedObjectPath, OwnedValue, Value},
+    };
 
     const WEATHER_FIELDS: &str = "temperature_2m,weather_code";
     const REFRESH_INTERVAL: Duration = Duration::from_mins(15);
@@ -995,38 +999,112 @@ mod monitor {
     pub(super) fn start(timezones: Vec<String>, updater: AppUpdater, http: Agent) {
         let (location_tx, locations) = mpsc::channel();
         thread::spawn(move || {
-            if let Err(error) = pollster::block_on(stream_location(location_tx)) {
+            if let Err(error) = stream_location(&location_tx) {
                 warn!(%error, "Location portal unavailable");
             }
         });
         thread::spawn(move || refresh_loop(&http, &timezones, &updater, &locations));
     }
 
-    async fn stream_location(sender: Sender<[f32; 2]>) -> Result<(), String> {
-        let proxy = LocationProxy::new().await.map_err(|error| error.to_string())?;
-        let session = proxy
-            .create_session(CreateSessionOptions::default().set_accuracy(Accuracy::City))
-            .await
-            .map_err(|error| error.to_string())?;
-        let mut updates = proxy
-            .receive_location_updated()
-            .await
-            .map_err(|error| error.to_string())?;
-        proxy
-            .start(&session, None, StartOptions::default())
-            .await
+    fn stream_location(sender: &Sender<[f32; 2]>) -> Result<(), String> {
+        const DESTINATION: &str = "org.freedesktop.portal.Desktop";
+        const PORTAL_PATH: &str = "/org/freedesktop/portal/desktop";
+        let connection = Connection::session().map_err(|error| error.to_string())?;
+        let location: Proxy<'_> = ProxyBuilder::new(&connection)
+            .destination(DESTINATION)
+            .and_then(|builder| builder.path(PORTAL_PATH))
+            .and_then(|builder| builder.interface("org.freedesktop.portal.Location"))
             .map_err(|error| error.to_string())?
-            .response()
+            .cache_properties(CacheProperties::No)
+            .build()
             .map_err(|error| error.to_string())?;
-        while let Some(value) = updates.next().await {
+        let session_token = format!("cantus_{:x}", fastrand::u64(..));
+        let session_path: OwnedObjectPath = location
+            .call(
+                "CreateSession",
+                &HashMap::from([
+                    ("session_handle_token", Value::from(session_token.as_str())),
+                    ("accuracy", Value::from(2u32)),
+                ]),
+            )
+            .map_err(|error| error.to_string())?;
+        let session: Proxy<'_> = ProxyBuilder::new(&connection)
+            .destination(DESTINATION)
+            .and_then(|builder| builder.path(session_path.clone()))
+            .and_then(|builder| builder.interface("org.freedesktop.portal.Session"))
+            .map_err(|error| error.to_string())?
+            .cache_properties(CacheProperties::No)
+            .build()
+            .map_err(|error| error.to_string())?;
+
+        let updates = location
+            .receive_signal("LocationUpdated")
+            .map_err(|error| error.to_string())?;
+        let request_token = format!("cantus_{:x}", fastrand::u64(..));
+        let sender_name = connection
+            .unique_name()
+            .expect("session bus connection has no unique name")
+            .trim_start_matches(':')
+            .replace('.', "_");
+        let request_path =
+            format!("/org/freedesktop/portal/desktop/request/{sender_name}/{request_token}");
+        let request: Proxy<'_> = ProxyBuilder::new(&connection)
+            .destination(DESTINATION)
+            .and_then(|builder| builder.path(request_path))
+            .and_then(|builder| builder.interface("org.freedesktop.portal.Request"))
+            .map_err(|error| error.to_string())?
+            .cache_properties(CacheProperties::No)
+            .build()
+            .map_err(|error| error.to_string())?;
+        let mut response = request
+            .receive_signal("Response")
+            .map_err(|error| error.to_string())?;
+        let returned_path: OwnedObjectPath = location
+            .call(
+                "Start",
+                &(
+                    &session_path,
+                    "",
+                    HashMap::from([("handle_token", Value::from(request_token.as_str()))]),
+                ),
+            )
+            .map_err(|error| error.to_string())?;
+        if returned_path.as_str() != request.path().as_str() {
+            return Err("location portal returned an unexpected request path".into());
+        }
+        let response = response
+            .next()
+            .ok_or("location portal closed without responding")?
+            .body()
+            .deserialize::<(u32, HashMap<String, OwnedValue>)>()
+            .map_err(|error| error.to_string())?;
+        if response.0 != 0 {
+            return Err(format!("location portal rejected request ({})", response.0));
+        }
+
+        for message in updates {
+            let (_, values) = message
+                .body()
+                .deserialize::<(OwnedObjectPath, HashMap<String, OwnedValue>)>()
+                .map_err(|error| error.to_string())?;
+            let coordinate = |name| {
+                values
+                    .get(name)
+                    .ok_or_else(|| format!("location update omitted {name}"))?
+                    .downcast_ref::<f64>()
+                    .map(|value| value as f32)
+                    .map_err(|error| error.to_string())
+            };
             if sender
-                .send([value.latitude() as f32, value.longitude() as f32])
+                .send([coordinate("Latitude")?, coordinate("Longitude")?])
                 .is_err()
             {
                 break;
             }
         }
-        session.close().await.map_err(|error| error.to_string())
+        session
+            .call::<_, _, ()>("Close", &())
+            .map_err(|error| error.to_string())
     }
 
     fn refresh_loop(
