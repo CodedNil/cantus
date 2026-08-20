@@ -1,10 +1,10 @@
 use crate::render::{
+    FrameData, PANEL_START,
     shader::{
         SdfSurface, avalanche, hover_mask, pill_fragment, pill_margin, pill_sheen, pixel_to_ndc,
         presence, quad_coord, sd_capsule_box, sd_star, simplex_noise,
     },
-    shared::{FrameData, PANEL_START, smoothstep},
-    text,
+    smoothstep, text,
 };
 use core::f32::consts::{FRAC_PI_2, TAU};
 use isthmus::{
@@ -24,25 +24,18 @@ use crate::{
         music::{CondensedPlaylist, PlaybackState, Timeline, Track, playlist_icons},
     },
     render::{
+        GAP,
         cpu::{Frame, Passes, approach},
-        shared::GAP,
         text::TextStyle,
     },
 };
 
 #[cfg(feature = "cpu")]
 use isthmus::{FilterableFloatFormat, SampledTexture, TextureView, wgpu::Extent3d};
-#[cfg(feature = "cpu")]
-use std::sync::{Arc, Weak};
-
 /// Maximum number of playlist artwork icons carried by one pill instance.
 pub const MAX_PILL_PLAYLIST_ICONS: usize = 8;
 /// Number of colors extracted from album artwork.
 pub const PALETTE_COLORS: usize = 4;
-#[cfg(feature = "cpu")]
-const MAX_TEXTURE_IMAGES: u32 = 32;
-#[cfg(feature = "cpu")]
-const MAX_RENDER_INSTANCES: usize = 32;
 /// Visual width, in pixels, of rating and playlist icons before hover growth.
 const ICON_WIDTH: f32 = 21.6;
 /// Center-to-center icon spacing for rating stars and playlist artwork.
@@ -50,20 +43,27 @@ const ICON_SPACING: f32 = 18.0;
 /// Stars in the rating row; each holds a half-star either side of its centre.
 const STAR_RATINGS: usize = 5;
 #[cfg(feature = "cpu")]
-const TITLE_STYLE: TextStyle = TextStyle::new(16.0, 700.0);
+mod host {
+    use super::TextStyle;
+
+    pub const MAX_TEXTURE_IMAGES: u32 = 32;
+    pub const MAX_RENDER_INSTANCES: usize = 32;
+    pub const TITLE_STYLE: TextStyle = TextStyle::new(16.0, 700.0);
+    pub const DETAILS_STYLE: TextStyle = TextStyle::new(14.0, 700.0);
+    pub const DETAIL_FADE_DURATION: f32 = 0.2;
+    pub const PLAYLIST_EXPANSION_DURATION: f32 = 1.0 / 6.0;
+}
+
 #[cfg(feature = "cpu")]
-const DETAILS_STYLE: TextStyle = TextStyle::new(14.0, 700.0);
-#[cfg(feature = "cpu")]
-const DETAIL_FADE_DURATION: f32 = 0.2;
-#[cfg(feature = "cpu")]
-const PLAYLIST_EXPANSION_DURATION: f32 = 1.0 / 6.0;
-#[cfg(feature = "cpu")]
-pub(crate) const TEXT_GLYPHS: usize = MAX_RENDER_INSTANCES * 2 * text::MAX_LINE_GLYPHS;
+use host::{
+    DETAIL_FADE_DURATION, DETAILS_STYLE, MAX_RENDER_INSTANCES, MAX_TEXTURE_IMAGES,
+    PLAYLIST_EXPANSION_DURATION, TITLE_STYLE,
+};
 
 #[cfg(feature = "cpu")]
 struct ImageAtlas {
     texture: SampledTexture<Texture2DArray>,
-    slots: [Weak<AlbumArt>; MAX_TEXTURE_IMAGES as usize],
+    slots: Vec<String>,
     used: u32,
 }
 
@@ -80,7 +80,7 @@ impl ImageAtlas {
                 },
                 FilterableFloatFormat::Rgba8Unorm,
             ),
-            slots: [const { Weak::new() }; MAX_TEXTURE_IMAGES as usize],
+            slots: vec![String::new(); MAX_TEXTURE_IMAGES as usize],
             used: 0,
         }
     }
@@ -93,13 +93,11 @@ impl ImageAtlas {
         self.used = 0;
     }
 
-    fn index_of(&mut self, art: Option<&Arc<AlbumArt>>) -> i32 {
-        let Some(art) = art else { return -1 };
-        if let Some(index) = self
-            .slots
-            .iter()
-            .position(|slot| slot.as_ptr() == Arc::as_ptr(art))
-        {
+    fn index_of(&mut self, url: Option<&str>, art: Option<&AlbumArt>) -> i32 {
+        let (Some(url), Some(art)) = (url, art) else {
+            return -1;
+        };
+        if let Some(index) = self.slots.iter().position(|slot| slot == url) {
             self.used |= 1 << index;
             return index as i32;
         }
@@ -113,7 +111,7 @@ impl ImageAtlas {
             return -1;
         }
         self.used |= 1 << index;
-        self.slots[index as usize] = Arc::downgrade(art);
+        url.clone_into(&mut self.slots[index as usize]);
         index as i32
     }
 }
@@ -279,10 +277,9 @@ impl PillIconRow {
 
     fn surface(self, offset: Vec2, radius: f32, pixel_pos: Vec2, mouse_pos: Vec2) -> SdfSurface {
         let center = self.backplate_center() + offset;
-        SdfSurface::new(
-            sd_capsule_box(pixel_pos - center, self.half_span(), radius),
-            sd_capsule_box(mouse_pos - center, self.half_span(), radius),
-        )
+        SdfSurface::sample(pixel_pos, mouse_pos, |point| {
+            sd_capsule_box(point - center, self.half_span(), radius)
+        })
     }
 }
 
@@ -456,7 +453,9 @@ impl TrackPass {
                 );
             for (slot, (image, (primary, playlist))) in playlist_images.iter_mut().zip(icons).enumerate()
             {
-                *image = self.images.index_of(playlist.art.ready());
+                *image = self
+                    .images
+                    .index_of(playlist.image_url.as_deref(), playlist.art.ready());
                 playlist_ids[slot] = Some(playlist.id);
                 primary_count += u32::from(primary);
                 secondary_count += u32::from(!primary);
@@ -494,7 +493,9 @@ impl TrackPass {
             x: layout.x,
             width: layout.width.max(height),
             colors: track.runtime.art.palette(),
-            image_index: self.images.index_of(track.runtime.art.ready()),
+            image_index: self
+                .images
+                .index_of(track.image.as_deref(), track.runtime.art.ready()),
             rating,
             primary_playlist_count: primary_count,
             secondary_playlist_count: secondary_count,
@@ -734,7 +735,7 @@ impl TrackPass {
         #[gpu(resource)] edges: &[text::Edge],
     ) -> Vec4 {
         let (interaction, local_pixel, pill_size, body_surface) =
-            pill_fragment(pixel_pos, frame, pill.x, pill.width);
+            pill_fragment(pixel_pos, frame, pill.x, PANEL_START, pill.width);
         let local_uv = local_pixel / pill_size;
         let local_centered = local_uv - 0.5;
 
@@ -812,7 +813,7 @@ impl TrackPass {
             color = color.lerp(tex.truncate(), img_mask * tex.w);
         }
 
-        color += color.lerp(Vec3::ONE, 0.32) * pill_sheen(refracted.y / pill_size.y, dist);
+        color += color.lerp(Vec3::ONE, 0.32) * pill_sheen(dist);
         color = color.lerp(color * 1.5 + 0.1, interaction.ripple_flash);
         let mut output = (color * mask).extend(alpha);
 

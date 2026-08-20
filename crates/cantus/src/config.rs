@@ -1,4 +1,4 @@
-use crate::render::{shared::GAP, tempestas, track::MAX_PILL_PLAYLIST_ICONS};
+use crate::render::{GAP, tempestas, track::MAX_PILL_PLAYLIST_ICONS};
 use arrayvec::ArrayVec;
 use serde::{Deserialize, Serialize};
 use std::{env, fs, path::PathBuf};

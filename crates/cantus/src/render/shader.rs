@@ -1,8 +1,9 @@
-use crate::render::shared::{FrameData, PANEL_START, smoothstep};
+use crate::render::{FrameData, smoothstep};
 use isthmus::{
-    glam::{FloatExt, UVec2, Vec2, Vec4, uvec2, vec2, vec4},
+    glam::{FloatExt, UVec2, Vec2, Vec4, uvec2, vec2},
     spirv_std::arch::Derivative,
 };
+pub use isthmus::{pixel_to_ndc, quad_coord};
 
 #[cfg(target_arch = "spirv")]
 use isthmus::spirv_std::num_traits::Float;
@@ -34,6 +35,10 @@ impl SdfSurface {
         }
     }
 
+    pub fn sample(pixel: Vec2, mouse: Vec2, shape: impl Fn(Vec2) -> f32) -> Self {
+        Self::new(shape(pixel), shape(mouse))
+    }
+
     pub fn smooth_union(self, other: Self, radius: f32, blend: f32) -> Self {
         Self {
             distance: smooth_union(self.distance, other.distance, radius, blend),
@@ -54,7 +59,11 @@ impl PillInteraction {
 
     /// Return the expanded distance, fill coverage, and combined fill/shadow alpha.
     pub fn surface(self, surface: SdfSurface) -> (f32, f32, f32) {
-        let distance = self.expand(surface);
+        Self::shade(self.expand(surface))
+    }
+
+    /// Shade an already assembled and expanded surface distance.
+    pub fn shade(distance: f32) -> (f32, f32, f32) {
         let mask = sdf_coverage(distance);
         let shadow = (-distance.max(0.0) * 0.3).exp() * 0.16;
         (distance, mask, mask.max(shadow))
@@ -119,16 +128,6 @@ pub fn cloud_mass(p: Vec2, scale: f32, time: f32) -> f32 {
     fbm(p / scale * 0.14 + vec2(time * 0.012, 6.1))
 }
 
-pub const fn quad_coord(vertex_index: u32) -> Vec2 {
-    vec2((vertex_index & 1) as f32, (vertex_index >> 1) as f32)
-}
-
-#[isthmus::outline]
-pub fn pixel_to_ndc(pixel: Vec2, screen_size: Vec2) -> Vec4 {
-    let ndc = pixel / screen_size * 2.0 - 1.0;
-    vec4(ndc.x, -ndc.y, 0.0, 1.0)
-}
-
 /// Pixels the pill can cover beyond its bounds: shadow always, bulges only while active.
 pub fn pill_margin(frame: &FrameData) -> f32 {
     let mut bulge = frame.mouse_pressure * 8.0;
@@ -142,9 +141,9 @@ pub fn pill_margin(frame: &FrameData) -> f32 {
     SHADOW_REACH + bulge * 0.5
 }
 
-pub fn pill_vertex(vertex: u32, frame: &FrameData, x: f32, size: Vec2) -> (Vec4, Vec2) {
+pub fn pill_vertex(vertex: u32, frame: &FrameData, x: f32, y: f32, size: Vec2) -> (Vec4, Vec2) {
     let margin = pill_margin(frame);
-    let pixel = vec2(x - margin, PANEL_START - margin)
+    let pixel = vec2(x - margin, y - margin)
         + quad_coord(vertex) * (size + vec2(margin, frame.panel_height + margin) * 2.0);
     (pixel_to_ndc(pixel, frame.screen_size), pixel)
 }
@@ -153,13 +152,14 @@ pub fn pill_fragment(
     pixel: Vec2,
     frame: &FrameData,
     x: f32,
+    y: f32,
     width: f32,
 ) -> (PillInteraction, Vec2, Vec2, SdfSurface) {
     let size = vec2(width, frame.panel_height);
-    let local = pixel - vec2(x, PANEL_START);
+    let local = pixel - vec2(x, y);
     let distance = sd_capsule_box(local - size * 0.5, (size.x - size.y) * 0.5, size.y * 0.5);
     let mouse_distance = if frame.mouse_pressure > 0.0 {
-        let mouse = frame.mouse_pos - vec2(x, PANEL_START) - size * 0.5;
+        let mouse = frame.mouse_pos - vec2(x, y) - size * 0.5;
         sd_capsule_box(mouse, (size.x - size.y) * 0.5, size.y * 0.5)
     } else {
         1.0
@@ -233,8 +233,9 @@ pub fn pill_interaction(pixel: Vec2, frame: &FrameData) -> PillInteraction {
     }
 }
 
-pub fn pill_sheen(uv_y: f32, distance: f32) -> f32 {
-    smoothstep(0.12, 0.0, uv_y) * 0.12 + smoothstep(5.0, -3.0, distance) * 0.08
+/// Edge light derived from the final SDF, so it follows every deformation.
+pub fn pill_sheen(distance: f32) -> f32 {
+    smoothstep(5.0, -3.0, distance) * 0.14
 }
 
 #[isthmus::outline]

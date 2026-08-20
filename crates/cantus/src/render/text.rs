@@ -1,6 +1,6 @@
 use crate::render::{
+    FrameData,
     shader::{pixel_to_ndc, quad_coord},
-    shared::FrameData,
 };
 use isthmus::{
     Unorm8x4,
@@ -25,14 +25,14 @@ use {
 pub const MAX_LINE_GLYPHS: usize = 64;
 pub const COLOR: Vec3 = Vec3::splat(0.94);
 const EFFECT_PADDING: f32 = 3.5;
+#[cfg(feature = "cpu")]
+const GLYPH_CAPACITY: usize = 16_384;
 
 #[isthmus::data]
 pub struct Edge {
     start: Vec2,
-    control: Vec2,
     end: Vec2,
     start_delta: Vec2,
-    control_delta: Vec2,
     end_delta: Vec2,
 }
 
@@ -109,90 +109,31 @@ impl TextStyle {
 }
 
 #[isthmus::outline]
-fn curve_at(a: Vec2, linear: Vec2, quadratic: Vec2, t: f32) -> Vec2 {
-    a + (linear + quadratic * t) * t
-}
-
-#[isthmus::outline]
-fn ray_crossing(a: Vec2, linear: Vec2, quadratic: Vec2, point: Vec2, t: f32) -> i32 {
-    if !(0.0..1.0).contains(&t) {
-        return 0;
-    }
-    if a.x + (linear.x + quadratic.x * t) * t <= point.x {
-        return 0;
-    }
-    let vertical_tangent = linear.y + quadratic.y * (2.0 * t);
-    if vertical_tangent > 0.0 {
-        1
-    } else if vertical_tangent < 0.0 {
-        -1
-    } else {
-        0
-    }
-}
-
-/// Exact non-zero winding contribution of a quadratic to a rightward ray from `point`.
-fn edge_winding(a: Vec2, linear: Vec2, quadratic: Vec2, point: Vec2) -> i32 {
-    let constant = a.y - point.y;
-    if quadratic.y.abs() < 1e-7 {
-        return if linear.y.abs() < 1e-7 {
-            0
-        } else {
-            ray_crossing(a, linear, quadratic, point, -constant / linear.y)
-        };
-    }
-    let discriminant = linear.y * linear.y - 4.0 * quadratic.y * constant;
-    if discriminant <= 0.0 {
-        return 0;
-    }
-    let root = discriminant.sqrt();
-    let divisor = quadratic.y * 2.0;
-    ray_crossing(a, linear, quadratic, point, (-linear.y - root) / divisor)
-        + ray_crossing(a, linear, quadratic, point, (-linear.y + root) / divisor)
-}
-
-#[isthmus::outline]
 // `f32::clamp` adds Rust-GPU panic checks and forces this shared function to inline.
 #[allow(clippy::manual_clamp)]
 fn edge_distance(edge: Edge, weight: f32, point: Vec2, best_distance: f32) -> (f32, i32) {
     let a = edge.start + edge.start_delta * weight;
-    let control = edge.control + edge.control_delta * weight;
     let b = edge.end + edge.end_delta * weight;
-    let linear = (control - a) * 2.0;
-    let quadratic = a - control * 2.0 + b;
-    let bounds_min = a.min(control).min(b);
-    let bounds_max = a.max(control).max(b);
-    let winding = if point.x >= bounds_max.x || point.y < bounds_min.y || point.y >= bounds_max.y {
-        0
+    let segment = b - a;
+    let winding = if (a.y <= point.y && point.y < b.y) || (b.y <= point.y && point.y < a.y) {
+        let crossing = a.x + (point.y - a.y) * segment.x / segment.y;
+        if crossing > point.x {
+            if segment.y > 0.0 { 1 } else { -1 }
+        } else {
+            0
+        }
     } else {
-        edge_winding(a, linear, quadratic, point)
+        0
     };
+    let bounds_min = a.min(b);
+    let bounds_max = a.max(b);
     if (point - point.clamp(bounds_min, bounds_max)).length_squared() >= best_distance {
         return (best_distance, winding);
     }
-    let chord = b - a;
-    let mut t = ((point - a).dot(chord) / chord.length_squared().max(1e-8))
+    let t = ((point - a).dot(segment) / segment.length_squared().max(1e-8))
         .max(0.0)
         .min(1.0);
-    if quadratic.length_squared() < 1e-12 {
-        return ((point - (a + linear * t)).length_squared(), winding);
-    }
-    let second = quadratic * 2.0;
-    let mut iteration = 0;
-    while iteration < 2 {
-        let curve = curve_at(a, linear, quadratic, t);
-        let tangent = linear + second * t;
-        let delta = curve - point;
-        let denominator = tangent.length_squared() + delta.dot(second);
-        let denominator = denominator.abs().max(1e-8).copysign(denominator);
-        t = (t - delta.dot(tangent) / denominator).max(0.0).min(1.0);
-        iteration += 1;
-    }
-    let distance = (point - a)
-        .length_squared()
-        .min((point - b).length_squared())
-        .min((point - curve_at(a, linear, quadratic, t)).length_squared());
-    (distance, winding)
+    ((point - (a + segment * t)).length_squared(), winding)
 }
 
 fn glyph_distance(edges: &[Edge], start: u32, count: u32, weight: f32, point: Vec2, size: f32) -> f32 {
@@ -240,21 +181,29 @@ pub fn line_distance(
     edges: &[Edge],
     local: Vec2,
 ) -> f32 {
-    if (local.x < line.min.x || local.x > line.max.x) || (local.y < line.min.y || local.y > line.max.y) {
-        return -1e6;
-    }
+    line_distance_scaled(line, placed_glyphs, glyphs, edges, local, 1.0)
+}
+
+pub fn line_distance_scaled(
+    line: Line,
+    placed_glyphs: &[PlacedGlyph],
+    glyphs: &[Glyph],
+    edges: &[Edge],
+    local: Vec2,
+    scale: f32,
+) -> f32 {
     let inverse_size = 1.0 / line.size;
     let line_point = (local - line.origin) * inverse_size;
     let after = glyph_after(placed_glyphs, line.first, line.count, line_point.x);
     let mut best: f32 = -1e6;
-    let padding = EFFECT_PADDING * inverse_size;
+    let padding = EFFECT_PADDING * inverse_size / scale;
     // Include the next origin too: italic/curved glyphs and the effect padding can overhang left.
     let mut glyph_index = (after + 1).min(line.count);
     while glyph_index > 0 {
         glyph_index -= 1;
         let placed = *isthmus::reference(placed_glyphs, (line.first + glyph_index) as usize);
         let glyph = *isthmus::reference(glyphs, placed.glyph as usize);
-        let glyph_point = vec2(line_point.x - placed.x, -line_point.y);
+        let glyph_point = vec2(line_point.x - placed.x, -line_point.y) / scale;
         if glyph_point.x > glyph.max.x + padding {
             break;
         }
@@ -269,7 +218,7 @@ pub fn line_distance(
                 glyph.count,
                 line.weight,
                 glyph_point,
-                line.size,
+                line.size * scale,
             ));
         }
     }
@@ -291,8 +240,26 @@ pub fn line_alpha(
     coverage(line_distance(line, placed_glyphs, glyphs, edges, local))
 }
 
-pub fn vertex(line: Line, vertex: u32, frame: &FrameData) -> isthmus::Vertex<Varyings> {
+/// One quad covering a placed line's bounds.
+pub fn line_quad(line: Line, vertex: u32, frame: &FrameData) -> isthmus::Vertex<Varyings> {
     let pixel = line.min + quad_coord(vertex) * (line.max - line.min);
+    isthmus::Vertex {
+        position: pixel_to_ndc(pixel, frame.screen_size),
+        varyings: Varyings { pixel },
+    }
+}
+
+/// A line quad conservatively enlarged for a fragment-only scale or stroke effect.
+pub fn line_quad_effect(
+    line: Line,
+    vertex: u32,
+    frame: &FrameData,
+    scale: f32,
+    padding: f32,
+) -> isthmus::Vertex<Varyings> {
+    let min = line.origin + (line.min - line.origin) * scale - padding;
+    let max = line.origin + (line.max - line.origin) * scale + padding;
+    let pixel = min + quad_coord(vertex) * (max - min);
     isthmus::Vertex {
         position: pixel_to_ndc(pixel, frame.screen_size),
         varyings: Varyings { pixel },
@@ -417,7 +384,7 @@ impl Renderer {
     /// # Panics
     ///
     /// Panics if Cantus's embedded font cannot be parsed or its outlines cannot be read.
-    pub fn new(passes: &Passes<'_>, capacity: usize) -> Self {
+    pub fn new(passes: &Passes<'_>) -> Self {
         let mut face = Face::parse(FONT, 0).expect("parse variable font");
         let characters = RANGES
             .iter()
@@ -462,18 +429,32 @@ impl Renderer {
             let (low, low_advance, low_bounds) = &outlines[0][index];
             let (high, high_advance, high_bounds) = &outlines[1][index];
             assert_eq!(low.len(), high.len(), "variable outline topology changed");
-            let count = low.len();
             let start = curves.len() as u32;
             for (&[a, b, c], &[d, e, f]) in low.iter().zip(high) {
-                curves.push(Edge {
-                    start: a,
-                    control: b,
-                    end: c,
-                    start_delta: d - a,
-                    control_delta: e - b,
-                    end_delta: f - c,
-                });
+                // Flatten once on the CPU. The tolerance is in ems and keeps the
+                // largest text comfortably below a quarter pixel of curve error.
+                let curvature = (a - b * 2.0 + c).length().max((d - e * 2.0 + f).length());
+                let segments = (curvature / 0.02).sqrt().ceil().max(1.0) as u32;
+                let point = |start: Vec2, control: Vec2, end: Vec2, t: f32| {
+                    let one_minus_t = 1.0 - t;
+                    start * one_minus_t * one_minus_t + control * 2.0 * one_minus_t * t + end * t * t
+                };
+                for segment in 0..segments {
+                    let t0 = segment as f32 / segments as f32;
+                    let t1 = (segment + 1) as f32 / segments as f32;
+                    let low_start = point(a, b, c, t0);
+                    let low_end = point(a, b, c, t1);
+                    let high_start = point(d, e, f, t0);
+                    let high_end = point(d, e, f, t1);
+                    curves.push(Edge {
+                        start: low_start,
+                        end: low_end,
+                        start_delta: high_start - low_start,
+                        end_delta: high_end - low_end,
+                    });
+                }
             }
+            let count = curves.len() - start as usize;
             metadata.push((
                 id,
                 Meta {
@@ -506,8 +487,8 @@ impl Renderer {
             },
             edges,
             glyphs,
-            storage: passes.storage_with_capacity("Text Glyphs", capacity),
-            placed: Vec::with_capacity(capacity),
+            storage: passes.storage_with_capacity("Text Glyphs", GLYPH_CAPACITY),
+            placed: Vec::with_capacity(GLYPH_CAPACITY),
         }
     }
 
@@ -531,6 +512,18 @@ impl Renderer {
         let shaped = self.shape(text, style);
         let origin = vec2(center.x - shaped.width * 0.5, center.y + shaped.baseline);
         self.place(&shaped, origin)
+    }
+
+    /// Places `text` with its left edge at `x`.
+    pub fn left(&mut self, text: &str, style: TextStyle, y: f32, x: f32) -> Line {
+        let shaped = self.shape(text, style);
+        self.place(&shaped, vec2(x, y + shaped.baseline))
+    }
+
+    /// Places `text` with its right edge at `x`.
+    pub fn right(&mut self, text: &str, style: TextStyle, y: f32, x: f32) -> Line {
+        let shaped = self.shape(text, style);
+        self.place(&shaped, vec2(x - shaped.width, y + shaped.baseline))
     }
 
     pub fn place_visible(&mut self, shaped: &ShapedLine, left: Vec2, clip: Range<f32>) -> Line {

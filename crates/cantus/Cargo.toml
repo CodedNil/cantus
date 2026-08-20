@@ -23,6 +23,8 @@ cpu = [
     "dep:fastrand",
     "dep:form_urlencoded",
     "dep:flate2",
+    "dep:freedesktop-desktop-entry",
+    "dep:freedesktop-icons",
     "dep:futures-util",
     "dep:hex",
     "dep:image",
@@ -49,6 +51,9 @@ cpu = [
     "dep:wayland-client",
     "dep:wayland-protocols",
     "dep:wayland-protocols-wlr",
+    "dep:xkbcommon",
+    "dep:fend-core",
+    "dep:resvg",
     "isthmus/vulkan",
 ]
 shader = []
@@ -78,6 +83,9 @@ quick-xml = { version = "0.41.0", optional = true }
 wayland-client = { version = "0.31.15", default-features = false, features = ["system"], optional = true }
 wayland-protocols = { version = "0.32.13", features = ["client", "staging"], optional = true }
 wayland-protocols-wlr = { version = "0.3.12", features = ["client"], optional = true }
+xkbcommon = { version = "0.9.0", default-features = false, features = ["wayland"], optional = true }
+fend-core = { version = "1.5.8", optional = true }
+resvg = { version = "0.48.1", default-features = false, optional = true }
 ttf-parser = { version = "0.25.1", optional = true }
 image = { version = "0.25.10", default-features = false, features = [
     "jpeg",
@@ -93,6 +101,8 @@ ureq = { version = "3.4.0", default-features = false, features = ["json", "rustl
 base64 = { version = "0.23.1", optional = true }
 form_urlencoded = { version = "1.2.2", optional = true }
 flate2 = { version = "1.1.9", optional = true }
+freedesktop-desktop-entry = { version = "0.8.1", default-features = false, optional = true }
+freedesktop-icons = { version = "0.4.0", optional = true }
 futures-util = { version = "0.3.34", default-features = false, optional = true }
 hex = { version = "0.4.3", optional = true }
 fastrand = { version = "2.5.0", optional = true }

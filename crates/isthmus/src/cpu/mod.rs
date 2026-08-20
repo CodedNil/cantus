@@ -15,6 +15,10 @@ pub enum Binding {
     Storage(wgpu::Buffer),
 }
 
+pub trait ResourceBinding {
+    fn binding(&self) -> Binding;
+}
+
 impl Binding {
     pub(crate) fn resource(&self) -> wgpu::BindingResource<'_> {
         match self {
@@ -55,21 +59,21 @@ impl FilteringSampler {
     }
 }
 
-impl<D> From<&TextureView<D>> for Binding {
-    fn from(view: &TextureView<D>) -> Self {
-        Self::Texture(view.raw.clone())
+impl<D> ResourceBinding for TextureView<D> {
+    fn binding(&self) -> Binding {
+        Binding::Texture(self.raw.clone())
     }
 }
 
-impl From<&FilteringSampler> for Binding {
-    fn from(sampler: &FilteringSampler) -> Self {
-        Self::Sampler(sampler.0.clone())
+impl ResourceBinding for FilteringSampler {
+    fn binding(&self) -> Binding {
+        Binding::Sampler(self.0.clone())
     }
 }
 
-impl<T: BufferData> From<&Storage<T>> for Binding {
-    fn from(storage: &Storage<T>) -> Self {
-        Self::Storage(storage.buffer.raw().clone())
+impl<T: BufferData> ResourceBinding for Storage<T> {
+    fn binding(&self) -> Binding {
+        Binding::Storage(self.buffer.raw().clone())
     }
 }
 

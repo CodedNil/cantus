@@ -12,7 +12,6 @@ pub struct PassModel {
     pub shared: Option<Type>,
     pub instance: Type,
     pub resources: Vec<(Ident, TokenStream)>,
-    pub carry_instance: bool,
 }
 
 impl PassModel {
@@ -87,8 +86,11 @@ impl PassModel {
             shared,
             instance,
             resources,
-            carry_instance,
         })
+    }
+
+    pub fn carries_instance(&self) -> bool {
+        self.fragment.has_implicit(GpuRole::Instance)
     }
 }
 
@@ -112,19 +114,6 @@ fn resource_cpu_type(ty: &Type) -> Result<TokenStream> {
     let Type::Reference(reference) = ty else {
         return Err(syn::Error::new_spanned(ty, "GPU resources must be references"));
     };
-    if let Type::Slice(slice) = reference.elem.as_ref() {
-        let element = &slice.elem;
-        return Ok(quote!(#isthmus::Storage<#element>));
-    }
-    let Type::Path(path) = reference.elem.as_ref() else {
-        return Err(syn::Error::new_spanned(ty, "unsupported GPU resource type"));
-    };
-    let name = &path.path.segments.last().unwrap().ident;
-    if name == "Sampler" {
-        Ok(quote!(#isthmus::FilteringSampler))
-    } else if name == "Texture2DArray" {
-        Ok(quote!(#isthmus::TextureView<#isthmus::Texture2DArray>))
-    } else {
-        Err(syn::Error::new_spanned(ty, "unsupported GPU resource type"))
-    }
+    let resource = &reference.elem;
+    Ok(quote!(<#resource as #isthmus::__private::ResourceType>::Binding))
 }

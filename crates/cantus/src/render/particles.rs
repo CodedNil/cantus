@@ -1,6 +1,7 @@
 use crate::render::{
+    FrameData,
     shader::{direction_and_length, pixel_to_ndc, quad_coord},
-    shared::{FrameData, smoothstep},
+    smoothstep,
 };
 use isthmus::{
     Unorm8x4, Vertex,
@@ -13,8 +14,8 @@ use {
     crate::{
         app::music::PlaybackState,
         render::{
+            PANEL_START,
             cpu::{Frame, Passes},
-            shared::PANEL_START,
             track,
         },
     },

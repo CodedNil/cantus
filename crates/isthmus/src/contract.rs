@@ -1,7 +1,13 @@
 #[cfg(feature = "cpu")]
-use crate::{cpu::Binding, data::BufferData};
+use crate::{
+    cpu::{
+        Binding, FilteringSampler, ResourceBinding, Storage, TextureView,
+        texture::SampledTextureDimension,
+    },
+    data::BufferData,
+};
 pub use spirv_std::Sampler;
-use spirv_std::image::Image2dArray;
+use spirv_std::image::{Image2d, Image2dArray};
 #[cfg(feature = "cpu")]
 use std::vec::Vec;
 
@@ -11,7 +17,40 @@ pub struct Vertex<T> {
     pub varyings: T,
 }
 
+pub type Texture2D = Image2d;
 pub type Texture2DArray = Image2dArray;
+
+/// Maps a shader-side resource type to the host object that binds it.
+#[cfg(feature = "cpu")]
+pub trait ResourceType {
+    type Binding: ResourceBinding;
+}
+
+#[cfg(feature = "cpu")]
+impl<T: BufferData> ResourceType for [T] {
+    type Binding = Storage<T>;
+}
+
+#[cfg(feature = "cpu")]
+impl ResourceType for Sampler {
+    type Binding = FilteringSampler;
+}
+
+#[cfg(feature = "cpu")]
+impl<D: SampledTextureDimension> ResourceType for D {
+    type Binding = TextureView<D>;
+}
+
+/// Coordinates for a two-triangle unit quad from its vertex index.
+pub const fn quad_coord(vertex: u32) -> glam::Vec2 {
+    glam::vec2((vertex & 1) as f32, (vertex >> 1) as f32)
+}
+
+/// Converts a top-left-origin pixel position to clip space.
+pub fn pixel_to_ndc(pixel: glam::Vec2, screen_size: glam::Vec2) -> glam::Vec4 {
+    let ndc = pixel / screen_size * 2.0 - 1.0;
+    glam::vec4(ndc.x, -ndc.y, 0.0, 1.0)
+}
 
 /// Borrows a value directly from a generated shader storage binding.
 pub fn reference<T>(records: &[T], index: usize) -> &T {

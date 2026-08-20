@@ -22,6 +22,7 @@ use librespot_protocol::{
     metadata,
     player::{ContextPlayerOptions, PlayerState, ProvidedTrack, Suppressions},
 };
+use parking_lot::Mutex;
 use protobuf::{EnumOrUnknown, Message as _, MessageField};
 use ring::rand::{SecureRandom as _, SystemRandom};
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
@@ -33,9 +34,12 @@ use std::{
     io::{self, Write},
     os::unix::fs::PermissionsExt,
     path::{Path, PathBuf},
-    sync::mpsc::{self, Receiver, Sender},
-    thread::spawn,
-    time::{Instant, SystemTime, UNIX_EPOCH},
+    sync::{
+        Arc,
+        mpsc::{self, Receiver, Sender},
+    },
+    thread::{sleep, spawn},
+    time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 use tracing::{error, warn};
 use ureq::http::Method;
@@ -110,7 +114,7 @@ struct SpotifyLyricLine {
 
 pub struct SpotifyBackend {
     events: Sender<WorkerEvent>,
-    client: SpotifyClient,
+    client: Arc<Mutex<Option<SpotifyClient>>>,
 }
 
 enum WorkerEvent {
@@ -122,29 +126,46 @@ enum WorkerEvent {
 }
 
 impl SpotifyBackend {
-    /// Starts the authenticated Spotify client and its event worker.
-    ///
-    /// # Panics
-    ///
-    /// Panics when configuration or Spotify authentication cannot be initialized.
     pub fn new(config: &Config, updater: &AppUpdater, http: ureq::Agent) -> Self {
-        fs::create_dir_all(config::directory()).expect("Failed to create Cantus config directory");
-        let client = SpotifyClient::new(http).expect("Failed to initialize Spotify client");
+        if let Err(error) = fs::create_dir_all(config::directory()) {
+            warn!(%error, "Failed to create Cantus config directory");
+        }
         let (events, receiver) = mpsc::channel();
-        dealer::connect(client.clone(), events.clone());
-        let worker = SpotifyWorker {
-            client: client.clone(),
-            events: events.clone(),
-            updater: updater.clone(),
-            connection_id: None,
-            active_device: None,
-            playlist_targets: config.playlists.clone(),
-            playlist_cache: read_cache(&config_path(PLAYLIST_TRACKS_CACHE)).unwrap_or_default(),
-            track_metadata: HashMap::new(),
-            queue: None,
-            ratings_enabled: config.ratings_enabled,
-        };
-        spawn(move || worker.run(&receiver));
+        let client = Arc::new(Mutex::new(None));
+        let connected_client = Arc::clone(&client);
+        let worker_events = events.clone();
+        let updater = updater.clone();
+        let playlist_targets = config.playlists.clone();
+        let ratings_enabled = config.ratings_enabled;
+        spawn(move || {
+            loop {
+                match SpotifyClient::new(http.clone()) {
+                    Ok(spotify) => {
+                        *connected_client.lock() = Some(spotify.clone());
+                        dealer::connect(spotify.clone(), worker_events.clone());
+                        SpotifyWorker {
+                            client: spotify,
+                            events: worker_events,
+                            updater,
+                            connection_id: None,
+                            active_device: None,
+                            playlist_targets,
+                            playlist_cache: read_cache(&config_path(PLAYLIST_TRACKS_CACHE))
+                                .unwrap_or_default(),
+                            track_metadata: HashMap::new(),
+                            queue: None,
+                            ratings_enabled,
+                        }
+                        .run(&receiver);
+                        break;
+                    }
+                    Err(error) => {
+                        warn!(%error, "Spotify unavailable; retrying");
+                        sleep(Duration::from_secs(5));
+                    }
+                }
+            }
+        });
         Self { events, client }
     }
 }
@@ -157,7 +178,12 @@ impl MusicService for SpotifyBackend {
     }
 
     fn lyrics(&self, track_id: TrackId) -> MusicResult<Vec<LyricSegment>> {
-        let response = match self.client.request(
+        let client = self
+            .client
+            .lock()
+            .clone()
+            .ok_or_else(|| client_error("Spotify is not connected"))?;
+        let response = match client.request(
             Method::GET,
             &format!("color-lyrics/v2/track/{track_id}?format=json&market=from_token"),
             &[("accept", "application/json"), ("app-platform", "WebPlayer")],
@@ -187,6 +213,7 @@ impl MusicService for SpotifyBackend {
                         .unwrap_or(start_ms + 1_000.0),
                     text: line.words.clone(),
                     lane: 0,
+                    line_end: true,
                 })
             })
             .collect())
@@ -593,14 +620,8 @@ fn fetch_track_metadata(
         entity_request,
         ..Default::default()
     };
-    let result = client
-        .request_proto(
-            Method::POST,
-            "extended-metadata/v0/extended-metadata",
-            &[("content-type", "application/x-protobuf")],
-            &request,
-        )
-        .and_then(|bytes| Ok(BatchedExtensionResponse::parse_from_bytes(&bytes)?));
+    let result: ClientResult<BatchedExtensionResponse> =
+        client.request_proto(Method::POST, "extended-metadata/v0/extended-metadata", &request);
     let Ok(response) = result else {
         warn!("Failed to fetch Spotify track metadata");
         return HashMap::new();

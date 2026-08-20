@@ -1,6 +1,7 @@
 use crate::render::{
+    FrameData, PANEL_START,
     shader::{pixel_to_ndc, quad_coord, sd_capsule_box, sd_rounded_triangle},
-    shared::{FrameData, PANEL_START, smoothstep},
+    smoothstep,
 };
 use isthmus::{
     Vertex,

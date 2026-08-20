@@ -1,20 +1,21 @@
 use crate::{
     app::{CantusApp, config::Config, interaction::InteractionState, music::PlaybackState},
     render::{
-        lyrics::{self, LyricsPass},
+        FrameData, GAP, PANEL_START, RipplePulse,
+        launcher::{LauncherPass, LauncherState},
+        lyrics::{EXTENSION as LYRICS_EXTENSION, LyricsPass},
         particles::ParticlePass,
         playhead::PlayheadPass,
-        shared::{FrameData, GAP, PANEL_START, RipplePulse},
-        status::{self, StatusPass},
-        tempestas::{self, EXTENSION, TempestasPass},
+        status::StatusPass,
+        tempestas::{EXTENSION, TempestasPass},
         text::Renderer as TextRenderer,
-        track::{self, TrackPass},
+        track::TrackPass,
     },
 };
 use isthmus::{
-    PassBuilder, Present, Program, Render,
+    PassBuilder, Present, Program,
     glam::{Vec2, vec2},
-    wgpu::{Color, Instance, PowerPreference, RenderPass, Surface},
+    wgpu::{Color, Instance, PowerPreference, Surface},
 };
 use std::{sync::Arc, time::Instant};
 
@@ -31,6 +32,7 @@ pub struct Frame<'a> {
     pub interaction: &'a mut InteractionState,
 }
 
+#[derive(isthmus::Render)]
 pub struct Systems {
     pub lyrics: Option<LyricsPass>,
     pub tempestas: Option<TempestasPass>,
@@ -38,6 +40,8 @@ pub struct Systems {
     pub track: TrackPass,
     pub particles: ParticlePass,
     pub playhead: PlayheadPass,
+    pub launcher: LauncherPass,
+    #[render(skip)]
     pub text: TextRenderer,
 }
 
@@ -49,6 +53,8 @@ pub struct RenderState {
     /// Physical buffer pixels per logical Wayland surface pixel.
     pub scale: f32,
     pub surface_width: Option<f32>,
+    /// The output's own height in physical pixels, used to vertically center the launcher panel.
+    pub output_height: Option<f32>,
 }
 
 pub fn approach(current: &mut f32, target: f32, speed: f32) {
@@ -108,6 +114,7 @@ impl Default for RenderState {
             last_toggle_time: 0.0,
             scale: 1.0,
             surface_width: None,
+            output_height: None,
         }
     }
 }
@@ -127,17 +134,16 @@ impl RenderState {
 
 impl Systems {
     fn new(passes: &Passes<'_>, app: &CantusApp) -> Self {
-        let text = TextRenderer::new(
-            passes,
-            usize::from(app.config.lyrics_enabled) * lyrics::TEXT_GLYPHS
-                + track::TEXT_GLYPHS
-                + usize::from(app.config.status_enabled) * status::TEXT_GLYPHS
-                + usize::from(app.config.tempestas_enabled) * tempestas::TEXT_GLYPHS,
-        );
-        let tempestas = app
-            .config
-            .tempestas_enabled
-            .then(|| TempestasPass::new(passes, &text, &app.config.timezones));
+        let text = TextRenderer::new(passes);
+        let tempestas = app.config.tempestas_enabled.then(|| {
+            TempestasPass::new(
+                passes,
+                &text,
+                &app.config.timezones,
+                app.updater.clone(),
+                app.enrichment.http.clone(),
+            )
+        });
         let status = app
             .config
             .status_enabled
@@ -152,6 +158,7 @@ impl Systems {
             track: TrackPass::new(passes, &text),
             particles: ParticlePass::new(passes),
             playhead: PlayheadPass::new(passes),
+            launcher: LauncherPass::new(passes, &text),
             text,
         }
     }
@@ -161,8 +168,11 @@ impl Systems {
         frame: &mut Frame<'_>,
         playback: &mut PlaybackState,
         last_toggle_time: &mut f32,
+        launcher: &mut LauncherState,
     ) {
         self.text.begin();
+        self.launcher.update(&mut self.text, launcher, frame);
+
         let status_width = self
             .status
             .as_ref()
@@ -191,26 +201,6 @@ impl Systems {
         }
         self.particles.update(&self.track, playback, frame);
         self.text.upload();
-    }
-}
-
-impl Render for Systems {
-    fn prepare(&mut self) {
-        Render::prepare(&mut self.lyrics);
-        Render::prepare(&mut self.tempestas);
-        Render::prepare(&mut self.status);
-        Render::prepare(&mut self.track);
-        Render::prepare(&mut self.particles);
-        Render::prepare(&mut self.playhead);
-    }
-
-    fn draw<'pass>(&'pass self, pass: &mut RenderPass<'pass>) {
-        Render::draw(&self.lyrics, pass);
-        Render::draw(&self.tempestas, pass);
-        Render::draw(&self.status, pass);
-        Render::draw(&self.track, pass);
-        Render::draw(&self.particles, pass);
-        Render::draw(&self.playhead, pass);
     }
 }
 
@@ -252,18 +242,32 @@ impl CantusApp {
             .expect("replacement surface is incompatible");
     }
 
+    /// The status pill's pass, which only monitors touch and only while it is enabled.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the status pill is disabled or the GPU is not yet initialized.
+    pub const fn status_pass(&mut self) -> &mut StatusPass {
+        self.render.program().passes_mut().status.as_mut().unwrap()
+    }
+
     pub fn logical_surface_size(&self) -> (f32, f32) {
+        let width = self.render.surface_width.unwrap_or(1920.0);
+        if self.launcher.open {
+            let height = self
+                .render
+                .output_height
+                .map_or(1080.0, |height| height / self.render.scale);
+            return (width, height);
+        }
         let extension = if self.config.tempestas_enabled {
             EXTENSION
         } else if self.config.lyrics_enabled {
-            lyrics::EXTENSION
+            LYRICS_EXTENSION
         } else {
             0.0
         } + PANEL_OVERFLOW;
-        (
-            self.render.surface_width.unwrap_or(1920.0),
-            self.config.height + PANEL_START + extension,
-        )
+        (width, self.config.height + PANEL_START + extension)
     }
 
     pub fn buffer_size(&self) -> (u32, u32) {
@@ -274,11 +278,14 @@ impl CantusApp {
         )
     }
 
-    pub fn render(&mut self) -> bool {
+    /// Applies queued cross-thread updates before this frame's surface is sized.
+    pub fn apply_pending_updates(&mut self) {
         while let Ok(update) = self.app_updates.try_recv() {
             update(self);
         }
+    }
 
+    pub fn render(&mut self) -> bool {
         let (screen_width, screen_height) = self.logical_surface_size();
         let Some(program) = self.render.program.as_mut() else {
             return false;
@@ -292,7 +299,12 @@ impl CantusApp {
                 elapsed,
                 vec2(screen_width, screen_height),
             );
-            systems.update(&mut frame, &mut self.playback, &mut self.render.last_toggle_time);
+            systems.update(
+                &mut frame,
+                &mut self.playback,
+                &mut self.render.last_toggle_time,
+                &mut self.launcher,
+            );
             frame.finish();
         });
         if matches!(present, Present::Validation) {

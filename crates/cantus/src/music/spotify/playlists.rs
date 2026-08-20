@@ -9,7 +9,7 @@ use crate::app::{
 use librespot_protocol::playlist4_external::{
     Add, Delta, Item, ListAttributes, ListChanges, Op, Rem, SelectedListContent, op,
 };
-use protobuf::{Message as _, MessageField};
+use protobuf::MessageField;
 use std::{
     str,
     sync::Arc,
@@ -72,7 +72,7 @@ impl SpotifyWorker {
             };
             let result = self.request_connected_proto(
                 Method::POST,
-                &format!("playlist/v2/playlist/{playlist_id}"),
+                &format!("playlist/v2/playlist/{playlist_id}/changes"),
                 &request,
             );
             if let Err(error) = result {
@@ -98,7 +98,7 @@ impl SpotifyWorker {
             }
         };
         if let Err(error) =
-            self.request_connected(Method::POST, &format!("collection/collection/{username}"), body)
+            self.request_connected(Method::PUT, &format!("collection/collection/{username}"), body)
         {
             error!(%error, %track_id, "Failed to update Spotify library");
         }
@@ -112,15 +112,9 @@ impl SpotifyWorker {
 
     fn load_playlists(&mut self) -> ClientResult<()> {
         let username = self.client.session.lock().username.clone();
-        let bytes = self.client.request(
-            Method::GET,
-            &format!(
+        let root: SelectedListContent = self.client.get_proto(&format!(
                 "playlist/v2/user/{username}/rootlist?decorate=revision,attributes,length,owner,capabilities,status_code&from=0&length=10000"
-            ),
-            &[],
-            Vec::new(),
-        )?;
-        let root = SelectedListContent::parse_from_bytes(&bytes)?;
+            ))?;
         let mut cache_changed = false;
         let mut updates = Vec::new();
         for (item, metadata) in root
@@ -198,13 +192,7 @@ impl SpotifyWorker {
 }
 
 fn fetch_playlist_tracks(client: &SpotifyClient, id: PlaylistId) -> ClientResult<PlaylistTracks> {
-    let bytes = client.request(
-        Method::GET,
-        &format!("playlist/v2/playlist/{id}"),
-        &[],
-        Vec::new(),
-    )?;
-    let playlist = SelectedListContent::parse_from_bytes(&bytes)?;
+    let playlist: SelectedListContent = client.get_proto(&format!("playlist/v2/playlist/{id}"))?;
     Ok(Arc::new(
         playlist
             .contents

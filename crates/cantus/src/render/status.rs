@@ -1,10 +1,11 @@
 use crate::render::{
+    FrameData, GAP, PADDING, PANEL_START,
     shader::{
-        cloud_mass, fill, hash, pill_fragment, pill_sheen, pill_vertex, sd_capsule_box, sd_chevron,
-        sd_rounded_box, segment_distance, smooth_union, stroke,
+        cloud_mass, fill, hash, pill_fragment, pill_vertex, sd_capsule_box, sd_chevron, sd_rounded_box,
+        segment_distance, smooth_union, stroke,
     },
-    shared::{FrameData, GAP, PADDING, smoothstep},
-    tempestas::WeatherCondition,
+    smoothstep,
+    tempestas::{WeatherCondition, scene, sky_phase},
     text,
 };
 use core::f32::consts::TAU;
@@ -20,10 +21,13 @@ use isthmus::spirv_std::num_traits::Float;
 #[cfg(feature = "cpu")]
 use {
     crate::{
-        app::{AppUpdater, interaction::Rect, platform::linux as platform},
+        app::{
+            AppUpdater,
+            interaction::Rect,
+            platform::{Current as Platform, Platform as _},
+        },
         render::{
             cpu::{Frame, Passes},
-            shared::PANEL_START,
             text::TextStyle,
         },
     },
@@ -62,9 +66,6 @@ const MUTED_COLOR: Vec3 = Vec3::new(1.0, 0.24, 0.3);
 #[cfg(feature = "cpu")]
 const LABEL_STYLE: TextStyle = TextStyle::new(11.0, 700.0);
 const HISTORY_END: usize = STATUS_HISTORY_SAMPLES - 1;
-#[cfg(feature = "cpu")]
-pub(crate) const TEXT_GLYPHS: usize = 2 * MAX_LABEL_CHARS;
-
 #[derive(Clone, Copy, PartialEq, Eq)]
 #[repr(u32)]
 enum StatusSection {
@@ -137,6 +138,7 @@ pub struct StatusVaryings {
 #[isthmus::pass]
 pub struct StatusPass {
     pub pill: isthmus::Instance<Self>,
+    pub(crate) temperature_targets: [f32; 2],
     audio_spectrum: Arc<[AtomicU32; AUDIO_SPECTRUM_BANDS]>,
 }
 
@@ -223,38 +225,6 @@ fn section_rect(pill: &StatusPill, x: f32, height: f32, section: StatusSection) 
         vec2(x + pill.section_center(section), PANEL_START + height * 0.5),
         vec2((section.width() + GAP) * 0.5, height * 0.5),
     )
-}
-
-fn status_sky(local: Vec2, distance: f32, sun: f32, weather: WeatherCondition, time: f32) -> Vec3 {
-    let WeatherCondition {
-        fog,
-        cloud,
-        rain,
-        snow,
-        lightning,
-        hail,
-    } = weather;
-    let vertical = smoothstep(1.0, 0.0, local.y);
-    let daylight = smoothstep(-0.04, 0.2, sun);
-    let twilight = smoothstep(-0.2, 0.02, sun) * (1.0 - daylight);
-    let mut color = vec3(0.008, 0.015, 0.04)
-        .lerp(vec3(0.03, 0.06, 0.13), vertical)
-        .lerp(
-            vec3(0.09, 0.37, 0.65).lerp(vec3(0.34, 0.7, 0.9), vertical),
-            daylight,
-        )
-        .lerp(
-            vec3(0.65, 0.25, 0.2).lerp(vec3(0.3, 0.2, 0.4), vertical),
-            twilight,
-        );
-    color = color.lerp(vec3(0.16, 0.2, 0.27), cloud * 0.34 + rain * 0.16 + hail * 0.08);
-    color = color.lerp(Vec3::splat(0.82), snow * 0.16);
-    color = color.lerp(vec3(0.62, 0.68, 0.72), fog * 0.62);
-    color = color.lerp(
-        vec3(0.65, 0.74, 0.96),
-        smoothstep(0.92, 1.0, (time * 2.7).sin()) * lightning * 0.45,
-    );
-    color + pill_sheen(local.y, distance)
 }
 
 fn fill_box(point: Vec2, half_size: Vec2, radius: f32) -> f32 {
@@ -452,7 +422,7 @@ fn action_icon(point: Vec2, time: f32, action: f32, hover: f32, pill: &StatusPil
 impl StatusPass {
     pub(crate) fn new(passes: &Passes<'_>, text: &text::Renderer, updater: AppUpdater) -> Self {
         let audio_spectrum = Arc::<[AtomicU32; AUDIO_SPECTRUM_BANDS]>::default();
-        platform::start_status_monitor(updater, Arc::clone(&audio_spectrum));
+        Platform::start_status_monitor(updater, Arc::clone(&audio_spectrum));
         let pill = passes.instance(
             text.resources(),
             StatusPill {
@@ -462,19 +432,30 @@ impl StatusPass {
                 ..Default::default()
             },
         );
-        Self { pill, audio_spectrum }
+        Self {
+            pill,
+            temperature_targets: [0.0; 2],
+            audio_spectrum,
+        }
     }
 
     pub fn update(&mut self, text: &mut text::Renderer, frame: &mut Frame) {
         let height = frame.config.height;
         let pill = &mut *self.pill;
+        let temperature_blend = 1.0 - (-5.0 * frame.delta_time).exp();
+        for (processor, target) in [&mut pill.cpu, &mut pill.gpu]
+            .into_iter()
+            .zip(self.temperature_targets)
+        {
+            processor.temperature += (target - processor.temperature) * temperature_blend;
+        }
         for (damped, level) in pill.audio_spectrum.iter_mut().zip(self.audio_spectrum.iter()) {
             let target = f32::from_bits(level.load(Ordering::Relaxed));
             let response = if target > *damped { 18.0 } else { 6.0 };
             *damped += (target - *damped) * (1.0 - (-response * frame.delta_time).exp());
         }
         pill.history_scroll = (pill.history_scroll
-            + frame.delta_time / platform::STATUS_SAMPLE_INTERVAL.as_secs_f32())
+            + frame.delta_time / Platform::STATUS_SAMPLE_INTERVAL.as_secs_f32())
         .saturate();
 
         let width = pill.width();
@@ -485,7 +466,7 @@ impl StatusPass {
         if scroll != 0 {
             let sign = pill.volume.signum();
             pill.volume = (pill.volume.abs() - scroll as f32 * 0.05).saturate() * sign;
-            platform::set_volume(pill.volume.abs());
+            Platform::set_volume(pill.volume.abs());
         }
 
         let buttons = StatusSection::POWER_ACTIONS
@@ -505,7 +486,7 @@ impl StatusPass {
                 pill.power_action = -1;
             } else if progress >= 1.0 {
                 pill.power_action = -1;
-                platform::run_power_action(action);
+                Platform::run_power_action(action);
             } else {
                 pill.power_progress = progress;
             }
@@ -546,7 +527,7 @@ impl StatusPass {
     ) -> Vertex<StatusVaryings> {
         let width = pill.width();
         let x = pill_x(frame.screen_size.x, width);
-        let (position, pixel) = pill_vertex(vertex, frame, x, vec2(width, 0.0));
+        let (position, pixel) = pill_vertex(vertex, frame, x, PANEL_START, vec2(width, 0.0));
         Vertex {
             position,
             varyings: StatusVaryings { pixel },
@@ -564,14 +545,21 @@ impl StatusPass {
     ) -> Vec4 {
         let width = pill.width();
         let x = pill_x(frame.screen_size.x, width);
-        let (interaction, raw_local, size, surface) = pill_fragment(pixel, frame, x, width);
+        let (interaction, raw_local, size, surface) = pill_fragment(pixel, frame, x, PANEL_START, width);
         let (dist, mask, alpha) = interaction.surface(surface);
         if alpha <= 1.0 / 1024.0 {
             kill();
         }
         let refracted = interaction.refract(raw_local, size, dist);
-        let background = status_sky(refracted, dist, pill.sun_height, pill.conditions, frame.time);
         let local = refracted * size;
+        let background = scene(
+            frame,
+            local,
+            size.x,
+            dist,
+            sky_phase(pill.sun_height),
+            pill.conditions,
+        );
         let (section, center_x) = pill.section_at(local.x);
         let section_center = |section| vec2(pill.section_center(section), size.y * 0.5);
         let point = local - vec2(center_x, size.y * 0.5);

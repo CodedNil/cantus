@@ -1,6 +1,6 @@
 use crate::{
     app::music::{CondensedPlaylist, MusicBackend, PlaybackCommand, PlaylistId, Timeline, TrackId},
-    render::shared::PANEL_START,
+    render::PANEL_START,
 };
 use isthmus::glam::Vec2;
 use std::mem;

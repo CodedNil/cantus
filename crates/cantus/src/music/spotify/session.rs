@@ -100,38 +100,34 @@ pub fn login(http: &Agent, oauth_token: &str, cache_path: &Path) -> ClientResult
         .call()?
         .body_mut()
         .read_json::<AccessPoints>()?;
-    let credentials = if let Some(cache) = cached {
-        let cached = ap_login(
-            &endpoints.accesspoint,
-            &device_id,
-            AuthenticationType::AUTHENTICATION_STORED_SPOTIFY_CREDENTIALS,
-            Some(cache.credentials.username.clone()),
-            cache.credentials.data,
-        );
-        if oauth_token.is_empty() {
-            cached?
-        } else {
-            cached
-                .inspect_err(|error| warn!(%error, "Cached Spotify credentials failed; retrying OAuth"))
-                .or_else(|_| {
-                    ap_login(
-                        &endpoints.accesspoint,
-                        &device_id,
-                        AuthenticationType::AUTHENTICATION_SPOTIFY_TOKEN,
-                        None,
-                        oauth_token.as_bytes().to_vec(),
-                    )
-                })?
-        }
-    } else {
+    let oauth = || {
         ap_login(
             &endpoints.accesspoint,
             &device_id,
             AuthenticationType::AUTHENTICATION_SPOTIFY_TOKEN,
             None,
             oauth_token.as_bytes().to_vec(),
-        )?
+        )
     };
+    let credentials = match cached {
+        Some(cache) => {
+            let cached = ap_login(
+                &endpoints.accesspoint,
+                &device_id,
+                AuthenticationType::AUTHENTICATION_STORED_SPOTIFY_CREDENTIALS,
+                Some(cache.credentials.username.clone()),
+                cache.credentials.data,
+            );
+            if oauth_token.is_empty() {
+                cached
+            } else {
+                cached
+                    .inspect_err(|error| warn!(%error, "Cached Spotify credentials failed"))
+                    .or_else(|_| oauth())
+            }
+        }
+        None => oauth(),
+    }?;
     write_cache(
         cache_path,
         &CachedSession {
@@ -160,6 +156,15 @@ pub fn login(http: &Agent, oauth_token: &str, cache_path: &Path) -> ClientResult
         cache_path: cache_path.to_owned(),
         expires_at,
     })
+}
+
+pub fn cached(cache_path: &Path) -> bool {
+    read_cache::<CachedSession>(cache_path).is_some()
+}
+
+pub fn network_available(http: &Agent) -> ClientResult<()> {
+    http.get(AP_RESOLVE).call()?;
+    Ok(())
 }
 
 #[derive(Deserialize)]

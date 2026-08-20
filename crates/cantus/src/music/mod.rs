@@ -6,11 +6,10 @@ use arrayvec::ArrayString;
 use std::{collections::HashSet, error::Error, mem, sync::Arc, time::Instant};
 
 mod enrichment;
-mod lyrics;
 mod spotify;
 
+pub(crate) use crate::render::lyrics::LyricSegment;
 pub use enrichment::{AlbumArt, ArtState, Enrichment, Fetch, IMAGE_SIZE};
-pub use lyrics::LyricSegment;
 
 pub type TrackId = ArrayString<22>;
 pub type PlaylistId = ArrayString<22>;

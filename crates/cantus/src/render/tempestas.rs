@@ -1,10 +1,10 @@
 use crate::render::{
+    FrameData, GAP, PANEL_START, UNIT,
     shader::{
-        SdfSurface, cloud_mass, fbm, hash, pill_fragment, pill_interaction, pill_sheen, pill_vertex,
-        sd_capsule_box, sd_rounded_box, sdf_coverage,
+        PillInteraction, SdfSurface, cloud_mass, fbm, hash, pill_fragment, pill_interaction, pill_sheen,
+        pill_vertex, sd_capsule_box, sd_rounded_box, sdf_coverage,
     },
-    shared::{FrameData, GAP, PANEL_START, UNIT, smoothstep},
-    text,
+    smoothstep, text,
 };
 use core::f32::consts::PI;
 use isthmus::{
@@ -19,7 +19,10 @@ use isthmus::spirv_std::num_traits::Float;
 #[cfg(feature = "cpu")]
 use {
     crate::{
-        app::interaction::{InteractionState, Rect},
+        app::{
+            AppUpdater,
+            interaction::{InteractionState, Rect},
+        },
         render::{
             cpu::{Frame, Passes, approach},
             status,
@@ -33,8 +36,9 @@ use {
         civil::{DateTime, Time},
         tz::{Offset, TimeZone},
     },
-    std::{fmt::Write, mem, sync::mpsc::Receiver},
+    std::{fmt::Write, mem},
     tracing::warn,
+    ureq::Agent,
 };
 
 /// Number of conditions shown in the hourly forecast row.
@@ -47,41 +51,39 @@ pub const WIDTH: f32 = UNIT * 77.0;
 pub const EXTENSION: f32 = UNIT * 61.0;
 const FORECAST_X: f32 = WIDTH + GAP;
 
-// Calendar geometry.
-const WEEKDAY_COUNT: usize = 7;
-const GRID_ROWS: usize = 6;
-const GRID_CELLS: usize = WEEKDAY_COUNT * GRID_ROWS;
-const GRID_ROW_HEIGHT: f32 = UNIT * 6.0;
-const GRID_TOP_Y: f32 = UNIT * 24.0;
-const WEEKDAY_Y: f32 = UNIT * 17.0;
-const TITLE: Vec2 = Vec2::new(WIDTH * 0.5, UNIT * 10.0);
+/// Labels are found through a lookup grid over the pill and its expanded popup: each cell names
+/// up to two labels whose padded bounds reach it, so the fragment samples two lines rather than
+/// all of them. Two slots suffice because only stacked or neighbouring labels share a cell.
+const TEXT_COLUMNS: usize = 24;
+const TEXT_ROWS: usize = 36;
+#[cfg(feature = "cpu")]
+mod host {
+    use super::{MAX_WORLD_CLOCKS, TextStyle, UNIT, Vec2, WIDTH};
 
-// Offsets into the spatially indexed text-line buffer.
-const TITLE_LINE: usize = 1;
-const ARROW_LINES: usize = 2;
-const DETAILS_LINE: usize = 4;
-const FORECAST_LINES: usize = 5;
-const DAILY_LINES: usize = FORECAST_LINES + HOURLY_FORECASTS * 2;
-const WEEKDAY_LINES: usize = DAILY_LINES + DAILY_FORECASTS * 2;
-const GRID_LINES: usize = WEEKDAY_LINES + WEEKDAY_COUNT;
-const WORLD_CLOCK_LINES: usize = GRID_LINES + GRID_CELLS;
-#[cfg(feature = "cpu")]
-const WEEKDAYS: [&str; WEEKDAY_COUNT] = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"];
-#[cfg(feature = "cpu")]
-const ORDINALS: [&str; 10] = ["th", "st", "nd", "rd", "th", "th", "th", "th", "th", "th"];
-#[cfg(feature = "cpu")]
-const MAX_TEXT_LINES: usize = WORLD_CLOCK_LINES + MAX_WORLD_CLOCKS * 2;
-#[cfg(feature = "cpu")]
-pub(crate) const TEXT_GLYPHS: usize = 768;
+    pub const WEEKDAY_COUNT: usize = 7;
+    pub const GRID_CELLS: usize = WEEKDAY_COUNT * 6;
+    pub const GRID_ROW_HEIGHT: f32 = UNIT * 6.0;
+    pub const GRID_TOP_Y: f32 = UNIT * 24.0;
+    pub const WEEKDAY_Y: f32 = UNIT * 17.0;
+    pub const TITLE: Vec2 = Vec2::new(WIDTH * 0.5, UNIT * 10.0);
+    pub const WEEKDAYS: [&str; WEEKDAY_COUNT] = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"];
+    pub const ORDINALS: [&str; 10] = ["th", "st", "nd", "rd", "th", "th", "th", "th", "th", "th"];
+    pub const TEXT_CELLS: usize = super::TEXT_COLUMNS * super::TEXT_ROWS;
+    pub const MAX_TEXT_LINES: usize = 17
+        + (super::HOURLY_FORECASTS + super::DAILY_FORECASTS + MAX_WORLD_CLOCKS) * 2
+        + WEEKDAY_COUNT
+        + GRID_CELLS;
+    pub const DETAILS_STYLE: TextStyle = TextStyle::new(14.0, 700.0);
+    pub const WEATHER_STYLE: TextStyle = TextStyle::new(24.0, 600.0);
+    pub const TITLE_STYLE: TextStyle = TextStyle::new(20.0, 750.0);
+    pub const CLOCK_STYLE: TextStyle = TextStyle::new(12.0, 700.0);
+}
 
 #[cfg(feature = "cpu")]
-const DETAILS_STYLE: TextStyle = TextStyle::new(14.0, 700.0);
-#[cfg(feature = "cpu")]
-const WEATHER_STYLE: TextStyle = TextStyle::new(24.0, 600.0);
-#[cfg(feature = "cpu")]
-const TITLE_STYLE: TextStyle = TextStyle::new(20.0, 750.0);
-#[cfg(feature = "cpu")]
-const CLOCK_STYLE: TextStyle = TextStyle::new(12.0, 700.0);
+use host::{
+    CLOCK_STYLE, DETAILS_STYLE, GRID_CELLS, GRID_ROW_HEIGHT, GRID_TOP_Y, MAX_TEXT_LINES, ORDINALS,
+    TEXT_CELLS, TITLE, TITLE_STYLE, WEATHER_STYLE, WEEKDAY_COUNT, WEEKDAY_Y, WEEKDAYS,
+};
 
 #[isthmus::data]
 #[derive(Default)]
@@ -131,7 +133,9 @@ pub struct Varyings {
 pub struct TempestasPass {
     pub pill: isthmus::Instance<Self>,
     text_lines: Storage<text::Line>,
+    text_cells: Storage<u32>,
     labels: Vec<text::Line>,
+    cells: Box<[u32; TEXT_CELLS]>,
     temperature: String,
     utc_offset: Option<Offset>,
     details: String,
@@ -139,41 +143,58 @@ pub struct TempestasPass {
     daily: [ForecastItem; DAILY_FORECASTS],
     timezones: ArrayVec<WorldClock, MAX_WORLD_CLOCKS>,
     month_offset: i32,
-    forecast_updates: Receiver<monitor::Update>,
 }
 
 #[cfg(feature = "cpu")]
 struct Labels<'a> {
     lines: &'a mut Vec<text::Line>,
+    cells: &'a mut [u32; TEXT_CELLS],
     text: &'a mut text::Renderer,
+    /// Where popup-relative label positions start from.
     origin: Vec2,
+    /// Lookup grid origin and cell size, in surface pixels.
+    grid: (Vec2, Vec2),
+    /// Popup progress driving each label's staggered fade; 1.0 leaves them fully visible.
+    expansion: f32,
 }
 
 #[cfg(feature = "cpu")]
 impl Labels<'_> {
-    fn centered(&mut self, content: &str, style: TextStyle, center: Vec2, color: Vec4) {
-        self.lines.push(
-            self.text
-                .centered(content, style, self.origin + center)
-                .with_color(color),
-        );
+    fn centered(&mut self, content: &str, style: TextStyle, center: Vec2, opacity: f32) {
+        self.colored(content, style, center, text::COLOR, opacity);
     }
 
-    fn pair(
-        &mut self,
-        content: [&str; 2],
-        style: TextStyle,
-        center: Vec2,
-        spacing: f32,
-        opacity: [f32; 2],
-    ) {
+    fn colored(&mut self, content: &str, style: TextStyle, center: Vec2, color: Vec3, opacity: f32) {
+        let alpha = reveal_progress(self.expansion, center.y) * opacity;
+        let line = self
+            .text
+            .centered(content, style, self.origin + center)
+            .with_color(color.extend(alpha));
+        let index = self.lines.len() as u32;
+        self.lines.push(line);
+
+        let (grid_origin, cell) = self.grid;
+        let last = vec2(TEXT_COLUMNS as f32, TEXT_ROWS as f32) - 1.0;
+        let first_cell = ((line.min - grid_origin) / cell).floor().clamp(Vec2::ZERO, last);
+        let last_cell = ((line.max - grid_origin) / cell).floor().clamp(first_cell, last);
+        for row in first_cell.y as usize..=last_cell.y as usize {
+            for column in first_cell.x as usize..=last_cell.x as usize {
+                // Two label indices share each cell word; the low half fills first.
+                let slot = &mut self.cells[row * TEXT_COLUMNS + column];
+                if *slot == 0 {
+                    *slot = index;
+                } else if *slot >> 16 == 0 {
+                    *slot |= index << 16;
+                }
+            }
+        }
+    }
+
+    /// Two stacked labels sharing a center, the second dimmer than the first.
+    fn pair(&mut self, content: [&str; 2], style: TextStyle, center: Vec2, spacing: f32, dim: f32) {
         for (line, content) in content.into_iter().enumerate() {
-            self.centered(
-                content,
-                style,
-                center + vec2(0.0, (line as f32 * 2.0 - 1.0) * spacing),
-                text::COLOR.extend(opacity[line]),
-            );
+            let offset = vec2(0.0, (line as f32 * 2.0 - 1.0) * spacing);
+            self.centered(content, style, center + offset, if line == 0 { 1.0 } else { dim });
         }
     }
 }
@@ -224,18 +245,22 @@ fn forecast_row(height: f32, row: f32) -> (Vec2, Vec2) {
     (center - size * 0.5, size)
 }
 
+#[cfg(feature = "cpu")]
 fn world_clock_center(height: f32, index: usize) -> f32 {
     forecast_center(height, 1.0) + height * 0.5 + UNIT * (3.5 + index as f32 * 7.0)
 }
 
+/// Origin and cell size of the label lookup grid, which spans the pill plus its full popup.
+fn text_grid(frame: &FrameData, pill_x: f32) -> (Vec2, Vec2) {
+    let size = vec2(WIDTH + FORECAST_X, frame.panel_height + EXTENSION);
+    let cell = size / vec2(TEXT_COLUMNS as f32, TEXT_ROWS as f32);
+    (vec2(expanded_x(pill_x, 1.0), PANEL_START), cell)
+}
+
+#[cfg(feature = "cpu")]
 fn reveal_progress(expansion: f32, y: f32) -> f32 {
     let delay = 0.5 + (y / EXTENSION) * 0.18;
     smoothstep(delay, delay + 0.24, expansion)
-}
-
-#[isthmus::outline]
-fn cell_index(value: f32, start: f32, size: f32, last: f32) -> usize {
-    ((value - start) / size).floor().max(0.0).min(last) as usize
 }
 
 /// Sun phase (0 at sunrise, 1 at sunset) and height (-1 to 1) for the given hour.
@@ -289,7 +314,7 @@ fn precipitation(p: Vec2, time: f32, kind: i32, strength: f32) -> Vec4 {
 }
 
 /// Daylight, blue-hour and twilight palette weights for a sun height.
-fn sky_phase(sun_y: f32) -> Vec3 {
+pub(crate) fn sky_phase(sun_y: f32) -> Vec3 {
     let daylight = smoothstep(-0.04, 0.2, sun_y);
     vec3(
         daylight,
@@ -298,7 +323,7 @@ fn sky_phase(sun_y: f32) -> Vec3 {
     )
 }
 
-fn scene(
+pub(crate) fn scene(
     frame: &FrameData,
     p: Vec2,
     width: f32,
@@ -306,13 +331,6 @@ fn scene(
     phase: Vec3,
     weather: WeatherCondition,
 ) -> Vec3 {
-    let WeatherCondition {
-        fog: fog_strength,
-        cloud,
-        rain: rain_strength,
-        lightning,
-        ..
-    } = weather;
     let (cloud_scale, time) = (frame.panel_height, frame.time);
     let sky_y = p.y / cloud_scale;
     let vertical = smoothstep(1.0, 0.0, sky_y);
@@ -336,9 +354,9 @@ fn scene(
     let stars = smoothstep(1.0, 0.4, p.distance(star_center))
         * smoothstep(0.75, 1.0, hash(star_cell + 31.7).x)
         * (1.0 - phase.x);
-    color += Vec3::splat(stars * (1.0 - cloud) * (0.3 + vertical * 0.7));
+    color += Vec3::splat(stars * (1.0 - weather.cloud) * (0.3 + vertical * 0.7));
 
-    if cloud > 1.0 / 1024.0 {
+    if weather.cloud > 1.0 / 1024.0 {
         let mass = cloud_mass(p, cloud_scale, time);
         let billows = fbm(p / cloud_scale * 0.287 + vec2(time * 0.018, -3.7));
         let cloud_shape = smoothstep(0.35, 0.6, mass + (billows - 0.5) * 0.24);
@@ -353,10 +371,10 @@ fn scene(
                 vec3(0.5, 0.36, 0.4).lerp(vec3(0.76, 0.59, 0.56), cloud_light),
                 phase.z * 0.45,
             );
-        color = color.lerp(cloud_color, cloud * (0.12 + cloud_shape * 0.7));
+        color = color.lerp(cloud_color, weather.cloud * (0.12 + cloud_shape * 0.7));
     }
 
-    color = color.lerp(vec3(0.1, 0.17, 0.25), rain_strength * 0.2);
+    color = color.lerp(vec3(0.1, 0.17, 0.25), weather.rain * 0.2);
     if weather.rain > 1.0 / 1024.0 {
         let particle = precipitation(p, time, 0, weather.rain);
         color = color.lerp(particle.truncate(), particle.w);
@@ -370,17 +388,17 @@ fn scene(
         color = color.lerp(particle.truncate(), particle.w);
     }
 
-    let flash = smoothstep(0.92, 1.0, (time * 2.7).sin()) * lightning;
+    let flash = smoothstep(0.92, 1.0, (time * 2.7).sin()) * weather.lightning;
     color = color.lerp(vec3(0.65, 0.74, 0.96), flash * 0.55);
 
-    if fog_strength > 1.0 / 1024.0 {
+    if weather.fog > 1.0 / 1024.0 {
         let fog = fbm(vec2(p.x / width * 0.9 + time * 0.008, sky_y * 0.32 + 12.0));
         color = color.lerp(
             vec3(0.63, 0.69, 0.73),
-            fog_strength * (0.58 + smoothstep(0.35, 0.7, fog) * 0.18),
+            weather.fog * (0.58 + smoothstep(0.35, 0.7, fog) * 0.18),
         );
     }
-    color + pill_sheen(sky_y, dist)
+    color + pill_sheen(dist)
 }
 
 fn sun_layer(
@@ -427,18 +445,13 @@ fn main_surface(
             (box_size.y * 0.5).min(18.0),
         )
     };
-    body.smooth_union(
-        SdfSurface::new(popup(pixel), popup(frame.mouse_pos)),
-        56.0,
-        expansion,
-    )
+    body.smooth_union(SdfSurface::sample(pixel, frame.mouse_pos, popup), 56.0, expansion)
 }
 
 struct ForecastSample {
     local: Vec2,
     size: Vec2,
     surface: SdfSurface,
-    reveal: f32,
     conditions: WeatherCondition,
     sun_height: f32,
 }
@@ -446,22 +459,13 @@ struct ForecastSample {
 fn sample_forecast(pixel: Vec2, frame: &FrameData, pill: &WeatherSurface) -> ForecastSample {
     let daily = pixel.y - PANEL_START - frame.panel_height > forecast_split(frame.panel_height);
     let row = if daily { 1.0 } else { 0.0 };
-    let reveal = reveal_progress(pill.calendar_expansion, forecast_center(frame.panel_height, row));
-    let (row_origin, full_size) = forecast_row(frame.panel_height, row);
-    let size = full_size * reveal;
-    let origin = vec2(expanded_x(pill.x, 1.0), PANEL_START + frame.panel_height)
-        + row_origin
-        + (full_size - size) * 0.5;
-    let capsule = |point: Vec2| {
-        if reveal <= 0.001 {
-            f32::MAX
-        } else {
-            sd_capsule_box(point - origin - size * 0.5, (size.x - size.y) * 0.5, size.y * 0.5)
-        }
-    };
+    let (row_origin, size) = forecast_row(frame.panel_height, row);
+    let origin = vec2(expanded_x(pill.x, 1.0), PANEL_START + frame.panel_height) + row_origin;
+    let capsule =
+        |point: Vec2| sd_capsule_box(point - origin - size * 0.5, (size.x - size.y) * 0.5, size.y * 0.5);
     let local = pixel - origin;
     let count = if daily { DAILY_FORECASTS } else { HOURLY_FORECASTS };
-    let position = (local.x / size.x.max(0.001) * count as f32 - 0.5).clamp(0.0, (count - 1) as f32);
+    let position = (local.x / size.x * count as f32 - 0.5).clamp(0.0, (count - 1) as f32);
     let index = position.floor() as usize;
     let amount = smoothstep(0.0, 1.0, position.fract());
     let (conditions, next, hour) = if daily {
@@ -480,81 +484,21 @@ fn sample_forecast(pixel: Vec2, frame: &FrameData, pill: &WeatherSurface) -> For
     ForecastSample {
         local,
         size,
-        surface: SdfSurface::new(capsule(pixel), capsule(frame.mouse_pos)),
-        reveal,
+        surface: SdfSurface::sample(pixel, frame.mouse_pos, capsule),
         conditions: conditions.lerp(next, amount),
         sun_height: sun_position(hour, pill.sun_hours)[1],
     }
 }
 
-/// Selects the only text line whose spatial cell can cover `pixel`.
-fn text_line_index(pixel: Vec2, frame: &FrameData, pill: &WeatherSurface) -> usize {
-    let popup_origin = vec2(expanded_x(pill.x, 1.0), PANEL_START + frame.panel_height);
-    if pixel.y < popup_origin.y {
-        return 0;
-    }
-    let local = pixel - popup_origin;
-    if local.x >= FORECAST_X {
-        let first_forecast = forecast_center(frame.panel_height, 0.0);
-        if local.y < (TITLE.y + first_forecast) * 0.5 {
-            return DETAILS_LINE;
-        }
-        let first_clock = world_clock_center(frame.panel_height, 0);
-        if local.y > first_clock - UNIT * 3.5 {
-            let clock = cell_index(
-                local.y,
-                first_clock - UNIT * 3.5,
-                UNIT * 7.0,
-                (MAX_WORLD_CLOCKS - 1) as f32,
-            );
-            let center = world_clock_center(frame.panel_height, clock);
-            return WORLD_CLOCK_LINES + clock * 2 + usize::from(local.y > center);
-        }
-        let daily = local.y > forecast_split(frame.panel_height);
-        let (base, count, center) = if daily {
-            (
-                DAILY_LINES,
-                DAILY_FORECASTS,
-                forecast_center(frame.panel_height, 1.0),
-            )
-        } else {
-            (FORECAST_LINES, HOURLY_FORECASTS, first_forecast)
-        };
-        let column = cell_index(local.x, FORECAST_X, WIDTH / count as f32, (count - 1) as f32);
-        return base + column * 2 + usize::from(local.y > center);
-    }
-    if local.y < (TITLE.y + WEEKDAY_Y) * 0.5 {
-        let reveal = reveal_progress(pill.calendar_expansion, TITLE.y);
-        let offset = (WIDTH * 0.5 - UNIT * 7.0) * reveal;
-        if (local.x - (TITLE.x - offset)).abs() < UNIT * 5.0 {
-            return ARROW_LINES;
-        }
-        if (local.x - (TITLE.x + offset)).abs() < UNIT * 5.0 {
-            return ARROW_LINES + 1;
-        }
-        return TITLE_LINE;
-    }
-    let column = cell_index(
-        local.x,
-        0.0,
-        WIDTH / WEEKDAY_COUNT as f32,
-        (WEEKDAY_COUNT - 1) as f32,
-    );
-    if local.y < (WEEKDAY_Y + GRID_TOP_Y) * 0.5 {
-        return WEEKDAY_LINES + column;
-    }
-    let row = cell_index(
-        local.y,
-        GRID_TOP_Y - GRID_ROW_HEIGHT * 0.5,
-        GRID_ROW_HEIGHT,
-        (GRID_ROWS - 1) as f32,
-    );
-    GRID_LINES + row * WEEKDAY_COUNT + column
-}
-
 #[isthmus::pass]
 impl TempestasPass {
-    pub fn new(passes: &Passes<'_>, text: &text::Renderer, timezones: &[String]) -> Self {
+    pub fn new(
+        passes: &Passes<'_>,
+        text: &text::Renderer,
+        timezones: &[String],
+        updater: AppUpdater,
+        http: Agent,
+    ) -> Self {
         let mut forecast_timezones = Vec::with_capacity(timezones.len());
         let timezones: ArrayVec<_, MAX_WORLD_CLOCKS> = timezones
             .iter()
@@ -570,11 +514,12 @@ impl TempestasPass {
                 })
             })
             .collect();
-        let forecast_updates = monitor::start(forecast_timezones);
+        monitor::start(forecast_timezones, updater, http);
         let text_lines = passes.storage_with_capacity("Tempestas Text", MAX_TEXT_LINES);
+        let text_cells = passes.storage_with_capacity("Tempestas Text Grid", TEXT_CELLS);
         let (placed_glyphs, glyphs, edges) = text.resources();
         let pill = passes.instance(
-            (&text_lines, placed_glyphs, glyphs, edges),
+            (&text_lines, &text_cells, placed_glyphs, glyphs, edges),
             WeatherSurface {
                 sun_hours: [6.0, 18.0],
                 ..Default::default()
@@ -583,7 +528,9 @@ impl TempestasPass {
         Self {
             pill,
             text_lines,
+            text_cells,
             labels: Vec::with_capacity(MAX_TEXT_LINES),
+            cells: Box::new([0; TEXT_CELLS]),
             temperature: String::new(),
             utc_offset: None,
             details: "Weather unavailable".into(),
@@ -591,7 +538,6 @@ impl TempestasPass {
             daily: Default::default(),
             timezones,
             month_offset: 0,
-            forecast_updates,
         }
     }
 
@@ -601,9 +547,6 @@ impl TempestasPass {
         status: Option<&mut status::StatusPass>,
         frame: &mut Frame,
     ) {
-        while let Ok(update) = self.forecast_updates.try_recv() {
-            monitor::apply(self, update);
-        }
         let height = frame.config.height;
         let x = Self::pill_x(frame.shared.screen_size.x, frame.shared.status_width);
         let (weather_label, hour) = self.collapsed_label(x, height, frame);
@@ -613,22 +556,30 @@ impl TempestasPass {
             status.pill.conditions = self.pill.hourly_conditions[0];
         }
         let mut lines = mem::take(&mut self.labels);
+        let mut cells = mem::replace(&mut self.cells, Box::new([0; TEXT_CELLS]));
         lines.clear();
+        // Index 0 is an empty line, so a cell with no label needs no sentinel of its own.
+        lines.push(text::Line::default());
+        cells.fill(0);
         let mut labels = Labels {
             lines: &mut lines,
+            cells: &mut cells,
             text,
             origin: vec2(x, PANEL_START),
+            grid: text_grid(frame.shared, x),
+            expansion: 1.0,
         };
         labels.centered(
             &weather_label,
             WEATHER_STYLE,
             vec2(WIDTH * 0.5, height * 0.46),
-            text::COLOR.extend(1.0),
+            1.0,
         );
         self.calendar_labels(&mut labels, x, height, frame.delta_time, frame.interaction);
-        lines.resize_with(MAX_TEXT_LINES, text::Line::default);
         self.text_lines.upload(&lines);
+        self.text_cells.upload(&cells[..]);
         self.labels = lines;
+        self.cells = cells;
     }
 
     fn collapsed_label(&mut self, x: f32, height: f32, frame: &mut Frame) -> (ArrayString<64>, f32) {
@@ -672,7 +623,12 @@ impl TempestasPass {
         }
         let origin = Vec2::new(expanded_x(bounds.x0, 1.0), bounds.y1);
         text.origin = origin;
-        let reveal = reveal_progress(self.pill.calendar_expansion, TITLE.y);
+        let surfaces = Self::visible_rects(x, height, self.pill.calendar_expansion);
+        let expansion = self.pill.calendar_expansion;
+        text.expansion = expansion;
+        let reveal = reveal_progress(expansion, TITLE.y);
+        let hover_blend = 1.0 - (-delta_time * 14.0).exp();
+
         let title = interaction.surface(Rect::from_center(
             origin + TITLE,
             Vec2::new(UNIT * 26.0, UNIT * 4.0),
@@ -680,10 +636,23 @@ impl TempestasPass {
         if title.clicked {
             self.month_offset = 0;
         }
-        let hover_blend = 1.0 - (-delta_time * 14.0).exp();
         self.pill.text_hover[0] += (f32::from(title.hovered) - self.pill.text_hover[0]) * hover_blend;
 
-        let arrows = [-1.0f32, 1.0].map(|side| {
+        let today = Zoned::now().date();
+        let month = today
+            .first_of_month()
+            .saturating_add(Span::new().months(self.month_offset));
+        let title_hover = self.pill.text_hover[0];
+        text.centered(
+            &month.strftime("%B %Y").to_string(),
+            TITLE_STYLE
+                .scaled(1.0 + title_hover * 0.2)
+                .with_weight_mix(0.5 + title_hover * 0.5),
+            TITLE,
+            1.0,
+        );
+
+        for (side, glyph) in [(-1.0f32, "<"), (1.0, ">")] {
             let position = Vec2::new(
                 WIDTH * 0.5 + side * (WIDTH * 0.5 - UNIT * 7.0) * reveal,
                 TITLE.y - (1.0 - reveal) * UNIT * 3.0,
@@ -693,89 +662,45 @@ impl TempestasPass {
             if response.clicked {
                 self.month_offset = (self.month_offset + side as i32).clamp(-1200, 1200);
             }
-            let index = usize::from(side > 0.0) + 1;
-            self.pill.text_hover[index] +=
-                (f32::from(response.hovered) - self.pill.text_hover[index]) * hover_blend;
-            position
-        });
-
-        let today = Zoned::now().date();
-        let month = today
-            .first_of_month()
-            .saturating_add(Span::new().months(self.month_offset));
-        let title_hover = self.pill.text_hover[0];
-        let expansion = self.pill.calendar_expansion;
-        text.centered(
-            &month.strftime("%B %Y").to_string(),
-            TITLE_STYLE
-                .scaled(1.0 + title_hover * 0.2)
-                .with_weight_mix(0.5 + title_hover * 0.5),
-            TITLE,
-            text::COLOR.extend(reveal_progress(expansion, TITLE.y)),
-        );
-        for (index, (content, position)) in ["<", ">"].into_iter().zip(arrows).enumerate() {
-            let hover = self.pill.text_hover[index + 1];
-            text.centered(
-                content,
-                TITLE_STYLE
-                    .scaled(1.0 + hover * 0.35)
-                    .with_weight_mix(0.5 + hover * 0.5),
-                position,
-                text::COLOR.extend(reveal_progress(expansion, TITLE.y)),
-            );
+            let hover = &mut self.pill.text_hover[usize::from(side > 0.0) + 1];
+            *hover += (f32::from(response.hovered) - *hover) * hover_blend;
+            let style = TITLE_STYLE
+                .scaled(1.0 + *hover * 0.35)
+                .with_weight_mix(0.5 + *hover * 0.5);
+            text.centered(glyph, style, position, 1.0);
         }
 
+        // The hovered forecast column takes over the details line while the pointer is on it.
         let forecasts = [&self.hourly[..], &self.daily[..]];
-        let hovered_forecast = if self.pill.calendar_expansion > 0.01 {
-            forecasts.into_iter().enumerate().find_map(|(row, forecasts)| {
-                let (row_origin, size) = forecast_row(height, row as f32);
-                let column_width = size.x / forecasts.len() as f32;
-                (0..forecasts.len()).find_map(|column| {
-                    let x = origin.x + row_origin.x + column as f32 * column_width;
-                    let rect = Rect::new(
-                        x,
-                        bounds.y1 + row_origin.y,
-                        x + column_width,
-                        bounds.y1 + row_origin.y + size.y,
-                    );
-                    interaction
-                        .contains(rect)
-                        .then(|| forecasts[column].hover_text.as_str())
-                })
-            })
-        } else {
-            None
-        };
-        let details = Vec2::new(FORECAST_X + WIDTH * 0.5, TITLE.y);
+        let hovered = forecasts.into_iter().enumerate().find_map(|(row, items)| {
+            let (row_origin, size) = forecast_row(height, row as f32);
+            let left = origin.x + row_origin.x;
+            let top = bounds.y1 + row_origin.y;
+            if !interaction.contains(Rect::new(left, top, left + size.x, top + size.y)) {
+                return None;
+            }
+            let column = ((interaction.pointer.x - left) / size.x * items.len() as f32) as usize;
+            Some(items[column.min(items.len() - 1)].hover_text.as_str())
+        });
         text.centered(
-            hovered_forecast.unwrap_or(&self.details),
+            hovered.unwrap_or(&self.details),
             DETAILS_STYLE,
-            details,
-            text::COLOR.extend(reveal_progress(expansion, details.y)),
+            Vec2::new(FORECAST_X + WIDTH * 0.5, TITLE.y),
+            1.0,
         );
 
-        for (row, forecasts) in forecasts.into_iter().enumerate() {
+        for (row, items) in forecasts.into_iter().enumerate() {
             let center = forecast_center(height, row as f32);
-            let opacity = reveal_progress(expansion, center);
-            for (column, forecast) in forecasts.iter().enumerate() {
-                let x = FORECAST_X + (column as f32 + 0.5) * WIDTH / forecasts.len() as f32;
-                text.pair(
-                    [&forecast.text[0], &forecast.text[1]],
-                    DETAILS_STYLE,
-                    vec2(x, center),
-                    GAP,
-                    [opacity; 2],
-                );
+            for (column, forecast) in items.iter().enumerate() {
+                let x = FORECAST_X + (column as f32 + 0.5) * WIDTH / items.len() as f32;
+                let [primary, secondary] = &forecast.text;
+                text.pair([primary, secondary], DETAILS_STYLE, vec2(x, center), GAP, 1.0);
             }
         }
 
         for (column, weekday) in WEEKDAYS.iter().enumerate() {
-            text.centered(
-                weekday,
-                DETAILS_STYLE,
-                Vec2::new(grid_cell(column).x, WEEKDAY_Y),
-                text::COLOR.extend(reveal_progress(expansion, WEEKDAY_Y) * 0.75),
-            );
+            let position = Vec2::new(grid_cell(column).x, WEEKDAY_Y);
+            text.centered(weekday, DETAILS_STYLE, position, 0.75);
         }
 
         let grid_start = month.saturating_sub(Span::new().days(month.weekday().to_monday_zero_offset()));
@@ -783,39 +708,30 @@ impl TempestasPass {
             let date = grid_start.saturating_add(Span::new().days(index as i64));
             let mut label = ArrayString::<2>::new();
             write!(label, "{}", date.day()).unwrap();
-            let today = date == today;
-            let (color, style) = if today {
-                (vec3(1.0, 0.68, 0.68), TextStyle::new(16.0, 900.0))
-            } else {
-                (text::COLOR, TextStyle::new(16.0, 700.0))
-            };
-            let month_opacity = if date.month() == month.month() { 1.0 } else { 0.32 };
-            let position = grid_cell(index);
-            text.centered(
+            let is_today = date == today;
+            text.colored(
                 &label,
-                style,
-                position,
-                color.extend(reveal_progress(expansion, position.y) * month_opacity),
+                TextStyle::new(16.0, if is_today { 900.0 } else { 700.0 }),
+                grid_cell(index),
+                if is_today {
+                    vec3(1.0, 0.68, 0.68)
+                } else {
+                    text::COLOR
+                },
+                if date.month() == month.month() { 1.0 } else { 0.32 },
             );
         }
 
         let now = Timestamp::now();
         for (index, timezone) in self.timezones.iter().enumerate() {
-            let center = world_clock_center(height, index);
             let local = now.to_zoned(timezone.timezone.clone());
             let mut clock = ArrayString::<64>::new();
             write!(clock, "{} · {}", timezone.label, local.strftime("%H:%M")).unwrap();
-            let opacity = reveal_progress(expansion, center);
-            text.pair(
-                [&clock, &timezone.weather],
-                CLOCK_STYLE,
-                vec2(FORECAST_X + WIDTH * 0.5, center),
-                GAP * 0.7,
-                [opacity, opacity * 0.75],
-            );
+            let center = vec2(FORECAST_X + WIDTH * 0.5, world_clock_center(height, index));
+            text.pair([&clock, &timezone.weather], CLOCK_STYLE, center, GAP * 0.7, 0.75);
         }
 
-        for rect in Self::visible_rects(x, height, self.pill.calendar_expansion) {
+        for rect in surfaces {
             interaction.input_region(rect);
         }
     }
@@ -854,6 +770,7 @@ impl TempestasPass {
             vertex,
             frame,
             expanded_x(pill.x, expansion),
+            PANEL_START,
             popup_size(expansion),
         );
         Vertex {
@@ -868,43 +785,64 @@ impl TempestasPass {
         #[gpu(shared)] frame: FrameData,
         #[gpu(instance)] pill: WeatherSurface,
         #[gpu(resource)] text_lines: &[text::Line],
+        #[gpu(resource)] text_cells: &[u32],
         #[gpu(resource)] placed_glyphs: &[text::PlacedGlyph],
         #[gpu(resource)] glyphs: &[text::Glyph],
         #[gpu(resource)] edges: &[text::Edge],
     ) -> Vec4 {
-        let (_, body_local, body_size, body_surface) = pill_fragment(pixel, frame, pill.x, WIDTH);
+        let (_, body_local, body_size, body_surface) =
+            pill_fragment(pixel, frame, pill.x, PANEL_START, WIDTH);
         let expansion = weather.w;
-        let main_surface = main_surface(pixel, frame, pill.x, expansion, body_surface);
         let interaction = pill_interaction(pixel, frame);
-        let main_surface_distance = interaction.expand(main_surface);
 
-        let row = sample_forecast(pixel, frame, pill);
-        let row_surface_distance = interaction.expand(row.surface);
-        let surface_distance = main_surface_distance.min(row_surface_distance);
-        let mask = sdf_coverage(surface_distance);
-        let alpha = mask.max((-surface_distance.max(0.0) * 0.3).exp() * 0.16);
+        // The pill merged with its popup is the whole shape; forecast rows only pick a scene.
+        let surface_distance =
+            interaction.expand(main_surface(pixel, frame, pill.x, expansion, body_surface));
+        let (_, mask, alpha) = PillInteraction::shade(surface_distance);
         if alpha <= 1.0 / 1024.0 {
             kill();
         }
 
+        let row = sample_forecast(pixel, frame, pill);
+        let row_surface_distance = interaction.expand(row.surface);
         let current = pill.hourly_conditions[0];
         let edge = ((body_local.x / body_size.x).clamp(0.0, 1.0) - 0.5).abs();
-        let body_conditions = current.lerp(pill.hourly_conditions[1], smoothstep(0.2, 0.25, edge));
+        let body_conditions = current.lerp(pill.hourly_conditions[1], smoothstep(0.05, 0.25, edge));
         let main_conditions = body_conditions.lerp(current, expansion);
-        let main_refracted = interaction.refract(body_local, body_size, main_surface_distance);
-        let row_refracted = if row.reveal > 0.001 {
-            interaction.refract(row.local, row.size, row_surface_distance)
+        let main_refracted = interaction.refract(body_local, body_size, surface_distance);
+        let row_refracted = interaction.refract(row.local, row.size, row_surface_distance);
+        let row_blend = sdf_coverage(row_surface_distance);
+        let in_row = row_blend > 0.001;
+        let (sample, width, distance, phase, conditions) = if in_row {
+            (
+                row_refracted * row.size,
+                row.size.x,
+                row_surface_distance,
+                sky_phase(row.sun_height),
+                row.conditions,
+            )
         } else {
-            main_refracted
+            (
+                main_refracted * body_size,
+                body_size.x,
+                surface_distance,
+                sky_phase(weather.y),
+                main_conditions,
+            )
         };
-        let row_blend = sdf_coverage(row_surface_distance) * row.reveal;
-        let sample = (main_refracted * body_size).lerp(row_refracted * row.size, row_blend);
-        let scene_width = body_size.x + (row.size.x - body_size.x) * row_blend;
-        let scene_distance = main_surface_distance
-            + (row_surface_distance.min(1000.0) - main_surface_distance) * row_blend;
-        let conditions = main_conditions.lerp(row.conditions, row_blend);
-        let phase = sky_phase(weather.y).lerp(sky_phase(row.sun_height), row_blend);
-        let mut color = scene(frame, sample, scene_width, scene_distance, phase, conditions);
+        let mut color = scene(frame, sample, width, distance, phase, conditions);
+        // Only the antialiased boundary needs both nonlinear scene evaluations.
+        if in_row && row_blend < 0.999 {
+            let main_color = scene(
+                frame,
+                main_refracted * body_size,
+                body_size.x,
+                surface_distance,
+                sky_phase(weather.y),
+                main_conditions,
+            );
+            color = main_color.lerp(color, row_blend);
+        }
         if body_surface.distance < 1.0 {
             color = color.lerp(
                 sun_layer(
@@ -919,10 +857,23 @@ impl TempestasPass {
             );
         }
         color = color.lerp(color * 1.5 + 0.1, interaction.ripple_flash);
-        let label = text_lines[text_line_index(pixel, frame, pill)];
-        let label_color = label.color.to_vec4();
-        let text_alpha = text::line_alpha(label, placed_glyphs, glyphs, edges, pixel) * label_color.w;
-        color = color * (1.0 - text_alpha) + label_color.truncate() * text_alpha;
+
+        // Both labels a grid cell can name, so overlapping padded bounds never drop a glyph.
+        let (grid_origin, cell_size) = text_grid(frame, pill.x);
+        let cell = ((pixel - grid_origin) / cell_size).floor().clamp(
+            Vec2::ZERO,
+            vec2(TEXT_COLUMNS as f32 - 1.0, TEXT_ROWS as f32 - 1.0),
+        );
+        let names = *isthmus::reference(text_cells, (cell.y * TEXT_COLUMNS as f32 + cell.x) as usize);
+        let mut slot = 0;
+        while slot < 2 {
+            let label = *isthmus::reference(text_lines, ((names >> (slot * 16)) & 0xffff) as usize);
+            let label_color = label.color.to_vec4();
+            let text_alpha =
+                text::line_alpha(label, placed_glyphs, glyphs, edges, pixel) * label_color.w;
+            color = color * (1.0 - text_alpha) + label_color.truncate() * text_alpha;
+            slot += 1;
+        }
         (color * mask).extend(alpha)
     }
 }
@@ -930,6 +881,7 @@ impl TempestasPass {
 #[cfg(feature = "cpu")]
 mod monitor {
     use super::{ForecastItem, HOURLY_STEP_HOURS, ORDINALS, TempestasPass, WeatherCondition};
+    use crate::app::{AppUpdater, send_update};
     use ashpd::desktop::location::{Accuracy, CreateSessionOptions, LocationProxy, StartOptions};
     use futures_util::StreamExt;
     use jiff::{
@@ -943,13 +895,12 @@ mod monitor {
         thread,
         time::Duration,
     };
-    use tracing::{info, warn};
+    use tracing::warn;
+    use ureq::Agent;
 
     const WEATHER_FIELDS: &str = "temperature_2m,weather_code";
     const REFRESH_INTERVAL: Duration = Duration::from_mins(15);
     const RETRY_INTERVAL: Duration = Duration::from_secs(30);
-
-    pub(super) struct Update(Vec<(usize, Forecast)>);
 
     #[derive(Deserialize)]
     struct Forecast {
@@ -1041,21 +992,14 @@ mod monitor {
         99 => "Thunderstorm Heavy Hail" { rain: 0.85, lightning: 1.0, hail: 1.0 };
     }
 
-    pub(super) fn start(timezones: Vec<String>) -> Receiver<Update> {
-        let (forecast_tx, forecast_updates) = mpsc::channel();
-        let locations = location_monitor();
-        thread::spawn(move || refresh_loop(&timezones, &forecast_tx, &locations));
-        forecast_updates
-    }
-
-    fn location_monitor() -> Receiver<[f32; 2]> {
-        let (sender, receiver) = mpsc::channel();
+    pub(super) fn start(timezones: Vec<String>, updater: AppUpdater, http: Agent) {
+        let (location_tx, locations) = mpsc::channel();
         thread::spawn(move || {
-            if let Err(error) = pollster::block_on(stream_location(sender)) {
+            if let Err(error) = pollster::block_on(stream_location(location_tx)) {
                 warn!(%error, "Location portal unavailable");
             }
         });
-        receiver
+        thread::spawn(move || refresh_loop(&http, &timezones, &updater, &locations));
     }
 
     async fn stream_location(sender: Sender<[f32; 2]>) -> Result<(), String> {
@@ -1086,23 +1030,15 @@ mod monitor {
     }
 
     fn refresh_loop(
+        http: &Agent,
         timezones: &[String],
-        forecast_tx: &Sender<Update>,
+        updater: &AppUpdater,
         locations_rx: &Receiver<[f32; 2]>,
     ) {
         let mut locations = vec![None; timezones.len() + 1];
-        let mut portal_location = false;
         if let Some(timezone) = TimeZone::system().iana_name() {
-            match geocode(timezone) {
-                Ok(location) => {
-                    info!(
-                        timezone,
-                        latitude = location[0],
-                        longitude = location[1],
-                        "Using timezone fallback weather location"
-                    );
-                    locations[0] = Some(location);
-                }
+            match geocode(http, timezone) {
+                Ok(location) => locations[0] = Some(location),
                 Err(error) => warn!(%error, timezone, "Failed to locate system timezone"),
             }
         } else {
@@ -1111,14 +1047,12 @@ mod monitor {
         loop {
             while let Ok(location) = locations_rx.try_recv() {
                 locations[0] = Some(location);
-                portal_location = true;
             }
             let mut retry = false;
-            let mut forecasts = Vec::with_capacity(locations.len());
             let mut ready = Vec::with_capacity(locations.len());
             for (index, location) in locations.iter_mut().enumerate() {
                 if index > 0 && location.is_none() {
-                    *location = geocode(&timezones[index - 1])
+                    *location = geocode(http, &timezones[index - 1])
                         .inspect_err(|error| {
                             retry = true;
                             warn!(%error, timezone = timezones[index - 1], "Failed to locate timezone");
@@ -1131,48 +1065,37 @@ mod monitor {
                 };
                 ready.push((index, [latitude, longitude]));
             }
-            match fetch(&ready) {
-                Ok(results) => {
-                    for ((index, [latitude, longitude]), forecast) in ready.into_iter().zip(results) {
-                        if index == 0 {
-                            info!(
-                                source = if portal_location {
-                                    "portal"
-                                } else {
-                                    "timezone fallback"
-                                },
-                                latitude,
-                                longitude,
-                                temperature = forecast.current.temperature_2m,
-                                "Current weather refreshed"
-                            );
-                        }
-                        forecasts.push((index, forecast));
-                    }
-                }
+            let forecasts = match fetch(http, &ready) {
+                Ok(results) => ready
+                    .into_iter()
+                    .zip(results)
+                    .map(|((index, _), forecast)| (index, forecast))
+                    .collect(),
                 Err(error) => {
                     retry = true;
                     warn!(%error, "Failed to refresh weather");
+                    Vec::new()
                 }
-            }
-            if !forecasts.is_empty() && forecast_tx.send(Update(forecasts)).is_err() {
-                return;
+            };
+            if !forecasts.is_empty()
+                && !send_update(updater, move |app| {
+                    if let Some(program) = app.render.program.as_mut()
+                        && let Some(pass) = program.passes_mut().tempestas.as_mut()
+                    {
+                        for (index, forecast) in forecasts {
+                            apply_forecast(pass, index, &forecast);
+                        }
+                    }
+                })
+            {
+                break;
             }
             let interval = if retry { RETRY_INTERVAL } else { REFRESH_INTERVAL };
             match locations_rx.recv_timeout(interval) {
-                Ok(location) => {
-                    locations[0] = Some(location);
-                    portal_location = true;
-                }
+                Ok(location) => locations[0] = Some(location),
                 Err(mpsc::RecvTimeoutError::Timeout) => {}
                 Err(mpsc::RecvTimeoutError::Disconnected) => thread::sleep(interval),
             }
-        }
-    }
-
-    pub(super) fn apply(pass: &mut TempestasPass, Update(forecasts): Update) {
-        for (index, forecast) in forecasts {
-            apply_forecast(pass, index, &forecast);
         }
     }
 
@@ -1183,6 +1106,7 @@ mod monitor {
             hourly,
             daily,
         } = forecast;
+        // Index 0 is the local forecast; the rest fill in each configured world clock.
         if let Some(timezone) = index
             .checked_sub(1)
             .and_then(|index| pass.timezones.get_mut(index))
@@ -1204,19 +1128,15 @@ mod monitor {
         pass.pill.hourly_start = TempestasPass::hour_of_day(hourly.time[0]);
         pass.hourly = from_fn(|index| {
             let source = index * HOURLY_STEP_HOURS;
-            let time = hourly.time[source];
             let (description, conditions) = weather(hourly.weather_code[source]);
             pass.pill.hourly_conditions[index] = conditions;
+            let (time, degrees) = (
+                hourly.time[source].strftime("%H:%M").to_string(),
+                format!("{:.0}°", hourly.temperature_2m[source]),
+            );
             ForecastItem {
-                text: [
-                    time.strftime("%H:%M").to_string(),
-                    format!("{:.0}°", hourly.temperature_2m[source]),
-                ],
-                hover_text: format!(
-                    "{} {description} {:.0}°",
-                    time.strftime("%H:%M"),
-                    hourly.temperature_2m[source]
-                ),
+                hover_text: format!("{time} {description} {degrees}"),
+                text: [time, degrees],
             }
         });
         pass.pill.hourly_conditions[0] = weather(current.weather_code).1;
@@ -1224,27 +1144,19 @@ mod monitor {
             let day = index + 1;
             let date = daily.sunrise[day];
             let number = date.day();
-            let suffix = if (11..=13).contains(&(number % 100)) {
-                "th"
-            } else {
-                ORDINALS[(number % 10) as usize]
+            let suffix = match number % 100 {
+                11..=13 => "th",
+                _ => ORDINALS[(number % 10) as usize],
             };
             let (description, conditions) = weather(daily.weather_code[day]);
             pass.pill.daily_conditions[index] = conditions;
+            let range = format!(
+                "{:.0}°/{:.0}°",
+                daily.temperature_2m_max[day], daily.temperature_2m_min[day]
+            );
             ForecastItem {
-                text: [
-                    date.strftime("%a").to_string(),
-                    format!(
-                        "{:.0}°/{:.0}°",
-                        daily.temperature_2m_max[day], daily.temperature_2m_min[day]
-                    ),
-                ],
-                hover_text: format!(
-                    "{}{suffix} {description} {:.0}°/{:.0}°",
-                    date.strftime("%A %-d"),
-                    daily.temperature_2m_max[day],
-                    daily.temperature_2m_min[day]
-                ),
+                hover_text: format!("{}{suffix} {description} {range}", date.strftime("%A %-d")),
+                text: [date.strftime("%a").to_string(), range],
             }
         });
         pass.details = format!(
@@ -1255,12 +1167,13 @@ mod monitor {
         );
     }
 
-    fn geocode(timezone: &str) -> Result<[f32; 2], String> {
+    fn geocode(http: &Agent, timezone: &str) -> Result<[f32; 2], String> {
         let city = timezone.rsplit('/').next().unwrap_or(timezone).replace('_', " ");
         let query: String = form_urlencoded::byte_serialize(city.as_bytes()).collect();
-        let results: SearchResults = get_json(format!(
-            "https://geocoding-api.open-meteo.com/v1/search?name={query}&count=10"
-        ))?;
+        let results: SearchResults = get_json(
+            http,
+            format!("https://geocoding-api.open-meteo.com/v1/search?name={query}&count=10"),
+        )?;
         let place = results
             .results
             .iter()
@@ -1270,7 +1183,7 @@ mod monitor {
         Ok([place.latitude, place.longitude])
     }
 
-    fn fetch(locations: &[(usize, [f32; 2])]) -> Result<Vec<Forecast>, String> {
+    fn fetch(http: &Agent, locations: &[(usize, [f32; 2])]) -> Result<Vec<Forecast>, String> {
         if locations.is_empty() {
             return Ok(Vec::new());
         }
@@ -1288,14 +1201,14 @@ mod monitor {
             "https://api.open-meteo.com/v1/forecast?latitude={latitude}&longitude={longitude}&current={WEATHER_FIELDS},relative_humidity_2m,wind_speed_10m&hourly={WEATHER_FIELDS}&forecast_hours=24&daily=weather_code,temperature_2m_max,temperature_2m_min,sunrise,sunset&temperature_unit=celsius&timezone=auto&forecast_days=6"
         );
         if locations.len() == 1 {
-            get_json(url).map(|forecast| vec![forecast])
+            get_json(http, url).map(|forecast| vec![forecast])
         } else {
-            get_json(url)
+            get_json(http, url)
         }
     }
 
-    fn get_json<T: DeserializeOwned>(url: String) -> Result<T, String> {
-        let mut response = ureq::get(url).call().map_err(|error| error.to_string())?;
+    fn get_json<T: DeserializeOwned>(http: &Agent, url: String) -> Result<T, String> {
+        let mut response = http.get(url).call().map_err(|error| error.to_string())?;
         response.body_mut().read_json().map_err(|error| error.to_string())
     }
 }

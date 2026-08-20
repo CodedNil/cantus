@@ -244,15 +244,9 @@ fn expand_pass(file: &mut File, options: &PassOptions, pass_type: &Type) -> SynR
     };
     let model = PassModel::parse(&vertex, &fragment)?;
     let pass = pass_declaration(&model, options, pass_type, &shader_module);
-    let (vertex_impl, vertex_entry) =
-        vertex_functions(vertex, &model.vertex, &varying_fields, model.carry_instance)?;
-    let (fragment_impl, fragment_entry) = fragment_functions(
-        fragment,
-        &model.fragment,
-        &varying_fields,
-        &varying_type,
-        model.carry_instance,
-    )?;
+    let (vertex_impl, vertex_entry) = vertex_functions(vertex, &model, &varying_fields)?;
+    let (fragment_impl, fragment_entry) =
+        fragment_functions(fragment, &model, &varying_fields, &varying_type)?;
     let remaining = &file.items;
     Ok(quote! {
         #pass
@@ -306,7 +300,7 @@ fn pass_declaration(
         let binding_names = names.clone();
         quote! {
             let (#(#names,)*) = resources;
-            std::vec![#(#isthmus::__private::Binding::from(#binding_names)),*]
+            std::vec![#(#isthmus::__private::ResourceBinding::binding(#binding_names)),*]
         }
     };
     let topology = format_ident!("{}", options.topology);

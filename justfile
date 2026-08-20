@@ -5,3 +5,6 @@ shader:
 
 run: shader
     cargo run -p cantus --features generate-nix
+
+launcher:
+    ./target/debug/cantus --launcher

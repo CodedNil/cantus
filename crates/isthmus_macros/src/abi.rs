@@ -1,5 +1,6 @@
 use crate::{
     isthmus_path,
+    model::PassModel,
     syntax::{GpuRole, StageContract, StageParameter},
 };
 use proc_macro2::TokenStream as TokenStream2;
@@ -115,10 +116,11 @@ fn align_varying_hygiene(expression: &mut Expr, fields: &[(Ident, Type, bool)]) 
 
 pub fn vertex_functions(
     mut function: ItemFn,
-    contract: &StageContract,
+    model: &PassModel,
     fields: &[(Ident, Type, bool)],
-    carry_instance: bool,
 ) -> SynResult<(ItemFn, TokenStream2)> {
+    let contract = &model.vertex;
+    let carry_instance = model.carries_instance();
     let arguments = argument_names(&function.sig.inputs)?;
     let mut wrapper_inputs = function.sig.inputs.iter().cloned().collect::<Vec<_>>();
     let implicit_instance = contract.has_implicit(GpuRole::Instance);
@@ -196,11 +198,12 @@ pub fn vertex_functions(
 
 pub fn fragment_functions(
     mut function: ItemFn,
-    contract: &StageContract,
+    model: &PassModel,
     fields: &[(Ident, Type, bool)],
     varying: &Type,
-    carry_instance: bool,
 ) -> SynResult<(ItemFn, TokenStream2)> {
+    let contract = &model.fragment;
+    let carry_instance = model.carries_instance();
     let first = function
         .sig
         .inputs

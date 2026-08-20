@@ -5,11 +5,13 @@ use crate::{
         send_update,
     },
     render::{
+        PANEL_START,
         lyrics::EXTENSION as LYRICS_EXTENSION,
-        shared::PANEL_START,
-        status::{AUDIO_SPECTRUM_BANDS, BATTERY_HIDDEN, ProcessorStatus},
+        status::{AUDIO_SPECTRUM_BANDS, BATTERY_HIDDEN},
     },
 };
+use ashpd::zbus::Connection as DbusConnection;
+use freedesktop_desktop_entry::{desktop_entries, get_languages_from_env};
 use isthmus::glam::vec2;
 use isthmus::wgpu::{
     Surface, SurfaceTargetUnsafe,
@@ -18,28 +20,35 @@ use isthmus::wgpu::{
 use microfft::real::rfft_1024;
 use serde_json::Value;
 use std::{
-    collections::HashMap,
+    collections::{HashMap, HashSet},
+    env,
     ffi::c_void,
-    fs,
-    io::{self, Read},
+    fs::{self, File},
+    io::{self, Read, Write},
+    os::{fd::AsFd, unix::net::UnixDatagram},
     path::{Path, PathBuf},
-    process::{Command, Stdio},
+    process::{self, Command, Stdio},
     ptr::NonNull,
     sync::{
         Arc,
         atomic::{AtomicU32, Ordering},
     },
     thread,
-    time::Duration,
+    time::{Duration, Instant},
 };
 use sysinfo::{Gpus, System};
 use tracing::warn;
 use wayland_client::{
-    Connection, Dispatch, Proxy, QueueHandle, WEnum, delegate_noop,
+    Connection, Dispatch, Proxy, QueueHandle, WEnum, delegate_noop, event_created_child,
     globals::{GlobalListContents, registry_queue_init},
     protocol::{
         wl_callback::{self, WlCallback},
         wl_compositor::WlCompositor,
+        wl_data_device::{self, WlDataDevice},
+        wl_data_device_manager::WlDataDeviceManager,
+        wl_data_offer::{self, WlDataOffer},
+        wl_data_source::{self, WlDataSource},
+        wl_keyboard::{self, KeyState, KeymapFormat, WlKeyboard},
         wl_output::{self, WlOutput},
         wl_pointer::{self, WlPointer},
         wl_region::WlRegion,
@@ -57,40 +66,170 @@ use wayland_protocols::wp::{
 };
 use wayland_protocols_wlr::layer_shell::v1::client::{
     zwlr_layer_shell_v1::{Layer as LayerStyle, ZwlrLayerShellV1},
-    zwlr_layer_surface_v1::{self, Anchor as LayerAnchor, ZwlrLayerSurfaceV1},
+    zwlr_layer_surface_v1::{self, Anchor as LayerAnchor, KeyboardInteractivity, ZwlrLayerSurfaceV1},
 };
+use xkbcommon::xkb;
 
-pub const STATUS_SAMPLE_INTERVAL: Duration = Duration::from_millis(500);
 const AUDIO_SAMPLE_RATE: u32 = 48_000;
 const AUDIO_WINDOW_SIZE: usize = 1024;
 const AUDIO_BAND_EDGES: [f32; AUDIO_SPECTRUM_BANDS + 1] =
     [60.0, 120.0, 250.0, 500.0, 1_000.0, 2_000.0, 4_000.0, 12_000.0];
+const LAUNCHER_SOCKET_NAME: &str = "cantus-launcher.sock";
+const TEXT_MIME: &str = "text/plain;charset=utf-8";
 
-pub(crate) fn start_status_monitor(
-    updater: AppUpdater,
-    spectrum: Arc<[AtomicU32; AUDIO_SPECTRUM_BANDS]>,
-) {
-    let volume_updater = updater.clone();
-    thread::spawn(move || monitor_playback(&spectrum));
-    thread::spawn(move || monitor_volume(&volume_updater));
-    thread::spawn(move || monitor_status(&updater));
+/// One launchable desktop entry.
+pub struct DesktopApp {
+    pub name: String,
+    pub exec: String,
+    pub comment: String,
+    pub icon_path: Option<PathBuf>,
+    pub action: Option<(String, String)>,
+    pub icon_layer: i32,
 }
 
-pub fn set_volume(volume: f32) {
-    let volume = format!("{volume:.3}");
-    if let Err(error) = Command::new("wpctl")
-        .args(["set-volume", "@DEFAULT_AUDIO_SINK@", &volume])
-        .spawn()
-    {
-        warn!(%error, "Failed to set PipeWire volume");
+/// Host integration used by app and render code.
+pub trait Platform {
+    const STATUS_SAMPLE_INTERVAL: Duration;
+
+    fn start_status_monitor(updater: AppUpdater, spectrum: Arc<[AtomicU32; AUDIO_SPECTRUM_BANDS]>);
+    fn set_volume(volume: f32);
+    fn run_power_action(action: usize);
+    fn desktop_apps() -> Vec<DesktopApp>;
+    fn spawn(exec: &str);
+    fn start_launcher_listener(updater: &AppUpdater);
+    fn trigger_launcher() -> !;
+}
+
+/// The Linux desktop [`Platform`].
+pub struct Linux;
+pub type Current = Linux;
+
+impl Platform for Linux {
+    const STATUS_SAMPLE_INTERVAL: Duration = Duration::from_millis(500);
+
+    fn start_status_monitor(updater: AppUpdater, spectrum: Arc<[AtomicU32; AUDIO_SPECTRUM_BANDS]>) {
+        let volume_updater = updater.clone();
+        thread::spawn(move || monitor_playback(&spectrum));
+        thread::spawn(move || monitor_volume(&volume_updater));
+        thread::spawn(move || monitor_status(&updater));
+    }
+
+    fn set_volume(volume: f32) {
+        let volume = format!("{volume:.3}");
+        if let Err(error) = Command::new("wpctl")
+            .args(["set-volume", "@DEFAULT_AUDIO_SINK@", &volume])
+            .spawn()
+        {
+            warn!(%error, "Failed to set PipeWire volume");
+        }
+    }
+
+    /// Calls logind directly, which is what `systemctl poweroff` does under the hood.
+    fn run_power_action(action: usize) {
+        let method = ["PowerOff", "Reboot"][action];
+        thread::spawn(move || {
+            let call = async {
+                DbusConnection::system()
+                    .await?
+                    .call_method(
+                        Some("org.freedesktop.login1"),
+                        "/org/freedesktop/login1",
+                        Some("org.freedesktop.login1.Manager"),
+                        method,
+                        &(false,),
+                    )
+                    .await
+            };
+            if let Err(error) = pollster::block_on(call) {
+                warn!(%error, method, "Failed to run held power action");
+            }
+        });
+    }
+
+    fn desktop_apps() -> Vec<DesktopApp> {
+        let mut seen = HashSet::new();
+        let locales = get_languages_from_env();
+        desktop_entries(&locales)
+            .into_iter()
+            .filter(|entry| seen.insert(entry.id().to_owned()))
+            .filter(|entry| !entry.no_display() && !entry.hidden() && !entry.terminal())
+            .filter_map(|entry| {
+                let action = entry
+                    .actions()
+                    .and_then(|actions| actions.into_iter().find(|action| !action.is_empty()))
+                    .and_then(|action| {
+                        entry
+                            .action_entry_localized(action, "Name", &locales)
+                            .zip(entry.action_entry(action, "Exec"))
+                    })
+                    .map(|(name, exec)| (name.into_owned(), exec.to_owned()));
+                Some(DesktopApp {
+                    name: entry.name(&locales)?.into_owned(),
+                    exec: entry.exec()?.to_owned(),
+                    comment: entry.comment(&locales).unwrap_or_default().into_owned(),
+                    icon_path: entry.icon().and_then(resolve_icon),
+                    action,
+                    icon_layer: -1,
+                })
+            })
+            .collect()
+    }
+
+    /// Strips desktop-entry field codes (`%f %F %u %U %i %c %k`) and launches the command, detached.
+    fn spawn(exec: &str) {
+        let mut args = exec.split_whitespace().filter(|token| !token.starts_with('%'));
+        let Some(program) = args.next() else { return };
+        if let Err(error) = Command::new(program)
+            .args(args)
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+        {
+            warn!(%error, program, "Failed to launch application");
+        }
+    }
+
+    fn start_launcher_listener(updater: &AppUpdater) {
+        let path = launcher_socket_path();
+        let _ = fs::remove_file(&path);
+        let socket = match UnixDatagram::bind(&path) {
+            Ok(socket) => socket,
+            Err(error) => return warn!(%error, ?path, "Failed to bind launcher toggle socket"),
+        };
+        let updater = updater.clone();
+        thread::spawn(move || {
+            let mut buffer = [0u8; 1];
+            while socket.recv(&mut buffer).is_ok() && send_update(&updater, |app| app.launcher.toggle())
+            {
+            }
+        });
+    }
+
+    fn trigger_launcher() -> ! {
+        let path = launcher_socket_path();
+        if let Err(error) = UnixDatagram::unbound().and_then(|socket| socket.send_to(&[0], &path)) {
+            eprintln!(
+                "Failed to reach a running Cantus instance at {}: {error}",
+                path.display()
+            );
+            process::exit(1);
+        }
+        process::exit(0);
     }
 }
 
-pub fn run_power_action(action: usize) {
-    let command = ["poweroff", "reboot"][action];
-    if let Err(error) = Command::new("systemctl").arg(command).spawn() {
-        warn!(%error, %command, "Failed to run held power action");
+fn launcher_socket_path() -> PathBuf {
+    let runtime_dir = env::var_os("XDG_RUNTIME_DIR").unwrap_or_else(|| "/tmp".into());
+    PathBuf::from(runtime_dir).join(LAUNCHER_SOCKET_NAME)
+}
+
+fn resolve_icon(icon: &str) -> Option<PathBuf> {
+    let path = Path::new(icon);
+    if path.is_absolute() {
+        return path.exists().then(|| path.to_owned());
     }
+    freedesktop_icons::lookup(icon).with_size(64).find()
 }
 
 fn monitor_status(updater: &AppUpdater) {
@@ -107,45 +246,30 @@ fn monitor_status(updater: &AppUpdater) {
         if let Some(gpus) = &mut gpus {
             gpus.refresh(false);
         }
-        let cpu = [
+        let [cpu_temperature, cpu_usage, cpu_memory] = [
             system.cpus().first().map_or(0.0, sysinfo::Cpu::temperature),
             system.global_cpu_usage() / 100.0,
             system.used_memory() as f32 / system.total_memory().max(1) as f32,
         ];
         let gpu = gpus.as_ref().and_then(gpu_sample);
-        let battery_level = battery
-            .as_deref()
-            .and_then(battery_level)
-            .map_or(BATTERY_HIDDEN, |level| {
-                if battery.as_deref().is_some_and(battery_charging) {
-                    -level.max(f32::EPSILON)
-                } else if level >= 0.995 {
-                    // Hidden while idle at full charge; layout reads this once per poll, not per frame.
-                    BATTERY_HIDDEN
-                } else {
-                    level
-                }
-            });
+        let battery_level = battery_sample(battery.as_deref());
         if !send_update(updater, move |app| {
-            let status = app.render.program().passes_mut().status.as_mut().unwrap();
-            let data = &mut *status.pill;
-            apply_processor(&mut data.cpu, cpu);
-            if let Some(gpu) = gpu {
-                apply_processor(&mut data.gpu, gpu);
+            let status = app.status_pass();
+            status.temperature_targets[0] = cpu_temperature;
+            status.pill.cpu.usage.push(cpu_usage);
+            status.pill.cpu.memory.push(cpu_memory);
+            if let Some([temperature, usage, memory]) = gpu {
+                status.temperature_targets[1] = temperature;
+                status.pill.gpu.usage.push(usage);
+                status.pill.gpu.memory.push(memory);
             }
-            data.battery_level = battery_level;
-            data.history_scroll = 0.0;
+            status.pill.battery_level = battery_level;
+            status.pill.history_scroll = 0.0;
         }) {
             break;
         }
-        thread::sleep(STATUS_SAMPLE_INTERVAL);
+        thread::sleep(Linux::STATUS_SAMPLE_INTERVAL);
     }
-}
-
-fn apply_processor(status: &mut ProcessorStatus, [temperature, usage, memory]: [f32; 3]) {
-    status.temperature = temperature;
-    status.usage.push(usage);
-    status.memory.push(memory);
 }
 
 fn gpu_sample(gpus: &Gpus) -> Option<[f32; 3]> {
@@ -171,18 +295,25 @@ fn find_battery() -> Option<PathBuf> {
         })
 }
 
-fn battery_level(path: &Path) -> Option<f32> {
-    fs::read_to_string(path.join("capacity"))
-        .ok()?
-        .trim()
-        .parse::<f32>()
-        .ok()
-        .map(|level| level / 100.0)
-}
-
-fn battery_charging(path: &Path) -> bool {
-    fs::read_to_string(path.join("status"))
-        .is_ok_and(|status| status.trim().eq_ignore_ascii_case("charging"))
+/// Charge level, negated while charging, or `BATTERY_HIDDEN` with no battery or idle at full.
+fn battery_sample(path: Option<&Path>) -> f32 {
+    let Some(path) = path else {
+        return BATTERY_HIDDEN;
+    };
+    let read = |name: &str| fs::read_to_string(path.join(name));
+    let Ok(level) = read("capacity").map(|level| level.trim().parse::<f32>()) else {
+        return BATTERY_HIDDEN;
+    };
+    let Ok(level) = level.map(|level| level / 100.0) else {
+        return BATTERY_HIDDEN;
+    };
+    if read("status").is_ok_and(|status| status.trim().eq_ignore_ascii_case("charging")) {
+        -level.max(f32::EPSILON)
+    } else if level >= 0.995 {
+        BATTERY_HIDDEN
+    } else {
+        level
+    }
 }
 
 fn monitor_playback(levels: &[AtomicU32; AUDIO_SPECTRUM_BANDS]) {
@@ -244,27 +375,23 @@ fn monitor_volume(updater: &AppUpdater) {
     }
 }
 
+fn piped(command: &mut Command) -> io::Result<(process::Child, process::ChildStdout)> {
+    let mut child = command.stdout(Stdio::piped()).stderr(Stdio::null()).spawn()?;
+    let output = child
+        .stdout
+        .take()
+        .ok_or_else(|| io::Error::other("command stdout was not piped"))?;
+    Ok((child, output))
+}
+
 fn capture_volume(updater: &AppUpdater) -> io::Result<bool> {
-    let mut child = Command::new("pw-dump")
-        .args(["--monitor", "--no-colors", "--indent", "0"])
-        .stdout(Stdio::piped())
-        .stderr(Stdio::null())
-        .spawn()?;
-    let output = child.stdout.take().expect("piped PipeWire output");
+    let (mut child, output) =
+        piped(Command::new("pw-dump").args(["--monitor", "--no-colors", "--indent", "0"]))?;
     let mut state = PipeWireState::default();
     for batch in serde_json::Deserializer::from_reader(output).into_iter::<Vec<Value>>() {
         for object in batch.map_err(io::Error::other)? {
             if let Some(volume) = state.update(&object)
-                && !send_update(updater, move |app| {
-                    app.render
-                        .program()
-                        .passes_mut()
-                        .status
-                        .as_mut()
-                        .unwrap()
-                        .pill
-                        .volume = volume;
-                })
+                && !send_update(updater, move |app| app.status_pass().pill.volume = volume)
             {
                 child.kill()?;
                 child.wait()?;
@@ -277,23 +404,18 @@ fn capture_volume(updater: &AppUpdater) -> io::Result<bool> {
 }
 
 fn capture_playback(levels: &[AtomicU32; AUDIO_SPECTRUM_BANDS]) -> io::Result<()> {
-    let mut child = Command::new("pw-record")
-        .args([
-            "--properties",
-            "stream.capture.sink=true",
-            "--rate",
-            "48000",
-            "--channels",
-            "1",
-            "--format",
-            "f32",
-            "--raw",
-            "-",
-        ])
-        .stdout(Stdio::piped())
-        .stderr(Stdio::null())
-        .spawn()?;
-    let mut output = child.stdout.take().expect("piped PipeWire output");
+    let (mut child, mut output) = piped(Command::new("pw-record").args([
+        "--properties",
+        "stream.capture.sink=true",
+        "--rate",
+        &AUDIO_SAMPLE_RATE.to_string(),
+        "--channels",
+        "1",
+        "--format",
+        "f32",
+        "--raw",
+        "-",
+    ]))?;
     let mut window = [0.0; AUDIO_WINDOW_SIZE];
     loop {
         match output.read_exact(bytemuck::cast_slice_mut(&mut window)) {
@@ -333,62 +455,64 @@ pub fn run() {
     let layer_shell: ZwlrLayerShellV1 = globals
         .bind(&qhandle, 4..=4, ())
         .expect("Missing zwlr_layer_shell_v1");
-    let viewporter: Option<WpViewporter> = globals.bind(&qhandle, 1..=1, ()).ok();
-    let fractional_manager: Option<WpFractionalScaleManagerV1> = globals.bind(&qhandle, 1..=1, ()).ok();
+    let seat: WlSeat = globals.bind(&qhandle, 1..=7, ()).expect("Missing wl_seat");
 
-    let display_ptr = NonNull::new(connection.backend().display_ptr().cast::<c_void>())
-        .expect("Failed to get display pointer");
     let mut app = LayerShellApp {
         compositor: Some(compositor.clone()),
+        repeat_delay: Duration::from_millis(600),
+        repeat_interval: Duration::from_millis(40),
+        clipboard: globals
+            .bind::<WlDataDeviceManager, _, _>(&qhandle, 1..=3, ())
+            .ok()
+            .map(|manager| {
+                let device = manager.get_data_device(&seat, &qhandle, ());
+                (manager, device)
+            }),
         ..LayerShellApp::default()
     };
 
+    // Every output is bound so its name arrives; the configured monitor replaces the first one.
     let registry = globals.registry();
-    globals.contents().with_list(|list| {
-        for global in list {
-            match global.interface.as_str() {
-                "wl_seat" => drop(registry.bind::<WlSeat, (), LayerShellApp>(
-                    global.name,
-                    global.version.min(7),
-                    &qhandle,
-                    (),
-                )),
-                "wl_output" => {
-                    let output = registry.bind::<WlOutput, (), LayerShellApp>(
-                        global.name,
-                        global.version.min(4),
-                        &qhandle,
-                        (),
-                    );
-                    app.output.get_or_insert(output);
-                }
-                _ => {}
-            }
+    for global in globals.contents().clone_list() {
+        if global.interface == "wl_output" {
+            let version = global.version.min(4);
+            let output =
+                registry.bind::<WlOutput, (), LayerShellApp>(global.name, version, &qhandle, ());
+            app.output.get_or_insert(output);
         }
-    });
+    }
     event_queue
         .roundtrip(&mut app)
         .expect("Failed to fetch output details");
 
     let wl_surface = compositor.create_surface(&qhandle, ());
-    let surface_ptr =
-        NonNull::new(wl_surface.id().as_ptr().cast::<c_void>()).expect("Failed to get surface pointer");
+    let handle = |pointer: Option<NonNull<c_void>>| pointer.expect("Failed to get Wayland pointer");
     app.surface_handles = Some((
-        RawDisplayHandle::Wayland(WaylandDisplayHandle::new(display_ptr)),
-        RawWindowHandle::Wayland(WaylandWindowHandle::new(surface_ptr)),
+        RawDisplayHandle::Wayland(WaylandDisplayHandle::new(handle(NonNull::new(
+            connection.backend().display_ptr().cast(),
+        )))),
+        RawWindowHandle::Wayland(WaylandWindowHandle::new(handle(NonNull::new(
+            wl_surface.id().as_ptr().cast(),
+        )))),
     ));
     app.pending_surface = Some(app.create_render_surface());
     let output = app.output.take().expect("No Wayland outputs found");
 
     let surface = app.wl_surface.insert(wl_surface);
-    if let (Some(vp), Some(fm)) = (viewporter, fractional_manager) {
-        app.viewport = Some(vp.get_viewport(surface, &qhandle, ()));
-        app.fractional = Some(fm.get_fractional_scale(surface, &qhandle, ()));
+    // Fractional scaling needs both halves: the viewport scales the buffer the scale factor sizes.
+    if let (Ok(viewporter), Ok(fractional)) = (
+        globals.bind::<WpViewporter, _, _>(&qhandle, 1..=1, ()),
+        globals.bind::<WpFractionalScaleManagerV1, _, _>(&qhandle, 1..=1, ()),
+    ) {
+        app.viewport = Some(viewporter.get_viewport(surface, &qhandle, ()));
+        app.fractional = Some(fractional.get_fractional_scale(surface, &qhandle, ()));
     }
+
+    let config = &app.cantus.config;
     let layer_surface = layer_shell.get_layer_surface(
         surface,
         Some(&output),
-        match app.cantus.config.layer {
+        match config.layer {
             ConfigLayer::Background => LayerStyle::Background,
             ConfigLayer::Bottom => LayerStyle::Bottom,
             ConfigLayer::Top => LayerStyle::Top,
@@ -398,16 +522,15 @@ pub fn run() {
         &qhandle,
         (),
     );
-    layer_surface.set_size(0, app.cantus.logical_surface_size().1 as u32);
-    layer_surface.set_anchor(match app.cantus.config.layer_anchor {
+    layer_surface.set_anchor(match config.layer_anchor {
         ConfigLayerAnchor::Top => LayerAnchor::Top | LayerAnchor::Left | LayerAnchor::Right,
         ConfigLayerAnchor::Bottom => LayerAnchor::Bottom | LayerAnchor::Left | LayerAnchor::Right,
     });
     layer_surface.set_exclusive_zone(
-        (PANEL_START
-            + app.cantus.config.height
-            + f32::from(app.cantus.config.lyrics_enabled) * LYRICS_EXTENSION) as i32,
+        (PANEL_START + config.height + f32::from(config.lyrics_enabled) * LYRICS_EXTENSION) as i32,
     );
+    resize_layer_surface(&layer_surface, &app.cantus);
+    app.layer_surface = Some(layer_surface);
 
     surface.commit();
     connection.flush().expect("Failed to flush initial commit");
@@ -424,13 +547,31 @@ struct LayerShellApp {
     cantus: CantusApp,
 
     should_exit: bool,
+    /// `cantus.launcher.open` as of the last frame, to resize the layer surface only on change.
+    last_launcher_open: bool,
 
     compositor: Option<WlCompositor>,
     pointer: Option<WlPointer>,
+    keyboard: Option<WlKeyboard>,
+    xkb_state: Option<xkb::State>,
+    /// Repeat timing advertised by the compositor; `run` seeds the usual X11 rate.
+    repeat_delay: Duration,
+    repeat_interval: Duration,
+    /// The held key waiting to repeat and when it next fires, pumped each frame.
+    repeat: Option<(xkb::Keycode, Instant)>,
+    /// Latest keyboard serial, which the compositor requires to claim the selection.
+    key_serial: u32,
+    clipboard: Option<(WlDataDeviceManager, WlDataDevice)>,
+    /// Text this instance put on the clipboard, served on demand until another client claims it.
+    copied: Arc<str>,
+    /// The selection offer to read on paste, kept only while it advertises text.
+    selection: Option<WlDataOffer>,
+    offer_is_text: bool,
     output: Option<WlOutput>,
     pending_surface: Option<Surface<'static>>,
     surface_handles: Option<(RawDisplayHandle, RawWindowHandle)>,
     wl_surface: Option<WlSurface>,
+    layer_surface: Option<ZwlrLayerSurfaceV1>,
     viewport: Option<WpViewport>,
     fractional: Option<WpFractionalScaleV1>,
     frame_callback: Option<WlCallback>,
@@ -451,7 +592,54 @@ macro_rules! dispatch {
     };
 }
 
+/// Resizes the bar's layer surface to fit the launcher panel and sets its keyboard focus.
+fn resize_layer_surface(layer_surface: &ZwlrLayerSurfaceV1, cantus: &CantusApp) {
+    layer_surface.set_size(0, cantus.logical_surface_size().1 as u32);
+    layer_surface.set_keyboard_interactivity(if cantus.launcher.open {
+        KeyboardInteractivity::Exclusive
+    } else {
+        KeyboardInteractivity::None
+    });
+}
+
 impl LayerShellApp {
+    /// Re-fires the held key for as long as it stays down, once the initial delay has passed.
+    fn pump_key_repeat(&mut self) {
+        let now = Instant::now();
+        while let Some((keycode, next)) = self.repeat
+            && next <= now
+            && self.cantus.launcher.open
+        {
+            self.repeat = Some((keycode, next + self.repeat_interval));
+            handle_launcher_key(self, keycode);
+        }
+    }
+
+    /// Claims the clipboard selection, serving `text` to whoever pastes next.
+    fn set_clipboard(&mut self, text: &str, qhandle: &QueueHandle<Self>) {
+        let Some((manager, device)) = &self.clipboard else {
+            return;
+        };
+        let source = manager.create_data_source(qhandle, ());
+        source.offer(TEXT_MIME.to_owned());
+        device.set_selection(Some(&source), self.key_serial);
+        self.copied = text.into();
+    }
+
+    /// Reads the selection as text, blocking on the pipe the owning client writes into.
+    fn paste(&self) -> Option<String> {
+        let offer = self.selection.as_ref()?;
+        let (mut reader, writer) = io::pipe().ok()?;
+        offer.receive(TEXT_MIME.to_owned(), writer.as_fd());
+        drop(writer);
+        Connection::from_backend(offer.backend().upgrade()?)
+            .flush()
+            .ok()?;
+        let mut text = String::new();
+        reader.read_to_string(&mut text).ok()?;
+        Some(text)
+    }
+
     fn create_render_surface(&self) -> Surface<'static> {
         let (display, window) = self.surface_handles.expect("missing Wayland surface handles");
         let target = SurfaceTargetUnsafe::RawHandle {
@@ -463,18 +651,41 @@ impl LayerShellApp {
     }
 
     fn try_render_frame(&mut self, qhandle: &QueueHandle<Self>) {
-        let (buffer_width, buffer_height) = self.cantus.buffer_size();
-        if buffer_width > 0 && buffer_height > 0 {
-            if let Some(program) = &mut self.cantus.render.program {
-                program.resize(buffer_width, buffer_height);
-            } else if let Some(surface) = self.pending_surface.take() {
-                self.cantus.initialize_gpu(surface, buffer_width, buffer_height);
+        self.pump_key_repeat();
+
+        // Cross-thread updates may write GPU-backed pass state. Establish the program before
+        // draining them so fast startup jobs cannot race the first surface configuration.
+        if self.cantus.render.program.is_none()
+            && let Some(surface) = self.pending_surface.take()
+        {
+            let (width, height) = self.cantus.buffer_size();
+            if width > 0 && height > 0 {
+                self.cantus.initialize_gpu(surface, width, height);
+            } else {
+                self.pending_surface = Some(surface);
             }
+        }
+        self.cantus.apply_pending_updates();
+        if self.cantus.launcher.open != self.last_launcher_open {
+            self.last_launcher_open = self.cantus.launcher.open;
+            resize_layer_surface(self.layer_surface.as_ref().unwrap(), &self.cantus);
+            self.update_scale_and_viewport();
+        }
+
+        let (buffer_width, buffer_height) = self.cantus.buffer_size();
+        if buffer_width > 0
+            && buffer_height > 0
+            && let Some(program) = &mut self.cantus.render.program
+        {
+            program.resize(buffer_width, buffer_height);
         }
 
         if self.cantus.render() {
             let surface = self.create_render_surface();
             self.cantus.replace_render_surface(surface);
+        }
+        if let Some(text) = self.cantus.launcher.pending_copy.take() {
+            self.set_clipboard(&text, qhandle);
         }
         self.update_input_region(qhandle);
         let surface = self.wl_surface.as_ref().unwrap();
@@ -545,19 +756,25 @@ dispatch!(WlCallback, |state, _proxy, event, qhandle| {
 });
 
 dispatch!(WlOutput, |state, proxy, event, _qhandle| {
-    let identifier = match event {
-        wl_output::Event::Geometry { make, model, .. } => format!("{make} {model}"),
-        wl_output::Event::Name { name } | wl_output::Event::Description { description: name } => name,
-        _ => return,
-    };
-    if state
-        .cantus
-        .config
-        .monitor
-        .as_ref()
-        .is_some_and(|target| identifier.contains(target))
-    {
-        state.output = Some(proxy.clone());
+    match event {
+        wl_output::Event::Mode {
+            flags: WEnum::Value(flags),
+            height,
+            ..
+        } if flags.contains(wl_output::Mode::Current) => {
+            state.cantus.render.output_height = Some(height as f32);
+        }
+        wl_output::Event::Name { name } | wl_output::Event::Description { description: name }
+            if state
+                .cantus
+                .config
+                .monitor
+                .as_ref()
+                .is_some_and(|target| name.contains(target)) =>
+        {
+            state.output = Some(proxy.clone());
+        }
+        _ => {}
     }
 });
 
@@ -572,8 +789,188 @@ dispatch!(WlSeat, |state, proxy, event, qhandle| {
         } else if let Some(pointer) = state.pointer.take() {
             pointer.release();
         }
+        if caps.contains(wl_seat::Capability::Keyboard) {
+            if state.keyboard.is_none() {
+                state.keyboard = Some(proxy.get_keyboard(qhandle, ()));
+            }
+        } else if let Some(keyboard) = state.keyboard.take() {
+            keyboard.release();
+        }
     }
 });
+
+impl Dispatch<WlDataDevice, ()> for LayerShellApp {
+    fn event(
+        state: &mut Self,
+        _proxy: &WlDataDevice,
+        event: wl_data_device::Event,
+        _data: &(),
+        _conn: &Connection,
+        _qhandle: &QueueHandle<Self>,
+    ) {
+        match event {
+            wl_data_device::Event::DataOffer { .. } => state.offer_is_text = false,
+            wl_data_device::Event::Selection { id } => {
+                // Offers are per-selection objects; whatever we held before is ours to release.
+                if let Some(stale) = state.selection.take() {
+                    stale.destroy();
+                }
+                state.selection = id.filter(|_| state.offer_is_text);
+            }
+            _ => {}
+        }
+    }
+
+    event_created_child!(Self, WlDataDevice, [
+        wl_data_device::EVT_DATA_OFFER_OPCODE => (WlDataOffer, ()),
+    ]);
+}
+
+dispatch!(WlDataOffer, |state, _proxy, event, _qhandle| {
+    if let wl_data_offer::Event::Offer { mime_type } = event {
+        state.offer_is_text |= mime_type == TEXT_MIME;
+    }
+});
+
+dispatch!(WlDataSource, |state, proxy, event, _qhandle| {
+    match event {
+        // Serving `copied` rather than a per-source copy lets a stale source hand out the latest.
+        wl_data_source::Event::Send { fd, .. } => {
+            if let Err(error) = File::from(fd).write_all(state.copied.as_bytes()) {
+                warn!(%error, "Failed to serve the clipboard selection");
+            }
+        }
+        wl_data_source::Event::Cancelled => proxy.destroy(),
+        _ => {}
+    }
+});
+
+dispatch!(WlKeyboard, |state, _proxy, event, _qhandle| {
+    match event {
+        wl_keyboard::Event::Keymap {
+            format: WEnum::Value(KeymapFormat::XkbV1),
+            fd,
+            size,
+        } => {
+            let context = xkb::Context::new(xkb::CONTEXT_NO_FLAGS);
+            let keymap = unsafe {
+                xkb::Keymap::new_from_fd(
+                    &context,
+                    fd,
+                    size as usize,
+                    xkb::KEYMAP_FORMAT_TEXT_V1,
+                    xkb::KEYMAP_COMPILE_NO_FLAGS,
+                )
+            };
+            state.xkb_state = keymap.ok().flatten().map(|keymap| xkb::State::new(&keymap));
+        }
+        wl_keyboard::Event::Modifiers {
+            mods_depressed,
+            mods_latched,
+            mods_locked,
+            group,
+            ..
+        } => {
+            if let Some(xkb_state) = &mut state.xkb_state {
+                xkb_state.update_mask(mods_depressed, mods_latched, mods_locked, 0, 0, group);
+            }
+        }
+        wl_keyboard::Event::RepeatInfo { rate, delay } if rate > 0 => {
+            state.repeat_delay = Duration::from_millis(delay.max(0) as u64);
+            state.repeat_interval = Duration::from_micros(1_000_000 / rate as u64);
+        }
+        wl_keyboard::Event::Leave { .. } => state.repeat = None,
+        wl_keyboard::Event::Key {
+            serial,
+            key,
+            state: WEnum::Value(key_state),
+            ..
+        } => {
+            let keycode = xkb::Keycode::new(key + 8);
+            state.key_serial = serial;
+            if key_state == KeyState::Pressed {
+                // Modifiers are marked as non-repeating by the keymap, so they never latch here.
+                let repeats = state
+                    .xkb_state
+                    .as_ref()
+                    .is_some_and(|xkb_state| xkb_state.get_keymap().key_repeats(keycode));
+                state.repeat = repeats.then(|| (keycode, Instant::now() + state.repeat_delay));
+                handle_launcher_key(state, keycode);
+            } else if state.repeat.is_some_and(|(held, _)| held == keycode) {
+                state.repeat = None;
+            }
+            if let Some(xkb_state) = &mut state.xkb_state {
+                let direction = if key_state == KeyState::Released {
+                    xkb::KeyDirection::Up
+                } else {
+                    xkb::KeyDirection::Down
+                };
+                xkb_state.update_key(keycode, direction);
+            }
+        }
+        _ => {}
+    }
+});
+
+/// Applies one key press to the launcher's search field and selection while it is open.
+fn handle_launcher_key(state: &mut LayerShellApp, keycode: xkb::Keycode) {
+    if !state.cantus.launcher.open {
+        return;
+    }
+    let Some(xkb_state) = &state.xkb_state else {
+        return;
+    };
+    let sym = xkb_state.key_get_one_sym(keycode);
+    let shift = xkb_state.mod_name_is_active(xkb::MOD_NAME_SHIFT, xkb::STATE_MODS_EFFECTIVE);
+    let control = xkb_state.mod_name_is_active(xkb::MOD_NAME_CTRL, xkb::STATE_MODS_EFFECTIVE);
+    let character = sym.key_char();
+    // Held control turns `key_char` into a control code, so the shortcuts read the keysym instead.
+    let letter = char::from_u32(sym.raw())
+        .filter(char::is_ascii_alphabetic)
+        .map(|letter| letter.to_ascii_lowercase());
+
+    if control && letter == Some('v') {
+        if let Some(pasted) = state.paste() {
+            let pasted = pasted.replace(['\n', '\r'], " ");
+            state.cantus.launcher.edit(|field| field.insert(&pasted));
+        }
+        return;
+    }
+    let launcher = &mut state.cantus.launcher;
+    match sym.raw() {
+        xkb::keysyms::KEY_Escape => launcher.close(),
+        xkb::keysyms::KEY_Return | xkb::keysyms::KEY_KP_Enter => {
+            launcher.activate(launcher.selected, shift);
+        }
+        xkb::keysyms::KEY_Up => launcher.move_selection(-1),
+        xkb::keysyms::KEY_Down => launcher.move_selection(1),
+        xkb::keysyms::KEY_BackSpace => launcher.edit(|field| field.erase(false)),
+        xkb::keysyms::KEY_Delete => launcher.edit(|field| field.erase(true)),
+        xkb::keysyms::KEY_Left => launcher.field.move_cursor(false, shift),
+        xkb::keysyms::KEY_Right => launcher.field.move_cursor(true, shift),
+        xkb::keysyms::KEY_Home => launcher.field.set_cursor(0, shift),
+        xkb::keysyms::KEY_End => {
+            let end = launcher.field.text.len();
+            launcher.field.set_cursor(end, shift);
+        }
+        _ => match letter {
+            Some('a') if control => launcher.field.select_all(),
+            Some('c' | 'x') if control => {
+                launcher.pending_copy = Some(launcher.field.selected_text().to_owned());
+                if letter == Some('x') {
+                    launcher.edit(|field| {
+                        field.delete_selection();
+                    });
+                }
+            }
+            _ => {
+                if let Some(typed) = character.filter(|typed| !typed.is_control() && !control) {
+                    launcher.edit(|field| field.insert(typed.encode_utf8(&mut [0u8; 4])));
+                }
+            }
+        },
+    }
+}
 
 dispatch!(WlPointer, |state, _proxy, event, _qhandle| {
     let cantus = &mut state.cantus;
@@ -651,3 +1048,4 @@ delegate_noop!(LayerShellApp: ignore WpViewporter);
 delegate_noop!(LayerShellApp: ignore WpViewport);
 delegate_noop!(LayerShellApp: ignore WlCompositor);
 delegate_noop!(LayerShellApp: ignore WlRegion);
+delegate_noop!(LayerShellApp: ignore WlDataDeviceManager);

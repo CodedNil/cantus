@@ -37,10 +37,13 @@ pub(super) struct SpotifyClient {
 impl SpotifyClient {
     pub(super) fn new(http: Agent) -> ClientResult<Self> {
         let cache = config_path(SPOTIFY_SESSION_CACHE);
-        let session = session::login(&http, "", &cache).or_else(|_| {
+        let session = if session::cached(&cache) {
+            session::login(&http, "", &cache)?
+        } else {
+            session::network_available(&http)?;
             let token = prompt_for_token(&http)?;
-            session::login(&http, &token, &cache)
-        })?;
+            session::login(&http, &token, &cache)?
+        };
         info!(
             username = %session.username,
             device_id = %session.device_id,
@@ -79,14 +82,24 @@ impl SpotifyClient {
         Ok(self.http.run(request.body(body)?)?.body_mut().read_to_vec()?)
     }
 
-    pub(super) fn request_proto<T: protobuf::Message>(
+    pub(super) fn request_proto<T: protobuf::Message, R: protobuf::Message>(
         &self,
         method: Method,
         path: &str,
-        headers: &[(&str, &str)],
         message: &T,
-    ) -> ClientResult<Vec<u8>> {
-        self.request(method, path, headers, message.write_to_bytes()?)
+    ) -> ClientResult<R> {
+        let bytes = self.request(
+            method,
+            path,
+            &[("content-type", "application/x-protobuf")],
+            message.write_to_bytes()?,
+        )?;
+        R::parse_from_bytes(&bytes).map_err(Into::into)
+    }
+
+    pub(super) fn get_proto<R: protobuf::Message>(&self, path: &str) -> ClientResult<R> {
+        let bytes = self.request(Method::GET, path, &[], Vec::new())?;
+        R::parse_from_bytes(&bytes).map_err(Into::into)
     }
 
     pub(super) fn with_session<T>(
