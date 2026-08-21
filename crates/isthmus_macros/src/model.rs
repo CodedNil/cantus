@@ -6,7 +6,8 @@ use proc_macro2::TokenStream;
 use quote::quote;
 use syn::{Ident, ItemFn, Result, Type};
 
-pub struct PassModel {
+/// Canonical representation shared by host pass generation and shader ABI lowering.
+pub struct PassSchema {
     pub vertex: StageContract,
     pub fragment: StageContract,
     pub shared: Option<Type>,
@@ -14,15 +15,16 @@ pub struct PassModel {
     pub resources: Vec<(Ident, TokenStream)>,
 }
 
-impl PassModel {
+impl PassSchema {
     pub fn parse(vertex: &ItemFn, fragment: &ItemFn) -> Result<Self> {
         let vertex = StageContract::parse(vertex, Stage::Vertex)?;
         let fragment_contract = StageContract::parse(fragment, Stage::Fragment)?;
         let carry_instance = fragment_contract.has_implicit(GpuRole::Instance);
         if carry_instance
-            && vertex.parameters.iter().any(|parameter| {
-                parameter.role.role == GpuRole::Instance && parameter.role.index.is_some()
-            })
+            && vertex
+                .parameters
+                .iter()
+                .any(|parameter| parameter.role.role == GpuRole::Instance && parameter.role.index.is_some())
         {
             return Err(syn::Error::new_spanned(
                 fragment,
@@ -37,33 +39,16 @@ impl PassModel {
             let mut resource_index = 0;
             for parameter in &stage.parameters {
                 match parameter.role.role {
-                    GpuRole::Shared => merge_type(
-                        &mut shared,
-                        &parameter.ty,
-                        "all shader stages must use the same shared type",
-                    )?,
-                    GpuRole::Instance => merge_type(
-                        &mut instance,
-                        &parameter.ty,
-                        "all shader stages must use the same instance type",
-                    )?,
+                    GpuRole::Shared => merge_type(&mut shared, &parameter.ty, "all shader stages must use the same shared type")?,
+                    GpuRole::Instance => merge_type(&mut instance, &parameter.ty, "all shader stages must use the same instance type")?,
                     GpuRole::Resource => {
                         let resource = (parameter.name.clone(), resource_cpu_type(&parameter.ty)?);
-                        if resources[..resource_index]
-                            .iter()
-                            .any(|previous| previous.0 == resource.0)
-                        {
-                            return Err(syn::Error::new_spanned(
-                                &parameter.name,
-                                "resource names must be unique within a shader stage",
-                            ));
+                        if resources[..resource_index].iter().any(|previous| previous.0 == resource.0) {
+                            return Err(syn::Error::new_spanned(&parameter.name, "resource names must be unique within a shader stage"));
                         }
                         if let Some(previous) = resources.get(resource_index) {
                             if previous.0 != resource.0 || !same_tokens(&previous.1, &resource.1) {
-                                return Err(syn::Error::new_spanned(
-                                    &parameter.name,
-                                    "shader stages must declare shared resources in the same order",
-                                ));
+                                return Err(syn::Error::new_spanned(&parameter.name, "shader stages must declare shared resources in the same order"));
                             }
                         } else {
                             resources.push(resource);
@@ -74,12 +59,7 @@ impl PassModel {
                 }
             }
         }
-        let instance = instance.ok_or_else(|| {
-            syn::Error::new_spanned(
-                fragment,
-                "a pass must declare `#[gpu(instance)]` data in at least one stage",
-            )
-        })?;
+        let instance = instance.ok_or_else(|| syn::Error::new_spanned(fragment, "a pass must declare `#[gpu(instance)]` data in at least one stage"))?;
         Ok(Self {
             vertex,
             fragment: fragment_contract,

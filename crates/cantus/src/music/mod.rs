@@ -52,8 +52,7 @@ impl Timeline {
     pub fn track_at_playhead(&self, queue: &[Track]) -> Option<(usize, f32)> {
         let mut start_ms = self.queue_start_ms;
         queue.iter().enumerate().find_map(|(index, track)| {
-            let current = (start_ms <= 0.0 && start_ms + track.duration_ms as f32 >= 0.0)
-                .then_some((index, -start_ms));
+            let current = (start_ms <= 0.0 && start_ms + track.duration_ms as f32 >= 0.0).then_some((index, -start_ms));
             start_ms += track.queue_span_ms();
             current
         })
@@ -69,21 +68,10 @@ impl PlaybackState {
     }
 
     /// Replaces an authoritative queue snapshot without moving its rendered contents.
-    pub fn replace_queue(
-        &mut self,
-        mut queue: Vec<Track>,
-        index: usize,
-        position_ms: f32,
-        rate: f32,
-        observed_at: Instant,
-    ) {
+    pub fn replace_queue(&mut self, mut queue: Vec<Track>, index: usize, position_ms: f32, rate: f32, observed_at: Instant) {
         let old_index = self.timeline.index.min(self.queue.len().saturating_sub(1));
         let origin = self.queue.get(old_index).map(|track| {
-            let progress = -self.timeline.queue_start_ms
-                - self.queue[..old_index]
-                    .iter()
-                    .map(Track::queue_span_ms)
-                    .sum::<f32>();
+            let progress = -self.timeline.queue_start_ms - self.queue[..old_index].iter().map(Track::queue_span_ms).sum::<f32>();
             (track.uri.clone(), progress)
         });
 
@@ -104,8 +92,7 @@ impl PlaybackState {
                 .map(|(index, _)| (index, progress))
         });
         let (origin, progress) = rebased.unwrap_or((index, position_ms));
-        self.timeline.queue_start_ms =
-            -progress - queue[..origin].iter().map(Track::queue_span_ms).sum::<f32>();
+        self.timeline.queue_start_ms = -progress - queue[..origin].iter().map(Track::queue_span_ms).sum::<f32>();
         self.queue = queue;
         self.observe(index, position_ms, rate, observed_at);
     }
@@ -117,8 +104,7 @@ impl PlaybackState {
             return;
         }
         let index = self.timeline.index.min(self.queue.len() - 1);
-        let target = -(self.timeline.position_ms
-            + self.timeline.observed_at.elapsed().as_millis() as f32 * self.timeline.rate)
+        let target = -(self.timeline.position_ms + self.timeline.observed_at.elapsed().as_millis() as f32 * self.timeline.rate)
             - self.queue[..index].iter().map(Track::queue_span_ms).sum::<f32>()
             + drag_offset_ms;
         let difference = target - self.timeline.queue_start_ms;
@@ -128,8 +114,7 @@ impl PlaybackState {
             target
         };
         let target_movement = (next - self.timeline.queue_start_ms) * delta_time;
-        self.timeline.movement +=
-            (target_movement - self.timeline.movement) * (delta_time * 10.0).min(1.0);
+        self.timeline.movement += (target_movement - self.timeline.movement) * (delta_time * 10.0).min(1.0);
         self.timeline.queue_start_ms = next;
     }
 }
@@ -174,22 +159,14 @@ pub struct CondensedPlaylist {
 impl CondensedPlaylist {
     pub fn set_membership(&mut self, track_id: TrackId, add: bool) -> bool {
         let tracks = Arc::make_mut(&mut self.tracks);
-        if add {
-            tracks.insert(track_id)
-        } else {
-            tracks.remove(&track_id)
-        }
+        if add { tracks.insert(track_id) } else { tracks.remove(&track_id) }
     }
 }
 
-pub fn playlist_icons(
-    track_id: TrackId,
-    playlists: &[CondensedPlaylist],
-    contains_track: bool,
-) -> impl Iterator<Item = &CondensedPlaylist> {
-    playlists.iter().filter(move |playlist| {
-        playlist.rating_index.is_none() && playlist.tracks.contains(&track_id) == contains_track
-    })
+pub fn playlist_icons(track_id: TrackId, playlists: &[CondensedPlaylist], contains_track: bool) -> impl Iterator<Item = &CondensedPlaylist> {
+    playlists
+        .iter()
+        .filter(move |playlist| playlist.rating_index.is_none() && playlist.tracks.contains(&track_id) == contains_track)
 }
 
 pub enum PlaybackCommand {
@@ -208,9 +185,7 @@ pub struct MusicBackend(Arc<spotify::SpotifyBackend>);
 
 impl MusicBackend {
     pub(crate) fn spotify(config: &Config, updater: &AppUpdater, background: &Background) -> Self {
-        Self(Arc::new(spotify::SpotifyBackend::new(
-            config, updater, background,
-        )))
+        Self(Arc::new(spotify::SpotifyBackend::new(config, updater, background)))
     }
 
     pub fn command(&self, command: PlaybackCommand) {

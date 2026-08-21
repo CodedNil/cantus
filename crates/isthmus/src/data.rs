@@ -22,12 +22,7 @@ impl Unorm8x4 {
         }
         #[cfg(not(target_arch = "spirv"))]
         {
-            Vec4::new(
-                (self.0 & 255) as f32,
-                ((self.0 >> 8) & 255) as f32,
-                ((self.0 >> 16) & 255) as f32,
-                (self.0 >> 24) as f32,
-            ) / 255.0
+            Vec4::new((self.0 & 255) as f32, ((self.0 >> 8) & 255) as f32, ((self.0 >> 16) & 255) as f32, (self.0 >> 24) as f32) / 255.0
         }
     }
 
@@ -184,11 +179,6 @@ mod tests {
         let mut words = [0];
         color.write(&mut words, 0);
         assert_eq!(words[0], 0xff00_80ff);
-        assert!(
-            (color.to_vec4() - Vec4::new(1.0, 128.0 / 255.0, 0.0, 1.0))
-                .abs()
-                .max_element()
-                < 1e-6
-        );
+        assert!((color.to_vec4() - Vec4::new(1.0, 128.0 / 255.0, 0.0, 1.0)).abs().max_element() < 1e-6);
     }
 }

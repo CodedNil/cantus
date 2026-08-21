@@ -38,13 +38,7 @@ impl<SharedData, Passes, Target> Program<SharedData, Passes, Target> {
         let shared = SharedData::default();
         let shared_buffer = DataBuffer::new(context.device(), context.queue(), "Shared", 1);
         let shader = context.device().create_shader_module(shader);
-        let passes = build(&PassBuilder::new(
-            context.device(),
-            context.queue(),
-            &shader,
-            format,
-            &shared_buffer,
-        ));
+        let passes = build(&PassBuilder::new(context.device(), context.queue(), &shader, format, &shared_buffer));
         let program = Self {
             context,
             target,
@@ -52,10 +46,7 @@ impl<SharedData, Passes, Target> Program<SharedData, Passes, Target> {
             shared_buffer,
             passes,
         };
-        validation
-            .pop()
-            .await
-            .map_or_else(|| Ok(program), |error| Err(SetupError::Validation(error)))
+        validation.pop().await.map_or_else(|| Ok(program), |error| Err(SetupError::Validation(error)))
     }
 
     pub fn update(&mut self, update: impl FnOnce(&mut SharedData, &mut Passes))
@@ -81,9 +72,7 @@ impl<SharedData, Passes, Target> Program<SharedData, Passes, Target> {
     }
 }
 
-impl<'window, SharedData: BufferData + Default, Passes: Render>
-    Program<SharedData, Passes, SurfaceTarget<'window>>
-{
+impl<'window, SharedData: BufferData + Default, Passes: Render> Program<SharedData, Passes, SurfaceTarget<'window>> {
     /// Creates a program presented to a surface.
     ///
     /// # Errors
@@ -115,11 +104,7 @@ impl<'window, SharedData: BufferData + Default, Passes: Render>
         self.target.replace(&self.context, surface)
     }
 
-    pub fn render(
-        &mut self,
-        clear: Color,
-        update: impl FnOnce(&mut SharedData, &mut Passes),
-    ) -> Present {
+    pub fn render(&mut self, clear: Color, update: impl FnOnce(&mut SharedData, &mut Passes)) -> Present {
         let frame = match self.target.acquire(&self.context) {
             Ok(frame) => frame,
             Err(status) => return status,

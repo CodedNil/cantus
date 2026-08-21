@@ -76,14 +76,8 @@ impl ParticlePass {
             for particle in self.expired(time).take(emit_count as usize) {
                 let y_fraction = fastrand::f32();
 
-                particle.spawn_pos = vec2(
-                    frame.shared.playhead_x,
-                    PANEL_START + frame.config.height * (0.1 + y_fraction * 0.85),
-                );
-                particle.spawn_vel = vec2(
-                    fastrand::usize(40..60) as f32 * horizontal_bias,
-                    (y_fraction - 0.5) * 2.0 * VELOCITY_Y,
-                );
+                particle.spawn_pos = vec2(frame.shared.playhead_x, PANEL_START + frame.config.height * (0.1 + y_fraction * 0.85));
+                particle.spawn_vel = vec2(fastrand::usize(40..60) as f32 * horizontal_bias, (y_fraction - 0.5) * 2.0 * VELOCITY_Y);
                 particle.duration = LIFETIME_START + (LIFETIME_END - LIFETIME_START) * fastrand::f32();
                 particle.rgb = palette[fastrand::usize(0..palette.len())];
                 particle.end_time = time + particle.duration;
@@ -93,8 +87,7 @@ impl ParticlePass {
             for particle in self.expired(time).take(20) {
                 particle.duration = 0.5 + fastrand::f32();
                 particle.spawn_pos = pointer;
-                particle.spawn_vel =
-                    Vec2::from_angle(fastrand::f32() * TAU) * (30.0 + fastrand::f32() * 20.0);
+                particle.spawn_vel = Vec2::from_angle(fastrand::f32() * TAU) * (30.0 + fastrand::f32() * 20.0);
                 particle.rgb = Unorm8x4::from_vec3(vec3(1.0, 0.843, 0.196));
                 particle.end_time = time + particle.duration;
             }
@@ -102,17 +95,20 @@ impl ParticlePass {
     }
 
     fn expired(&mut self, time: f32) -> impl Iterator<Item = &mut Particle> {
-        self.instances
-            .iter_mut()
-            .filter(move |particle| time > particle.end_time)
+        self.instances.iter_mut().filter(move |particle| time > particle.end_time)
     }
 
     #[gpu]
-    pub fn vertex(
-        #[gpu(vertex_index)] vertex: u32,
-        #[gpu(shared)] frame: FrameData,
-        #[gpu(instance)] particle: Particle,
-    ) -> Vertex<Varyings> {
+    pub fn vertex(#[gpu(vertex_index)] vertex: u32, #[gpu(shared)] frame: FrameData, #[gpu(instance)] particle: Particle) -> Vertex<Varyings> {
+        if frame.launcher_open > 0.5 {
+            return Vertex {
+                position: Vec4::ZERO,
+                varyings: Varyings {
+                    color: Vec4::ZERO,
+                    uv: Vec2::ZERO,
+                },
+            };
+        }
         let dt = frame.time - (particle.end_time - particle.duration);
 
         if dt < 0.0 || dt > particle.duration {
@@ -129,8 +125,7 @@ impl ParticlePass {
         let (dir, _) = direction_and_length(particle.spawn_vel);
         let uv = quad_coord(vertex) * 2.0 - 1.0;
         let extent = uv * vec2(5.0, 2.5) * (p_life + 0.5);
-        let world_pos =
-            particle.spawn_pos + particle.spawn_vel * dt + dir * extent.x + dir.perp() * extent.y;
+        let world_pos = particle.spawn_pos + particle.spawn_vel * dt + dir * extent.x + dir.perp() * extent.y;
         let rgb = particle.rgb.to_vec3();
         let luma = rgb.dot(vec3(0.299, 0.587, 0.114));
         let spark_color = Vec3::splat(luma).lerp(rgb, 2.0).lerp(Vec3::ONE, 0.2) * 2.0;

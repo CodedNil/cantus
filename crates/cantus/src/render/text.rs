@@ -117,11 +117,7 @@ fn edge_distance(edge: Edge, weight: f32, point: Vec2, best_distance: f32) -> (f
     let segment = b - a;
     let winding = if (a.y <= point.y && point.y < b.y) || (b.y <= point.y && point.y < a.y) {
         let crossing = a.x + (point.y - a.y) * segment.x / segment.y;
-        if crossing > point.x {
-            if segment.y > 0.0 { 1 } else { -1 }
-        } else {
-            0
-        }
+        if crossing > point.x { if segment.y > 0.0 { 1 } else { -1 } } else { 0 }
     } else {
         0
     };
@@ -130,9 +126,7 @@ fn edge_distance(edge: Edge, weight: f32, point: Vec2, best_distance: f32) -> (f
     if (point - point.clamp(bounds_min, bounds_max)).length_squared() >= best_distance {
         return (best_distance, winding);
     }
-    let t = ((point - a).dot(segment) / segment.length_squared().max(1e-8))
-        .max(0.0)
-        .min(1.0);
+    let t = ((point - a).dot(segment) / segment.length_squared().max(1e-8)).max(0.0).min(1.0);
     ((point - (a + segment * t)).length_squared(), winding)
 }
 
@@ -141,12 +135,7 @@ fn glyph_distance(edges: &[Edge], start: u32, count: u32, weight: f32, point: Ve
     let mut winding = 0;
     let mut index = 0;
     while index < count {
-        let (distance, edge_winding) = edge_distance(
-            *isthmus::reference(edges, (start + index) as usize),
-            weight,
-            point,
-            distance_squared,
-        );
+        let (distance, edge_winding) = edge_distance(*isthmus::reference(edges, (start + index) as usize), weight, point, distance_squared);
         distance_squared = distance;
         winding += edge_winding;
         index += 1;
@@ -174,24 +163,11 @@ fn glyph_after(placed_glyphs: &[PlacedGlyph], first: u32, count: u32, x: f32) ->
     low
 }
 
-pub fn line_distance(
-    line: Line,
-    placed_glyphs: &[PlacedGlyph],
-    glyphs: &[Glyph],
-    edges: &[Edge],
-    local: Vec2,
-) -> f32 {
+pub fn line_distance(line: Line, placed_glyphs: &[PlacedGlyph], glyphs: &[Glyph], edges: &[Edge], local: Vec2) -> f32 {
     line_distance_scaled(line, placed_glyphs, glyphs, edges, local, 1.0)
 }
 
-pub fn line_distance_scaled(
-    line: Line,
-    placed_glyphs: &[PlacedGlyph],
-    glyphs: &[Glyph],
-    edges: &[Edge],
-    local: Vec2,
-    scale: f32,
-) -> f32 {
+pub fn line_distance_scaled(line: Line, placed_glyphs: &[PlacedGlyph], glyphs: &[Glyph], edges: &[Edge], local: Vec2, scale: f32) -> f32 {
     let inverse_size = 1.0 / line.size;
     let line_point = (local - line.origin) * inverse_size;
     let after = glyph_after(placed_glyphs, line.first, line.count, line_point.x);
@@ -207,19 +183,8 @@ pub fn line_distance_scaled(
         if glyph_point.x > glyph.max.x + padding {
             break;
         }
-        if glyph_point.x >= glyph.min.x - padding
-            && glyph_point.y >= glyph.min.y - padding
-            && glyph_point.x <= glyph.max.x + padding
-            && glyph_point.y <= glyph.max.y + padding
-        {
-            best = best.max(glyph_distance(
-                edges,
-                glyph.start,
-                glyph.count,
-                line.weight,
-                glyph_point,
-                line.size * scale,
-            ));
+        if glyph_point.x >= glyph.min.x - padding && glyph_point.y >= glyph.min.y - padding && glyph_point.x <= glyph.max.x + padding && glyph_point.y <= glyph.max.y + padding {
+            best = best.max(glyph_distance(edges, glyph.start, glyph.count, line.weight, glyph_point, line.size * scale));
         }
     }
     best
@@ -230,13 +195,7 @@ pub fn coverage(distance: f32) -> f32 {
     coverage * coverage * (3.0 - 2.0 * coverage)
 }
 
-pub fn line_alpha(
-    line: Line,
-    placed_glyphs: &[PlacedGlyph],
-    glyphs: &[Glyph],
-    edges: &[Edge],
-    local: Vec2,
-) -> f32 {
+pub fn line_alpha(line: Line, placed_glyphs: &[PlacedGlyph], glyphs: &[Glyph], edges: &[Edge], local: Vec2) -> f32 {
     coverage(line_distance(line, placed_glyphs, glyphs, edges, local))
 }
 
@@ -250,13 +209,7 @@ pub fn line_quad(line: Line, vertex: u32, frame: &FrameData) -> isthmus::Vertex<
 }
 
 /// A line quad conservatively enlarged for a fragment-only scale or stroke effect.
-pub fn line_quad_effect(
-    line: Line,
-    vertex: u32,
-    frame: &FrameData,
-    scale: f32,
-    padding: f32,
-) -> isthmus::Vertex<Varyings> {
+pub fn line_quad_effect(line: Line, vertex: u32, frame: &FrameData, scale: f32, padding: f32) -> isthmus::Vertex<Varyings> {
     let margin = line.size * (scale - 1.0).max(0.0) + padding;
     let min = line.min - margin;
     let max = line.max + margin;
@@ -268,10 +221,7 @@ pub fn line_quad_effect(
 }
 
 #[cfg(feature = "cpu")]
-const FONT: &[u8] = include_bytes!(concat!(
-    env!("CARGO_MANIFEST_DIR"),
-    "/../../assets/NotoSans-Variable.ttf"
-));
+const FONT: &[u8] = include_bytes!(concat!(env!("CARGO_MANIFEST_DIR"), "/../../assets/NotoSans-Variable.ttf"));
 #[cfg(feature = "cpu")]
 const WGHT: Tag = Tag::from_bytes(b"wght");
 #[cfg(feature = "cpu")]
@@ -306,8 +256,7 @@ struct Outline {
 #[cfg(feature = "cpu")]
 impl Outline {
     fn segment(&mut self, point: Vec2) {
-        self.edges
-            .push([self.current, (self.current + point) * 0.5, point]);
+        self.edges.push([self.current, (self.current + point) * 0.5, point]);
         self.current = point;
     }
 }
@@ -335,10 +284,7 @@ impl OutlineBuilder for Outline {
             let phase = step as f32 / 4.0;
             let inverse = 1.0 - phase;
             self.segment(
-                start * inverse * inverse * inverse
-                    + control_a * 3.0 * inverse * inverse * phase
-                    + control_b * 3.0 * inverse * phase * phase
-                    + end * phase * phase * phase,
+                start * inverse * inverse * inverse + control_a * 3.0 * inverse * inverse * phase + control_b * 3.0 * inverse * phase * phase + end * phase * phase * phase,
             );
         }
     }
@@ -400,8 +346,7 @@ impl Renderer {
         let baseline = f32::from(face.ascender() + face.descender()) * 0.5 / span;
         let mut outlines = Vec::new();
         for weight in [600.0, 900.0] {
-            face.set_variation(WGHT, weight)
-                .expect("font must have a weight axis");
+            face.set_variation(WGHT, weight).expect("font must have a weight axis");
             outlines.push(
                 ids.iter()
                     .map(|&id| {
@@ -416,11 +361,7 @@ impl Renderer {
                                 vec2(f32::from(bounds.x_max), f32::from(bounds.y_max)) / span,
                             )
                         });
-                        (
-                            outline.edges,
-                            f32::from(face.glyph_hor_advance(GlyphId(id)).unwrap_or(0)) / span,
-                            (min, max),
-                        )
+                        (outline.edges, f32::from(face.glyph_hor_advance(GlyphId(id)).unwrap_or(0)) / span, (min, max))
                     })
                     .collect::<Vec<_>>(),
             );
@@ -472,12 +413,7 @@ impl Renderer {
         }
         let characters = characters
             .into_iter()
-            .filter_map(|(character, id)| {
-                metadata
-                    .binary_search_by_key(&id, |&(id, _)| id)
-                    .ok()
-                    .map(|index| (character, metadata[index].1))
-            })
+            .filter_map(|(character, id)| metadata.binary_search_by_key(&id, |&(id, _)| id).ok().map(|index| (character, metadata[index].1)))
             .collect::<Vec<_>>();
         let edges = passes.storage("Vector Font Edges", curves);
         let glyphs = passes.storage("Vector Font Glyphs", metadata.iter().map(|(_, meta)| meta.data));
@@ -530,15 +466,8 @@ impl Renderer {
     pub fn place_visible(&mut self, shaped: &ShapedLine, left: Vec2, clip: Range<f32>) -> Line {
         let origin = vec2(left.x, left.y + shaped.baseline);
         let local = |x| (x - origin.x) / shaped.size;
-        let start = shaped
-            .glyphs
-            .partition_point(|glyph| glyph.x < local(clip.start - EFFECT_PADDING))
-            .saturating_sub(1);
-        let end = (shaped
-            .glyphs
-            .partition_point(|glyph| glyph.x <= local(clip.end + EFFECT_PADDING))
-            + 1)
-        .min(shaped.glyphs.len());
+        let start = shaped.glyphs.partition_point(|glyph| glyph.x < local(clip.start - EFFECT_PADDING)).saturating_sub(1);
+        let end = (shaped.glyphs.partition_point(|glyph| glyph.x <= local(clip.end + EFFECT_PADDING)) + 1).min(shaped.glyphs.len());
         let mut line = self.place_range(shaped, origin, start..end);
         line.min.x = line.min.x.max(clip.start);
         line.max.x = line.max.x.min(clip.end);
@@ -570,10 +499,7 @@ impl Renderer {
         let (min, max) = if count == 0 {
             (Vec2::ZERO, Vec2::ZERO)
         } else {
-            (
-                origin + shaped.min * shaped.size - EFFECT_PADDING,
-                origin + shaped.max * shaped.size + EFFECT_PADDING,
-            )
+            (origin + shaped.min * shaped.size - EFFECT_PADDING, origin + shaped.max * shaped.size + EFFECT_PADDING)
         };
         self.placed.extend_from_slice(&shaped.glyphs[range]);
         Line {
@@ -601,10 +527,7 @@ impl Deref for Renderer {
 #[cfg(feature = "cpu")]
 impl Shaper {
     fn glyph(&self, character: char) -> Option<Meta> {
-        self.characters
-            .binary_search_by_key(&character, |glyph| glyph.0)
-            .ok()
-            .map(|index| self.characters[index].1)
+        self.characters.binary_search_by_key(&character, |glyph| glyph.0).ok().map(|index| self.characters[index].1)
     }
 
     pub fn shape(&self, text: &str, style: TextStyle) -> ShapedLine {
@@ -620,12 +543,7 @@ impl Shaper {
             * style.size
     }
 
-    pub fn shape_positioned<'a>(
-        &self,
-        parts: impl IntoIterator<Item = (&'a str, f32)>,
-        style: TextStyle,
-        max_glyphs: usize,
-    ) -> ShapedLine {
+    pub fn shape_positioned<'a>(&self, parts: impl IntoIterator<Item = (&'a str, f32)>, style: TextStyle, max_glyphs: usize) -> ShapedLine {
         let mut min = Vec2::splat(f32::MAX);
         let mut max = Vec2::splat(f32::MIN);
         let weight = style.normalized_weight();

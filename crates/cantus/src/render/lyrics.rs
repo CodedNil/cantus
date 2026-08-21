@@ -1,5 +1,5 @@
 use crate::render::{FrameData, smoothstep, text};
-use isthmus::glam::Vec4;
+use isthmus::{glam::Vec4, spirv_std::arch::kill};
 
 #[cfg(feature = "cpu")]
 use {
@@ -51,11 +51,7 @@ impl Lyrics {
     const MUSIC_GAP_MS: f32 = 5_000.0;
     const LINE_GAP: f32 = 14.0;
 
-    pub(crate) fn shape(
-        mut segments: Vec<LyricSegment>,
-        duration_ms: f32,
-        shaper: &text::Shaper,
-    ) -> Option<Self> {
+    pub(crate) fn shape(mut segments: Vec<LyricSegment>, duration_ms: f32, shaper: &text::Shaper) -> Option<Self> {
         segments.retain(|segment| !segment.text.trim().is_empty());
         segments.sort_by(|left, right| left.start_ms.total_cmp(&right.start_ms));
         if segments.is_empty() {
@@ -66,7 +62,7 @@ impl Lyrics {
         let mut vocal_end = segments[0].end_ms;
         for segment in &segments[1..] {
             if segment.start_ms - vocal_end >= Self::MUSIC_GAP_MS {
-                let middle = (vocal_end + segment.start_ms) * 0.5;
+                let middle = f32::midpoint(vocal_end, segment.start_ms);
                 music.push(LyricSegment {
                     start_ms: middle,
                     end_ms: middle + 1_000.0,
@@ -98,14 +94,11 @@ impl Lyrics {
             cursors[lane] += width + if segment.line_end { Self::LINE_GAP } else { 0.0 };
             vocal_end = vocal_end.max(segment.end_ms);
             if lane == 0 {
-                timeline.push(((segment.start_ms + segment.end_ms) * 0.5, position + width * 0.5));
+                timeline.push((f32::midpoint(segment.start_ms, segment.end_ms), position + width * 0.5));
             }
         }
-        let lines = [0, 1].map(|lane| {
-            shaper.shape_positioned(positioned[lane].iter().copied(), Self::STYLE, TEXT_GLYPHS)
-        });
-        let position =
-            cursors[0].max(cursors[1]) + (duration_ms - vocal_end).max(0.0) * Self::SILENCE_SPEED;
+        let lines = [0, 1].map(|lane| shaper.shape_positioned(positioned[lane].iter().copied(), Self::STYLE, TEXT_GLYPHS));
+        let position = cursors[0].max(cursors[1]) + (duration_ms - vocal_end).max(0.0) * Self::SILENCE_SPEED;
         timeline.push((duration_ms.max(vocal_end), position));
         timeline.sort_by(|left, right| left.0.total_cmp(&right.0));
         Some(Self {
@@ -185,16 +178,7 @@ mod provider {
             .results
             .into_iter()
             .find(|result| result.timing_type == "word")?;
-        let source = http
-            .get(result.url)
-            .send()
-            .await
-            .ok()?
-            .error_for_status()
-            .ok()?
-            .text()
-            .await
-            .ok()?;
+        let source = http.get(result.url).send().await.ok()?.error_for_status().ok()?.text().await.ok()?;
         let segments = parse(&source);
         (!segments.is_empty()).then_some(segments)
     }
@@ -230,13 +214,9 @@ mod provider {
                 Ok(Event::Start(tag)) if tag.local_name().as_ref() == b"p" => {
                     span_roles.clear();
                     line_text.clear();
-                    line_time = attribute(&tag, b"begin")
-                        .as_deref()
-                        .and_then(time)
-                        .zip(attribute(&tag, b"end").as_deref().and_then(time));
+                    line_time = attribute(&tag, b"begin").as_deref().and_then(time).zip(attribute(&tag, b"end").as_deref().and_then(time));
                     let agent = attribute(&tag, b"agent").unwrap_or_default();
-                    let lane =
-                        usize::from(primary_agent.as_ref().is_some_and(|primary| primary != &agent));
+                    let lane = usize::from(primary_agent.as_ref().is_some_and(|primary| primary != &agent));
                     primary_agent.get_or_insert(agent);
                     line_lane = Some(lane);
                     line_start = segments.len();
@@ -256,15 +236,12 @@ mod provider {
                             start_ms,
                             end_ms: end.unwrap_or(start_ms + 1_000.0),
                             text: String::new(),
-                            lane: line_lane.unwrap()
-                                ^ usize::from(span_roles.iter().any(|&(background, _)| background)),
+                            lane: line_lane.unwrap() ^ usize::from(span_roles.iter().any(|&(background, _)| background)),
                             line_end: false,
                         });
                     }
                 }
-                Ok(Event::Text(value))
-                    if line_lane.is_some() && !span_roles.iter().any(|&(_, ignored)| ignored) =>
-                {
+                Ok(Event::Text(value)) if line_lane.is_some() && !span_roles.iter().any(|&(_, ignored)| ignored) => {
                     let Ok(value) = value.decode() else {
                         return Vec::new();
                     };
@@ -319,12 +296,7 @@ pub(crate) use provider::{LyricsRequest, fetch};
 
 #[isthmus::pass]
 impl LyricsPass {
-    pub fn new(
-        passes: &Passes<'_>,
-        text: &text::Renderer,
-        enrichment: Enrichment,
-        music: MusicBackend,
-    ) -> Self {
+    pub fn new(passes: &Passes<'_>, text: &text::Renderer, enrichment: Enrichment, music: MusicBackend) -> Self {
         let (placed_glyphs, glyphs, edges) = text.resources();
         Self {
             lines: passes.instances_with_capacity((placed_glyphs, glyphs, edges), 6),
@@ -333,12 +305,7 @@ impl LyricsPass {
         }
     }
 
-    pub fn update(
-        &mut self,
-        text: &mut text::Renderer,
-        playback: &mut PlaybackState,
-        frame: &Frame<'_>,
-    ) {
+    pub fn update(&mut self, text: &mut text::Renderer, playback: &mut PlaybackState, frame: &Frame<'_>) {
         const PREFETCH_TRACKS: usize = 4;
         const LANE_OFFSET: f32 = 8.0;
 
@@ -348,15 +315,9 @@ impl LyricsPass {
             .map_or(playback.timeline.index, |(index, _)| index)
             .min(playback.queue.len());
         let now = Instant::now();
-        for track in playback
-            .queue
-            .iter_mut()
-            .skip(start.saturating_sub(1))
-            .take(PREFETCH_TRACKS)
-        {
+        for track in playback.queue.iter_mut().skip(start.saturating_sub(1)).take(PREFETCH_TRACKS) {
             if track.runtime.lyrics.request(now) {
-                self.enrichment
-                    .request_lyrics(track, self.music.clone(), text.shaper());
+                self.enrichment.request_lyrics(track, self.music.clone(), text.shaper());
             }
         }
 
@@ -373,19 +334,14 @@ impl LyricsPass {
                 .lyrics
                 .ready()
                 .filter(|lyrics| lyrics.span > 0.0)
-                .map_or_else(
-                    || track.queue_span_ms() * Lyrics::SILENCE_SPEED,
-                    |lyrics| lyrics.span,
-                )
+                .map_or_else(|| track.queue_span_ms() * Lyrics::SILENCE_SPEED, |lyrics| lyrics.span)
         };
         let current = &playback.queue[index];
         let progress = current
             .runtime
             .lyrics
             .ready()
-            .map_or(progress_ms * Lyrics::SILENCE_SPEED, |lyrics| {
-                lyrics.position(progress_ms)
-            });
+            .map_or(progress_ms * Lyrics::SILENCE_SPEED, |lyrics| lyrics.position(progress_ms));
         let mut x = frame.shared.playhead_x - progress;
         for track in &playback.queue[visible.start..index] {
             x -= span(track);
@@ -393,25 +349,12 @@ impl LyricsPass {
         for item in visible {
             let track = &playback.queue[item];
             if let Some(lyrics) = track.runtime.lyrics.ready() {
-                for (lane, line) in lyrics
-                    .lines
-                    .iter()
-                    .enumerate()
-                    .filter(|(_, line)| line.width > 0.0)
-                {
+                for (lane, line) in lyrics.lines.iter().enumerate().filter(|(_, line)| line.width > 0.0) {
                     if x <= frame.shared.screen_size.x && x + line.width >= 0.0 {
-                        let color = if lane == 0 {
-                            text::COLOR.extend(1.0)
-                        } else {
-                            Vec4::new(0.72, 0.86, 1.0, 1.0)
-                        };
+                        let color = if lane == 0 { text::COLOR.extend(1.0) } else { Vec4::new(0.72, 0.86, 1.0, 1.0) };
                         self.lines.push(
-                            text.place_visible(
-                                line,
-                                vec2(x, y + lane as f32 * LANE_OFFSET),
-                                0.0..frame.shared.screen_size.x,
-                            )
-                            .with_color(color),
+                            text.place_visible(line, vec2(x, y + lane as f32 * LANE_OFFSET), 0.0..frame.shared.screen_size.x)
+                                .with_color(color),
                         );
                     }
                 }
@@ -421,11 +364,7 @@ impl LyricsPass {
     }
 
     #[gpu]
-    pub fn vertex(
-        #[gpu(vertex_index)] vertex: u32,
-        #[gpu(shared)] frame: FrameData,
-        #[gpu(instance)] line: text::Line,
-    ) -> isthmus::Vertex<text::Varyings> {
+    pub fn vertex(#[gpu(vertex_index)] vertex: u32, #[gpu(shared)] frame: FrameData, #[gpu(instance)] line: text::Line) -> isthmus::Vertex<text::Varyings> {
         text::line_quad_effect(*line, vertex, frame, 1.2, 1.0)
     }
 
@@ -438,19 +377,14 @@ impl LyricsPass {
         #[gpu(resource)] glyphs: &[text::Glyph],
         #[gpu(resource)] edges: &[text::Edge],
     ) -> Vec4 {
-        let edge_fade = smoothstep(0.0, 32.0, pixel.x)
-            * smoothstep(frame.screen_size.x, frame.screen_size.x - 32.0, pixel.x);
+        if frame.launcher_open > 0.5 {
+            kill();
+        }
+        let edge_fade = smoothstep(0.0, 32.0, pixel.x) * smoothstep(frame.screen_size.x, frame.screen_size.x - 32.0, pixel.x);
         let emphasis = smoothstep(110.0, 0.0, (pixel.x - frame.playhead_x).abs());
         let mut emphasized = *line;
         emphasized.weight = (emphasized.weight + emphasis * 0.15).min(1.0);
-        let distance = text::line_distance_scaled(
-            emphasized,
-            placed_glyphs,
-            glyphs,
-            edges,
-            pixel,
-            1.0 + emphasis * 0.2,
-        );
+        let distance = text::line_distance_scaled(emphasized, placed_glyphs, glyphs, edges, pixel, 1.0 + emphasis * 0.2);
         let fill = text::coverage(distance);
 
         let outline = text::coverage(distance + 0.9) * 0.4;

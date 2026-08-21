@@ -4,9 +4,8 @@ use crate::{
 };
 use core::{error::Error, fmt};
 use wgpu::{
-    Device, Extent3d, Origin3d, Queue, TexelCopyBufferLayout, TexelCopyTextureInfo, Texture,
-    TextureDescriptor, TextureDimension, TextureFormat, TextureUsages, TextureViewDescriptor,
-    TextureViewDimension,
+    Device, Extent3d, Origin3d, Queue, TexelCopyBufferLayout, TexelCopyTextureInfo, Texture, TextureDescriptor, TextureDimension, TextureFormat, TextureUsages,
+    TextureViewDescriptor, TextureViewDimension,
 };
 
 mod dimension {
@@ -82,13 +81,7 @@ impl SampledTextureDimension for Texture2DArray {
 }
 
 impl<D: SampledTextureDimension> SampledTexture<D> {
-    pub(crate) fn new(
-        device: &Device,
-        queue: &Queue,
-        label: &str,
-        size: Extent3d,
-        format: FilterableFloatFormat,
-    ) -> Self {
+    pub(crate) fn new(device: &Device, queue: &Queue, label: &str, size: Extent3d, format: FilterableFloatFormat) -> Self {
         let bytes_per_texel = format.bytes_per_texel();
         let format = format.into();
         let texture = device.create_texture(&TextureDescriptor {
@@ -122,12 +115,7 @@ impl<D: SampledTextureDimension> SampledTexture<D> {
     ///
     /// # Errors
     /// Returns an error if the region or data length is invalid.
-    pub fn write(
-        &self,
-        [x, y, layer]: [u32; 3],
-        [width, height]: [u32; 2],
-        data: &[u8],
-    ) -> Result<(), TextureWriteError> {
+    pub fn write(&self, [x, y, layer]: [u32; 3], [width, height]: [u32; 2], data: &[u8]) -> Result<(), TextureWriteError> {
         if width == 0 || height == 0 {
             return Err(TextureWriteError::EmptyRegion);
         }
@@ -143,10 +131,7 @@ impl<D: SampledTextureDimension> SampledTexture<D> {
             .and_then(|bytes| usize::try_from(bytes).ok())
             .ok_or(TextureWriteError::OutOfBounds)?;
         if data.len() != expected {
-            return Err(TextureWriteError::InvalidDataLength {
-                expected,
-                actual: data.len(),
-            });
+            return Err(TextureWriteError::InvalidDataLength { expected, actual: data.len() });
         }
 
         self.queue.write_texture(

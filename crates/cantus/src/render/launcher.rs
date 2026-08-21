@@ -1,9 +1,6 @@
 use crate::render::{
     FrameData, GAP, PADDING,
-    shader::{
-        fill, pill_fragment, pill_interaction, pill_vertex, pixel_to_ndc, presence, quad_coord,
-        sd_rounded_box, segment_distance, stroke,
-    },
+    shader::{fill, pill_fragment, pill_interaction, pill_vertex, pixel_to_ndc, presence, quad_coord, sd_rounded_box, segment_distance, stroke},
     text,
 };
 use isthmus::{
@@ -23,6 +20,7 @@ use {
             update,
         },
         render::{
+            atlas::TextureAtlas,
             cpu::{Frame, Passes},
             smoothstep,
             text::TextStyle,
@@ -30,8 +28,7 @@ use {
     },
     fend_core::Context,
     image::imageops::FilterType,
-    isthmus::{FilterableFloatFormat, SampledTexture, wgpu::Extent3d},
-    reqwest::Client,
+    reqwest::{Client, Url},
     resvg::{
         render,
         tiny_skia::{Pixmap, Transform},
@@ -76,10 +73,7 @@ mod host {
 }
 
 #[cfg(feature = "cpu")]
-use host::{
-    BADGE_WIDTHS, DETAIL_COLOR, DETAIL_STYLE, ICON_PX, MAX_ICON_SLOTS, MUTED_COLOR, NAME_STYLE,
-    SEARCH_STYLE,
-};
+use host::{BADGE_WIDTHS, DETAIL_COLOR, DETAIL_STYLE, ICON_PX, MAX_ICON_SLOTS, MUTED_COLOR, NAME_STYLE, SEARCH_STYLE};
 
 /// Height of the search field, which sits flush at the top of the panel instead of in a pill.
 fn header_height(frame: &FrameData) -> f32 {
@@ -112,9 +106,7 @@ fn calculator_icon(point: Vec2) -> Vec4 {
     let badge = fill(sd_rounded_box(point, Vec2::splat(13.0), 9.0));
     let bar = |offset: f32| fill(sd_rounded_box(point - vec2(0.0, offset), vec2(5.4, 1.1), 1.1));
     let equals = bar(-3.1).max(bar(3.1));
-    ACCENT_COLOR
-        .lerp(Vec3::splat(0.96), equals)
-        .extend(badge.max(equals * badge))
+    ACCENT_COLOR.lerp(Vec3::splat(0.96), equals).extend(badge.max(equals * badge))
 }
 
 /// "↵" or "⇧" glyph coverage, drawn around the origin.
@@ -265,6 +257,7 @@ pub(crate) enum LauncherKey {
 #[cfg(feature = "cpu")]
 pub struct LauncherState {
     pub open: bool,
+    just_opened: bool,
     pub field: TextField,
     pub apps: Vec<DesktopApp>,
     pub matches: Vec<u32>,
@@ -274,6 +267,7 @@ pub struct LauncherState {
     pub selected: usize,
     /// Text waiting to be put on the system clipboard by the platform layer.
     pub pending_copy: Option<String>,
+    pending_icons: Vec<(u32, Vec<u8>)>,
     providers: Vec<SearchEngine>,
     calc: Context,
 }
@@ -294,11 +288,7 @@ enum LauncherEntry<'a> {
 
 #[cfg(feature = "cpu")]
 impl LauncherState {
-    pub(crate) fn new(
-        background: &Background,
-        http: &Client,
-        providers: impl IntoIterator<Item = SearchProvider>,
-    ) -> Self {
+    pub(crate) fn new(background: &Background, http: &Client, providers: impl IntoIterator<Item = SearchProvider>) -> Self {
         let mut calc = Context::new();
         fetch_exchange_rates(background, http.clone());
         calc.set_exchange_rate_handler_v2(ExchangeRates);
@@ -310,15 +300,17 @@ impl LauncherState {
                 icon_layer: SEARCH_ICON,
             })
             .collect::<Vec<_>>();
-        start_scan(background, http.clone(), &providers);
+        start_scan(background, http, &providers);
         Self {
             open: false,
+            just_opened: false,
             field: TextField::default(),
             apps: Vec::new(),
             matches: Vec::new(),
             calc_result: None,
             selected: 0,
             pending_copy: None,
+            pending_icons: Vec::new(),
             providers,
             calc,
         }
@@ -327,12 +319,14 @@ impl LauncherState {
     /// Opens or closes the launcher with a fresh query.
     pub fn toggle(&mut self) {
         self.open = !self.open;
+        self.just_opened = self.open;
         self.field.clear();
         self.refresh_matches();
     }
 
     pub const fn close(&mut self) {
         self.open = false;
+        self.just_opened = false;
     }
 
     /// Runs one edit against the search field, then re-runs the query.
@@ -385,8 +379,7 @@ impl LauncherState {
             .filter(|_| !explicit_search)
             .filter_map(|(index, app)| {
                 let name = app.name.to_lowercase();
-                name.contains(&query)
-                    .then(|| (index as u32, name.starts_with(&query)))
+                name.contains(&query).then(|| (index as u32, name.starts_with(&query)))
             })
             .collect::<Vec<_>>();
         scored.sort_by_key(|&(_, prefix_match)| !prefix_match);
@@ -395,9 +388,7 @@ impl LauncherState {
     }
 
     pub fn entry_count(&self) -> usize {
-        usize::from(self.calc_result.is_some())
-            + self.matches.len()
-            + usize::from(self.search_provider().is_some())
+        usize::from(self.calc_result.is_some()) + self.matches.len() + usize::from(self.search_provider().is_some())
     }
 
     fn entry(&self, row: usize) -> Option<LauncherEntry<'_>> {
@@ -412,31 +403,18 @@ impl LauncherState {
             .get(row)
             .and_then(|&app| self.apps.get(app as usize))
             .map(LauncherEntry::App)
-            .or_else(|| {
-                (row == self.matches.len())
-                    .then(|| self.search_provider())
-                    .flatten()
-                    .map(LauncherEntry::Search)
-            })
+            .or_else(|| (row == self.matches.len()).then(|| self.search_provider()).flatten().map(LauncherEntry::Search))
     }
 
     /// Moves the highlight by `delta` rows, stopping at either end.
     pub fn move_selection(&mut self, delta: i32) {
-        self.selected = self
-            .selected
-            .saturating_add_signed(delta as isize)
-            .min(self.entry_count().saturating_sub(1));
+        self.selected = self.selected.saturating_add_signed(delta as isize).min(self.entry_count().saturating_sub(1));
     }
 
     /// Runs row `index`'s action — its alternative one when `alternate` is set — then dismisses.
     pub fn activate(&mut self, index: usize, alternate: bool) {
         match self.entry(index) {
-            Some(LauncherEntry::App(app)) => Platform::spawn(
-                app.action
-                    .as_ref()
-                    .filter(|_| alternate)
-                    .map_or(&app.exec, |(_, exec)| exec),
-            ),
+            Some(LauncherEntry::App(app)) => Platform::spawn(app.action.as_ref().filter(|_| alternate).map_or(&app.exec, |(_, exec)| exec)),
             Some(LauncherEntry::Answer(answer)) => self.pending_copy = Some(answer.to_owned()),
             Some(LauncherEntry::Search(engine)) => {
                 let terms = self.search_query().1;
@@ -446,6 +424,7 @@ impl LauncherState {
             None => return,
         }
         self.open = false;
+        self.just_opened = false;
         self.field.clear();
         self.refresh_matches();
     }
@@ -454,25 +433,13 @@ impl LauncherState {
         let query = self.field.text.trim();
         self.providers
             .iter()
-            .position(|provider| {
-                query == provider.config.alias
-                    || query
-                        .strip_prefix(&provider.config.alias)
-                        .is_some_and(|rest| rest.starts_with(char::is_whitespace))
-            })
-            .map_or((None, query), |index| {
-                (
-                    Some(index),
-                    query[self.providers[index].config.alias.len()..].trim(),
-                )
-            })
+            .position(|provider| query == provider.config.alias || query.strip_prefix(&provider.config.alias).is_some_and(|rest| rest.starts_with(char::is_whitespace)))
+            .map_or((None, query), |index| (Some(index), query[self.providers[index].config.alias.len()..].trim()))
     }
 
     fn search_provider(&self) -> Option<&SearchEngine> {
         let (provider, query) = self.search_query();
-        (!query.is_empty() || provider.is_some())
-            .then(|| self.providers.get(provider.unwrap_or(0)))
-            .flatten()
+        (!query.is_empty() || provider.is_some()).then(|| self.providers.get(provider.unwrap_or(0))).flatten()
     }
 }
 
@@ -485,11 +452,7 @@ struct ExchangeRates;
 
 #[cfg(feature = "cpu")]
 impl fend_core::ExchangeRateFnV2 for ExchangeRates {
-    fn relative_to_base_currency(
-        &self,
-        currency: &str,
-        _options: &fend_core::ExchangeRateFnV2Options,
-    ) -> Result<f64, Box<dyn Error + Send + Sync>> {
+    fn relative_to_base_currency(&self, currency: &str, _options: &fend_core::ExchangeRateFnV2Options) -> Result<f64, Box<dyn Error + Send + Sync>> {
         EXCHANGE_RATES
             .get()
             .and_then(|rates| rates.get(currency))
@@ -501,11 +464,7 @@ impl fend_core::ExchangeRateFnV2 for ExchangeRates {
 #[cfg(feature = "cpu")]
 fn fetch_exchange_rates(background: &Background, http: Client) {
     background.spawn(async move {
-        if let Ok(response) = http
-            .get("https://open.er-api.com/v6/latest/USD")
-            .send()
-            .await
-            .and_then(reqwest::Response::error_for_status)
+        if let Ok(response) = http.get("https://open.er-api.com/v6/latest/USD").send().await.and_then(reqwest::Response::error_for_status)
             && let Ok(body) = response.json::<CurrencyRates>().await
         {
             let _ = EXCHANGE_RATES.set(body.rates);
@@ -547,57 +506,42 @@ pub struct Varyings {
 #[isthmus::pass]
 pub struct LauncherPass {
     rows: isthmus::Instances<Self>,
-    icons: SampledTexture<Texture2DArray>,
+    icons: TextureAtlas,
 }
 
 #[isthmus::pass]
 impl LauncherPass {
     pub fn new(passes: &Passes<'_>, text: &text::Renderer) -> Self {
-        let icons = passes.sampled_texture::<Texture2DArray>(
-            "Launcher Icons",
-            Extent3d {
-                width: ICON_PX,
-                height: ICON_PX,
-                depth_or_array_layers: MAX_ICON_SLOTS as u32,
-            },
-            FilterableFloatFormat::Rgba8Unorm,
-        );
+        let icons = TextureAtlas::new(passes, "Launcher Icons", [ICON_PX; 2], MAX_ICON_SLOTS);
         let sampler = passes.filtering_sampler("Launcher Icon Sampler");
         let (placed_glyphs, glyphs, edges) = text.resources();
         Self {
-            rows: passes.instances_with_capacity(
-                (icons.view(), &sampler, placed_glyphs, glyphs, edges),
-                MAX_VISIBLE + 2,
-            ),
+            rows: passes.instances_with_capacity((icons.view(), &sampler, placed_glyphs, glyphs, edges), MAX_VISIBLE + 2),
             icons,
         }
     }
 
     /// Uploads a decoded `ICON_PX`×`ICON_PX` RGBA icon into a fixed texture layer.
     pub fn write_icon(&self, layer: u32, pixels: &[u8]) {
-        if let Err(error) = self.icons.write([0, 0, layer], [ICON_PX; 2], pixels) {
-            warn!(%error, layer, "Failed to upload app icon");
+        if !self.icons.write(layer, [ICON_PX; 2], pixels) {
+            warn!(layer, "Failed to upload app icon");
         }
     }
 
     /// Draws the panel and its search field, then the rows beneath it.
-    pub fn update(
-        &mut self,
-        text: &mut text::Renderer,
-        launcher: &mut LauncherState,
-        frame: &mut Frame,
-    ) {
+    pub fn update(&mut self, text: &mut text::Renderer, launcher: &mut LauncherState, frame: &mut Frame) {
         self.rows.clear();
+        let interactive = !launcher.just_opened;
+        launcher.just_opened = false;
+        for (layer, pixels) in launcher.pending_icons.drain(..) {
+            self.write_icon(layer, &pixels);
+        }
         if !launcher.open {
             return;
         }
         let (origin, size) = background_bounds(frame.shared.screen_size, frame.shared.panel_height);
         let screen = frame.shared.screen_size;
-        frame
-            .interaction
-            .input_region(Rect::new(0.0, 0.0, screen.x, screen.y));
-        let panel = Rect::new(origin.x, origin.y, origin.x + size.x, origin.y + size.y);
-
+        frame.interaction.input_region(Rect::new(0.0, 0.0, screen.x, screen.y));
         let header = header_height(frame.shared);
         let (left, right) = (PADDING + 34.0, size.x - PADDING);
         let field = &mut launcher.field;
@@ -607,8 +551,7 @@ impl LauncherPass {
         }
         let mut lines = [text::Line::default(); 4];
         lines[0] = if field.text.is_empty() {
-            text.left("Search anything…", SEARCH_STYLE, header * 0.5, left)
-                .with_color(MUTED_COLOR)
+            text.left("Search anything…", SEARCH_STYLE, header * 0.5, left).with_color(MUTED_COLOR)
         } else {
             let query = text.shape(&field.text, SEARCH_STYLE);
             text.place_visible(&query, vec2(left, header * 0.5), left..right)
@@ -630,21 +573,11 @@ impl LauncherPass {
             ..Default::default()
         });
 
-        self.push_entries(text, launcher, frame, origin, frame.config.height);
-        if frame.interaction.released() && !panel.contains(frame.interaction.pointer) {
-            launcher.close();
-        }
+        self.push_entries(text, launcher, frame, origin, frame.config.height, interactive);
     }
 
     /// Lays out the calculator answer and matched app rows below the search field.
-    fn push_entries(
-        &mut self,
-        text: &mut text::Renderer,
-        launcher: &mut LauncherState,
-        frame: &mut Frame,
-        origin: Vec2,
-        row_height: f32,
-    ) {
+    fn push_entries(&mut self, text: &mut text::Renderer, launcher: &mut LauncherState, frame: &mut Frame, origin: Vec2, row_height: f32, interactive: bool) {
         let (x, width) = row_bounds(frame.shared);
         let top = origin.y + header_height(frame.shared) + PADDING;
         let count = launcher.entry_count();
@@ -653,7 +586,7 @@ impl LauncherPass {
             Rect::new(x, y, x + width, y + row_height)
         };
         // Resolve the highlight up front, so hover and the arrow keys agree across every row.
-        if let Some(index) = (0..count).find(|&index| frame.interaction.contains(rect(index))) {
+        if interactive && let Some(index) = (0..count).find(|&index| frame.interaction.contains(rect(index))) {
             launcher.selected = index;
         }
         let text_left = row_height * 0.5 + ICON_SIZE * 0.5 + GAP * 2.0;
@@ -661,7 +594,7 @@ impl LauncherPass {
         let mut activated = None;
         for index in 0..count {
             let row = rect(index);
-            if frame.interaction.surface(row).clicked {
+            if interactive && frame.interaction.surface(row).clicked {
                 activated = Some(index);
             }
             let (icon, name, detail, action, alternate) = match launcher.entry(index).unwrap() {
@@ -673,13 +606,7 @@ impl LauncherPass {
                     app.action.as_ref().map(|(label, _)| label.as_str()),
                 ),
                 LauncherEntry::Answer(answer) => (CALCULATOR_ICON, answer, "", "Copy", None),
-                LauncherEntry::Search(engine) => (
-                    engine.icon_layer,
-                    engine.label.as_str(),
-                    launcher.search_query().1,
-                    "Search",
-                    None,
-                ),
+                LauncherEntry::Search(engine) => (engine.icon_layer, engine.label.as_str(), launcher.search_query().1, "Search", None),
             };
 
             // Only the highlighted row spells out what enter and shift+enter would do.
@@ -692,9 +619,7 @@ impl LauncherPass {
                     let badge_width = BADGE_WIDTHS[slot];
                     badges[slot] = vec2(edge - badge_width * 0.5, badge_width * 0.5);
                     edge -= badge_width + GAP;
-                    lines[2 + slot] = text
-                        .right(label, DETAIL_STYLE, row_height * 0.5, edge)
-                        .with_color(MUTED_COLOR);
+                    lines[2 + slot] = text.right(label, DETAIL_STYLE, row_height * 0.5, edge).with_color(MUTED_COLOR);
                     edge -= text.width(label, DETAIL_STYLE) + GAP * 2.0;
                 }
             }
@@ -709,9 +634,7 @@ impl LauncherPass {
             lines[0] = text.place_visible(&shaped, vec2(text_left, name_y), clip.clone());
             if !detail.is_empty() {
                 let shaped = text.shape(detail, DETAIL_STYLE);
-                lines[1] = text
-                    .place_visible(&shaped, vec2(text_left, detail_y), clip)
-                    .with_color(DETAIL_COLOR);
+                lines[1] = text.place_visible(&shaped, vec2(text_left, detail_y), clip).with_color(DETAIL_COLOR);
             }
 
             self.rows.push(LauncherRow {
@@ -728,12 +651,7 @@ impl LauncherPass {
     }
 
     #[gpu]
-    pub fn vertex(
-        #[gpu(vertex_index)] vertex: u32,
-        #[gpu(instance_index)] instance: u32,
-        #[gpu(shared)] frame: FrameData,
-        #[gpu(instance)] row: LauncherRow,
-    ) -> Vertex<Varyings> {
+    pub fn vertex(#[gpu(vertex_index)] vertex: u32, #[gpu(instance_index)] instance: u32, #[gpu(shared)] frame: FrameData, #[gpu(instance)] row: LauncherRow) -> Vertex<Varyings> {
         let (position, pixel) = if row.icon == PANEL {
             let (origin, size) = background_bounds(frame.screen_size, frame.panel_height);
             let pixel = origin + quad_coord(vertex) * size;
@@ -744,10 +662,7 @@ impl LauncherPass {
         };
         Vertex {
             position,
-            varyings: Varyings {
-                pixel,
-                row_idx: instance,
-            },
+            varyings: Varyings { pixel, row_idx: instance },
         }
     }
 
@@ -764,11 +679,7 @@ impl LauncherPass {
     ) -> Vec4 {
         if row.icon == PANEL {
             let (origin, size) = background_bounds(frame.screen_size, frame.panel_height);
-            let mask = fill(sd_rounded_box(
-                pixel - origin - size * 0.5,
-                size * 0.5,
-                BACKGROUND_RADIUS as f32,
-            ));
+            let mask = fill(sd_rounded_box(pixel - origin - size * 0.5, size * 0.5, BACKGROUND_RADIUS as f32));
             if mask <= 0.0 {
                 kill();
             }
@@ -777,29 +688,18 @@ impl LauncherPass {
             let header = header_height(frame);
             let mut color = Vec3::splat(0.09).lerp(
                 Vec3::splat(0.17),
-                fill(sd_rounded_box(
-                    local - vec2(size.x * 0.5, header - 0.5),
-                    vec2(size.x * 0.5, 0.5),
-                    0.0,
-                )),
+                fill(sd_rounded_box(local - vec2(size.x * 0.5, header - 0.5), vec2(size.x * 0.5, 0.5), 0.0)),
             );
             color = color.lerp(color * 1.5 + 0.1, pill_interaction(pixel, frame).ripple_flash);
-            color = color.lerp(
-                ICON_COLOR,
-                magnifier_icon(local - vec2(PADDING + 11.0, header * 0.5)),
-            );
+            color = color.lerp(ICON_COLOR, magnifier_icon(local - vec2(PADDING + 11.0, header * 0.5)));
             let span = row.selection.y - row.selection.x;
             let highlight = fill(sd_rounded_box(
-                local - vec2((row.selection.x + row.selection.y) * 0.5, header * 0.5),
+                local - vec2(f32::midpoint(row.selection.x, row.selection.y), header * 0.5),
                 vec2(span * 0.5, 13.0),
                 3.0,
             ));
             color = color.lerp(vec3(0.24, 0.28, 0.52), highlight * presence(span));
-            let caret = fill(sd_rounded_box(
-                local - vec2(row.caret.x, header * 0.5),
-                vec2(0.9, 12.0),
-                0.9,
-            ));
+            let caret = fill(sd_rounded_box(local - vec2(row.caret.x, header * 0.5), vec2(0.9, 12.0), 0.9));
             color = color.lerp(text::COLOR, caret * row.caret.y);
             let query = row.lines[0];
             let alpha = text::line_alpha(query, placed_glyphs, glyphs, edges, local);
@@ -851,21 +751,20 @@ impl LauncherPass {
 
 /// Scans installed apps and decodes their icons on a background thread, then applies the result.
 #[cfg(feature = "cpu")]
-fn start_scan(background: &Background, http: Client, providers: &[SearchEngine]) {
+fn start_scan(background: &Background, http: &Client, providers: &[SearchEngine]) {
     let provider_icon_count = providers.len().min(MAX_ICON_SLOTS);
     let provider_icons = providers
         .iter()
         .take(provider_icon_count)
         .enumerate()
         .filter_map(|(index, provider)| {
-            let (scheme, rest) = provider.config.url.split_once("://")?;
-            let host = rest.split('/').next()?;
-            Some((index, format!("{scheme}://{host}/favicon.ico")))
+            let url = Url::parse(&provider.config.url.replace("{searchTerms}", "")).ok()?;
+            Some((index, url))
         })
         .collect::<Vec<_>>();
     let app_slots = MAX_ICON_SLOTS - provider_icon_count;
     background.spawn(async move {
-        let (apps, mut icon_writes) = spawn_blocking(move || {
+        let (apps, icon_writes) = spawn_blocking(move || {
             let mut apps = Platform::desktop_apps();
             apps.sort_by_key(|app| app.name.to_lowercase());
             let mut icon_writes = Vec::new();
@@ -884,42 +783,61 @@ fn start_scan(background: &Background, http: Client, providers: &[SearchEngine])
         })
         .await
         .unwrap_or_default();
-        let mut provider_layers = Vec::new();
-        for (index, url) in provider_icons {
-            let pixels = http
-                .get(&url)
-                .send()
-                .await
-                .ok()
-                .and_then(|response| response.error_for_status().ok());
-            let pixels = if let Some(response) = pixels {
-                match response.bytes().await {
-                    Ok(bytes) => spawn_blocking(move || load_raster(&bytes)).await.ok().flatten(),
-                    Err(_) => None,
-                }
-            } else {
-                None
-            };
-            if let Some(pixels) = pixels {
-                let layer = (app_slots + index) as u32;
-                icon_writes.push((layer, pixels));
-                provider_layers.push((index, layer as i32));
-            } else {
-                warn!(%url, "Failed to download search provider icon");
-            }
-        }
         Some(update(move |app| {
-            let passes = app.render.program().passes_mut();
-            for (layer, pixels) in &icon_writes {
-                passes.launcher.write_icon(*layer, pixels);
-            }
+            app.launcher.pending_icons.extend(icon_writes);
             app.launcher.apps = apps;
-            for (index, layer) in provider_layers {
-                app.launcher.providers[index].icon_layer = layer;
-            }
             app.launcher.refresh_matches();
         }))
     });
+
+    for (index, url) in provider_icons {
+        let http = http.clone();
+        background.spawn(async move {
+            let pixels = fetch_favicon(&http, url).await?;
+            let layer = (app_slots + index) as u32;
+            Some(update(move |app| {
+                app.launcher.pending_icons.push((layer, pixels));
+                app.launcher.providers[index].icon_layer = layer as i32;
+                app.launcher.refresh_matches();
+            }))
+        });
+    }
+}
+
+#[cfg(feature = "cpu")]
+async fn fetch_favicon(http: &Client, page: Url) -> Option<Vec<u8>> {
+    let html = http.get(page.clone()).send().await.ok()?.text().await.ok()?;
+    let advertised = html
+        .split("<link")
+        .skip(1)
+        .filter_map(|tag| tag.split_once('>').map(|pair| pair.0))
+        .find(|tag| attribute(tag, "rel").is_some_and(|rel| rel.contains("icon")))
+        .and_then(|tag| attribute(tag, "href"))
+        .and_then(|href| page.join(href).ok());
+    let fallback = (|| {
+        let mut labels = page.host_str()?.rsplit('.');
+        let (suffix, name) = (labels.next()?, labels.next()?);
+        Url::parse(&format!("https://{name}.{suffix}/favicon.ico")).ok()
+    })();
+    for icon in advertised.into_iter().chain(fallback) {
+        let Some(bytes) = http.get(icon).send().await.ok().and_then(|response| response.error_for_status().ok()) else {
+            continue;
+        };
+        let Ok(bytes) = bytes.bytes().await else { continue };
+        if let Ok(Some(pixels)) = spawn_blocking(move || load_raster(&bytes)).await {
+            return Some(pixels);
+        }
+    }
+    None
+}
+
+#[cfg(feature = "cpu")]
+fn attribute<'a>(tag: &'a str, name: &str) -> Option<&'a str> {
+    let value = tag.split_once(name)?.1.trim_start().strip_prefix('=')?.trim_start();
+    match value.as_bytes().first()? {
+        quote @ (b'\'' | b'"') => value[1..].split_once(char::from(*quote)).map(|pair| pair.0),
+        _ => value.split_whitespace().next(),
+    }
 }
 
 /// Rasterizes an icon to `ICON_PX` square, straight-alpha RGBA.
@@ -940,9 +858,15 @@ fn load_icon_pixels(path: &Path) -> Option<Vec<u8>> {
 
 #[cfg(feature = "cpu")]
 fn load_raster(bytes: &[u8]) -> Option<Vec<u8>> {
-    image::load_from_memory(bytes)
-        .ok()
-        .map(|image| resize_icon(&image))
+    if let Ok(image) = image::load_from_memory(bytes) {
+        return Some(resize_icon(&image));
+    }
+    let tree = Tree::from_data(bytes, &usvg::Options::default()).ok()?;
+    let mut pixmap = Pixmap::new(ICON_PX, ICON_PX)?;
+    let source = tree.size();
+    let fit = Transform::from_scale(ICON_PX as f32 / source.width(), ICON_PX as f32 / source.height());
+    render(&tree, fit, &mut pixmap.as_mut());
+    Some(pixmap.take_demultiplied())
 }
 
 #[cfg(feature = "cpu")]

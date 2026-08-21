@@ -41,22 +41,16 @@ impl PlayheadPass {
         }
     }
 
-    pub fn update(
-        &mut self,
-        frame: &mut Frame,
-        playback: &mut PlaybackState,
-        last_toggle_time: &mut f32,
-    ) {
+    pub fn update(&mut self, frame: &mut Frame, playback: &mut PlaybackState, last_toggle_time: &mut f32) {
         const START_DURATION: f32 = 0.7;
         const TRANSITION_SPEED: f32 = 5.5;
 
         let playhead_x = frame.shared.playhead_x;
         let height = frame.config.height;
         let time = frame.shared.time;
-        let playhead = frame.interaction.surface(Rect::from_center(
-            vec2(playhead_x, PANEL_START + height * 0.5),
-            vec2(height * 0.25, height * 0.5),
-        ));
+        let playhead = frame
+            .interaction
+            .surface(Rect::from_center(vec2(playhead_x, PANEL_START + height * 0.5), vec2(height * 0.25, height * 0.5)));
         let speed = TRANSITION_SPEED * frame.delta_time;
         let last_toggle = (time - *last_toggle_time) / START_DURATION;
         if !playhead.hovered && playback.playing && last_toggle < 1.0 {
@@ -78,10 +72,7 @@ impl PlayheadPass {
     }
 
     #[gpu]
-    pub fn vertex(
-        #[gpu(vertex_index)] vertex: u32,
-        #[gpu(shared)] frame: FrameData,
-    ) -> Vertex<Varyings> {
+    pub fn vertex(#[gpu(vertex_index)] vertex: u32, #[gpu(shared)] frame: FrameData) -> Vertex<Varyings> {
         let uv = quad_coord(vertex);
         let world_pos = vec2(
             frame.playhead_x + (uv.x * 2.0 - 1.0) * frame.panel_height * 0.4,
@@ -94,11 +85,10 @@ impl PlayheadPass {
     }
 
     #[gpu]
-    pub fn fragment(
-        Varyings { world_pos }: Varyings,
-        #[gpu(shared)] frame: FrameData,
-        #[gpu(instance)] state: PlayheadState,
-    ) -> Vec4 {
+    pub fn fragment(Varyings { world_pos }: Varyings, #[gpu(shared)] frame: FrameData, #[gpu(instance)] state: PlayheadState) -> Vec4 {
+        if frame.launcher_open > 0.5 {
+            kill();
+        }
         let center = vec2(frame.playhead_x, PANEL_START + frame.panel_height * 0.5);
         let pause = (world_pos - center).abs();
 
@@ -110,8 +100,7 @@ impl PlayheadPass {
         let dx = (pause.x - 4.0 * state.bar_split).abs();
         let dy = (pause.y - frame.panel_height * 0.1).max(0.0);
         let dist_pause = vec2(dx, dy).length() - 3.5;
-        let play_scale =
-            frame.panel_height * 0.18 * (1.0 + state.icon_morph * (1.0 - state.icon_presence));
+        let play_scale = frame.panel_height * 0.18 * (1.0 + state.icon_morph * (1.0 - state.icon_presence));
         let dist_play = sd_rounded_triangle((world_pos - center).perp(), play_scale, play_scale * 0.5);
         let dist_icon = dist_pause + (dist_play - dist_pause) * state.icon_morph;
         let bar_mask = 1.0 - smoothstep(-0.8, 0.2, dist_bar);
@@ -121,8 +110,6 @@ impl PlayheadPass {
             kill();
         }
         let edge = smoothstep(-2.5, -1.0, dist_bar.min(dist_icon));
-        vec3(1.0, 0.878, 0.824)
-            .lerp(Vec3::splat(0.15), edge)
-            .extend(alpha)
+        vec3(1.0, 0.878, 0.824).lerp(Vec3::splat(0.15), edge).extend(alpha)
     }
 }

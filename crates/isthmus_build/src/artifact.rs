@@ -21,20 +21,14 @@ pub fn shader_artifact(crate_dir: &Path) -> Result<PathBuf, String> {
 #[cfg(feature = "compiler")]
 pub(crate) fn shader_features(crate_dir: &Path) -> Result<Vec<String>, String> {
     let manifest = read_manifest(crate_dir)?;
-    let Some(features) = manifest_path(&manifest, &["package", "metadata", "isthmus", "features"])
-    else {
+    let Some(features) = manifest_path(&manifest, &["package", "metadata", "isthmus", "features"]) else {
         return Ok(vec![String::from("shader")]);
     };
     features
         .as_array()
         .ok_or_else(|| String::from("package.metadata.isthmus.features must be an array"))?
         .iter()
-        .map(|feature| {
-            feature
-                .as_str()
-                .map(String::from)
-                .ok_or_else(|| String::from("Isthmus shader features must be strings"))
-        })
+        .map(|feature| feature.as_str().map(String::from).ok_or_else(|| String::from("Isthmus shader features must be strings")))
         .collect()
 }
 
@@ -45,18 +39,13 @@ fn read_manifest(crate_dir: &Path) -> Result<toml_edit::DocumentMut, String> {
         .map_err(|error| std::format!("invalid shader package manifest: {error}"))
 }
 
-fn manifest_path<'a>(
-    manifest: &'a toml_edit::DocumentMut,
-    path: &[&str],
-) -> Option<&'a toml_edit::Item> {
-    path.iter()
-        .try_fold(manifest.as_item(), |item, key| item.get(*key))
+fn manifest_path<'a>(manifest: &'a toml_edit::DocumentMut, path: &[&str]) -> Option<&'a toml_edit::Item> {
+    path.iter().try_fold(manifest.as_item(), |item, key| item.get(*key))
 }
 
 #[cfg(feature = "compiler")]
 pub(crate) fn workspace_root(crate_dir: &Path) -> Result<PathBuf, String> {
-    let crate_dir = fs::canonicalize(crate_dir)
-        .map_err(|error| std::format!("failed to locate shader crate: {error}"))?;
+    let crate_dir = fs::canonicalize(crate_dir).map_err(|error| std::format!("failed to locate shader crate: {error}"))?;
     Ok(crate_dir
         .ancestors()
         .find(|path| {

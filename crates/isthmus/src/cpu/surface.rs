@@ -1,8 +1,5 @@
 use crate::cpu::context::{Context, SetupError};
-use wgpu::{
-    CompositeAlphaMode, CurrentSurfaceTexture, Surface, SurfaceConfiguration, SurfaceTexture,
-    TextureFormat, TextureView, TextureViewDescriptor,
-};
+use wgpu::{CompositeAlphaMode, CurrentSurfaceTexture, Surface, SurfaceConfiguration, SurfaceTexture, TextureFormat, TextureView, TextureViewDescriptor};
 
 pub(super) struct SurfaceFrame {
     pub(super) texture: SurfaceTexture,
@@ -27,29 +24,19 @@ impl<'window> SurfaceTarget<'window> {
     ///
     /// # Errors
     /// Returns an error when the adapter cannot present to the surface.
-    pub fn new(
-        context: &Context,
-        surface: Surface<'window>,
-        width: u32,
-        height: u32,
-    ) -> Result<Self, SetupError> {
+    pub fn new(context: &Context, surface: Surface<'window>, width: u32, height: u32) -> Result<Self, SetupError> {
         let capabilities = surface.get_capabilities(context.adapter());
         let format = [TextureFormat::Rgba8Unorm, TextureFormat::Bgra8Unorm]
             .into_iter()
             .find(|format| capabilities.formats.contains(format))
             .or_else(|| capabilities.formats.first().copied())
             .ok_or(SetupError::UnsupportedSurface)?;
-        let alpha_mode = [
-            CompositeAlphaMode::PreMultiplied,
-            CompositeAlphaMode::PostMultiplied,
-        ]
-        .into_iter()
-        .find(|mode| capabilities.alpha_modes.contains(mode))
-        .or_else(|| capabilities.alpha_modes.first().copied())
-        .ok_or(SetupError::UnsupportedSurface)?;
-        let mut config = surface
-            .get_default_config(context.adapter(), width, height)
+        let alpha_mode = [CompositeAlphaMode::PreMultiplied, CompositeAlphaMode::PostMultiplied]
+            .into_iter()
+            .find(|mode| capabilities.alpha_modes.contains(mode))
+            .or_else(|| capabilities.alpha_modes.first().copied())
             .ok_or(SetupError::UnsupportedSurface)?;
+        let mut config = surface.get_default_config(context.adapter(), width, height).ok_or(SetupError::UnsupportedSurface)?;
         config.desired_maximum_frame_latency = 1;
         config.format = format;
         config.alpha_mode = alpha_mode;
@@ -69,11 +56,7 @@ impl<'window> SurfaceTarget<'window> {
         }
     }
 
-    pub(super) fn replace(
-        &mut self,
-        context: &Context,
-        surface: Surface<'window>,
-    ) -> Result<(), SetupError> {
+    pub(super) fn replace(&mut self, context: &Context, surface: Surface<'window>) -> Result<(), SetupError> {
         let capabilities = surface.get_capabilities(context.adapter());
         if !supports(&capabilities, &self.config) {
             return Err(SetupError::IncompatibleSurface);
@@ -87,9 +70,7 @@ impl<'window> SurfaceTarget<'window> {
         match self.surface.get_current_texture() {
             CurrentSurfaceTexture::Success(texture) => Ok(Self::frame(texture, false)),
             CurrentSurfaceTexture::Suboptimal(texture) => Ok(Self::frame(texture, true)),
-            CurrentSurfaceTexture::Timeout | CurrentSurfaceTexture::Occluded => {
-                Err(Present::Unavailable)
-            }
+            CurrentSurfaceTexture::Timeout | CurrentSurfaceTexture::Occluded => Err(Present::Unavailable),
             CurrentSurfaceTexture::Outdated => {
                 self.configure(context);
                 Err(Present::Unavailable)
@@ -125,8 +106,5 @@ fn supports(capabilities: &wgpu::SurfaceCapabilities, config: &SurfaceConfigurat
         && capabilities.alpha_modes.contains(&config.alpha_mode)
         && capabilities.present_modes.contains(&config.present_mode)
         && capabilities.usages.contains(config.usage)
-        && config
-            .view_formats
-            .iter()
-            .all(|format| capabilities.formats.contains(format))
+        && config.view_formats.iter().all(|format| capabilities.formats.contains(format))
 }

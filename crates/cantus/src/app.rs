@@ -73,7 +73,8 @@ impl Default for CantusApp {
             .max_blocking_threads(8)
             .thread_keep_alive(Duration::from_secs(10))
             .thread_name("cantus-async")
-            .thread_stack_size(1024 * 1024)
+            // Keep renderer worker stacks small; these jobs are shallow async state machines.
+            .thread_stack_size(512 * 1024)
             .enable_all()
             .build()
             .expect("failed to start Cantus async runtime");
@@ -101,10 +102,7 @@ pub(crate) fn update(work: impl FnOnce(&mut CantusApp) + Send + 'static) -> Upda
     Box::new(work)
 }
 
-pub(crate) fn send_update(
-    sender: &AppUpdater,
-    work: impl FnOnce(&mut CantusApp) + Send + 'static,
-) -> bool {
+pub(crate) fn send_update(sender: &AppUpdater, work: impl FnOnce(&mut CantusApp) + Send + 'static) -> bool {
     sender.send(update(work)).is_ok()
 }
 

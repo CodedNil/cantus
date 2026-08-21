@@ -42,14 +42,10 @@ impl<T: BufferData> DataBuffer<T> {
     }
 
     pub fn upload(&mut self, data: &[T]) {
-        assert!(
-            data.len() * T::BUFFER_STRIDE <= self.raw.size() as usize,
-            "buffer capacity exceeded"
-        );
+        assert!(data.len() * T::BUFFER_STRIDE <= self.raw.size() as usize, "buffer capacity exceeded");
         encode(data, &mut self.words);
         if !self.words.is_empty() {
-            self.queue
-                .write_buffer(&self.raw, 0, bytemuck::cast_slice(&self.words));
+            self.queue.write_buffer(&self.raw, 0, bytemuck::cast_slice(&self.words));
         }
     }
 
@@ -59,8 +55,7 @@ impl<T: BufferData> DataBuffer<T> {
         }
         let capacity = capacity.next_power_of_two();
         self.raw = create::<T>(&self.device, &self.label, capacity);
-        self.words
-            .reserve((T::BUFFER_WORDS * capacity).saturating_sub(self.words.capacity()));
+        self.words.reserve((T::BUFFER_WORDS * capacity).saturating_sub(self.words.capacity()));
         true
     }
 

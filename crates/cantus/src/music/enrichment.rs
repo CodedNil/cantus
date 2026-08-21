@@ -59,10 +59,11 @@ impl Enrichment {
             let uri = request.uri.clone();
             let state = fetch_lyrics(&request, &http, &music, &shaper).await;
             Some(update(move |app| {
-                if let Some(track) =
-                    app.playback.queue.iter_mut().find(|track| {
-                        track.uri == uri && matches!(track.runtime.lyrics, Fetch::Fetching)
-                    })
+                if let Some(track) = app
+                    .playback
+                    .queue
+                    .iter_mut()
+                    .find(|track| track.uri == uri && matches!(track.runtime.lyrics, Fetch::Fetching))
                 {
                     track.runtime.lyrics = state;
                 }
@@ -126,17 +127,11 @@ struct ReccoFeatures {
 
 impl Fetch<AlbumArt> {
     pub fn palette(&self) -> [Unorm8x4; PALETTE_COLORS] {
-        self.ready()
-            .map_or_else(|| [Unorm8x4::default(); PALETTE_COLORS], |art| art.palette)
+        self.ready().map_or_else(|| [Unorm8x4::default(); PALETTE_COLORS], |art| art.palette)
     }
 }
 
-async fn fetch_lyrics(
-    request: &LyricsRequest,
-    http: &Client,
-    music: &MusicBackend,
-    shaper: &text::Shaper,
-) -> Fetch<lyrics::Lyrics> {
+async fn fetch_lyrics(request: &LyricsRequest, http: &Client, music: &MusicBackend, shaper: &text::Shaper) -> Fetch<lyrics::Lyrics> {
     let result = if let Some(lyrics) = lyrics::fetch(http, request).await {
         Ok(lyrics)
     } else if let Some(id) = request.track_id {
@@ -145,9 +140,7 @@ async fn fetch_lyrics(
         Ok(Vec::new())
     };
     match result {
-        Ok(segments) => Fetch::Ready(
-            lyrics::Lyrics::shape(segments, request.duration_ms as f32, shaper).unwrap_or_default(),
-        ),
+        Ok(segments) => Fetch::Ready(lyrics::Lyrics::shape(segments, request.duration_ms as f32, shaper).unwrap_or_default()),
         Err(error) => {
             warn!(%error, track = request.name, "Failed to fetch lyrics");
             Fetch::retry()
@@ -185,9 +178,10 @@ fn art_slots(playback: &mut PlaybackState) -> impl Iterator<Item = (&str, &mut A
         .iter_mut()
         .filter_map(|track| track.image.as_deref().map(|url| (url, &mut track.runtime.art)))
         .chain(
-            playback.playlists.iter_mut().filter_map(|playlist| {
-                playlist.image_url.as_deref().map(|url| (url, &mut playlist.art))
-            }),
+            playback
+                .playlists
+                .iter_mut()
+                .filter_map(|playlist| playlist.image_url.as_deref().map(|url| (url, &mut playlist.art))),
         )
 }
 
@@ -223,8 +217,7 @@ impl CantusApp {
                         let Some(features) = track.id.and_then(|id| features.get(&id)) else {
                             continue;
                         };
-                        track.runtime.audio_features =
-                            features.map_or_else(Fetch::default, Fetch::Ready);
+                        track.runtime.audio_features = features.map_or_else(Fetch::default, Fetch::Ready);
                     }
                 }))
             });
@@ -253,10 +246,7 @@ impl CantusApp {
     }
 }
 
-async fn resolve_audio_features(
-    http: &Client,
-    track_ids: &[TrackId],
-) -> HashMap<TrackId, Option<AudioFeatures>> {
+async fn resolve_audio_features(http: &Client, track_ids: &[TrackId]) -> HashMap<TrackId, Option<AudioFeatures>> {
     let mut output = track_ids.iter().map(|&id| (id, None)).collect::<HashMap<_, _>>();
     for batch in track_ids.chunks(40) {
         let ids = batch.iter().map(TrackId::as_str).collect::<Vec<_>>().join(",");
@@ -277,12 +267,12 @@ async fn resolve_audio_features(
         else {
             continue;
         };
-        output.extend(features.items.into_iter().filter_map(|item| {
-            Some((
-                item.href.rsplit('/').next()?.parse().ok()?,
-                Some(item.features.normalized()),
-            ))
-        }));
+        output.extend(
+            features
+                .items
+                .into_iter()
+                .filter_map(|item| Some((item.href.rsplit('/').next()?.parse().ok()?, Some(item.features.normalized())))),
+        );
     }
     output
 }
@@ -292,10 +282,7 @@ fn complete_palette(colors: &mut ArrayVec<(Lch, f32), PALETTE_COLORS>) {
     let mut index = 1;
     while index < colors.len() {
         let (color, weight) = colors[index];
-        if let Some(duplicate) = colors[..index]
-            .iter()
-            .position(|(other, _)| (color.hue - other.hue).into_degrees().abs() < 20.0)
-        {
+        if let Some(duplicate) = colors[..index].iter().position(|(other, _)| (color.hue - other.hue).into_degrees().abs() < 20.0) {
             colors[duplicate].1 += weight;
             colors.remove(index);
         } else {
@@ -321,9 +308,7 @@ fn complete_palette(colors: &mut ArrayVec<(Lch, f32), PALETTE_COLORS>) {
 fn palette_color((color, weight): (Lch, f32), total: f32) -> Unorm8x4 {
     let rgb: palette::Srgb = color.into_color();
     let rgb = rgb.clamp();
-    Unorm8x4::from_vec4(
-        Vec3::new(rgb.red, rgb.green, rgb.blue).extend((weight / total).max(1.0 / 255.0)),
-    )
+    Unorm8x4::from_vec4(Vec3::new(rgb.red, rgb.green, rgb.blue).extend((weight / total).max(1.0 / 255.0)))
 }
 
 const fn component(color: &palette::Lab, channel: usize) -> f32 {
@@ -348,10 +333,7 @@ fn dominant_colors(pixels: &mut [palette::Lab]) -> ArrayVec<(Lch, f32), PALETTE_
                         max[channel] = max[channel].max(component(color, channel));
                     }
                 }
-                let (channel, spread) = (0..3)
-                    .map(|channel| (channel, max[channel] - min[channel]))
-                    .max_by(|a, b| a.1.total_cmp(&b.1))
-                    .unwrap();
+                let (channel, spread) = (0..3).map(|channel| (channel, max[channel] - min[channel])).max_by(|a, b| a.1.total_cmp(&b.1)).unwrap();
                 (index, channel, spread * range.len() as f32)
             })
             .max_by(|a, b| a.2.total_cmp(&b.2))
@@ -361,8 +343,7 @@ fn dominant_colors(pixels: &mut [palette::Lab]) -> ArrayVec<(Lch, f32), PALETTE_
         };
 
         let range = buckets.swap_remove(bucket_index);
-        pixels[range.clone()]
-            .sort_unstable_by(|a, b| component(a, channel).total_cmp(&component(b, channel)));
+        pixels[range.clone()].sort_unstable_by(|a, b| component(a, channel).total_cmp(&component(b, channel)));
         let middle = range.start + range.len() / 2;
         buckets.push(range.start..middle);
         buckets.push(middle..range.end);
@@ -378,23 +359,13 @@ fn dominant_colors(pixels: &mut [palette::Lab]) -> ArrayVec<(Lch, f32), PALETTE_
                 sum[2] += color.b;
                 sum
             });
-            (
-                palette::Lab::new(sum[0] / weight, sum[1] / weight, sum[2] / weight).into_color(),
-                weight,
-            )
+            (palette::Lab::new(sum[0] / weight, sum[1] / weight, sum[2] / weight).into_color(), weight)
         })
         .collect()
 }
 
 fn image_palette(image: &RgbaImage) -> [Unorm8x4; PALETTE_COLORS] {
-    let srgb_to_lab = |pixel: &image::Rgba<u8>| {
-        palette::Srgb::new(
-            f32::from(pixel[0]) / 255.0,
-            f32::from(pixel[1]) / 255.0,
-            f32::from(pixel[2]) / 255.0,
-        )
-        .into_color()
-    };
+    let srgb_to_lab = |pixel: &image::Rgba<u8>| palette::Srgb::new(f32::from(pixel[0]) / 255.0, f32::from(pixel[1]) / 255.0, f32::from(pixel[2]) / 255.0).into_color();
     let mut pixels: Vec<palette::Lab> = image
         .pixels()
         .filter(|pixel| {

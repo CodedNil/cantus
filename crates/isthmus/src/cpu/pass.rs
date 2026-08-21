@@ -9,11 +9,10 @@ use crate::{
     data::BufferData,
 };
 use core::ops::{Deref, DerefMut};
-use std::{format, ops::Range, vec::Vec};
+use std::{boxed::Box, format, ops::Range, vec::Vec};
 use wgpu::{
-    BindGroup, BindGroupDescriptor, BindGroupEntry, Buffer, ColorTargetState, ColorWrites, Device,
-    FragmentState, MultisampleState, PipelineCompilationOptions, PrimitiveState, Queue, RenderPass,
-    RenderPipeline, RenderPipelineDescriptor, ShaderModule, TextureFormat, VertexState,
+    BindGroup, BindGroupDescriptor, BindGroupEntry, Buffer, ColorTargetState, ColorWrites, Device, FragmentState, MultisampleState, PipelineCompilationOptions, PrimitiveState,
+    Queue, RenderPass, RenderPipeline, RenderPipelineDescriptor, ShaderModule, TextureFormat, VertexState,
 };
 
 /// Resources shared while constructing passes.
@@ -26,13 +25,7 @@ pub struct PassBuilder<'a, Shared> {
 }
 
 impl<'a, Shared: BufferData> PassBuilder<'a, Shared> {
-    pub(super) const fn new(
-        device: &'a Device,
-        queue: &'a Queue,
-        shader: &'a ShaderModule,
-        format: TextureFormat,
-        shared: &'a DataBuffer<Shared>,
-    ) -> Self {
+    pub(super) const fn new(device: &'a Device, queue: &'a Queue, shader: &'a ShaderModule, format: TextureFormat, shared: &'a DataBuffer<Shared>) -> Self {
         Self {
             device,
             queue,
@@ -54,12 +47,7 @@ impl<'a, Shared: BufferData> PassBuilder<'a, Shared> {
         self.format
     }
 
-    pub fn sampled_texture<D: SampledTextureDimension>(
-        &self,
-        label: &str,
-        size: wgpu::Extent3d,
-        format: FilterableFloatFormat,
-    ) -> SampledTexture<D> {
+    pub fn sampled_texture<D: SampledTextureDimension>(&self, label: &str, size: wgpu::Extent3d, format: FilterableFloatFormat) -> SampledTexture<D> {
         SampledTexture::new(self.device, self.queue, label, size, format)
     }
 
@@ -72,11 +60,7 @@ impl<'a, Shared: BufferData> PassBuilder<'a, Shared> {
         }))
     }
 
-    pub fn storage<T: BufferData>(
-        &self,
-        label: &str,
-        values: impl IntoIterator<Item = T>,
-    ) -> Storage<T> {
+    pub fn storage<T: BufferData>(&self, label: &str, values: impl IntoIterator<Item = T>) -> Storage<T> {
         let values = values.into_iter().collect::<Vec<_>>();
         Storage::new(self.device, self.queue, label, &values)
     }
@@ -85,36 +69,20 @@ impl<'a, Shared: BufferData> PassBuilder<'a, Shared> {
         Storage::with_capacity(self.device, self.queue, label, capacity)
     }
 
-    pub fn instances<S: PassContract + PassShared<Shared>>(
-        &self,
-        resources: S::Resources<'_>,
-        instances: impl IntoIterator<Item = S::Instance>,
-    ) -> Instances<S> {
+    pub fn instances<S: PassContract + PassShared<Shared>>(&self, resources: S::Resources<'_>, instances: impl IntoIterator<Item = S::Instance>) -> Instances<S> {
         let instances = instances.into_iter().collect::<Vec<_>>();
         self.build(S::bindings(resources), instances)
     }
 
-    pub fn instances_with_capacity<S: PassContract + PassShared<Shared>>(
-        &self,
-        resources: S::Resources<'_>,
-        capacity: usize,
-    ) -> Instances<S> {
+    pub fn instances_with_capacity<S: PassContract + PassShared<Shared>>(&self, resources: S::Resources<'_>, capacity: usize) -> Instances<S> {
         self.build(S::bindings(resources), Vec::with_capacity(capacity))
     }
 
-    pub fn instance<S: PassContract + PassShared<Shared>>(
-        &self,
-        resources: S::Resources<'_>,
-        instance: S::Instance,
-    ) -> Instance<S> {
+    pub fn instance<S: PassContract + PassShared<Shared>>(&self, resources: S::Resources<'_>, instance: S::Instance) -> Instance<S> {
         self.build(S::bindings(resources), Vec::from([instance]))
     }
 
-    fn build<S: PassContract + PassShared<Shared>, const ONE: bool>(
-        &self,
-        resources: Vec<Binding>,
-        instances: Vec<S::Instance>,
-    ) -> Instances<S, ONE> {
+    fn build<S: PassContract + PassShared<Shared>, const ONE: bool>(&self, resources: Box<[Binding]>, instances: Vec<S::Instance>) -> Instances<S, ONE> {
         let name = S::NAME;
         let entry = name.replace("::", "_");
         let pipeline = self.device.create_render_pipeline(&RenderPipelineDescriptor {
@@ -145,15 +113,9 @@ impl<'a, Shared: BufferData> PassBuilder<'a, Shared> {
             multiview_mask: None,
             cache: None,
         });
-        let buffer = DataBuffer::new(
-            self.device,
-            self.queue,
-            &format!("{name} Instances"),
-            instances.capacity().max(instances.len()).max(1),
-        );
+        let buffer = DataBuffer::new(self.device, self.queue, &format!("{name} Instances"), instances.capacity().max(instances.len()).max(1));
         let shared = S::SHARED_BUFFER.then(|| self.shared.raw().clone());
-        let bind_group =
-            create_bind_group(self.device, name, &pipeline, shared.as_ref(), &buffer, &resources);
+        let bind_group = create_bind_group(self.device, name, &pipeline, shared.as_ref(), &buffer, &resources);
         Instances {
             pipeline,
             buffer,
@@ -171,21 +133,14 @@ pub struct Instances<S: PassContract, const ONE: bool = false> {
     buffer: DataBuffer<S::Instance>,
     bind_group: BindGroup,
     shared: Option<Buffer>,
-    resources: Vec<Binding>,
+    resources: Box<[Binding]>,
     values: Vec<S::Instance>,
 }
 
 impl<S: PassContract, const ONE: bool> Render for Instances<S, ONE> {
     fn prepare(&mut self) {
         if self.buffer.grow(self.values.len()) {
-            self.bind_group = create_bind_group(
-                self.buffer.device(),
-                S::NAME,
-                &self.pipeline,
-                self.shared.as_ref(),
-                &self.buffer,
-                &self.resources,
-            );
+            self.bind_group = create_bind_group(self.buffer.device(), S::NAME, &self.pipeline, self.shared.as_ref(), &self.buffer, &self.resources);
         }
         self.buffer.upload(&self.values);
     }
@@ -203,14 +158,7 @@ impl<S: PassContract, const ONE: bool> Instances<S, ONE> {
     }
 }
 
-fn create_bind_group(
-    device: &Device,
-    name: &str,
-    pipeline: &RenderPipeline,
-    shared: Option<&Buffer>,
-    buffer: &DataBuffer<impl BufferData>,
-    resources: &[Binding],
-) -> BindGroup {
+fn create_bind_group(device: &Device, name: &str, pipeline: &RenderPipeline, shared: Option<&Buffer>, buffer: &DataBuffer<impl BufferData>, resources: &[Binding]) -> BindGroup {
     let mut entries = Vec::with_capacity(2 + resources.len());
     if let Some(shared) = shared {
         entries.push(BindGroupEntry {
@@ -222,15 +170,10 @@ fn create_bind_group(
         binding: 1,
         resource: buffer.raw().as_entire_binding(),
     });
-    entries.extend(
-        resources
-            .iter()
-            .enumerate()
-            .map(|(index, resource)| BindGroupEntry {
-                binding: index as u32 + 2,
-                resource: resource.resource(),
-            }),
-    );
+    entries.extend(resources.iter().enumerate().map(|(index, resource)| BindGroupEntry {
+        binding: index as u32 + 2,
+        resource: resource.resource(),
+    }));
     device.create_bind_group(&BindGroupDescriptor {
         label: Some(&format!("{name} Bind Group")),
         layout: &pipeline.get_bind_group_layout(0),

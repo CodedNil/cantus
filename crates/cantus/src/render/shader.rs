@@ -29,10 +29,7 @@ pub struct SdfSurface {
 
 impl SdfSurface {
     pub const fn new(distance: f32, mouse_distance: f32) -> Self {
-        Self {
-            distance,
-            mouse_distance,
-        }
+        Self { distance, mouse_distance }
     }
 
     pub fn sample(pixel: Vec2, mouse: Vec2, shape: impl Fn(Vec2) -> f32) -> Self {
@@ -77,9 +74,7 @@ impl PillInteraction {
 
 /// Core 2-lane avalanche mixer for hash functions
 pub fn avalanche(mut value: UVec2) -> UVec2 {
-    value = value
-        .wrapping_mul(UVec2::splat(1_664_525))
-        .wrapping_add(UVec2::splat(1_013_904_223));
+    value = value.wrapping_mul(UVec2::splat(1_664_525)).wrapping_add(UVec2::splat(1_013_904_223));
     value.x = value.x.wrapping_add(value.y.wrapping_mul(1_664_525));
     value.y = value.y.wrapping_add(value.x.wrapping_mul(1_664_525));
     value ^= value >> 16;
@@ -143,18 +138,11 @@ pub fn pill_margin(frame: &FrameData) -> f32 {
 
 pub fn pill_vertex(vertex: u32, frame: &FrameData, x: f32, y: f32, size: Vec2) -> (Vec4, Vec2) {
     let margin = pill_margin(frame);
-    let pixel = vec2(x - margin, y - margin)
-        + quad_coord(vertex) * (size + vec2(margin, frame.panel_height + margin) * 2.0);
+    let pixel = vec2(x - margin, y - margin) + quad_coord(vertex) * (size + vec2(margin, frame.panel_height + margin) * 2.0);
     (pixel_to_ndc(pixel, frame.screen_size), pixel)
 }
 
-pub fn pill_fragment(
-    pixel: Vec2,
-    frame: &FrameData,
-    x: f32,
-    y: f32,
-    width: f32,
-) -> (PillInteraction, Vec2, Vec2, SdfSurface) {
+pub fn pill_fragment(pixel: Vec2, frame: &FrameData, x: f32, y: f32, width: f32) -> (PillInteraction, Vec2, Vec2, SdfSurface) {
     let size = vec2(width, frame.panel_height);
     let local = pixel - vec2(x, y);
     let distance = sd_capsule_box(local - size * 0.5, (size.x - size.y) * 0.5, size.y * 0.5);
@@ -164,22 +152,13 @@ pub fn pill_fragment(
     } else {
         1.0
     };
-    (
-        pill_interaction(pixel, frame),
-        local,
-        size,
-        SdfSurface::new(distance, mouse_distance),
-    )
+    (pill_interaction(pixel, frame), local, size, SdfSurface::new(distance, mouse_distance))
 }
 
 /// Return a direction and length without `glam::normalize_or_zero`, whose infinity literal is rejected by Naga when translating SPIR-V.
 pub fn direction_and_length(vector: Vec2) -> (Vec2, f32) {
     let length = vector.length();
-    if length > 0.001 {
-        (vector / length, length)
-    } else {
-        (Vec2::ZERO, length)
-    }
+    if length > 0.001 { (vector / length, length) } else { (Vec2::ZERO, length) }
 }
 
 pub fn hover_mask(mouse_distance: f32) -> f32 {
@@ -207,9 +186,7 @@ pub fn pill_interaction(pixel: Vec2, frame: &FrameData) -> PillInteraction {
         // Uniform across the draw, so expired slots skip all per-pixel distance work.
         if pulse.strength > 0.0 && progress < 1.0 {
             let (direction, distance) = direction_and_length(pixel - pulse.origin);
-            let wave = smoothstep(80.0, 0.0, (distance - progress * 600.0).abs())
-                * pulse.strength
-                * (1.0 - progress);
+            let wave = smoothstep(80.0, 0.0, (distance - progress * 600.0).abs()) * pulse.strength * (1.0 - progress);
             ripple += direction * wave * (1.0 - progress) * 0.5;
             ripple_flash = (ripple_flash + wave * 0.5).min(1.0);
         }
@@ -223,11 +200,7 @@ pub fn pill_interaction(pixel: Vec2, frame: &FrameData) -> PillInteraction {
     };
     PillInteraction {
         mouse_bulge,
-        ripple_bulge: if ripple == Vec2::ZERO {
-            0.0
-        } else {
-            ripple.length() * 22.0
-        },
+        ripple_bulge: if ripple == Vec2::ZERO { 0.0 } else { ripple.length() * 22.0 },
         ripple,
         ripple_flash,
     }
@@ -269,12 +242,7 @@ pub fn sd_rounded_triangle(point: Vec2, side_len: f32, radius: f32) -> f32 {
     let mut point = vec2(point.x.abs(), point.y);
     let h = (point.x + k * point.y).max(0.0);
     point -= 0.5 * vec2(h, h * k);
-    point -= vec2(
-        point
-            .x
-            .clamp(-0.5 * (side_len - radius) * k, 0.5 * (side_len - radius) * k),
-        -0.5 * (side_len - radius),
-    );
+    point -= vec2(point.x.clamp(-0.5 * (side_len - radius) * k, 0.5 * (side_len - radius) * k), -0.5 * (side_len - radius));
     point.length() * if point.y > 0.0 { -1.0 } else { 1.0 } - radius
 }
 
@@ -297,11 +265,7 @@ pub fn fill(distance: f32) -> f32 {
 
 /// "‹" chevron with its tip at the origin, spanning to `extent` and its mirror; negate `extent.x` for a "›".
 pub fn sd_chevron(point: Vec2, extent: Vec2) -> f32 {
-    segment_distance(point, Vec2::ZERO, extent).min(segment_distance(
-        point,
-        Vec2::ZERO,
-        vec2(extent.x, -extent.y),
-    ))
+    segment_distance(point, Vec2::ZERO, extent).min(segment_distance(point, Vec2::ZERO, vec2(extent.x, -extent.y)))
 }
 
 pub fn smooth_union(base: f32, shape: f32, smoothing: f32, amount: f32) -> f32 {

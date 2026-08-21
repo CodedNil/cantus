@@ -50,9 +50,7 @@ pub fn pass(args: TokenStream, input: TokenStream) -> TokenStream {
 #[proc_macro_attribute]
 pub fn outline(args: TokenStream, input: TokenStream) -> TokenStream {
     if !args.is_empty() {
-        return syn::Error::new(proc_macro2::Span::call_site(), "outline takes no arguments")
-            .to_compile_error()
-            .into();
+        return syn::Error::new(proc_macro2::Span::call_site(), "outline takes no arguments").to_compile_error().into();
     }
     let function = syn::parse_macro_input!(input as syn::ItemFn);
     quote!(#[cfg_attr(target_arch = "spirv", inline(never))] #function).into()
@@ -74,16 +72,12 @@ pub fn shader_module(input: TokenStream) -> TokenStream {
             .into();
     }
     let Ok(crate_dir) = env::var("CARGO_MANIFEST_DIR") else {
-        return syn::Error::new(proc_macro2::Span::call_site(), "missing package directory")
-            .to_compile_error()
-            .into();
+        return syn::Error::new(proc_macro2::Span::call_site(), "missing package directory").to_compile_error().into();
     };
     let artifact = match shader_artifact(Path::new(&crate_dir)) {
         Ok(artifact) => artifact,
         Err(error) => {
-            return syn::Error::new(proc_macro2::Span::call_site(), error)
-                .to_compile_error()
-                .into();
+            return syn::Error::new(proc_macro2::Span::call_site(), error).to_compile_error().into();
         }
     };
     let artifact = artifact.to_string_lossy();

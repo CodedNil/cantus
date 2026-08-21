@@ -14,7 +14,6 @@ pub struct Rect {
     pub y1: f32,
 }
 
-/// Where the pointer sits relative to the bar.
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Pointer {
     Outside,
@@ -33,7 +32,7 @@ pub struct InteractionState {
     hover_claimed: bool,
     pulse: Option<Vec2>,
     regions: Vec<Rect>,
-    /// Set when a rate/playlist-toggle action fires this frame, for particles to burst a spark.
+    /// Position of a rate/playlist-toggle spark burst for this frame.
     rate_burst: Option<Vec2>,
     music: MusicBackend,
 }
@@ -93,34 +92,22 @@ impl InteractionState {
         let hovered = self.state != Pointer::Outside && !self.hover_claimed && inside;
         self.hover_claimed |= hovered;
         let pressed = inside && matches!(self.event, Some(PointerEvent::Press));
-        let clicked = inside
-            && !self.dragging
-            && self.press_origin.distance(self.pointer) < 2.0
-            && matches!(self.event, Some(PointerEvent::Release));
+        let clicked = inside && !self.dragging && self.press_origin.distance(self.pointer) < 2.0 && matches!(self.event, Some(PointerEvent::Release));
         if pressed || clicked {
             self.event = None;
         }
-        Response {
-            hovered,
-            pressed,
-            clicked,
-        }
+        Response { hovered, pressed, clicked }
     }
 
     pub fn scroll(&mut self, rect: Rect) -> i32 {
         self.regions.push(rect);
-        if rect.contains(self.pointer) {
-            mem::take(&mut self.scroll)
-        } else {
-            0
-        }
+        if rect.contains(self.pointer) { mem::take(&mut self.scroll) } else { 0 }
     }
 
     pub fn contains(&self, rect: Rect) -> bool {
         self.state != Pointer::Outside && rect.contains(self.pointer)
     }
 
-    /// Target the GPU smooths toward to drive hover and press deformation.
     pub const fn pressure(&self) -> f32 {
         match self.state {
             Pointer::Outside => 0.0,
@@ -133,12 +120,10 @@ impl InteractionState {
         matches!(self.state, Pointer::Held)
     }
 
-    /// Marks a rect as accepting pointer input without querying it this frame.
     pub fn input_region(&mut self, rect: Rect) {
         self.regions.push(rect);
     }
 
-    /// Takes this frame's input regions, for the compositor's input mask.
     pub fn take_regions(&mut self) -> impl Iterator<Item = Rect> + '_ {
         self.regions.drain(..)
     }
@@ -161,7 +146,6 @@ impl InteractionState {
         pulse
     }
 
-    /// Takes this frame's rate/playlist-toggle spark-burst position, if one fired.
     pub const fn take_rate_burst(&mut self) -> Option<Vec2> {
         self.rate_burst.take()
     }
@@ -193,28 +177,23 @@ impl InteractionState {
         self.dragging = false;
     }
 
-    /// The pointer is over the surface but not held (entered, or a held press let go elsewhere).
     pub const fn hover(&mut self) {
         self.state = Pointer::Hovering;
     }
 
-    /// The pointer left the surface entirely.
     pub const fn leave(&mut self) {
         self.state = Pointer::Outside;
         self.cancel_drag();
     }
 
-    /// Records this frame's raw OS scroll delta, for [`Self::scroll`] to consume.
     pub const fn scroll_input(&mut self, direction: i32) {
         self.scroll = direction;
     }
 
-    /// Marks hover as already claimed this frame, so other surfaces won't take it.
     pub const fn claim_hover(&mut self) {
         self.hover_claimed = true;
     }
 
-    /// Arms drag-tracking for the region that was just pressed.
     pub const fn enable_drag(&mut self) {
         self.drag_enabled = true;
     }
@@ -225,7 +204,6 @@ impl InteractionState {
         self.music.command(PlaybackCommand::SetPlaying(playing));
     }
 
-    /// Rates `track_id`, moving it into/out of whichever rating playlist matches `rating`.
     pub fn rate_track(&mut self, playlists: &mut [CondensedPlaylist], track_id: TrackId, rating: u8) {
         self.music.command(PlaybackCommand::UpdateLibrary {
             track_id,
@@ -233,9 +211,7 @@ impl InteractionState {
                 .iter_mut()
                 .filter_map(|playlist| {
                     let add = playlist.rating_index? == rating;
-                    playlist
-                        .set_membership(track_id, add)
-                        .then_some((playlist.id, add))
+                    playlist.set_membership(track_id, add).then_some((playlist.id, add))
                 })
                 .collect(),
             liked: Some(rating >= 5),
@@ -243,13 +219,7 @@ impl InteractionState {
         self.rate_burst = Some(self.pointer);
     }
 
-    /// Adds or removes `track_id` from `playlist_id`.
-    pub fn toggle_playlist(
-        &mut self,
-        playlists: &mut [CondensedPlaylist],
-        track_id: TrackId,
-        playlist_id: PlaylistId,
-    ) {
+    pub fn toggle_playlist(&mut self, playlists: &mut [CondensedPlaylist], track_id: TrackId, playlist_id: PlaylistId) {
         let Some(playlist) = playlists.iter_mut().find(|playlist| playlist.id == playlist_id) else {
             warn!("Playlist {playlist_id} not found for track {track_id}");
             return;
@@ -264,27 +234,14 @@ impl InteractionState {
         self.rate_burst = Some(self.pointer);
     }
 
-    /// Seeks within `clicked_index`, or skips to it when it is not the current track.
-    pub fn seek(
-        &self,
-        timeline: &Timeline,
-        clicked_index: usize,
-        clicked_duration_ms: u32,
-        fraction: f32,
-    ) {
+    pub fn seek(&self, timeline: &Timeline, clicked_index: usize, clicked_duration_ms: u32, fraction: f32) {
         let skip_count = clicked_index.abs_diff(timeline.index);
         if skip_count == 0 {
-            let milliseconds = if fraction < 0.05 {
-                0.0
-            } else {
-                clicked_duration_ms as f32 * fraction
-            }
-            .round() as u32;
+            let milliseconds = if fraction < 0.05 { 0.0 } else { clicked_duration_ms as f32 * fraction }.round() as u32;
             self.music.command(PlaybackCommand::Seek(milliseconds));
         } else {
             let direction = if timeline.index < clicked_index { 1 } else { -1 };
-            self.music
-                .command(PlaybackCommand::Skip(direction * skip_count.min(10) as i8));
+            self.music.command(PlaybackCommand::Skip(direction * skip_count.min(10) as i8));
         }
     }
 }

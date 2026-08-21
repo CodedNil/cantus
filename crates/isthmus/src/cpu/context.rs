@@ -1,9 +1,7 @@
 use core::{error::Error, fmt};
 use wgpu::{
-    Adapter, Color, CommandEncoderDescriptor, Device, DeviceDescriptor, Instance, Limits, LoadOp,
-    MemoryHints, Operations, PowerPreference, Queue, RenderPass, RenderPassColorAttachment,
-    RenderPassDescriptor, RequestAdapterError, RequestAdapterOptions, RequestDeviceError, StoreOp,
-    Surface, TextureView,
+    Adapter, Color, CommandEncoderDescriptor, Device, DeviceDescriptor, Instance, Limits, LoadOp, MemoryHints, Operations, PowerPreference, Queue, RenderPass,
+    RenderPassColorAttachment, RenderPassDescriptor, RequestAdapterError, RequestAdapterOptions, RequestDeviceError, StoreOp, Surface, TextureView,
 };
 
 #[derive(Debug)]
@@ -60,11 +58,7 @@ impl Context {
     ///
     /// # Errors
     /// Returns an error when adapter or device setup fails.
-    pub async fn new(
-        instance: &Instance,
-        compatible_surface: Option<&Surface<'_>>,
-        power_preference: PowerPreference,
-    ) -> Result<Self, SetupError> {
+    pub async fn new(instance: &Instance, compatible_surface: Option<&Surface<'_>>, power_preference: PowerPreference) -> Result<Self, SetupError> {
         let adapter = instance
             .request_adapter(&RequestAdapterOptions {
                 power_preference,
@@ -75,17 +69,13 @@ impl Context {
             .map_err(SetupError::Adapter)?;
         let (device, queue) = adapter
             .request_device(&DeviceDescriptor {
-                required_limits: Limits::default().using_resolution(adapter.limits()),
+                required_limits: Limits::default(),
                 memory_hints: MemoryHints::MemoryUsage,
                 ..Default::default()
             })
             .await
             .map_err(SetupError::Device)?;
-        Ok(Self {
-            adapter,
-            device,
-            queue,
-        })
+        Ok(Self { adapter, device, queue })
     }
 
     pub const fn device(&self) -> &Device {
@@ -101,9 +91,7 @@ impl Context {
     }
 
     pub(crate) fn draw(&self, target: &TextureView, clear: Color, render: &impl Render) {
-        let mut encoder = self
-            .device
-            .create_command_encoder(&CommandEncoderDescriptor::default());
+        let mut encoder = self.device.create_command_encoder(&CommandEncoderDescriptor::default());
         {
             let mut pass = encoder.begin_render_pass(&RenderPassDescriptor {
                 label: Some("Render Pass"),

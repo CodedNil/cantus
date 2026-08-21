@@ -8,13 +8,12 @@ name = "isthmus"
 required-features = ["compiler"]
 
 [dependencies]
-naga = { workspace = true, optional = true, features = ["spv-in", "wgsl-in", "wgsl-out"] }
 spirv-builder = { git = "https://github.com/Rust-GPU/rust-gpu", rev = "9453497884c28bd52405f0abc9bfc7d0b3374666", optional = true }
 toml_edit = "0.25.13"
 
 [features]
 default = []
-compiler = ["dep:naga", "dep:spirv-builder"]
+compiler = ["dep:spirv-builder"]
 
 [lints]
 workspace = true

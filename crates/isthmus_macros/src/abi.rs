@@ -1,13 +1,11 @@
 use crate::{
     isthmus_path,
-    model::PassModel,
+    model::PassSchema,
     syntax::{GpuRole, StageContract, StageParameter},
 };
 use proc_macro2::TokenStream as TokenStream2;
 use quote::{format_ident, quote};
-use syn::{
-    Expr, FnArg, Ident, ItemFn, Pat, Result as SynResult, Stmt, Type, parse_quote, visit_mut::VisitMut,
-};
+use syn::{Expr, FnArg, Ident, ItemFn, Pat, Result as SynResult, Stmt, Type, parse_quote, visit_mut::VisitMut};
 
 fn lower_parameters<'a>(
     inputs: &mut [FnArg],
@@ -18,9 +16,7 @@ fn lower_parameters<'a>(
     let isthmus = isthmus_path();
     let mut initializers = Vec::new();
     for (argument_index, parameter) in parameters {
-        let FnArg::Typed(argument) = &mut inputs[argument_index] else {
-            unreachable!()
-        };
+        let FnArg::Typed(argument) = &mut inputs[argument_index] else { unreachable!() };
         argument.attrs.remove(parameter.attribute);
         let role = &parameter.role;
         if matches!(role.role, GpuRole::VertexIndex | GpuRole::InstanceIndex) {
@@ -82,10 +78,7 @@ fn argument_names<'a>(inputs: impl IntoIterator<Item = &'a FnArg>) -> SynResult<
         .into_iter()
         .map(|argument| match argument {
             FnArg::Typed(argument) => Ok((*argument.pat).clone()),
-            FnArg::Receiver(receiver) => Err(syn::Error::new_spanned(
-                receiver,
-                "shader functions cannot have self",
-            )),
+            FnArg::Receiver(receiver) => Err(syn::Error::new_spanned(receiver, "shader functions cannot have self")),
         })
         .collect()
 }
@@ -93,9 +86,7 @@ fn argument_names<'a>(inputs: impl IntoIterator<Item = &'a FnArg>) -> SynResult<
 fn strip_gpu_attributes(function: &mut ItemFn) {
     for argument in &mut function.sig.inputs {
         if let FnArg::Typed(argument) = argument {
-            argument
-                .attrs
-                .retain(|attribute| !attribute.path().is_ident("gpu"));
+            argument.attrs.retain(|attribute| !attribute.path().is_ident("gpu"));
         }
     }
 }
@@ -114,11 +105,7 @@ fn align_varying_hygiene(expression: &mut Expr, fields: &[(Ident, Type, bool)]) 
     VaryingNames(fields).visit_expr_mut(expression);
 }
 
-pub fn vertex_functions(
-    mut function: ItemFn,
-    model: &PassModel,
-    fields: &[(Ident, Type, bool)],
-) -> SynResult<(ItemFn, TokenStream2)> {
+pub fn vertex_functions(mut function: ItemFn, model: &PassSchema, fields: &[(Ident, Type, bool)]) -> SynResult<(ItemFn, TokenStream2)> {
     let contract = &model.vertex;
     let carry_instance = model.carries_instance();
     let arguments = argument_names(&function.sig.inputs)?;
@@ -135,15 +122,10 @@ pub fn vertex_functions(
         ));
         instance_index = Some(format_ident!("__isthmus_instance_index"));
     }
-    let default_instance = instance_index
-        .as_ref()
-        .map_or_else(|| parse_quote!(0usize), |index| parse_quote!(#index as usize));
+    let default_instance = instance_index.as_ref().map_or_else(|| parse_quote!(0usize), |index| parse_quote!(#index as usize));
     let initializers = lower_parameters(
         &mut wrapper_inputs,
-        contract
-            .parameters
-            .iter()
-            .map(|parameter| (parameter.argument, parameter)),
+        contract.parameters.iter().map(|parameter| (parameter.argument, parameter)),
         &default_instance,
         None,
     );
@@ -170,9 +152,9 @@ pub fn vertex_functions(
         )
     });
     let instance_assignment = if carry_instance {
-        let instance_index = instance_index.as_ref().ok_or_else(|| {
-            syn::Error::new_spanned(&function.sig, "instance varying requires an instance index")
-        })?;
+        let instance_index = instance_index
+            .as_ref()
+            .ok_or_else(|| syn::Error::new_spanned(&function.sig, "instance varying requires an instance index"))?;
         Some(quote!(*out_isthmus_instance_index = #instance_index;))
     } else {
         None
@@ -196,12 +178,7 @@ pub fn vertex_functions(
     Ok((function, wrapper))
 }
 
-pub fn fragment_functions(
-    mut function: ItemFn,
-    model: &PassModel,
-    fields: &[(Ident, Type, bool)],
-    varying: &Type,
-) -> SynResult<(ItemFn, TokenStream2)> {
+pub fn fragment_functions(mut function: ItemFn, model: &PassSchema, fields: &[(Ident, Type, bool)], varying: &Type) -> SynResult<(ItemFn, TokenStream2)> {
     let contract = &model.fragment;
     let carry_instance = model.carries_instance();
     let first = function
@@ -210,10 +187,7 @@ pub fn fragment_functions(
         .first()
         .ok_or_else(|| syn::Error::new_spanned(&function.sig, "fragment must accept Varyings"))?;
     let FnArg::Typed(_) = first else {
-        return Err(syn::Error::new_spanned(
-            first,
-            "shader functions cannot have self",
-        ));
+        return Err(syn::Error::new_spanned(first, "shader functions cannot have self"));
     };
     let mut other_inputs = function.sig.inputs.iter().skip(1).cloned().collect::<Vec<_>>();
     let default_instance = if carry_instance {
@@ -235,9 +209,7 @@ pub fn fragment_functions(
     function.sig.ident = format_ident!("fragment_impl");
     borrow_data_parameters(&mut function, contract);
     // Stage inputs are values in the shader ABI, even when the Rust body only reads them.
-    function
-        .attrs
-        .push(parse_quote!(#[cfg_attr(feature = "cpu", allow(clippy::needless_pass_by_value))]));
+    function.attrs.push(parse_quote!(#[cfg_attr(feature = "cpu", allow(clippy::needless_pass_by_value))]));
     strip_gpu_attributes(&mut function);
     let varying_parameters = fields.iter().enumerate().map(|(location, (name, ty, flat))| {
         if *flat {

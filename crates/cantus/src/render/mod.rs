@@ -1,4 +1,6 @@
 #[cfg(feature = "cpu")]
+pub mod atlas;
+#[cfg(feature = "cpu")]
 pub mod cpu;
 pub mod launcher;
 pub mod lyrics;
@@ -35,6 +37,7 @@ pub struct FrameData {
     pub time: f32,
     /// Current hour at the detected weather location.
     pub weather_hour: f32,
+    pub launcher_open: f32,
     pub ripples: [RipplePulse; 4],
 }
 

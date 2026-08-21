@@ -12,8 +12,7 @@ fn main() -> ExitCode {
 
 fn run() -> Result<(), String> {
     let mut arguments = env::args_os().skip(1);
-    let (Some(command), Some(package), None) = (arguments.next(), arguments.next(), arguments.next())
-    else {
+    let (Some(command), Some(package), None) = (arguments.next(), arguments.next(), arguments.next()) else {
         return Err(String::from("usage: isthmus build <package>"));
     };
     if command != "build" {

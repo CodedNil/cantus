@@ -1,9 +1,6 @@
 use crate::render::{
     FrameData, GAP, PANEL_START, UNIT,
-    shader::{
-        PillInteraction, SdfSurface, cloud_mass, fbm, hash, pill_fragment, pill_interaction, pill_sheen,
-        pill_vertex, sd_capsule_box, sd_rounded_box, sdf_coverage,
-    },
+    shader::{PillInteraction, SdfSurface, cloud_mass, fbm, hash, pill_fragment, pill_interaction, pill_sheen, pill_vertex, sd_capsule_box, sd_rounded_box, sdf_coverage},
     smoothstep, text,
 };
 use core::f32::consts::PI;
@@ -51,9 +48,7 @@ pub const WIDTH: f32 = UNIT * 77.0;
 pub const EXTENSION: f32 = UNIT * 61.0;
 const FORECAST_X: f32 = WIDTH + GAP;
 
-/// Labels are found through a lookup grid over the pill and its expanded popup: each cell names
-/// up to two labels whose padded bounds reach it, so the fragment samples two lines rather than
-/// all of them. Two slots suffice because only stacked or neighbouring labels share a cell.
+/// A lookup grid maps each cell to the up to two labels whose padded bounds reach it.
 const TEXT_COLUMNS: usize = 24;
 const TEXT_ROWS: usize = 36;
 #[cfg(feature = "cpu")]
@@ -69,10 +64,7 @@ mod host {
     pub const WEEKDAYS: [&str; WEEKDAY_COUNT] = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"];
     pub const ORDINALS: [&str; 10] = ["th", "st", "nd", "rd", "th", "th", "th", "th", "th", "th"];
     pub const TEXT_CELLS: usize = super::TEXT_COLUMNS * super::TEXT_ROWS;
-    pub const MAX_TEXT_LINES: usize = 17
-        + (super::HOURLY_FORECASTS + super::DAILY_FORECASTS + MAX_WORLD_CLOCKS) * 2
-        + WEEKDAY_COUNT
-        + GRID_CELLS;
+    pub const MAX_TEXT_LINES: usize = 17 + (super::HOURLY_FORECASTS + super::DAILY_FORECASTS + MAX_WORLD_CLOCKS) * 2 + WEEKDAY_COUNT + GRID_CELLS;
     pub const DETAILS_STYLE: TextStyle = TextStyle::new(14.0, 700.0);
     pub const WEATHER_STYLE: TextStyle = TextStyle::new(24.0, 600.0);
     pub const TITLE_STYLE: TextStyle = TextStyle::new(20.0, 750.0);
@@ -81,8 +73,8 @@ mod host {
 
 #[cfg(feature = "cpu")]
 use host::{
-    CLOCK_STYLE, DETAILS_STYLE, GRID_CELLS, GRID_ROW_HEIGHT, GRID_TOP_Y, MAX_TEXT_LINES, ORDINALS,
-    TEXT_CELLS, TITLE, TITLE_STYLE, WEATHER_STYLE, WEEKDAY_COUNT, WEEKDAY_Y, WEEKDAYS,
+    CLOCK_STYLE, DETAILS_STYLE, GRID_CELLS, GRID_ROW_HEIGHT, GRID_TOP_Y, MAX_TEXT_LINES, ORDINALS, TEXT_CELLS, TITLE, TITLE_STYLE, WEATHER_STYLE, WEEKDAY_COUNT, WEEKDAY_Y,
+    WEEKDAYS,
 };
 
 #[isthmus::data]
@@ -166,10 +158,7 @@ impl Labels<'_> {
 
     fn colored(&mut self, content: &str, style: TextStyle, center: Vec2, color: Vec3, opacity: f32) {
         let alpha = reveal_progress(self.expansion, center.y) * opacity;
-        let line = self
-            .text
-            .centered(content, style, self.origin + center)
-            .with_color(color.extend(alpha));
+        let line = self.text.centered(content, style, self.origin + center).with_color(color.extend(alpha));
         let index = self.lines.len() as u32;
         self.lines.push(line);
 
@@ -272,11 +261,7 @@ fn sun_position(hour: f32, [sunrise, sunset]: [f32; 2]) -> [f32; 2] {
         [phase, height(phase)]
     } else {
         let night = 24.0 - daylight;
-        let phase = if hour < sunrise {
-            (hour + 24.0 - sunset) / night
-        } else {
-            (hour - sunset) / night
-        };
+        let phase = if hour < sunrise { (hour + 24.0 - sunset) / night } else { (hour - sunset) / night };
         [if hour >= sunset { 1.0 } else { 0.0 }, -height(phase)]
     }
 }
@@ -301,8 +286,7 @@ fn precipitation(p: Vec2, time: f32, kind: i32, strength: f32) -> Vec4 {
     let offset = q - center;
     let along = (offset.dot(segment) / segment.length_squared()).clamp(0.0, 1.0);
     let distance = (offset - segment * along).length();
-    let particle = smoothstep(radius + 0.45, radius - 0.15, distance)
-        * smoothstep(1.0 - density, 1.0, hash(cell + 19.3).x);
+    let particle = smoothstep(radius + 0.45, radius - 0.15, distance) * smoothstep(1.0 - density, 1.0, hash(cell + 19.3).x);
     let color = if rain {
         vec3(0.52, 0.72, 0.9)
     } else if snow {
@@ -323,37 +307,19 @@ pub(crate) fn sky_phase(sun_y: f32) -> Vec3 {
     )
 }
 
-pub(crate) fn scene(
-    frame: &FrameData,
-    p: Vec2,
-    width: f32,
-    dist: f32,
-    phase: Vec3,
-    weather: WeatherCondition,
-) -> Vec3 {
+pub(crate) fn scene(frame: &FrameData, p: Vec2, width: f32, dist: f32, phase: Vec3, weather: WeatherCondition) -> Vec3 {
     let (cloud_scale, time) = (frame.panel_height, frame.time);
     let sky_y = p.y / cloud_scale;
     let vertical = smoothstep(1.0, 0.0, sky_y);
     let mut color = vec3(0.006, 0.012, 0.035)
         .lerp(vec3(0.025, 0.04, 0.095), vertical)
-        .lerp(
-            vec3(0.08, 0.34, 0.62).lerp(vec3(0.32, 0.67, 0.87), vertical),
-            phase.x,
-        )
-        .lerp(
-            vec3(0.10, 0.16, 0.30).lerp(vec3(0.22, 0.25, 0.45), vertical),
-            phase.y * 0.8,
-        )
-        .lerp(
-            vec3(0.78, 0.30, 0.20).lerp(vec3(0.38, 0.22, 0.42), vertical),
-            phase.z * 0.9,
-        );
+        .lerp(vec3(0.08, 0.34, 0.62).lerp(vec3(0.32, 0.67, 0.87), vertical), phase.x)
+        .lerp(vec3(0.10, 0.16, 0.30).lerp(vec3(0.22, 0.25, 0.45), vertical), phase.y * 0.8)
+        .lerp(vec3(0.78, 0.30, 0.20).lerp(vec3(0.38, 0.22, 0.42), vertical), phase.z * 0.9);
 
     let star_cell = (p / 18.0).floor();
     let star_center = (star_cell + 0.2 + hash(star_cell) * 0.6) * 18.0;
-    let stars = smoothstep(1.0, 0.4, p.distance(star_center))
-        * smoothstep(0.75, 1.0, hash(star_cell + 31.7).x)
-        * (1.0 - phase.x);
+    let stars = smoothstep(1.0, 0.4, p.distance(star_center)) * smoothstep(0.75, 1.0, hash(star_cell + 31.7).x) * (1.0 - phase.x);
     color += Vec3::splat(stars * (1.0 - weather.cloud) * (0.3 + vertical * 0.7));
 
     if weather.cloud > 1.0 / 1024.0 {
@@ -363,14 +329,8 @@ pub(crate) fn scene(
         let cloud_light = smoothstep(0.42, 0.72, billows) * 0.55 + smoothstep(0.48, 0.7, mass) * 0.45;
         let cloud_color = vec3(0.16, 0.2, 0.28)
             .lerp(vec3(0.32, 0.36, 0.43), cloud_light)
-            .lerp(
-                vec3(0.62, 0.7, 0.78).lerp(vec3(0.92, 0.94, 0.96), cloud_light),
-                phase.x,
-            )
-            .lerp(
-                vec3(0.5, 0.36, 0.4).lerp(vec3(0.76, 0.59, 0.56), cloud_light),
-                phase.z * 0.45,
-            );
+            .lerp(vec3(0.62, 0.7, 0.78).lerp(vec3(0.92, 0.94, 0.96), cloud_light), phase.x)
+            .lerp(vec3(0.5, 0.36, 0.4).lerp(vec3(0.76, 0.59, 0.56), cloud_light), phase.z * 0.45);
         color = color.lerp(cloud_color, weather.cloud * (0.12 + cloud_shape * 0.7));
     }
 
@@ -393,26 +353,13 @@ pub(crate) fn scene(
 
     if weather.fog > 1.0 / 1024.0 {
         let fog = fbm(vec2(p.x / width * 0.9 + time * 0.008, sky_y * 0.32 + 12.0));
-        color = color.lerp(
-            vec3(0.63, 0.69, 0.73),
-            weather.fog * (0.58 + smoothstep(0.35, 0.7, fog) * 0.18),
-        );
+        color = color.lerp(vec3(0.63, 0.69, 0.73), weather.fog * (0.58 + smoothstep(0.35, 0.7, fog) * 0.18));
     }
     color + pill_sheen(dist)
 }
 
-fn sun_layer(
-    color: Vec3,
-    point: Vec2,
-    size: Vec2,
-    [sun_x, sun_y]: [f32; 2],
-    cloud: f32,
-    time: f32,
-) -> Vec3 {
-    let sun = vec2(
-        16.0 + sun_x * (size.x - 32.0),
-        size.y * (0.72 - sun_y.saturate() * 0.45),
-    );
+fn sun_layer(color: Vec3, point: Vec2, size: Vec2, [sun_x, sun_y]: [f32; 2], cloud: f32, time: f32) -> Vec3 {
+    let sun = vec2(16.0 + sun_x * (size.x - 32.0), size.y * (0.72 - sun_y.saturate() * 0.45));
     let sun_color = vec3(0.96, 0.98, 1.0).lerp(vec3(0.98, 0.74, 0.66), smoothstep(0.55, 0.02, sun_y));
     let obstruction = if cloud > 1.0 / 1024.0 {
         smoothstep(0.43, 0.69, cloud_mass(sun, size.y, time)) * cloud * 0.82
@@ -421,30 +368,15 @@ fn sun_layer(
     };
     let clear = smoothstep(-0.02, 0.04, sun_y) * (1.0 - obstruction);
     let distance = point.distance(sun);
-    color.lerp(
-        sun_color,
-        (smoothstep(62.0, 4.0, distance) * 0.24 + smoothstep(11.0, 1.0, distance) * 0.7) * clear,
-    )
+    color.lerp(sun_color, (smoothstep(62.0, 4.0, distance) * 0.24 + smoothstep(11.0, 1.0, distance) * 0.7) * clear)
 }
 
-fn main_surface(
-    pixel: Vec2,
-    frame: &FrameData,
-    pill_x: f32,
-    expansion: f32,
-    body: SdfSurface,
-) -> SdfSurface {
+fn main_surface(pixel: Vec2, frame: &FrameData, pill_x: f32, expansion: f32, body: SdfSurface) -> SdfSurface {
     let size = popup_size(expansion);
     let origin = vec2(expanded_x(pill_x, expansion), PANEL_START + frame.panel_height);
     let gap = GAP * expansion;
     let box_size = vec2(size.x, (size.y - gap).max(0.0));
-    let popup = |point: Vec2| {
-        sd_rounded_box(
-            point - origin - vec2(size.x * 0.5, gap + box_size.y * 0.5),
-            box_size * 0.5,
-            (box_size.y * 0.5).min(18.0),
-        )
-    };
+    let popup = |point: Vec2| sd_rounded_box(point - origin - vec2(size.x * 0.5, gap + box_size.y * 0.5), box_size * 0.5, (box_size.y * 0.5).min(18.0));
     body.smooth_union(SdfSurface::sample(pixel, frame.mouse_pos, popup), 56.0, expansion)
 }
 
@@ -461,19 +393,14 @@ fn sample_forecast(pixel: Vec2, frame: &FrameData, pill: &WeatherSurface) -> For
     let row = if daily { 1.0 } else { 0.0 };
     let (row_origin, size) = forecast_row(frame.panel_height, row);
     let origin = vec2(expanded_x(pill.x, 1.0), PANEL_START + frame.panel_height) + row_origin;
-    let capsule =
-        |point: Vec2| sd_capsule_box(point - origin - size * 0.5, (size.x - size.y) * 0.5, size.y * 0.5);
+    let capsule = |point: Vec2| sd_capsule_box(point - origin - size * 0.5, (size.x - size.y) * 0.5, size.y * 0.5);
     let local = pixel - origin;
     let count = if daily { DAILY_FORECASTS } else { HOURLY_FORECASTS };
     let position = (local.x / size.x * count as f32 - 0.5).clamp(0.0, (count - 1) as f32);
     let index = position.floor() as usize;
     let amount = smoothstep(0.0, 1.0, position.fract());
     let (conditions, next, hour) = if daily {
-        (
-            pill.daily_conditions[index],
-            pill.daily_conditions[(index + 1).min(DAILY_FORECASTS - 1)],
-            12.0,
-        )
+        (pill.daily_conditions[index], pill.daily_conditions[(index + 1).min(DAILY_FORECASTS - 1)], 12.0)
     } else {
         (
             pill.hourly_conditions[index],
@@ -492,21 +419,12 @@ fn sample_forecast(pixel: Vec2, frame: &FrameData, pill: &WeatherSurface) -> For
 
 #[isthmus::pass]
 impl TempestasPass {
-    pub(crate) fn new(
-        passes: &Passes<'_>,
-        text: &text::Renderer,
-        timezones: &[String],
-        background: &Background,
-        updater: AppUpdater,
-        http: Client,
-    ) -> Self {
+    pub(crate) fn new(passes: &Passes<'_>, text: &text::Renderer, timezones: &[String], background: &Background, updater: AppUpdater, http: Client) -> Self {
         let mut forecast_timezones = Vec::with_capacity(timezones.len());
         let timezones: ArrayVec<_, MAX_WORLD_CLOCKS> = timezones
             .iter()
             .filter_map(|name| {
-                let timezone = TimeZone::get(name)
-                    .inspect_err(|error| warn!(timezone = name, %error, "Ignoring invalid timezone"))
-                    .ok()?;
+                let timezone = TimeZone::get(name).inspect_err(|error| warn!(timezone = name, %error, "Ignoring invalid timezone")).ok()?;
                 forecast_timezones.push(name.clone());
                 Some(WorldClock {
                     label: name.rsplit('/').next().unwrap_or(name).replace('_', " "),
@@ -542,12 +460,7 @@ impl TempestasPass {
         }
     }
 
-    pub fn update(
-        &mut self,
-        text: &mut text::Renderer,
-        status: Option<&mut status::StatusPass>,
-        frame: &mut Frame,
-    ) {
+    pub fn update(&mut self, text: &mut text::Renderer, status: Option<&mut status::StatusPass>, frame: &mut Frame) {
         let height = frame.config.height;
         let x = Self::pill_x(frame.shared.screen_size.x, frame.shared.status_width);
         let (weather_label, hour) = self.collapsed_label(x, height, frame);
@@ -570,12 +483,7 @@ impl TempestasPass {
             grid: text_grid(frame.shared, x),
             expansion: 1.0,
         };
-        labels.centered(
-            &weather_label,
-            WEATHER_STYLE,
-            vec2(WIDTH * 0.5, height * 0.46),
-            1.0,
-        );
+        labels.centered(&weather_label, WEATHER_STYLE, vec2(WIDTH * 0.5, height * 0.46), 1.0);
         self.calendar_labels(&mut labels, x, height, frame.delta_time, frame.interaction);
         self.text_lines.upload(&lines);
         self.text_cells.upload(&cells[..]);
@@ -587,16 +495,11 @@ impl TempestasPass {
         let hovered = Self::visible_rects(x, height, self.pill.calendar_expansion)
             .into_iter()
             .any(|rect| frame.interaction.contains(rect));
-        approach(
-            &mut self.pill.calendar_expansion,
-            f32::from(hovered),
-            frame.delta_time.min(1.0 / 30.0) * 3.0,
-        );
+        approach(&mut self.pill.calendar_expansion, f32::from(hovered), frame.delta_time.min(1.0 / 30.0) * 3.0);
         let time = Zoned::now();
-        let hour = self.utc_offset.map_or_else(
-            || Self::hour_of_day(time.datetime()),
-            |offset| Self::hour_of_day(offset.to_datetime(time.timestamp())),
-        );
+        let hour = self
+            .utc_offset
+            .map_or_else(|| Self::hour_of_day(time.datetime()), |offset| Self::hour_of_day(offset.to_datetime(time.timestamp())));
         self.pill.x = x;
         let clock = time.strftime("%a %d %b  %H:%M:%S");
         let mut label = ArrayString::new();
@@ -608,14 +511,7 @@ impl TempestasPass {
         (label, hour)
     }
 
-    fn calendar_labels(
-        &mut self,
-        text: &mut Labels<'_>,
-        x: f32,
-        height: f32,
-        delta_time: f32,
-        interaction: &mut InteractionState,
-    ) {
+    fn calendar_labels(&mut self, text: &mut Labels<'_>, x: f32, height: f32, delta_time: f32, interaction: &mut InteractionState) {
         let bounds = Self::pill_rect(x, height);
         if self.pill.calendar_expansion <= 0.0 {
             self.pill.text_hover = [0.0; 3];
@@ -630,44 +526,31 @@ impl TempestasPass {
         let reveal = reveal_progress(expansion, TITLE.y);
         let hover_blend = 1.0 - (-delta_time * 14.0).exp();
 
-        let title = interaction.surface(Rect::from_center(
-            origin + TITLE,
-            Vec2::new(UNIT * 26.0, UNIT * 4.0),
-        ));
+        let title = interaction.surface(Rect::from_center(origin + TITLE, Vec2::new(UNIT * 26.0, UNIT * 4.0)));
         if title.clicked {
             self.month_offset = 0;
         }
         self.pill.text_hover[0] += (f32::from(title.hovered) - self.pill.text_hover[0]) * hover_blend;
 
         let today = Zoned::now().date();
-        let month = today
-            .first_of_month()
-            .saturating_add(Span::new().months(self.month_offset));
+        let month = today.first_of_month().saturating_add(Span::new().months(self.month_offset));
         let title_hover = self.pill.text_hover[0];
         text.centered(
             &month.strftime("%B %Y").to_string(),
-            TITLE_STYLE
-                .scaled(1.0 + title_hover * 0.2)
-                .with_weight_mix(0.5 + title_hover * 0.5),
+            TITLE_STYLE.scaled(1.0 + title_hover * 0.2).with_weight_mix(0.5 + title_hover * 0.5),
             TITLE,
             1.0,
         );
 
         for (side, glyph) in [(-1.0f32, "<"), (1.0, ">")] {
-            let position = Vec2::new(
-                WIDTH * 0.5 + side * (WIDTH * 0.5 - UNIT * 7.0) * reveal,
-                TITLE.y - (1.0 - reveal) * UNIT * 3.0,
-            );
-            let response =
-                interaction.surface(Rect::from_center(origin + position, Vec2::splat(UNIT * 5.0)));
+            let position = Vec2::new(WIDTH * 0.5 + side * (WIDTH * 0.5 - UNIT * 7.0) * reveal, TITLE.y - (1.0 - reveal) * UNIT * 3.0);
+            let response = interaction.surface(Rect::from_center(origin + position, Vec2::splat(UNIT * 5.0)));
             if response.clicked {
                 self.month_offset = (self.month_offset + side as i32).clamp(-1200, 1200);
             }
             let hover = &mut self.pill.text_hover[usize::from(side > 0.0) + 1];
             *hover += (f32::from(response.hovered) - *hover) * hover_blend;
-            let style = TITLE_STYLE
-                .scaled(1.0 + *hover * 0.35)
-                .with_weight_mix(0.5 + *hover * 0.5);
+            let style = TITLE_STYLE.scaled(1.0 + *hover * 0.35).with_weight_mix(0.5 + *hover * 0.5);
             text.centered(glyph, style, position, 1.0);
         }
 
@@ -683,12 +566,7 @@ impl TempestasPass {
             let column = ((interaction.pointer.x - left) / size.x * items.len() as f32) as usize;
             Some(items[column.min(items.len() - 1)].hover_text.as_str())
         });
-        text.centered(
-            hovered.unwrap_or(&self.details),
-            DETAILS_STYLE,
-            Vec2::new(FORECAST_X + WIDTH * 0.5, TITLE.y),
-            1.0,
-        );
+        text.centered(hovered.unwrap_or(&self.details), DETAILS_STYLE, Vec2::new(FORECAST_X + WIDTH * 0.5, TITLE.y), 1.0);
 
         for (row, items) in forecasts.into_iter().enumerate() {
             let center = forecast_center(height, row as f32);
@@ -714,11 +592,7 @@ impl TempestasPass {
                 &label,
                 TextStyle::new(16.0, if is_today { 900.0 } else { 700.0 }),
                 grid_cell(index),
-                if is_today {
-                    vec3(1.0, 0.68, 0.68)
-                } else {
-                    text::COLOR
-                },
+                if is_today { vec3(1.0, 0.68, 0.68) } else { text::COLOR },
                 if date.month() == month.month() { 1.0 } else { 0.32 },
             );
         }
@@ -758,22 +632,12 @@ impl TempestasPass {
     }
 
     #[gpu]
-    pub fn vertex(
-        #[gpu(vertex_index)] vertex: u32,
-        #[gpu(shared)] frame: FrameData,
-        #[gpu(instance)] pill: WeatherSurface,
-    ) -> Vertex<Varyings> {
+    pub fn vertex(#[gpu(vertex_index)] vertex: u32, #[gpu(shared)] frame: FrameData, #[gpu(instance)] pill: WeatherSurface) -> Vertex<Varyings> {
         let expansion = smoothstep(0.0, 1.0, pill.calendar_expansion);
         let sun = sun_position(frame.weather_hour, pill.sun_hours);
         let weather = vec3(sun[0], sun[1], sun_position(12.0, pill.sun_hours)[1]).extend(expansion);
         // `pill_vertex` reserves space around the animated SDF for bulge and AA.
-        let (position, pixel) = pill_vertex(
-            vertex,
-            frame,
-            expanded_x(pill.x, expansion),
-            PANEL_START,
-            popup_size(expansion),
-        );
+        let (position, pixel) = pill_vertex(vertex, frame, expanded_x(pill.x, expansion), PANEL_START, popup_size(expansion));
         Vertex {
             position,
             varyings: Varyings { pixel, weather },
@@ -791,14 +655,15 @@ impl TempestasPass {
         #[gpu(resource)] glyphs: &[text::Glyph],
         #[gpu(resource)] edges: &[text::Edge],
     ) -> Vec4 {
-        let (_, body_local, body_size, body_surface) =
-            pill_fragment(pixel, frame, pill.x, PANEL_START, WIDTH);
+        if frame.launcher_open > 0.5 {
+            kill();
+        }
+        let (_, body_local, body_size, body_surface) = pill_fragment(pixel, frame, pill.x, PANEL_START, WIDTH);
         let expansion = weather.w;
         let interaction = pill_interaction(pixel, frame);
 
         // The pill merged with its popup is the whole shape; forecast rows only pick a scene.
-        let surface_distance =
-            interaction.expand(main_surface(pixel, frame, pill.x, expansion, body_surface));
+        let surface_distance = interaction.expand(main_surface(pixel, frame, pill.x, expansion, body_surface));
         let (_, mask, alpha) = PillInteraction::shade(surface_distance);
         if alpha <= 1.0 / 1024.0 {
             kill();
@@ -815,45 +680,19 @@ impl TempestasPass {
         let row_blend = sdf_coverage(row_surface_distance);
         let in_row = row_blend > 0.001;
         let (sample, width, distance, phase, conditions) = if in_row {
-            (
-                row_refracted * row.size,
-                row.size.x,
-                row_surface_distance,
-                sky_phase(row.sun_height),
-                row.conditions,
-            )
+            (row_refracted * row.size, row.size.x, row_surface_distance, sky_phase(row.sun_height), row.conditions)
         } else {
-            (
-                main_refracted * body_size,
-                body_size.x,
-                surface_distance,
-                sky_phase(weather.y),
-                main_conditions,
-            )
+            (main_refracted * body_size, body_size.x, surface_distance, sky_phase(weather.y), main_conditions)
         };
         let mut color = scene(frame, sample, width, distance, phase, conditions);
         // Only the antialiased boundary needs both nonlinear scene evaluations.
         if in_row && row_blend < 0.999 {
-            let main_color = scene(
-                frame,
-                main_refracted * body_size,
-                body_size.x,
-                surface_distance,
-                sky_phase(weather.y),
-                main_conditions,
-            );
+            let main_color = scene(frame, main_refracted * body_size, body_size.x, surface_distance, sky_phase(weather.y), main_conditions);
             color = main_color.lerp(color, row_blend);
         }
         if body_surface.distance < 1.0 {
             color = color.lerp(
-                sun_layer(
-                    color,
-                    body_local,
-                    body_size,
-                    [weather.x, weather.y],
-                    body_conditions.cloud,
-                    frame.time,
-                ),
+                sun_layer(color, body_local, body_size, [weather.x, weather.y], body_conditions.cloud, frame.time),
                 smoothstep(1.0, -body_size.y * 0.25, body_surface.distance),
             );
         }
@@ -861,17 +700,15 @@ impl TempestasPass {
 
         // Both labels a grid cell can name, so overlapping padded bounds never drop a glyph.
         let (grid_origin, cell_size) = text_grid(frame, pill.x);
-        let cell = ((pixel - grid_origin) / cell_size).floor().clamp(
-            Vec2::ZERO,
-            vec2(TEXT_COLUMNS as f32 - 1.0, TEXT_ROWS as f32 - 1.0),
-        );
+        let cell = ((pixel - grid_origin) / cell_size)
+            .floor()
+            .clamp(Vec2::ZERO, vec2(TEXT_COLUMNS as f32 - 1.0, TEXT_ROWS as f32 - 1.0));
         let names = *isthmus::reference(text_cells, (cell.y * TEXT_COLUMNS as f32 + cell.x) as usize);
         let mut slot = 0;
         while slot < 2 {
             let label = *isthmus::reference(text_lines, ((names >> (slot * 16)) & 0xffff) as usize);
             let label_color = label.color.to_vec4();
-            let text_alpha =
-                text::line_alpha(label, placed_glyphs, glyphs, edges, pixel) * label_color.w;
+            let text_alpha = text::line_alpha(label, placed_glyphs, glyphs, edges, pixel) * label_color.w;
             color = color * (1.0 - text_alpha) + label_color.truncate() * text_alpha;
             slot += 1;
         }
@@ -997,12 +834,7 @@ mod monitor {
         99 => "Thunderstorm Heavy Hail" { rain: 0.85, lightning: 1.0, hail: 1.0 };
     }
 
-    pub(super) fn start(
-        timezones: Vec<String>,
-        background: &Background,
-        updater: AppUpdater,
-        http: Client,
-    ) {
+    pub(super) fn start(timezones: Vec<String>, background: &Background, updater: AppUpdater, http: Client) {
         let (location_tx, locations) = mpsc::unbounded_channel();
         background.spawn(async move {
             if let Err(error) = stream_location(&location_tx).await {
@@ -1033,10 +865,7 @@ mod monitor {
         let session_path: OwnedObjectPath = location
             .call(
                 "CreateSession",
-                &HashMap::from([
-                    ("session_handle_token", Value::from(session_token.as_str())),
-                    ("accuracy", Value::from(2u32)),
-                ]),
+                &HashMap::from([("session_handle_token", Value::from(session_token.as_str())), ("accuracy", Value::from(2u32))]),
             )
             .await
             .map_err(|error| error.to_string())?;
@@ -1050,18 +879,14 @@ mod monitor {
             .await
             .map_err(|error| error.to_string())?;
 
-        let updates = location
-            .receive_signal("LocationUpdated")
-            .await
-            .map_err(|error| error.to_string())?;
+        let updates = location.receive_signal("LocationUpdated").await.map_err(|error| error.to_string())?;
         let request_token = format!("cantus_{:x}", fastrand::u64(..));
         let sender_name = connection
             .unique_name()
             .expect("session bus connection has no unique name")
             .trim_start_matches(':')
             .replace('.', "_");
-        let request_path =
-            format!("/org/freedesktop/portal/desktop/request/{sender_name}/{request_token}");
+        let request_path = format!("/org/freedesktop/portal/desktop/request/{sender_name}/{request_token}");
         let request: Proxy<'_> = ProxyBuilder::new(&connection)
             .destination(DESTINATION)
             .and_then(|builder| builder.path(request_path))
@@ -1071,19 +896,9 @@ mod monitor {
             .build()
             .await
             .map_err(|error| error.to_string())?;
-        let mut response = request
-            .receive_signal("Response")
-            .await
-            .map_err(|error| error.to_string())?;
+        let mut response = request.receive_signal("Response").await.map_err(|error| error.to_string())?;
         let returned_path: OwnedObjectPath = location
-            .call(
-                "Start",
-                &(
-                    &session_path,
-                    "",
-                    HashMap::from([("handle_token", Value::from(request_token.as_str()))]),
-                ),
-            )
+            .call("Start", &(&session_path, "", HashMap::from([("handle_token", Value::from(request_token.as_str()))])))
             .await
             .map_err(|error| error.to_string())?;
         if returned_path.as_str() != request.path().as_str() {
@@ -1114,25 +929,14 @@ mod monitor {
                     .map(|value| value as f32)
                     .map_err(|error| error.to_string())
             };
-            if sender
-                .send([coordinate("Latitude")?, coordinate("Longitude")?])
-                .is_err()
-            {
+            if sender.send([coordinate("Latitude")?, coordinate("Longitude")?]).is_err() {
                 break;
             }
         }
-        session
-            .call::<_, _, ()>("Close", &())
-            .await
-            .map_err(|error| error.to_string())
+        session.call::<_, _, ()>("Close", &()).await.map_err(|error| error.to_string())
     }
 
-    async fn refresh_loop(
-        http: &Client,
-        timezones: &[String],
-        updater: &AppUpdater,
-        mut locations_rx: UnboundedReceiver<[f32; 2]>,
-    ) {
+    async fn refresh_loop(http: &Client, timezones: &[String], updater: &AppUpdater, mut locations_rx: UnboundedReceiver<[f32; 2]>) {
         let mut locations = vec![None; timezones.len() + 1];
         if let Some(timezone) = TimeZone::system().iana_name() {
             match geocode(http, timezone).await {
@@ -1165,11 +969,7 @@ mod monitor {
                 ready.push((index, [latitude, longitude]));
             }
             let forecasts = match fetch(http, &ready).await {
-                Ok(results) => ready
-                    .into_iter()
-                    .zip(results)
-                    .map(|((index, _), forecast)| (index, forecast))
-                    .collect(),
+                Ok(results) => ready.into_iter().zip(results).map(|((index, _), forecast)| (index, forecast)).collect(),
                 Err(error) => {
                     retry = true;
                     warn!(%error, "Failed to refresh weather");
@@ -1206,10 +1006,7 @@ mod monitor {
             daily,
         } = forecast;
         // Index 0 is the local forecast; the rest fill in each configured world clock.
-        if let Some(timezone) = index
-            .checked_sub(1)
-            .and_then(|index| pass.timezones.get_mut(index))
-        {
+        if let Some(timezone) = index.checked_sub(1).and_then(|index| pass.timezones.get_mut(index)) {
             timezone.weather = format!(
                 "{} · {:.0}°/{:.0}°",
                 weather(daily.weather_code[0]).0,
@@ -1229,10 +1026,7 @@ mod monitor {
             let source = index * HOURLY_STEP_HOURS;
             let (description, conditions) = weather(hourly.weather_code[source]);
             pass.pill.hourly_conditions[index] = conditions;
-            let (time, degrees) = (
-                hourly.time[source].strftime("%H:%M").to_string(),
-                format!("{:.0}°", hourly.temperature_2m[source]),
-            );
+            let (time, degrees) = (hourly.time[source].strftime("%H:%M").to_string(), format!("{:.0}°", hourly.temperature_2m[source]));
             ForecastItem {
                 hover_text: format!("{time} {description} {degrees}"),
                 text: [time, degrees],
@@ -1249,10 +1043,7 @@ mod monitor {
             };
             let (description, conditions) = weather(daily.weather_code[day]);
             pass.pill.daily_conditions[index] = conditions;
-            let range = format!(
-                "{:.0}°/{:.0}°",
-                daily.temperature_2m_max[day], daily.temperature_2m_min[day]
-            );
+            let range = format!("{:.0}°/{:.0}°", daily.temperature_2m_max[day], daily.temperature_2m_min[day]);
             ForecastItem {
                 hover_text: format!("{}{suffix} {description} {range}", date.strftime("%A %-d")),
                 text: [date.strftime("%a").to_string(), range],
@@ -1269,11 +1060,7 @@ mod monitor {
     async fn geocode(http: &Client, timezone: &str) -> Result<[f32; 2], String> {
         let city = timezone.rsplit('/').next().unwrap_or(timezone).replace('_', " ");
         let query: String = form_urlencoded::byte_serialize(city.as_bytes()).collect();
-        let results: SearchResults = get_json(
-            http,
-            format!("https://geocoding-api.open-meteo.com/v1/search?name={query}&count=10"),
-        )
-        .await?;
+        let results: SearchResults = get_json(http, format!("https://geocoding-api.open-meteo.com/v1/search?name={query}&count=10")).await?;
         let place = results
             .results
             .iter()
@@ -1287,16 +1074,8 @@ mod monitor {
         if locations.is_empty() {
             return Ok(Vec::new());
         }
-        let latitude = locations
-            .iter()
-            .map(|(_, [latitude, _])| latitude.to_string())
-            .collect::<Vec<_>>()
-            .join(",");
-        let longitude = locations
-            .iter()
-            .map(|(_, [_, longitude])| longitude.to_string())
-            .collect::<Vec<_>>()
-            .join(",");
+        let latitude = locations.iter().map(|(_, [latitude, _])| latitude.to_string()).collect::<Vec<_>>().join(",");
+        let longitude = locations.iter().map(|(_, [_, longitude])| longitude.to_string()).collect::<Vec<_>>().join(",");
         let url = format!(
             "https://api.open-meteo.com/v1/forecast?latitude={latitude}&longitude={longitude}&current={WEATHER_FIELDS},relative_humidity_2m,wind_speed_10m&hourly={WEATHER_FIELDS}&forecast_hours=24&daily=weather_code,temperature_2m_max,temperature_2m_min,sunrise,sunset&temperature_unit=celsius&timezone=auto&forecast_days=6"
         );

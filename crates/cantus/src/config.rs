@@ -99,10 +99,7 @@ impl Default for Config {
 
 impl Config {
     pub fn timeline_px_per_ms(&self, screen_width: f32, status_width: f32) -> f32 {
-        let reserved = self.history_width
-            + GAP
-            + f32::from(self.tempestas_enabled) * (tempestas::WIDTH + GAP)
-            + status_width;
+        let reserved = self.history_width + GAP + f32::from(self.tempestas_enabled) * (tempestas::WIDTH + GAP) + status_width;
         (screen_width - reserved).max(84.0) / (self.timeline_future_minutes * 60_000.0)
     }
 
@@ -184,11 +181,7 @@ pub mod nix_options {
             Some("array") => {
                 let list = format!("lib.types.listOf ({})", nix_type(&schema["items"]));
                 if let Some(max) = schema["maxItems"].as_u64() {
-                    let operator = if schema["minItems"] == schema["maxItems"] {
-                        "=="
-                    } else {
-                        "<="
-                    };
+                    let operator = if schema["minItems"] == schema["maxItems"] { "==" } else { "<=" };
                     format!("lib.types.addCheck ({list}) (xs: builtins.length xs {operator} {max})")
                 } else {
                     list

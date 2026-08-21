@@ -1,15 +1,12 @@
 #[cfg(feature = "cpu")]
 use crate::{
-    cpu::{
-        Binding, FilteringSampler, ResourceBinding, Storage, TextureView,
-        texture::SampledTextureDimension,
-    },
+    cpu::{Binding, FilteringSampler, ResourceBinding, Storage, TextureView, texture::SampledTextureDimension},
     data::BufferData,
 };
 pub use spirv_std::Sampler;
 use spirv_std::image::{Image2d, Image2dArray};
 #[cfg(feature = "cpu")]
-use std::vec::Vec;
+use std::boxed::Box;
 
 /// Values produced by a vertex shader before Isthmus lowers them to the GPU ABI.
 pub struct Vertex<T> {
@@ -47,9 +44,13 @@ pub const fn quad_coord(vertex: u32) -> glam::Vec2 {
 }
 
 /// Converts a top-left-origin pixel position to clip space.
+///
+/// Rust-GPU's WGSL target applies the final vertex Y convention at the entry
+/// point. Keep this conversion in the logical top-left space and let the
+/// generated wrapper perform that one coordinate-system adjustment.
 pub fn pixel_to_ndc(pixel: glam::Vec2, screen_size: glam::Vec2) -> glam::Vec4 {
     let ndc = pixel / screen_size * 2.0 - 1.0;
-    glam::vec4(ndc.x, -ndc.y, 0.0, 1.0)
+    glam::vec4(ndc.x, ndc.y, 0.0, 1.0)
 }
 
 /// Borrows a value directly from a generated shader storage binding.
@@ -80,7 +81,7 @@ pub trait PassContract {
     const NAME: &'static str;
     const PIPELINE: Pipeline;
 
-    fn bindings(resources: Self::Resources<'_>) -> Vec<Binding>;
+    fn bindings(resources: Self::Resources<'_>) -> Box<[Binding]>;
 }
 
 /// Verifies that a pass accepts a program's shared data.

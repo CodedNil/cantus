@@ -53,7 +53,9 @@ pub struct RenderState {
     /// Physical buffer pixels per logical Wayland surface pixel.
     pub scale: f32,
     pub surface_width: Option<f32>,
-    /// The output's own height in physical pixels, used to vertically center the launcher panel.
+    pub launcher_width: Option<f32>,
+    pub launcher_height: Option<f32>,
+    /// The output's physical height, used as a fallback to size the launcher.
     pub output_height: Option<f32>,
 }
 
@@ -62,13 +64,7 @@ pub fn approach(current: &mut f32, target: f32, speed: f32) {
 }
 
 impl<'a> Frame<'a> {
-    pub fn begin(
-        shared: &'a mut FrameData,
-        interaction: &'a mut InteractionState,
-        config: &'a Config,
-        elapsed: f32,
-        screen_size: Vec2,
-    ) -> Self {
+    pub fn begin(shared: &'a mut FrameData, interaction: &'a mut InteractionState, config: &'a Config, elapsed: f32, screen_size: Vec2) -> Self {
         let delta_time = (elapsed - shared.time).min(0.1);
         shared.time = elapsed;
         shared.screen_size = screen_size;
@@ -84,17 +80,9 @@ impl<'a> Frame<'a> {
     }
 
     pub fn finish(&mut self) {
-        approach(
-            &mut self.shared.mouse_pressure,
-            self.interaction.pressure(),
-            5.0 * self.delta_time,
-        );
+        approach(&mut self.shared.mouse_pressure, self.interaction.pressure(), 5.0 * self.delta_time);
         if let Some(origin) = self.interaction.end_frame()
-            && let Some(ripple) = self
-                .shared
-                .ripples
-                .iter_mut()
-                .min_by(|a, b| a.start_time.total_cmp(&b.start_time))
+            && let Some(ripple) = self.shared.ripples.iter_mut().min_by(|a, b| a.start_time.total_cmp(&b.start_time))
         {
             *ripple = RipplePulse {
                 origin,
@@ -114,6 +102,8 @@ impl Default for RenderState {
             last_toggle_time: 0.0,
             scale: 1.0,
             surface_width: None,
+            launcher_width: None,
+            launcher_height: None,
             output_height: None,
         }
     }
@@ -126,9 +116,7 @@ impl RenderState {
     ///
     /// Panics if called before GPU initialization.
     pub const fn program(&mut self) -> &mut RenderProgram {
-        self.program
-            .as_mut()
-            .expect("render called before GPU configured")
+        self.program.as_mut().expect("render called before GPU configured")
     }
 }
 
@@ -150,10 +138,7 @@ impl Systems {
             .status_enabled
             .then(|| StatusPass::new(passes, &text, &app.enrichment.background, app.updater.clone()));
         Self {
-            lyrics: app
-                .config
-                .lyrics_enabled
-                .then(|| LyricsPass::new(passes, &text, app.enrichment.clone(), app.music.clone())),
+            lyrics: app.config.lyrics_enabled.then(|| LyricsPass::new(passes, &text, app.enrichment.clone(), app.music.clone())),
             tempestas,
             status,
             track: TrackPass::new(passes, &text),
@@ -164,24 +149,14 @@ impl Systems {
         }
     }
 
-    fn update(
-        &mut self,
-        frame: &mut Frame<'_>,
-        playback: &mut PlaybackState,
-        last_toggle_time: &mut f32,
-        launcher: &mut LauncherState,
-    ) {
+    fn update(&mut self, frame: &mut Frame<'_>, playback: &mut PlaybackState, last_toggle_time: &mut f32, launcher: &mut LauncherState) {
         self.text.begin();
+        frame.shared.launcher_open = f32::from(launcher.open);
         self.launcher.update(&mut self.text, launcher, frame);
 
-        let status_width = self
-            .status
-            .as_ref()
-            .map_or(0.0, |status| status.pill.width() + GAP);
+        let status_width = self.status.as_ref().map_or(0.0, |status| status.pill.width() + GAP);
         frame.shared.status_width = status_width;
-        frame.shared.px_per_ms = frame
-            .config
-            .timeline_px_per_ms(frame.shared.screen_size.x, status_width);
+        frame.shared.px_per_ms = frame.config.timeline_px_per_ms(frame.shared.screen_size.x, status_width);
         frame.shared.playhead_x = frame.config.playhead_x(frame.shared.px_per_ms);
         let drag_offset_ms = if frame.interaction.dragging {
             (frame.shared.mouse_pos.x - frame.interaction.press_origin.x) / frame.shared.px_per_ms
@@ -225,9 +200,7 @@ impl CantusApp {
         .expect("failed to initialize renderer");
         let info = program.adapter_info();
         tracing::info!("Using adapter: {} ({:?})", info.name, info.device_type);
-        program
-            .device()
-            .on_uncaptured_error(Arc::new(|error| tracing::error!(%error, "uncaptured wgpu error")));
+        program.device().on_uncaptured_error(Arc::new(|error| tracing::error!(%error, "uncaptured wgpu error")));
         self.render.program = Some(program);
     }
 
@@ -237,10 +210,7 @@ impl CantusApp {
     ///
     /// Panics if the renderer is not initialized or the replacement surface is incompatible.
     pub fn replace_render_surface(&mut self, surface: Surface<'static>) {
-        self.render
-            .program()
-            .replace_surface(surface)
-            .expect("replacement surface is incompatible");
+        self.render.program().replace_surface(surface).expect("replacement surface is incompatible");
     }
 
     /// The status pill's pass, which only monitors touch and only while it is enabled.
@@ -253,12 +223,18 @@ impl CantusApp {
     }
 
     pub fn logical_surface_size(&self) -> (f32, f32) {
-        let width = self.render.surface_width.unwrap_or(1920.0);
+        let width = if self.launcher.open {
+            self.render.launcher_width.or(self.render.surface_width)
+        } else {
+            self.render.surface_width
+        }
+        .unwrap_or(1920.0);
         if self.launcher.open {
             let height = self
                 .render
-                .output_height
-                .map_or(1080.0, |height| height / self.render.scale);
+                .launcher_height
+                .or_else(|| self.render.output_height.map(|height| height / self.render.scale))
+                .unwrap_or(1080.0);
             return (width, height);
         }
         let extension = if self.config.tempestas_enabled {
@@ -273,10 +249,7 @@ impl CantusApp {
 
     pub fn buffer_size(&self) -> (u32, u32) {
         let (width, height) = self.logical_surface_size();
-        (
-            (width * self.render.scale).round() as u32,
-            (height * self.render.scale).round() as u32,
-        )
+        ((width * self.render.scale).round() as u32, (height * self.render.scale).round() as u32)
     }
 
     /// Applies queued cross-thread updates before this frame's surface is sized.
@@ -293,19 +266,8 @@ impl CantusApp {
         };
         let elapsed = self.render.start_time.elapsed().as_secs_f32();
         let present = program.render(Color::TRANSPARENT, |shared, systems| {
-            let mut frame = Frame::begin(
-                shared,
-                &mut self.interaction,
-                &self.config,
-                elapsed,
-                vec2(screen_width, screen_height),
-            );
-            systems.update(
-                &mut frame,
-                &mut self.playback,
-                &mut self.render.last_toggle_time,
-                &mut self.launcher,
-            );
+            let mut frame = Frame::begin(shared, &mut self.interaction, &self.config, elapsed, vec2(screen_width, screen_height));
+            systems.update(&mut frame, &mut self.playback, &mut self.render.last_toggle_time, &mut self.launcher);
             frame.finish();
         });
         if matches!(present, Present::Validation) {

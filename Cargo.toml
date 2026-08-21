@@ -11,7 +11,6 @@ default-members = ["crates/cantus"]
 [workspace.dependencies]
 bytemuck = { version = "1.25.2", features = ["derive"] }
 glam = { version = "0.33.5", default-features = false, features = ["bytemuck", "u32"] }
-naga = { version = "30.0.0", default-features = false }
 serde = { version = "1.0.229", features = ["derive"] }
 wgpu = { version = "30.0.0", default-features = false }
 
@@ -45,6 +44,7 @@ opt-level = 3
 codegen-units = 1
 lto = "fat"
 strip = true
+panic = "abort"
 
 
 [profile.release.build-override]

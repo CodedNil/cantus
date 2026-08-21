@@ -38,10 +38,7 @@ pub struct FilteringSampler(pub(crate) wgpu::Sampler);
 
 impl<D> TextureView<D> {
     pub(crate) const fn new(raw: wgpu::TextureView) -> Self {
-        Self {
-            raw,
-            dimension: PhantomData,
-        }
+        Self { raw, dimension: PhantomData }
     }
 
     pub const fn raw(&self) -> &wgpu::TextureView {
@@ -89,12 +86,7 @@ impl<T: BufferData> Storage<T> {
         storage
     }
 
-    pub(crate) fn with_capacity(
-        device: &wgpu::Device,
-        queue: &wgpu::Queue,
-        label: &str,
-        capacity: usize,
-    ) -> Self {
+    pub(crate) fn with_capacity(device: &wgpu::Device, queue: &wgpu::Queue, label: &str, capacity: usize) -> Self {
         Self {
             buffer: buffer::DataBuffer::new(device, queue, label, capacity),
         }
