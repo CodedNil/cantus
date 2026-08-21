@@ -110,4 +110,25 @@ impl Context {
         }
         self.queue.submit([encoder.finish()]);
     }
+
+    pub(crate) fn draw_custom(&self, target: &TextureView, clear: Color, draw: impl FnOnce(RenderPass<'_>)) {
+        let mut encoder = self.device.create_command_encoder(&CommandEncoderDescriptor::default());
+        {
+            let pass = encoder.begin_render_pass(&RenderPassDescriptor {
+                label: Some("Render Pass"),
+                color_attachments: &[Some(RenderPassColorAttachment {
+                    view: target,
+                    depth_slice: None,
+                    resolve_target: None,
+                    ops: Operations {
+                        load: LoadOp::Clear(clear),
+                        store: StoreOp::Store,
+                    },
+                })],
+                ..Default::default()
+            });
+            draw(pass);
+        }
+        self.queue.submit([encoder.finish()]);
+    }
 }

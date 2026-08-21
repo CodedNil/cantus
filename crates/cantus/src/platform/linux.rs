@@ -471,6 +471,9 @@ pub fn run() {
         connection.backend().display_ptr().cast(),
     )))));
     let output = app.output.take().expect("No Wayland outputs found");
+    // wl_pointer exposes a surface, not its output. Keep the configured output as the
+    // best protocol-level target for the launcher rather than letting the compositor choose.
+    app.output = Some(output.clone());
 
     app.wl_surface = Some(wl_surface);
     let surface = app.wl_surface.as_ref().unwrap();
@@ -511,7 +514,7 @@ pub fn run() {
     resize_layer_surface(&layer_surface, &app.cantus);
     app.layer_surface = Some(layer_surface);
 
-    app.pending_surface = Some(app.create_render_surface(surface));
+    app.pending_bar_surface = Some(app.create_render_surface(surface));
     surface.commit();
     connection.flush().expect("Failed to flush initial commit");
 
@@ -545,7 +548,8 @@ struct LayerShellApp {
     selection: Option<WlDataOffer>,
     offer_is_text: bool,
     output: Option<WlOutput>,
-    pending_surface: Option<Surface<'static>>,
+    pending_bar_surface: Option<Surface<'static>>,
+    pending_launcher_surface: Option<Surface<'static>>,
     display_handle: Option<RawDisplayHandle>,
     wl_surface: Option<WlSurface>,
     launcher_wl_surface: Option<WlSurface>,
@@ -561,7 +565,8 @@ struct LayerShellApp {
     launcher_fractional: Option<WpFractionalScaleV1>,
     launcher_background_effect: Option<ExtBackgroundEffectSurfaceV1>,
     launcher_configured: bool,
-    frame_callback: Option<WlCallback>,
+    bar_frame_callback: Option<WlCallback>,
+    launcher_frame_callback: Option<WlCallback>,
 }
 
 macro_rules! destroy_proxies {
@@ -587,9 +592,9 @@ macro_rules! dispatch {
     };
 }
 
-/// Resizes the bar's layer surface to fit the launcher panel and sets its keyboard focus.
+/// Resizes the bar surface and sets keyboard focus for the launcher.
 fn resize_layer_surface(layer_surface: &ZwlrLayerSurfaceV1, cantus: &CantusApp) {
-    layer_surface.set_size(0, cantus.logical_surface_size().1 as u32);
+    layer_surface.set_size(0, cantus.bar_surface_size().1 as u32);
     layer_surface.set_keyboard_interactivity(if cantus.launcher.open {
         KeyboardInteractivity::Exclusive
     } else {
@@ -653,14 +658,6 @@ impl LayerShellApp {
         }
     }
 
-    const fn active_viewport(&self) -> Option<&WpViewport> {
-        if self.launcher_wl_surface.is_some() {
-            self.launcher_viewport.as_ref()
-        } else {
-            self.viewport.as_ref()
-        }
-    }
-
     const fn active_background_effect(&self) -> Option<&ExtBackgroundEffectSurfaceV1> {
         if self.launcher_wl_surface.is_some() {
             self.launcher_background_effect.as_ref()
@@ -701,10 +698,13 @@ impl LayerShellApp {
             self.launcher_layer_surface = Some(layer);
             self.launcher_wl_surface = Some(surface);
             let surface = self.launcher_wl_surface.as_ref().unwrap();
-            self.pending_surface = Some(self.create_render_surface(surface));
+            self.pending_launcher_surface = Some(self.create_render_surface(surface));
             surface.commit();
         } else {
-            drop(self.frame_callback.take());
+            drop(self.launcher_frame_callback.take());
+            if let Some(program) = self.cantus.render.program.as_mut() {
+                program.remove_secondary_surface();
+            }
             destroy_proxies!(
                 self,
                 launcher_layer_surface,
@@ -714,7 +714,6 @@ impl LayerShellApp {
                 launcher_wl_surface
             );
             let surface = self.wl_surface.as_ref().unwrap();
-            self.pending_surface = Some(self.create_render_surface(surface));
             surface.commit();
         }
     }
@@ -729,51 +728,71 @@ impl LayerShellApp {
 
         // Initialize the program before draining updates so startup jobs cannot race surface configuration.
         if self.cantus.render.program.is_none()
-            && let Some(surface) = self.pending_surface.take()
+            && let Some(surface) = self.pending_bar_surface.take()
         {
             let (width, height) = self.cantus.buffer_size();
             if width > 0 && height > 0 {
                 self.cantus.initialize_gpu(surface, width, height);
             } else {
-                self.pending_surface = Some(surface);
+                self.pending_bar_surface = Some(surface);
             }
-        } else if let Some(surface) = self.pending_surface.take() {
-            self.cantus.replace_render_surface(surface);
+        }
+        if let Some(surface) = self.pending_launcher_surface.take() {
+            let (width, height) = self.cantus.launcher_buffer_size();
+            if let Some(program) = &mut self.cantus.render.program {
+                program.add_secondary_surface(surface, width, height).expect("launcher surface is incompatible");
+            }
         }
         self.update_scale_and_viewport();
         self.update_blur_region(qhandle);
 
         let (buffer_width, buffer_height) = self.cantus.buffer_size();
+        let launcher_size = self.cantus.launcher_buffer_size();
         if buffer_width > 0
             && buffer_height > 0
             && let Some(program) = &mut self.cantus.render.program
         {
             program.resize(buffer_width, buffer_height);
+            if self.launcher_wl_surface.is_some() {
+                let (width, height) = launcher_size;
+                program.resize_secondary(width, height);
+            }
         }
 
-        if self.cantus.render() {
-            let surface = self.create_render_surface(self.active_surface());
-            self.cantus.replace_render_surface(surface);
-        }
+        let _ = self.cantus.render();
         if let Some(text) = self.cantus.launcher.pending_copy.take() {
             self.set_clipboard(&text, qhandle);
         }
         self.update_input_region(qhandle);
-        let surface = self.active_surface().clone();
-        if self.frame_callback.is_none() {
-            self.frame_callback = Some(surface.frame(qhandle, ()));
+        let bar = self.wl_surface.as_ref().unwrap().clone();
+        if self.bar_frame_callback.is_none() {
+            self.bar_frame_callback = Some(bar.frame(qhandle, ()));
         }
-        surface.commit();
+        bar.commit();
+        if let Some(launcher) = self.launcher_wl_surface.clone() {
+            if self.launcher_frame_callback.is_none() {
+                self.launcher_frame_callback = Some(launcher.frame(qhandle, ()));
+            }
+            launcher.commit();
+        }
     }
 
     fn update_scale_and_viewport(&self) {
-        let (logical_width, logical_height) = self.cantus.logical_surface_size();
-        let viewport = self.active_viewport();
-        self.active_surface()
-            .set_buffer_scale(viewport.map_or_else(|| self.cantus.render.scale.ceil() as i32, |_| 1));
-        if let Some(viewport) = viewport {
-            // Leave the source unset so it always refers to the full attached buffer.
-            viewport.set_destination(logical_width as i32, logical_height as i32);
+        let scale = self.cantus.render.scale;
+        let (bar_width, bar_height) = self.cantus.bar_surface_size();
+        self.wl_surface
+            .as_ref()
+            .unwrap()
+            .set_buffer_scale(self.viewport.as_ref().map_or_else(|| scale.ceil() as i32, |_| 1));
+        if let Some(viewport) = &self.viewport {
+            viewport.set_destination(bar_width as i32, bar_height as i32);
+        }
+        if let Some(surface) = &self.launcher_wl_surface {
+            let (width, height) = self.cantus.launcher_surface_size();
+            surface.set_buffer_scale(self.launcher_viewport.as_ref().map_or_else(|| scale.ceil() as i32, |_| 1));
+            if let Some(viewport) = &self.launcher_viewport {
+                viewport.set_destination(width as i32, height as i32);
+            }
         }
     }
 
@@ -800,7 +819,7 @@ impl LayerShellApp {
 
         let compositor = self.compositor.as_ref().unwrap();
         let region = compositor.create_region(qhandle, ());
-        let (width, height) = self.cantus.logical_surface_size();
+        let (width, height) = self.cantus.launcher_surface_size();
         let (origin, size) = background_bounds(vec2(width, height), self.cantus.config.height);
         // Keep the integer input region one pixel inside the shader's antialiased edge.
         let x = origin.x.ceil() as i32 + 1;
@@ -866,9 +885,17 @@ dispatch!(WpFractionalScaleV1, |state, _proxy, event, qhandle| {
     }
 });
 
-dispatch!(WlCallback, |state, _proxy, event, qhandle| {
-    if matches!(event, wl_callback::Event::Done { .. }) && state.frame_callback.take().is_some() {
-        state.try_render_frame(qhandle);
+dispatch!(WlCallback, |state, proxy, event, qhandle| {
+    if matches!(event, wl_callback::Event::Done { .. }) {
+        let is_bar = state.bar_frame_callback.as_ref().is_some_and(|callback| callback.id() == proxy.id());
+        let consumed = if is_bar {
+            state.bar_frame_callback.take().is_some()
+        } else {
+            state.launcher_frame_callback.take().is_some_and(|callback| callback.id() == proxy.id())
+        };
+        if consumed {
+            state.try_render_frame(qhandle);
+        }
     }
 });
 

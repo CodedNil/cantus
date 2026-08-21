@@ -13,9 +13,9 @@ use crate::{
     },
 };
 use isthmus::{
-    PassBuilder, Present, Program,
+    PassBuilder, Present, Program, Render,
     glam::{Vec2, vec2},
-    wgpu::{Color, Instance, PowerPreference, Surface},
+    wgpu::{Color, Instance, PowerPreference, RenderPass, Surface},
 };
 use std::{sync::Arc, time::Instant};
 
@@ -149,10 +149,13 @@ impl Systems {
         }
     }
 
-    fn update(&mut self, frame: &mut Frame<'_>, playback: &mut PlaybackState, last_toggle_time: &mut f32, launcher: &mut LauncherState) {
+    fn update(&mut self, frame: &mut Frame<'_>, playback: &mut PlaybackState, last_toggle_time: &mut f32, launcher: &mut LauncherState, launcher_size: Vec2) {
         self.text.begin();
         frame.shared.launcher_open = f32::from(launcher.open);
+        let bar_size = frame.shared.screen_size;
+        frame.shared.screen_size = launcher_size;
         self.launcher.update(&mut self.text, launcher, frame);
+        frame.shared.screen_size = bar_size;
 
         let status_width = self.status.as_ref().map_or(0.0, |status| status.pill.width() + GAP);
         frame.shared.status_width = status_width;
@@ -177,6 +180,15 @@ impl Systems {
         }
         self.particles.update(&self.track, playback, frame);
         self.text.upload();
+    }
+
+    fn draw_bar<'a>(&'a self, pass: &mut RenderPass<'a>) {
+        self.lyrics.draw(pass);
+        self.tempestas.draw(pass);
+        self.status.draw(pass);
+        self.track.draw(pass);
+        self.particles.draw(pass);
+        self.playhead.draw(pass);
     }
 }
 
@@ -204,15 +216,6 @@ impl CantusApp {
         self.render.program = Some(program);
     }
 
-    /// Replaces a lost or recreated presentation surface without rebuilding renderer services.
-    ///
-    /// # Panics
-    ///
-    /// Panics if the renderer is not initialized or the replacement surface is incompatible.
-    pub fn replace_render_surface(&mut self, surface: Surface<'static>) {
-        self.render.program().replace_surface(surface).expect("replacement surface is incompatible");
-    }
-
     /// The status pill's pass, which only monitors touch and only while it is enabled.
     ///
     /// # Panics
@@ -222,33 +225,13 @@ impl CantusApp {
         self.render.program().passes_mut().status.as_mut().unwrap()
     }
 
-    pub fn logical_surface_size(&self) -> (f32, f32) {
-        let width = if self.launcher.open {
-            self.render.launcher_width.or(self.render.surface_width)
-        } else {
-            self.render.surface_width
-        }
-        .unwrap_or(1920.0);
-        if self.launcher.open {
-            let height = self
-                .render
-                .launcher_height
-                .or_else(|| self.render.output_height.map(|height| height / self.render.scale))
-                .unwrap_or(1080.0);
-            return (width, height);
-        }
-        let extension = if self.config.tempestas_enabled {
-            EXTENSION
-        } else if self.config.lyrics_enabled {
-            LYRICS_EXTENSION
-        } else {
-            0.0
-        } + PANEL_OVERFLOW;
-        (width, self.config.height + PANEL_START + extension)
+    pub fn buffer_size(&self) -> (u32, u32) {
+        let (width, height) = self.bar_surface_size();
+        ((width * self.render.scale).round() as u32, (height * self.render.scale).round() as u32)
     }
 
-    pub fn buffer_size(&self) -> (u32, u32) {
-        let (width, height) = self.logical_surface_size();
+    pub fn launcher_buffer_size(&self) -> (u32, u32) {
+        let (width, height) = self.launcher_surface_size();
         ((width * self.render.scale).round() as u32, (height * self.render.scale).round() as u32)
     }
 
@@ -259,17 +242,59 @@ impl CantusApp {
         }
     }
 
+    pub fn bar_surface_size(&self) -> (f32, f32) {
+        let width = self.render.surface_width.unwrap_or(1920.0);
+        let extension = if self.config.tempestas_enabled {
+            EXTENSION
+        } else if self.config.lyrics_enabled {
+            LYRICS_EXTENSION
+        } else {
+            0.0
+        } + PANEL_OVERFLOW;
+        (width, self.config.height + PANEL_START + extension)
+    }
+
+    pub fn launcher_surface_size(&self) -> (f32, f32) {
+        let width = self.render.launcher_width.or(self.render.surface_width).unwrap_or(1920.0);
+        let height = self
+            .render
+            .launcher_height
+            .or_else(|| self.render.output_height.map(|height| height / self.render.scale))
+            .unwrap_or(1080.0);
+        (width, height)
+    }
+
     pub fn render(&mut self) -> bool {
-        let (screen_width, screen_height) = self.logical_surface_size();
+        let (screen_width, screen_height) = self.bar_surface_size();
+        let launcher_size = self.launcher_surface_size();
         let Some(program) = self.render.program.as_mut() else {
             return false;
         };
         let elapsed = self.render.start_time.elapsed().as_secs_f32();
-        let present = program.render(Color::TRANSPARENT, |shared, systems| {
-            let mut frame = Frame::begin(shared, &mut self.interaction, &self.config, elapsed, vec2(screen_width, screen_height));
-            systems.update(&mut frame, &mut self.playback, &mut self.render.last_toggle_time, &mut self.launcher);
-            frame.finish();
-        });
+        let present = program.render_custom(
+            Color::TRANSPARENT,
+            |shared, systems| {
+                let mut frame = Frame::begin(shared, &mut self.interaction, &self.config, elapsed, vec2(screen_width, screen_height));
+                systems.update(
+                    &mut frame,
+                    &mut self.playback,
+                    &mut self.render.last_toggle_time,
+                    &mut self.launcher,
+                    vec2(launcher_size.0, launcher_size.1),
+                );
+                // The bar target must keep drawing while the launcher target is open.
+                frame.shared.launcher_open = 0.0;
+                frame.finish();
+            },
+            |systems, mut pass| systems.draw_bar(&mut pass),
+        );
+        if self.launcher.open {
+            program.update_shared(|shared| {
+                shared.screen_size = vec2(launcher_size.0, launcher_size.1);
+                shared.launcher_open = 1.0;
+            });
+            let _ = program.render_secondary(Color::TRANSPARENT, |systems, mut pass| systems.launcher.draw(&mut pass));
+        }
         if matches!(present, Present::Validation) {
             tracing::error!("surface texture acquisition failed validation");
         }

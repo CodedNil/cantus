@@ -17,6 +17,7 @@ pub struct Program<SharedData, Passes, Target = SurfaceTarget<'static>> {
     shared: SharedData,
     shared_buffer: DataBuffer<SharedData>,
     passes: Passes,
+    secondary: Option<SurfaceTarget<'static>>,
 }
 
 impl<SharedData, Passes, Target> Program<SharedData, Passes, Target> {
@@ -45,6 +46,7 @@ impl<SharedData, Passes, Target> Program<SharedData, Passes, Target> {
             shared,
             shared_buffer,
             passes,
+            secondary: None,
         };
         validation.pop().await.map_or_else(|| Ok(program), |error| Err(SetupError::Validation(error)))
     }
@@ -57,6 +59,14 @@ impl<SharedData, Passes, Target> Program<SharedData, Passes, Target> {
         update(&mut self.shared, &mut self.passes);
         self.shared_buffer.upload(from_ref(&self.shared));
         self.passes.prepare();
+    }
+
+    pub fn update_shared(&mut self, update: impl FnOnce(&mut SharedData))
+    where
+        SharedData: BufferData,
+    {
+        update(&mut self.shared);
+        self.shared_buffer.upload(from_ref(&self.shared));
     }
 
     pub const fn device(&self) -> &wgpu::Device {
@@ -96,6 +106,17 @@ impl<'window, SharedData: BufferData + Default, Passes: Render> Program<SharedDa
         self.target.resize(&self.context, width, height);
     }
 
+    pub fn render_custom(&mut self, clear: Color, update: impl FnOnce(&mut SharedData, &mut Passes), draw: impl for<'a> FnOnce(&'a Passes, wgpu::RenderPass<'a>)) -> Present {
+        let frame = match self.target.acquire(&self.context) {
+            Ok(frame) => frame,
+            Err(status) => return status,
+        };
+        self.update(update);
+        self.context.draw_custom(&frame.view, clear, |pass| draw(&self.passes, pass));
+        self.target.present(&self.context, frame);
+        Present::Rendered
+    }
+
     /// Replaces the presentation surface.
     ///
     /// # Errors
@@ -112,6 +133,38 @@ impl<'window, SharedData: BufferData + Default, Passes: Render> Program<SharedDa
         self.update(update);
         self.context.draw(&frame.view, clear, &self.passes);
         self.target.present(&self.context, frame);
+        Present::Rendered
+    }
+}
+
+impl<SharedData: BufferData + Default, Passes: Render> Program<SharedData, Passes, SurfaceTarget<'static>> {
+    /// Adds the launcher presentation target while retaining the bar target.
+    pub fn add_secondary_surface(&mut self, surface: Surface<'static>, width: u32, height: u32) -> Result<(), SetupError> {
+        let target = SurfaceTarget::new(&self.context, surface, width, height)?;
+        self.secondary = Some(target);
+        Ok(())
+    }
+
+    pub fn remove_secondary_surface(&mut self) {
+        self.secondary = None;
+    }
+
+    pub fn resize_secondary(&mut self, width: u32, height: u32) {
+        if let Some(target) = self.secondary.as_mut() {
+            target.resize(&self.context, width, height);
+        }
+    }
+
+    pub fn render_secondary(&mut self, clear: Color, draw: impl for<'a> FnOnce(&'a Passes, wgpu::RenderPass<'a>)) -> Present {
+        let Some(target) = self.secondary.as_ref() else {
+            return Present::Unavailable;
+        };
+        let frame = match target.acquire(&self.context) {
+            Ok(frame) => frame,
+            Err(status) => return status,
+        };
+        self.context.draw_custom(&frame.view, clear, |pass| draw(&self.passes, pass));
+        target.present(&self.context, frame);
         Present::Rendered
     }
 }
