@@ -52,10 +52,6 @@ const RATING_PLAYLISTS: [&str; 10] = ["0.5", "1.0", "1.5", "2.0", "2.5", "3.0", 
 type ClientResult<T> = Result<T, Box<dyn Error + Send + Sync>>;
 type PlaylistCache = HashMap<PlaylistId, (Vec<u8>, PlaylistTracks)>;
 
-fn client_error(message: &'static str) -> Box<dyn Error + Send + Sync> {
-    io::Error::other(message).into()
-}
-
 fn config_path(file: &str) -> PathBuf {
     config::directory().join(file)
 }
@@ -140,7 +136,7 @@ impl SpotifyBackend {
     }
 
     pub async fn lyrics(&self, track_id: TrackId) -> MusicResult<Vec<LyricSegment>> {
-        let session = self.session.lock().clone().ok_or_else(|| client_error("Spotify is not connected"))?;
+        let session = self.session.lock().clone().ok_or_else(|| io::Error::other("Spotify is not connected"))?;
         let id = SpotifyId::from_base62(&track_id)?;
         let response = match session.spclient().get_lyrics(&id).await {
             Ok(response) => response,

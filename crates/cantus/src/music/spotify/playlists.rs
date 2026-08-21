@@ -82,7 +82,7 @@ impl SpotifyWorker {
                 return;
             }
         };
-        if let Err(error) = self.request_connected(&Method::PUT, &format!("/collection/collection/{username}"), body).await {
+        if let Err(error) = self.request_connected(&Method::POST, &format!("/collection/collection/{username}"), body).await {
             error!(%error, %track_id, "Failed to update Spotify library");
         }
     }
