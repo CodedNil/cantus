@@ -84,13 +84,11 @@ pub fn avalanche(mut value: UVec2) -> UVec2 {
     value
 }
 
-#[isthmus::outline]
 pub fn hash(p: Vec2) -> Vec2 {
     let value = avalanche(uvec2(p.x as i32 as u32, p.y as i32 as u32));
     vec2(value.x as f32, value.y as f32) * 2.328_306_4e-10
 }
 
-#[isthmus::outline]
 pub fn simplex_noise(p: Vec2) -> f32 {
     const K1: f32 = 0.366_025_42;
     const K2: f32 = 0.211_324_87;
@@ -109,12 +107,10 @@ pub fn simplex_noise(p: Vec2) -> f32 {
 pub fn fbm(mut p: Vec2) -> f32 {
     let mut density = 0.0;
     let mut amplitude = 0.5;
-    let mut octave = 0;
-    while octave < 4 {
+    for _ in 0..4 {
         density += simplex_noise(p) * amplitude;
         p = vec2(p.x * 1.6 + p.y * 1.2, p.y * 1.6 - p.x * 1.2);
         amplitude *= 0.5;
-        octave += 1;
     }
     0.5 + density * 0.5
 }
@@ -126,12 +122,10 @@ pub fn cloud_mass(p: Vec2, scale: f32, time: f32) -> f32 {
 /// Pixels the pill can cover beyond its bounds: shadow always, bulges only while active.
 pub fn pill_margin(frame: &FrameData) -> f32 {
     let mut bulge = frame.mouse_pressure * 8.0;
-    let mut index = 0;
-    while index < frame.ripples.len() {
+    for index in 0..frame.ripples.len() {
         let pulse = frame.ripples[index];
         let fade = 1.0 - ((frame.time - pulse.start_time) * 1.2).saturate();
         bulge += pulse.strength * fade * fade * 11.0;
-        index += 1;
     }
     SHADOW_REACH + bulge * 0.5
 }
@@ -155,12 +149,6 @@ pub fn pill_fragment(pixel: Vec2, frame: &FrameData, x: f32, y: f32, width: f32)
     (pill_interaction(pixel, frame), local, size, SdfSurface::new(distance, mouse_distance))
 }
 
-/// Return a direction and length without `glam::normalize_or_zero`, whose infinity literal is rejected by Naga when translating SPIR-V.
-pub fn direction_and_length(vector: Vec2) -> (Vec2, f32) {
-    let length = vector.length();
-    if length > 0.001 { (vector / length, length) } else { (Vec2::ZERO, length) }
-}
-
 pub fn hover_mask(mouse_distance: f32) -> f32 {
     smoothstep(0.5, -0.5, mouse_distance)
 }
@@ -179,18 +167,18 @@ pub fn sdf_coverage(distance: f32) -> f32 {
 pub fn pill_interaction(pixel: Vec2, frame: &FrameData) -> PillInteraction {
     let mut ripple = Vec2::ZERO;
     let mut ripple_flash = 0.0;
-    let mut index = 0;
-    while index < frame.ripples.len() {
+    for index in 0..frame.ripples.len() {
         let pulse = frame.ripples[index];
         let progress = ((frame.time - pulse.start_time) * 1.2).saturate();
         // Uniform across the draw, so expired slots skip all per-pixel distance work.
         if pulse.strength > 0.0 && progress < 1.0 {
-            let (direction, distance) = direction_and_length(pixel - pulse.origin);
+            let offset = pixel - pulse.origin;
+            let distance = offset.length();
+            let direction = offset.normalize_or_zero();
             let wave = smoothstep(80.0, 0.0, (distance - progress * 600.0).abs()) * pulse.strength * (1.0 - progress);
             ripple += direction * wave * (1.0 - progress) * 0.5;
             ripple_flash = (ripple_flash + wave * 0.5).min(1.0);
         }
-        index += 1;
     }
 
     let mouse_bulge = if frame.mouse_pressure > 0.0 {
@@ -211,13 +199,11 @@ pub fn pill_sheen(distance: f32) -> f32 {
     smoothstep(5.0, -3.0, distance) * 0.14
 }
 
-#[isthmus::outline]
 pub fn sd_rounded_box(point: Vec2, half_size: Vec2, radius: f32) -> f32 {
     let corner = point.abs() - half_size + radius;
     corner.max(Vec2::ZERO).length() + corner.x.max(corner.y).min(0.0) - radius
 }
 
-#[isthmus::outline]
 pub fn sd_capsule_box(point: Vec2, half_span: f32, radius: f32) -> f32 {
     let offset = point.abs() - vec2(half_span, 0.0);
     offset.max(Vec2::ZERO).length() + offset.x.max(offset.y).min(0.0) - radius

@@ -11,7 +11,6 @@ mod model;
 mod pass;
 mod render;
 mod syntax;
-mod varyings;
 
 fn isthmus_path() -> TokenStream2 {
     match crate_name("isthmus") {
@@ -24,15 +23,10 @@ fn isthmus_path() -> TokenStream2 {
     }
 }
 
-/// Declares host/GPU data and rejects layouts that Rust-GPU cannot expose to WGSL.
+/// Declares host/GPU data and rejects layouts that Rust-GPU cannot expose to SPIR-V.
 #[proc_macro_attribute]
 pub fn data(_args: TokenStream, input: TokenStream) -> TokenStream {
     buffer::attribute(input)
-}
-
-#[proc_macro_derive(Varyings, attributes(gpu))]
-pub fn derive_varyings(input: TokenStream) -> TokenStream {
-    varyings::derive(input)
 }
 
 #[proc_macro_derive(Render, attributes(render))]
@@ -40,30 +34,29 @@ pub fn derive_render(input: TokenStream) -> TokenStream {
     render::derive(input)
 }
 
-/// Declares a typed CPU/GPU render pass.
+/// Declares a host render system and its drawable instance field.
 #[proc_macro_attribute]
-pub fn pass(args: TokenStream, input: TokenStream) -> TokenStream {
+pub fn system(args: TokenStream, input: TokenStream) -> TokenStream {
     pass::expand(args, input)
 }
 
-/// Keeps a shader helper outlined when its signature is legal in SPIR-V.
+/// Declares one linked vertex/fragment shader and infers its complete contract.
 #[proc_macro_attribute]
-pub fn outline(args: TokenStream, input: TokenStream) -> TokenStream {
+pub fn shader(args: TokenStream, input: TokenStream) -> TokenStream {
+    pass::expand_shader(args, input)
+}
+
+/// Keeps host implementation details out of the Rust-GPU compilation.
+#[proc_macro_attribute]
+pub fn host(args: TokenStream, input: TokenStream) -> TokenStream {
     if !args.is_empty() {
-        return syn::Error::new(proc_macro2::Span::call_site(), "outline takes no arguments").to_compile_error().into();
+        return syn::Error::new(proc_macro2::Span::call_site(), "host takes no arguments").to_compile_error().into();
     }
-    let function = syn::parse_macro_input!(input as syn::ItemFn);
-    quote!(#[cfg_attr(target_arch = "spirv", inline(never))] #function).into()
+    let item = TokenStream2::from(input);
+    quote!(#[cfg(not(target_arch = "spirv"))] #item).into()
 }
 
-/// Internal second half of the pass expansion.
-#[proc_macro]
-#[doc(hidden)]
-pub fn lower_pass(input: TokenStream) -> TokenStream {
-    pass::lower(input)
-}
-
-/// Includes the package's checked-in shader artifact.
+/// Includes the package's checked-in SPIR-V shader artifact.
 #[proc_macro]
 pub fn shader_module(input: TokenStream) -> TokenStream {
     if !input.is_empty() {
@@ -81,6 +74,5 @@ pub fn shader_module(input: TokenStream) -> TokenStream {
         }
     };
     let artifact = artifact.to_string_lossy();
-    let isthmus = isthmus_path();
-    quote!(#isthmus::wgpu::include_wgsl!(#artifact)).into()
+    quote!(include_bytes!(#artifact)).into()
 }

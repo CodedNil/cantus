@@ -12,42 +12,37 @@ pub struct PassSchema {
     pub fragment: StageContract,
     pub shared: Option<Type>,
     pub instance: Type,
-    pub resources: Vec<(Ident, TokenStream)>,
+    pub resources: Vec<ResourceSchema>,
+}
+
+pub struct ResourceSchema {
+    pub name: Ident,
+    pub cpu: Option<TokenStream>,
 }
 
 impl PassSchema {
-    pub fn parse(vertex: &ItemFn, fragment: &ItemFn) -> Result<Self> {
-        let vertex = StageContract::parse(vertex, Stage::Vertex)?;
-        let fragment_contract = StageContract::parse(fragment, Stage::Fragment)?;
-        let carry_instance = fragment_contract.has_implicit(GpuRole::Instance);
-        if carry_instance
-            && vertex
-                .parameters
-                .iter()
-                .any(|parameter| parameter.role.role == GpuRole::Instance && parameter.role.index.is_some())
-        {
-            return Err(syn::Error::new_spanned(
-                fragment,
-                "fragment instance needs an explicit index when the vertex remaps instances",
-            ));
-        }
-
+    pub fn parse(vertex: &ItemFn, fragment: &ItemFn, varying_count: usize) -> Result<Self> {
+        let vertex = StageContract::parse(vertex, Stage::Vertex, 0)?;
+        let fragment_contract = StageContract::parse(fragment, Stage::Fragment, varying_count)?;
         let mut shared = None;
         let mut instance = None;
-        let mut resources: Vec<(Ident, TokenStream)> = Vec::new();
+        let mut resources: Vec<ResourceSchema> = Vec::new();
         for stage in [&vertex, &fragment_contract] {
             let mut resource_index = 0;
             for parameter in &stage.parameters {
-                match parameter.role.role {
+                match parameter.role {
                     GpuRole::Shared => merge_type(&mut shared, &parameter.ty, "all shader stages must use the same shared type")?,
                     GpuRole::Instance => merge_type(&mut instance, &parameter.ty, "all shader stages must use the same instance type")?,
                     GpuRole::Resource => {
-                        let resource = (parameter.name.clone(), resource_cpu_type(&parameter.ty)?);
-                        if resources[..resource_index].iter().any(|previous| previous.0 == resource.0) {
+                        let resource = ResourceSchema {
+                            name: parameter.name.clone(),
+                            cpu: resource_cpu_type(&parameter.ty)?,
+                        };
+                        if resources[..resource_index].iter().any(|previous| previous.name == resource.name) {
                             return Err(syn::Error::new_spanned(&parameter.name, "resource names must be unique within a shader stage"));
                         }
                         if let Some(previous) = resources.get(resource_index) {
-                            if previous.0 != resource.0 || !same_tokens(&previous.1, &resource.1) {
+                            if previous.name != resource.name || !same_optional_tokens(previous.cpu.as_ref(), resource.cpu.as_ref()) {
                                 return Err(syn::Error::new_spanned(&parameter.name, "shader stages must declare shared resources in the same order"));
                             }
                         } else {
@@ -59,7 +54,7 @@ impl PassSchema {
                 }
             }
         }
-        let instance = instance.ok_or_else(|| syn::Error::new_spanned(fragment, "a pass must declare `#[gpu(instance)]` data in at least one stage"))?;
+        let instance = instance.ok_or_else(|| syn::Error::new_spanned(fragment, "a pass must accept instance data in at least one stage"))?;
         Ok(Self {
             vertex,
             fragment: fragment_contract,
@@ -89,11 +84,23 @@ fn same_tokens(left: &impl quote::ToTokens, right: &impl quote::ToTokens) -> boo
     quote!(#left).to_string() == quote!(#right).to_string()
 }
 
-fn resource_cpu_type(ty: &Type) -> Result<TokenStream> {
+fn same_optional_tokens(left: Option<&TokenStream>, right: Option<&TokenStream>) -> bool {
+    match (left, right) {
+        (Some(left), Some(right)) => same_tokens(left, right),
+        (None, None) => true,
+        _ => false,
+    }
+}
+
+fn resource_cpu_type(ty: &Type) -> Result<Option<TokenStream>> {
     let isthmus = isthmus_path();
     let Type::Reference(reference) = ty else {
         return Err(syn::Error::new_spanned(ty, "GPU resources must be references"));
     };
     let resource = &reference.elem;
-    Ok(quote!(<#resource as #isthmus::__private::ResourceType>::Binding))
+    if matches!(resource.as_ref(), Type::Path(path) if path.path.segments.last().is_some_and(|segment| segment.ident == "Sampler")) {
+        Ok(None)
+    } else {
+        Ok(Some(quote!(<#resource as #isthmus::__private::ResourceType>::Binding)))
+    }
 }

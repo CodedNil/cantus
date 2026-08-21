@@ -4,17 +4,16 @@ use crate::render::{
 };
 use isthmus::{
     Unorm8x4,
-    glam::{Vec2, Vec3, vec2},
+    glam::{Vec2, Vec3, Vec4, vec2},
 };
 
 #[cfg(target_arch = "spirv")]
 use isthmus::spirv_std::num_traits::Float;
 
-#[cfg(feature = "cpu")]
+#[cfg(not(target_arch = "spirv"))]
 use {
     crate::render::cpu::Passes,
     isthmus::Storage,
-    isthmus::glam::Vec4,
     std::{
         ops::{Deref, Range},
         sync::Arc,
@@ -25,7 +24,6 @@ use {
 pub const MAX_LINE_GLYPHS: usize = 64;
 pub const COLOR: Vec3 = Vec3::splat(0.94);
 const EFFECT_PADDING: f32 = 3.5;
-#[cfg(feature = "cpu")]
 const GLYPH_CAPACITY: usize = 16_384;
 
 #[isthmus::data]
@@ -50,7 +48,6 @@ pub struct Line {
 }
 
 impl Line {
-    #[cfg(feature = "cpu")]
     #[must_use]
     pub fn with_color(mut self, color: Vec4) -> Self {
         self.color = Unorm8x4::from_vec4(color);
@@ -74,8 +71,8 @@ pub struct PlacedGlyph {
     pub glyph: u32,
 }
 
-#[derive(isthmus::Varyings)]
-pub struct Varyings {
+pub struct LineVertex {
+    pub position: Vec4,
     pub pixel: Vec2,
 }
 
@@ -102,15 +99,11 @@ impl TextStyle {
         self
     }
 
-    #[cfg(feature = "cpu")]
     fn normalized_weight(self) -> f32 {
         ((self.weight - 600.0) / 300.0).clamp(0.0, 1.0)
     }
 }
 
-#[isthmus::outline]
-// `f32::clamp` adds Rust-GPU panic checks and forces this shared function to inline.
-#[allow(clippy::manual_clamp)]
 fn edge_distance(edge: Edge, weight: f32, point: Vec2, best_distance: f32) -> (f32, i32) {
     let a = edge.start + edge.start_delta * weight;
     let b = edge.end + edge.end_delta * weight;
@@ -126,19 +119,17 @@ fn edge_distance(edge: Edge, weight: f32, point: Vec2, best_distance: f32) -> (f
     if (point - point.clamp(bounds_min, bounds_max)).length_squared() >= best_distance {
         return (best_distance, winding);
     }
-    let t = ((point - a).dot(segment) / segment.length_squared().max(1e-8)).max(0.0).min(1.0);
+    let t = ((point - a).dot(segment) / segment.length_squared().max(1e-8)).clamp(0.0, 1.0);
     ((point - (a + segment * t)).length_squared(), winding)
 }
 
 fn glyph_distance(edges: &[Edge], start: u32, count: u32, weight: f32, point: Vec2, size: f32) -> f32 {
     let mut distance_squared = f32::MAX;
     let mut winding = 0;
-    let mut index = 0;
-    while index < count {
-        let (distance, edge_winding) = edge_distance(*isthmus::reference(edges, (start + index) as usize), weight, point, distance_squared);
+    for index in 0..count {
+        let (distance, edge_winding) = edge_distance(edges[(start + index) as usize], weight, point, distance_squared);
         distance_squared = distance;
         winding += edge_winding;
-        index += 1;
     }
     let scaled_squared = distance_squared * size * size;
     let distance = if scaled_squared >= EFFECT_PADDING * EFFECT_PADDING {
@@ -154,7 +145,7 @@ fn glyph_after(placed_glyphs: &[PlacedGlyph], first: u32, count: u32, x: f32) ->
     let mut high = count;
     while low < high {
         let middle = low + (high - low) / 2;
-        if isthmus::reference(placed_glyphs, (first + middle) as usize).x <= x {
+        if placed_glyphs[(first + middle) as usize].x <= x {
             low = middle + 1;
         } else {
             high = middle;
@@ -177,8 +168,8 @@ pub fn line_distance_scaled(line: Line, placed_glyphs: &[PlacedGlyph], glyphs: &
     let mut glyph_index = (after + 1).min(line.count);
     while glyph_index > 0 {
         glyph_index -= 1;
-        let placed = *isthmus::reference(placed_glyphs, (line.first + glyph_index) as usize);
-        let glyph = *isthmus::reference(glyphs, placed.glyph as usize);
+        let placed = placed_glyphs[(line.first + glyph_index) as usize];
+        let glyph = glyphs[placed.glyph as usize];
         let glyph_point = vec2(line_point.x - placed.x, -line_point.y) / scale;
         if glyph_point.x > glyph.max.x + padding {
             break;
@@ -200,31 +191,31 @@ pub fn line_alpha(line: Line, placed_glyphs: &[PlacedGlyph], glyphs: &[Glyph], e
 }
 
 /// One quad covering a placed line's bounds.
-pub fn line_quad(line: Line, vertex: u32, frame: &FrameData) -> isthmus::Vertex<Varyings> {
+pub fn line_quad(line: Line, vertex: u32, frame: &FrameData) -> LineVertex {
     let pixel = line.min + quad_coord(vertex) * (line.max - line.min);
-    isthmus::Vertex {
+    LineVertex {
         position: pixel_to_ndc(pixel, frame.screen_size),
-        varyings: Varyings { pixel },
+        pixel,
     }
 }
 
 /// A line quad conservatively enlarged for a fragment-only scale or stroke effect.
-pub fn line_quad_effect(line: Line, vertex: u32, frame: &FrameData, scale: f32, padding: f32) -> isthmus::Vertex<Varyings> {
+pub fn line_quad_effect(line: Line, vertex: u32, frame: &FrameData, scale: f32, padding: f32) -> LineVertex {
     let margin = line.size * (scale - 1.0).max(0.0) + padding;
     let min = line.min - margin;
     let max = line.max + margin;
     let pixel = min + quad_coord(vertex) * (max - min);
-    isthmus::Vertex {
+    LineVertex {
         position: pixel_to_ndc(pixel, frame.screen_size),
-        varyings: Varyings { pixel },
+        pixel,
     }
 }
 
-#[cfg(feature = "cpu")]
+#[cfg(not(target_arch = "spirv"))]
 const FONT: &[u8] = include_bytes!(concat!(env!("CARGO_MANIFEST_DIR"), "/../../assets/NotoSans-Variable.ttf"));
-#[cfg(feature = "cpu")]
+#[cfg(not(target_arch = "spirv"))]
 const WGHT: Tag = Tag::from_bytes(b"wght");
-#[cfg(feature = "cpu")]
+#[cfg(not(target_arch = "spirv"))]
 const RANGES: &[(u32, u32)] = &[
     (0x20, 0x7e),
     (0xa0, 0xff),
@@ -237,7 +228,7 @@ const RANGES: &[(u32, u32)] = &[
     (0x266a, 0x266b),
 ];
 
-#[cfg(feature = "cpu")]
+#[cfg(not(target_arch = "spirv"))]
 #[derive(Clone, Copy)]
 struct Meta {
     glyph: u32,
@@ -245,7 +236,7 @@ struct Meta {
     advance: [f32; 2],
 }
 
-#[cfg(feature = "cpu")]
+#[cfg(not(target_arch = "spirv"))]
 #[derive(Default)]
 struct Outline {
     edges: Vec<[Vec2; 3]>,
@@ -253,7 +244,7 @@ struct Outline {
     current: Vec2,
 }
 
-#[cfg(feature = "cpu")]
+#[cfg(not(target_arch = "spirv"))]
 impl Outline {
     fn segment(&mut self, point: Vec2) {
         self.edges.push([self.current, (self.current + point) * 0.5, point]);
@@ -261,7 +252,7 @@ impl Outline {
     }
 }
 
-#[cfg(feature = "cpu")]
+#[cfg(not(target_arch = "spirv"))]
 impl OutlineBuilder for Outline {
     fn move_to(&mut self, x: f32, y: f32) {
         self.first = vec2(x, y);
@@ -296,7 +287,7 @@ impl OutlineBuilder for Outline {
     }
 }
 
-#[cfg(feature = "cpu")]
+#[cfg(not(target_arch = "spirv"))]
 #[derive(Default)]
 pub struct ShapedLine {
     glyphs: Vec<PlacedGlyph>,
@@ -308,14 +299,14 @@ pub struct ShapedLine {
     weight: f32,
 }
 
-#[cfg(feature = "cpu")]
+#[cfg(not(target_arch = "spirv"))]
 #[derive(Clone)]
 pub struct Shaper {
     characters: Arc<[(char, Meta)]>,
     baseline: f32,
 }
 
-#[cfg(feature = "cpu")]
+#[cfg(not(target_arch = "spirv"))]
 pub struct Renderer {
     shaper: Shaper,
     edges: Storage<Edge>,
@@ -324,7 +315,7 @@ pub struct Renderer {
     placed: Vec<PlacedGlyph>,
 }
 
-#[cfg(feature = "cpu")]
+#[cfg(not(target_arch = "spirv"))]
 impl Renderer {
     /// Creates the shared vector-font renderer and GPU storage.
     ///
@@ -515,7 +506,7 @@ impl Renderer {
     }
 }
 
-#[cfg(feature = "cpu")]
+#[cfg(not(target_arch = "spirv"))]
 impl Deref for Renderer {
     type Target = Shaper;
 
@@ -524,7 +515,7 @@ impl Deref for Renderer {
     }
 }
 
-#[cfg(feature = "cpu")]
+#[cfg(not(target_arch = "spirv"))]
 impl Shaper {
     fn glyph(&self, character: char) -> Option<Meta> {
         self.characters.binary_search_by_key(&character, |glyph| glyph.0).ok().map(|index| self.characters[index].1)

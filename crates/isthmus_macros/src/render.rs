@@ -33,11 +33,8 @@ pub fn implementation(name: &Ident, generics: &Generics, fields: impl IntoIterat
                 #(#isthmus::Render::prepare(&mut self.#fields);)*
             }
 
-            fn draw<'pass>(
-                &'pass self,
-                pass: &mut #isthmus::wgpu::RenderPass<'pass>,
-            ) {
-                #(#isthmus::Render::draw(&self.#fields, pass);)*
+            fn draw(&self, frame: &#isthmus::RenderFrame<'_>) {
+                #(#isthmus::Render::draw(&self.#fields, frame);)*
             }
         }
     }

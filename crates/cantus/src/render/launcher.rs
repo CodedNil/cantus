@@ -1,15 +1,15 @@
 use crate::render::{
     FrameData, GAP, PADDING,
     shader::{fill, pill_fragment, pill_interaction, pill_vertex, pixel_to_ndc, presence, quad_coord, sd_rounded_box, segment_distance, stroke},
-    text,
+    text::{self, TextStyle},
 };
 use isthmus::{
-    Sampler, Texture2DArray, Vertex,
+    Sampler, Texture2DArray,
     glam::{Vec2, Vec3, Vec4, vec2, vec3},
     spirv_std::arch::kill,
 };
 
-#[cfg(feature = "cpu")]
+#[cfg(not(target_arch = "spirv"))]
 use {
     crate::{
         app::{
@@ -23,7 +23,6 @@ use {
             atlas::TextureAtlas,
             cpu::{Frame, Passes},
             smoothstep,
-            text::TextStyle,
         },
     },
     fend_core::Context,
@@ -48,7 +47,6 @@ pub(crate) const MAX_VISIBLE: usize = 8;
 /// the backdrop, which also draws the search field on itself.
 const PANEL: i32 = -3;
 const CALCULATOR_ICON: i32 = -2;
-#[cfg(feature = "cpu")]
 const SEARCH_ICON: i32 = -1;
 
 /// Side of the square icon tile at the left of every row.
@@ -57,23 +55,14 @@ const BADGE_HEIGHT: f32 = 21.0;
 /// Icons, badge outlines and the magnifier all share one grey.
 const ICON_COLOR: Vec3 = Vec3::splat(0.58);
 const ACCENT_COLOR: Vec3 = vec3(0.44, 0.40, 0.80);
-
-#[cfg(feature = "cpu")]
-mod host {
-    use super::{TextStyle, Vec4};
-
-    pub const BADGE_WIDTHS: [f32; 2] = [27.0, 42.0];
-    pub const ICON_PX: u32 = 48;
-    pub const MAX_ICON_SLOTS: usize = 192;
-    pub const SEARCH_STYLE: TextStyle = TextStyle::new(18.0, 600.0);
-    pub const NAME_STYLE: TextStyle = TextStyle::new(16.0, 700.0);
-    pub const DETAIL_STYLE: TextStyle = TextStyle::new(13.0, 600.0);
-    pub const DETAIL_COLOR: Vec4 = Vec4::new(0.56, 0.63, 0.86, 1.0);
-    pub const MUTED_COLOR: Vec4 = Vec4::new(0.52, 0.55, 0.64, 1.0);
-}
-
-#[cfg(feature = "cpu")]
-use host::{BADGE_WIDTHS, DETAIL_COLOR, DETAIL_STYLE, ICON_PX, MAX_ICON_SLOTS, MUTED_COLOR, NAME_STYLE, SEARCH_STYLE};
+const BADGE_WIDTHS: [f32; 2] = [27.0, 42.0];
+const ICON_PX: u32 = 48;
+const MAX_ICON_SLOTS: usize = 192;
+const SEARCH_STYLE: TextStyle = TextStyle::new(18.0, 600.0);
+const NAME_STYLE: TextStyle = TextStyle::new(16.0, 700.0);
+const DETAIL_STYLE: TextStyle = TextStyle::new(13.0, 600.0);
+const DETAIL_COLOR: Vec4 = Vec4::new(0.56, 0.63, 0.86, 1.0);
+const MUTED_COLOR: Vec4 = Vec4::new(0.52, 0.55, 0.64, 1.0);
 
 /// Height of the search field, which sits flush at the top of the panel instead of in a pill.
 fn header_height(frame: &FrameData) -> f32 {
@@ -141,7 +130,7 @@ fn action_badge(point: Vec2, half_width: f32, shift: bool) -> Vec4 {
 }
 
 /// The search query with a caret and selection, edited like an ordinary text box.
-#[cfg(feature = "cpu")]
+#[cfg(not(target_arch = "spirv"))]
 #[derive(Default)]
 pub struct TextField {
     pub text: String,
@@ -154,7 +143,7 @@ pub struct TextField {
     touched: bool,
 }
 
-#[cfg(feature = "cpu")]
+#[cfg(not(target_arch = "spirv"))]
 impl TextField {
     pub fn clear(&mut self) {
         self.text.clear();
@@ -236,7 +225,7 @@ impl TextField {
     }
 }
 
-#[cfg(feature = "cpu")]
+#[cfg(not(target_arch = "spirv"))]
 #[derive(Clone, Copy)]
 pub(crate) enum LauncherKey {
     Escape,
@@ -254,7 +243,7 @@ pub(crate) enum LauncherKey {
     Cut,
 }
 
-#[cfg(feature = "cpu")]
+#[cfg(not(target_arch = "spirv"))]
 pub struct LauncherState {
     pub open: bool,
     just_opened: bool,
@@ -272,21 +261,21 @@ pub struct LauncherState {
     calc: Context,
 }
 
-#[cfg(feature = "cpu")]
+#[cfg(not(target_arch = "spirv"))]
 struct SearchEngine {
     config: SearchProvider,
     label: String,
     icon_layer: i32,
 }
 
-#[cfg(feature = "cpu")]
+#[cfg(not(target_arch = "spirv"))]
 enum LauncherEntry<'a> {
     Answer(&'a str),
     App(&'a DesktopApp),
     Search(&'a SearchEngine),
 }
 
-#[cfg(feature = "cpu")]
+#[cfg(not(target_arch = "spirv"))]
 impl LauncherState {
     pub(crate) fn new(background: &Background, http: &Client, providers: impl IntoIterator<Item = SearchProvider>) -> Self {
         let mut calc = Context::new();
@@ -444,13 +433,13 @@ impl LauncherState {
 }
 
 /// Currency rates relative to USD, fetched once and read by fend for currency conversions.
-#[cfg(feature = "cpu")]
+#[cfg(not(target_arch = "spirv"))]
 static EXCHANGE_RATES: OnceLock<HashMap<String, f64>> = OnceLock::new();
 
-#[cfg(feature = "cpu")]
+#[cfg(not(target_arch = "spirv"))]
 struct ExchangeRates;
 
-#[cfg(feature = "cpu")]
+#[cfg(not(target_arch = "spirv"))]
 impl fend_core::ExchangeRateFnV2 for ExchangeRates {
     fn relative_to_base_currency(&self, currency: &str, _options: &fend_core::ExchangeRateFnV2Options) -> Result<f64, Box<dyn Error + Send + Sync>> {
         EXCHANGE_RATES
@@ -461,7 +450,7 @@ impl fend_core::ExchangeRateFnV2 for ExchangeRates {
     }
 }
 
-#[cfg(feature = "cpu")]
+#[cfg(not(target_arch = "spirv"))]
 fn fetch_exchange_rates(background: &Background, http: Client) {
     background.spawn(async move {
         if let Ok(response) = http.get("https://open.er-api.com/v6/latest/USD").send().await.and_then(reqwest::Response::error_for_status)
@@ -473,7 +462,7 @@ fn fetch_exchange_rates(background: &Background, http: Client) {
     });
 }
 
-#[cfg(feature = "cpu")]
+#[cfg(not(target_arch = "spirv"))]
 #[derive(serde::Deserialize)]
 struct CurrencyRates {
     rates: HashMap<String, f64>,
@@ -496,27 +485,28 @@ pub struct LauncherRow {
     pub lines: [text::Line; 4],
 }
 
-#[derive(isthmus::Varyings)]
-pub struct Varyings {
-    pub pixel: Vec2,
-    #[gpu(flat)]
-    pub row_idx: u32,
-}
-
-#[isthmus::pass]
-pub struct LauncherPass {
-    rows: isthmus::Instances<Self>,
+#[isthmus::system]
+pub struct LauncherRenderer {
+    rows: isthmus::Instances<LauncherRow>,
     icons: TextureAtlas,
 }
 
-#[isthmus::pass]
-impl LauncherPass {
+#[isthmus::host]
+impl LauncherRenderer {
     pub fn new(passes: &Passes<'_>, text: &text::Renderer) -> Self {
         let icons = TextureAtlas::new(passes, "Launcher Icons", [ICON_PX; 2], MAX_ICON_SLOTS);
-        let sampler = passes.filtering_sampler("Launcher Icon Sampler");
         let (placed_glyphs, glyphs, edges) = text.resources();
         Self {
-            rows: passes.instances_with_capacity((icons.view(), &sampler, placed_glyphs, glyphs, edges), MAX_VISIBLE + 2),
+            rows: launcher_shader::instances_with_capacity(
+                passes,
+                launcher_shader::PipelineResources {
+                    icons: icons.view(),
+                    placed_glyphs,
+                    glyphs,
+                    edges,
+                },
+                MAX_VISIBLE + 2,
+            ),
             icons,
         }
     }
@@ -649,9 +639,11 @@ impl LauncherPass {
             launcher.activate(index, false);
         }
     }
+}
 
-    #[gpu]
-    pub fn vertex(#[gpu(vertex_index)] vertex: u32, #[gpu(instance_index)] instance: u32, #[gpu(shared)] frame: FrameData, #[gpu(instance)] row: LauncherRow) -> Vertex<Varyings> {
+#[isthmus::shader]
+pub mod launcher_shader {
+    pub fn vertex(vertex: u32, frame: FrameData, row: LauncherRow) -> Raster {
         let (position, pixel) = if row.icon == PANEL {
             let (origin, size) = background_bounds(frame.screen_size, frame.panel_height);
             let pixel = origin + quad_coord(vertex) * size;
@@ -660,22 +652,18 @@ impl LauncherPass {
             let (x, width) = row_bounds(frame);
             pill_vertex(vertex, frame, x, row.y, vec2(width, 0.0))
         };
-        Vertex {
-            position,
-            varyings: Varyings { pixel, row_idx: instance },
-        }
+        Raster { position, pixel }
     }
 
-    #[gpu]
     pub fn fragment(
-        Varyings { pixel, row_idx: _ }: Varyings,
-        #[gpu(shared)] frame: FrameData,
-        #[gpu(instance = row_idx as usize)] row: LauncherRow,
-        #[gpu(resource)] icons: &Texture2DArray,
-        #[gpu(resource)] sampler: &Sampler,
-        #[gpu(resource)] placed_glyphs: &[text::PlacedGlyph],
-        #[gpu(resource)] glyphs: &[text::Glyph],
-        #[gpu(resource)] edges: &[text::Edge],
+        pixel: Vec2,
+        frame: FrameData,
+        row: LauncherRow,
+        icons: &Texture2DArray,
+        sampler: &Sampler,
+        placed_glyphs: &[text::PlacedGlyph],
+        glyphs: &[text::Glyph],
+        edges: &[text::Edge],
     ) -> Vec4 {
         if row.icon == PANEL {
             let (origin, size) = background_bounds(frame.screen_size, frame.panel_height);
@@ -729,20 +717,16 @@ impl LauncherPass {
             color = color.lerp(tex.truncate(), tex.w);
         }
 
-        let mut index = 0;
-        while index < 2 {
+        for index in 0..2 {
             let badge = row.badges[index];
             let key = action_badge(refracted - vec2(badge.x, size.y * 0.5), badge.y, index == 1);
             color = color.lerp(key.truncate(), key.w);
-            index += 1;
         }
 
-        let mut index = 0;
-        while index < 4 {
+        for index in 0..4 {
             let line = row.lines[index];
             let text_alpha = text::line_alpha(line, placed_glyphs, glyphs, edges, refracted);
             color = color.lerp(line.color.to_vec3(), text_alpha);
-            index += 1;
         }
 
         (color * mask).extend(alpha)
@@ -750,7 +734,7 @@ impl LauncherPass {
 }
 
 /// Scans installed apps and decodes their icons on a background thread, then applies the result.
-#[cfg(feature = "cpu")]
+#[cfg(not(target_arch = "spirv"))]
 fn start_scan(background: &Background, http: &Client, providers: &[SearchEngine]) {
     let provider_icon_count = providers.len().min(MAX_ICON_SLOTS);
     let provider_icons = providers
@@ -804,7 +788,7 @@ fn start_scan(background: &Background, http: &Client, providers: &[SearchEngine]
     }
 }
 
-#[cfg(feature = "cpu")]
+#[cfg(not(target_arch = "spirv"))]
 async fn fetch_favicon(http: &Client, page: Url) -> Option<Vec<u8>> {
     let html = http.get(page.clone()).send().await.ok()?.text().await.ok()?;
     let advertised = html
@@ -831,7 +815,7 @@ async fn fetch_favicon(http: &Client, page: Url) -> Option<Vec<u8>> {
     None
 }
 
-#[cfg(feature = "cpu")]
+#[cfg(not(target_arch = "spirv"))]
 fn attribute<'a>(tag: &'a str, name: &str) -> Option<&'a str> {
     let value = tag.split_once(name)?.1.trim_start().strip_prefix('=')?.trim_start();
     match value.as_bytes().first()? {
@@ -841,7 +825,7 @@ fn attribute<'a>(tag: &'a str, name: &str) -> Option<&'a str> {
 }
 
 /// Rasterizes an icon to `ICON_PX` square, straight-alpha RGBA.
-#[cfg(feature = "cpu")]
+#[cfg(not(target_arch = "spirv"))]
 fn load_icon_pixels(path: &Path) -> Option<Vec<u8>> {
     if path.extension().is_some_and(|extension| extension == "svg") {
         let tree = Tree::from_data(&fs::read(path).ok()?, &usvg::Options::default()).ok()?;
@@ -856,7 +840,7 @@ fn load_icon_pixels(path: &Path) -> Option<Vec<u8>> {
     Some(resize_icon(&raster))
 }
 
-#[cfg(feature = "cpu")]
+#[cfg(not(target_arch = "spirv"))]
 fn load_raster(bytes: &[u8]) -> Option<Vec<u8>> {
     if let Ok(image) = image::load_from_memory(bytes) {
         return Some(resize_icon(&image));
@@ -869,7 +853,7 @@ fn load_raster(bytes: &[u8]) -> Option<Vec<u8>> {
     Some(pixmap.take_demultiplied())
 }
 
-#[cfg(feature = "cpu")]
+#[cfg(not(target_arch = "spirv"))]
 fn resize_icon(image: &image::DynamicImage) -> Vec<u8> {
     let raster = image.resize_to_fill(ICON_PX, ICON_PX, FilterType::Triangle);
     raster.into_rgba8().into_raw()

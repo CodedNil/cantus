@@ -111,12 +111,7 @@ pub fn run() {
     config::nix_options::generate();
 
     tracing_subscriber::registry()
-        .with(
-            Targets::new()
-                .with_default(LevelFilter::WARN)
-                .with_target("cantus", Level::INFO)
-                .with_target("wgpu_hal", Level::ERROR),
-        )
+        .with(Targets::new().with_default(LevelFilter::WARN).with_target("cantus", Level::INFO))
         .with(fmt::layer().with_writer(io::stderr))
         .init();
 

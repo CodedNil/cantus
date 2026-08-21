@@ -4,20 +4,19 @@ use crate::render::{
     smoothstep,
 };
 use isthmus::{
-    Vertex,
     glam::{Vec2, Vec3, Vec4, vec2, vec3},
     spirv_std::arch::kill,
 };
 
-#[cfg(feature = "cpu")]
+#[isthmus::host]
 use crate::{
     app::{interaction::Rect, music::PlaybackState},
     render::cpu::{Frame, Passes, approach},
 };
 
-#[isthmus::pass]
-pub struct PlayheadPass {
-    pill: isthmus::Instance<Self>,
+#[isthmus::system]
+pub struct Playhead {
+    pill: isthmus::Instance<PlayheadState>,
 }
 
 #[isthmus::data]
@@ -28,16 +27,11 @@ pub struct PlayheadState {
     pub icon_morph: f32,
 }
 
-#[derive(isthmus::Varyings)]
-pub struct Varyings {
-    pub world_pos: Vec2,
-}
-
-#[isthmus::pass]
-impl PlayheadPass {
+#[isthmus::host]
+impl Playhead {
     pub fn new(passes: &Passes<'_>) -> Self {
         Self {
-            pill: passes.instance((), PlayheadState::default()),
+            pill: playhead_shader::instance(passes, (), PlayheadState::default()),
         }
     }
 
@@ -70,25 +64,23 @@ impl PlayheadPass {
             frame.interaction.toggle_playing(playback.playing);
         }
     }
+}
 
-    #[gpu]
-    pub fn vertex(#[gpu(vertex_index)] vertex: u32, #[gpu(shared)] frame: FrameData) -> Vertex<Varyings> {
+#[isthmus::shader]
+pub mod playhead_shader {
+    pub fn vertex(vertex: u32, frame: FrameData) -> Raster {
         let uv = quad_coord(vertex);
         let world_pos = vec2(
             frame.playhead_x + (uv.x * 2.0 - 1.0) * frame.panel_height * 0.4,
             PANEL_START - 5.0 + uv.y * (frame.panel_height + 10.0),
         );
-        Vertex {
+        Raster {
             position: pixel_to_ndc(world_pos, frame.screen_size),
-            varyings: Varyings { world_pos },
+            world_pos,
         }
     }
 
-    #[gpu]
-    pub fn fragment(Varyings { world_pos }: Varyings, #[gpu(shared)] frame: FrameData, #[gpu(instance)] state: PlayheadState) -> Vec4 {
-        if frame.launcher_open > 0.5 {
-            kill();
-        }
+    pub fn fragment(world_pos: Vec2, frame: FrameData, state: PlayheadState) -> Vec4 {
         let center = vec2(frame.playhead_x, PANEL_START + frame.panel_height * 0.5);
         let pause = (world_pos - center).abs();
 

@@ -1,6 +1,6 @@
 #![cfg_attr(target_arch = "spirv", no_std)]
+#![cfg_attr(target_arch = "spirv", allow(dead_code, unused_imports))]
 
-#[cfg(feature = "cpu")]
+#[cfg(not(target_arch = "spirv"))]
 pub mod app;
-#[cfg(feature = "shader")]
 pub mod render;

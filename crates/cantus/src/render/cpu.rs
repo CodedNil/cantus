@@ -2,22 +2,21 @@ use crate::{
     app::{CantusApp, config::Config, interaction::InteractionState, music::PlaybackState},
     render::{
         FrameData, GAP, PANEL_START, RipplePulse,
-        launcher::{LauncherPass, LauncherState},
-        lyrics::{EXTENSION as LYRICS_EXTENSION, LyricsPass},
-        particles::ParticlePass,
-        playhead::PlayheadPass,
-        status::StatusPass,
-        tempestas::{EXTENSION, TempestasPass},
+        launcher::{LauncherRenderer, LauncherState},
+        lyrics::{EXTENSION as LYRICS_EXTENSION, LyricsRenderer},
+        particles::Particles,
+        playhead::Playhead,
+        status::StatusRenderer,
+        tempestas::{EXTENSION, TempestasRenderer},
         text::Renderer as TextRenderer,
-        track::TrackPass,
+        track::TrackRenderer,
     },
 };
 use isthmus::{
-    PassBuilder, Present, Program, Render,
+    Color, PassBuilder, Present, Program, RenderFrame, Surface,
     glam::{Vec2, vec2},
-    wgpu::{Color, Instance, PowerPreference, RenderPass, Surface},
 };
-use std::{sync::Arc, time::Instant};
+use std::time::Instant;
 
 const PANEL_OVERFLOW: f32 = 16.0;
 
@@ -34,19 +33,18 @@ pub struct Frame<'a> {
 
 #[derive(isthmus::Render)]
 pub struct Systems {
-    pub lyrics: Option<LyricsPass>,
-    pub tempestas: Option<TempestasPass>,
-    pub status: Option<StatusPass>,
-    pub track: TrackPass,
-    pub particles: ParticlePass,
-    pub playhead: PlayheadPass,
-    pub launcher: LauncherPass,
+    pub lyrics: Option<LyricsRenderer>,
+    pub tempestas: Option<TempestasRenderer>,
+    pub status: Option<StatusRenderer>,
+    pub track: TrackRenderer,
+    pub particles: Particles,
+    pub playhead: Playhead,
+    pub launcher: LauncherRenderer,
     #[render(skip)]
     pub text: TextRenderer,
 }
 
 pub struct RenderState {
-    pub instance: Instance,
     pub program: Option<RenderProgram>,
     pub start_time: Instant,
     pub last_toggle_time: f32,
@@ -96,7 +94,6 @@ impl<'a> Frame<'a> {
 impl Default for RenderState {
     fn default() -> Self {
         Self {
-            instance: Instance::default(),
             program: None,
             start_time: Instant::now(),
             last_toggle_time: 0.0,
@@ -124,7 +121,7 @@ impl Systems {
     fn new(passes: &Passes<'_>, app: &CantusApp) -> Self {
         let text = TextRenderer::new(passes);
         let tempestas = app.config.tempestas_enabled.then(|| {
-            TempestasPass::new(
+            TempestasRenderer::new(
                 passes,
                 &text,
                 &app.config.timezones,
@@ -136,22 +133,24 @@ impl Systems {
         let status = app
             .config
             .status_enabled
-            .then(|| StatusPass::new(passes, &text, &app.enrichment.background, app.updater.clone()));
+            .then(|| StatusRenderer::new(passes, &text, &app.enrichment.background, app.updater.clone()));
         Self {
-            lyrics: app.config.lyrics_enabled.then(|| LyricsPass::new(passes, &text, app.enrichment.clone(), app.music.clone())),
+            lyrics: app
+                .config
+                .lyrics_enabled
+                .then(|| LyricsRenderer::new(passes, &text, app.enrichment.clone(), app.music.clone())),
             tempestas,
             status,
-            track: TrackPass::new(passes, &text),
-            particles: ParticlePass::new(passes),
-            playhead: PlayheadPass::new(passes),
-            launcher: LauncherPass::new(passes, &text),
+            track: TrackRenderer::new(passes, &text),
+            particles: Particles::new(passes),
+            playhead: Playhead::new(passes),
+            launcher: LauncherRenderer::new(passes, &text),
             text,
         }
     }
 
     fn update(&mut self, frame: &mut Frame<'_>, playback: &mut PlaybackState, last_toggle_time: &mut f32, launcher: &mut LauncherState, launcher_size: Vec2) {
         self.text.begin();
-        frame.shared.launcher_open = f32::from(launcher.open);
         let bar_size = frame.shared.screen_size;
         frame.shared.screen_size = launcher_size;
         self.launcher.update(&mut self.text, launcher, frame);
@@ -182,13 +181,13 @@ impl Systems {
         self.text.upload();
     }
 
-    fn draw_bar<'a>(&'a self, pass: &mut RenderPass<'a>) {
-        self.lyrics.draw(pass);
-        self.tempestas.draw(pass);
-        self.status.draw(pass);
-        self.track.draw(pass);
-        self.particles.draw(pass);
-        self.playhead.draw(pass);
+    fn draw_bar(&self, frame: &RenderFrame<'_>) {
+        frame.draw(&self.lyrics);
+        frame.draw(&self.tempestas);
+        frame.draw(&self.status);
+        frame.draw(&self.track);
+        frame.draw(&self.particles);
+        frame.draw(&self.playhead);
     }
 }
 
@@ -198,21 +197,10 @@ impl CantusApp {
     /// # Panics
     ///
     /// Panics if the GPU was already initialized or no compatible adapter, device, or surface configuration is available.
-    pub fn initialize_gpu(&mut self, surface: Surface<'static>, width: u32, height: u32) {
+    pub fn initialize_gpu(&mut self, surface: Surface, width: u32, height: u32) {
         assert!(self.render.program.is_none(), "GPU initialized twice");
-        let program = pollster::block_on(Program::surface(
-            &self.render.instance,
-            surface,
-            width,
-            height,
-            PowerPreference::LowPower,
-            isthmus::shader_module!(),
-            |passes| Systems::new(passes, self),
-        ))
-        .expect("failed to initialize renderer");
-        let info = program.adapter_info();
-        tracing::info!("Using adapter: {} ({:?})", info.name, info.device_type);
-        program.device().on_uncaptured_error(Arc::new(|error| tracing::error!(%error, "uncaptured wgpu error")));
+        let program = Program::surface(surface, width, height, isthmus::shader_module!(), |passes| Systems::new(passes, self)).expect("failed to initialize renderer");
+        tracing::info!("Using Vulkan device: {}", program.device_name());
         self.render.program = Some(program);
     }
 
@@ -221,7 +209,7 @@ impl CantusApp {
     /// # Panics
     ///
     /// Panics if the status pill is disabled or the GPU is not yet initialized.
-    pub const fn status_pass(&mut self) -> &mut StatusPass {
+    pub const fn status_pass(&mut self) -> &mut StatusRenderer {
         self.render.program().passes_mut().status.as_mut().unwrap()
     }
 
@@ -282,18 +270,15 @@ impl CantusApp {
                     &mut self.launcher,
                     vec2(launcher_size.0, launcher_size.1),
                 );
-                // The bar target must keep drawing while the launcher target is open.
-                frame.shared.launcher_open = 0.0;
                 frame.finish();
             },
-            |systems, mut pass| systems.draw_bar(&mut pass),
+            Systems::draw_bar,
         );
         if self.launcher.open {
             program.update_shared(|shared| {
                 shared.screen_size = vec2(launcher_size.0, launcher_size.1);
-                shared.launcher_open = 1.0;
             });
-            let _ = program.render_secondary(Color::TRANSPARENT, |systems, mut pass| systems.launcher.draw(&mut pass));
+            let _ = program.render_secondary(Color::TRANSPARENT, |systems, frame| frame.draw(&systems.launcher));
         }
         if matches!(present, Present::Validation) {
             tracing::error!("surface texture acquisition failed validation");

@@ -1,14 +1,7 @@
 use syn::{
-    Attribute, Expr, FnArg, Ident, ItemFn, Pat, Result as SynResult, Token, Type,
+    FnArg, Ident, ItemFn, Pat, Result as SynResult, Token, Type,
     parse::{Parse, ParseStream},
 };
-
-#[derive(Clone)]
-pub struct GpuParameter {
-    pub kind: Ident,
-    pub role: GpuRole,
-    pub index: Option<Expr>,
-}
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub enum GpuRole {
@@ -17,7 +10,6 @@ pub enum GpuRole {
     Shared,
     Instance,
     Resource,
-    Flat,
 }
 
 #[derive(Clone, Copy)]
@@ -44,11 +36,10 @@ impl Default for PassOptions {
 
 pub struct StageParameter {
     pub argument: usize,
-    pub attribute: usize,
     pub binding: Option<u32>,
     pub name: Ident,
     pub ty: Type,
-    pub role: GpuParameter,
+    pub role: GpuRole,
 }
 
 pub struct StageContract {
@@ -56,41 +47,29 @@ pub struct StageContract {
 }
 
 impl StageContract {
-    pub fn parse(function: &ItemFn, stage: Stage) -> SynResult<Self> {
+    pub fn parse(function: &ItemFn, stage: Stage, varying_count: usize) -> SynResult<Self> {
         let mut parameters = Vec::new();
-        let mut resource_binding = 2;
+        let mut resource_binding = 1;
         for (argument_index, argument) in function.sig.inputs.iter().enumerate() {
             let FnArg::Typed(argument) = argument else {
                 return Err(syn::Error::new_spanned(argument, "shader functions cannot have self"));
             };
-            let attribute = gpu_attribute(&argument.attrs)?;
-            let is_varyings = matches!(stage, Stage::Fragment) && argument_index == 0;
+            let is_varyings = matches!(stage, Stage::Fragment) && argument_index < varying_count;
             if is_varyings {
-                if let Some(attribute) = attribute {
-                    return Err(syn::Error::new_spanned(
-                        &argument.attrs[attribute],
-                        "the fragment varying parameter does not take a GPU role",
-                    ));
-                }
                 continue;
             }
-            let Some(attribute) = attribute else {
-                return Err(syn::Error::new_spanned(argument, "shader parameters require a `#[gpu(...)]` role"));
-            };
-            let role: GpuParameter = argument.attrs[attribute].parse_args()?;
-            validate_role(&role, stage)?;
-            if matches!(role.role, GpuRole::VertexIndex | GpuRole::InstanceIndex) && !is_named_type(&argument.ty, "u32") {
+            let role = infer_role(argument_index, argument, stage)?;
+            if matches!(role, GpuRole::VertexIndex | GpuRole::InstanceIndex) && !is_named_type(&argument.ty, "u32") {
                 return Err(syn::Error::new_spanned(&argument.ty, "GPU index parameters must use `u32`"));
             }
             let Pat::Ident(pattern) = argument.pat.as_ref() else {
                 return Err(syn::Error::new_spanned(&argument.pat, "GPU parameters require an identifier"));
             };
-            if role_is_unique(role.role) && parameters.iter().any(|parameter: &StageParameter| parameter.role.role == role.role) {
-                return Err(syn::Error::new_spanned(&argument.attrs[attribute], "a shader stage can only declare this GPU role once"));
+            if role_is_unique(role) && parameters.iter().any(|parameter: &StageParameter| parameter.role == role) {
+                return Err(syn::Error::new_spanned(argument, "a shader stage can only declare this GPU role once"));
             }
-            let binding = match role.role {
-                GpuRole::Shared => Some(0),
-                GpuRole::Instance => Some(1),
+            let binding = match role {
+                GpuRole::Instance => Some(0),
                 GpuRole::Resource => {
                     let binding = resource_binding;
                     resource_binding += 1;
@@ -100,7 +79,6 @@ impl StageContract {
             };
             parameters.push(StageParameter {
                 argument: argument_index,
-                attribute,
                 binding,
                 name: pattern.ident.clone(),
                 ty: (*argument.ty).clone(),
@@ -111,8 +89,27 @@ impl StageContract {
     }
 
     pub fn has_implicit(&self, role: GpuRole) -> bool {
-        self.parameters.iter().any(|parameter| parameter.role.role == role && parameter.role.index.is_none())
+        self.parameters.iter().any(|parameter| parameter.role == role)
     }
+}
+
+fn infer_role(argument_index: usize, argument: &syn::PatType, stage: Stage) -> SynResult<GpuRole> {
+    let Pat::Ident(pattern) = argument.pat.as_ref() else {
+        return Err(syn::Error::new_spanned(&argument.pat, "GPU parameters require an identifier"));
+    };
+    let name = pattern.ident.to_string();
+    let role = if matches!(stage, Stage::Vertex) && argument_index == 0 && is_named_type(&argument.ty, "u32") {
+        GpuRole::VertexIndex
+    } else if matches!(stage, Stage::Vertex) && name == "instance" && is_named_type(&argument.ty, "u32") {
+        GpuRole::InstanceIndex
+    } else if name == "frame" {
+        GpuRole::Shared
+    } else if matches!(argument.ty.as_ref(), Type::Reference(_)) {
+        GpuRole::Resource
+    } else {
+        GpuRole::Instance
+    };
+    Ok(role)
 }
 
 fn is_named_type(ty: &Type, name: &str) -> bool {
@@ -124,34 +121,7 @@ fn is_named_type(ty: &Type, name: &str) -> bool {
 }
 
 const fn role_is_unique(role: GpuRole) -> bool {
-    !matches!(role, GpuRole::Resource | GpuRole::Flat)
-}
-
-fn validate_role(parameter: &GpuParameter, stage: Stage) -> SynResult<()> {
-    if parameter.index.is_some() && parameter.role != GpuRole::Instance {
-        return Err(syn::Error::new(parameter.kind.span(), "only instance parameters can specify an index"));
-    }
-    let allowed = match stage {
-        Stage::Vertex => matches!(
-            parameter.role,
-            GpuRole::VertexIndex | GpuRole::InstanceIndex | GpuRole::Shared | GpuRole::Instance | GpuRole::Resource
-        ),
-        Stage::Fragment => matches!(parameter.role, GpuRole::Shared | GpuRole::Instance | GpuRole::Resource),
-    };
-    if allowed {
-        Ok(())
-    } else {
-        Err(syn::Error::new(parameter.kind.span(), "this GPU role is not valid for this shader stage"))
-    }
-}
-
-pub fn gpu_attribute(attributes: &[Attribute]) -> SynResult<Option<usize>> {
-    let mut matches = attributes.iter().enumerate().filter(|(_, attribute)| attribute.path().is_ident("gpu"));
-    let found = matches.next().map(|(index, _)| index);
-    if let Some((_, duplicate)) = matches.next() {
-        return Err(syn::Error::new_spanned(duplicate, "only one GPU role may be specified"));
-    }
-    Ok(found)
+    !matches!(role, GpuRole::Resource)
 }
 
 impl Parse for PassOptions {
@@ -201,27 +171,5 @@ impl Parse for PassOptions {
             }
         }
         Ok(options)
-    }
-}
-
-impl Parse for GpuParameter {
-    fn parse(input: ParseStream<'_>) -> SynResult<Self> {
-        let kind: Ident = input.parse()?;
-        let role = match kind.to_string().as_str() {
-            "vertex_index" => GpuRole::VertexIndex,
-            "instance_index" => GpuRole::InstanceIndex,
-            "shared" => GpuRole::Shared,
-            "instance" => GpuRole::Instance,
-            "resource" => GpuRole::Resource,
-            "flat" => GpuRole::Flat,
-            _ => return Err(syn::Error::new(kind.span(), "unknown GPU parameter role")),
-        };
-        let index = if input.peek(Token![=]) {
-            input.parse::<Token![=]>()?;
-            Some(input.parse()?)
-        } else {
-            None
-        };
-        Ok(Self { kind, role, index })
     }
 }

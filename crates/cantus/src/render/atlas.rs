@@ -1,5 +1,5 @@
 use crate::render::cpu::Passes;
-use isthmus::{FilterableFloatFormat, SampledTexture, Texture2DArray, TextureView, wgpu::Extent3d};
+use isthmus::{Extent3d, FilterableFloatFormat, SampledTexture, Texture2DArray, TextureView};
 
 /// Frame-local texture-array allocator shared by artwork and icon passes; keys remain owned by the atlas.
 pub struct TextureAtlas {

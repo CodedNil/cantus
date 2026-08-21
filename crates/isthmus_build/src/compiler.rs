@@ -1,4 +1,4 @@
-use crate::artifact::{shader_artifact, shader_features, workspace_root};
+use crate::artifact::{shader_artifact, workspace_root};
 use spirv_builder::{ModuleResult, SpirvBuilder, SpirvMetadata};
 use std::{
     fs,
@@ -7,9 +7,9 @@ use std::{
     vec::Vec,
 };
 
-const SHADER_TARGET: &str = "spirv-unknown-naga-wgsl";
+const SHADER_TARGET: &str = "spirv-unknown-vulkan1.3";
 
-/// Compiles a Rust-GPU crate directly to WGSL, then updates its artifact.
+/// Compiles a Rust-GPU crate to SPIR-V, then updates its artifact.
 ///
 /// Returns whether the artifact changed.
 ///
@@ -20,7 +20,7 @@ pub fn build_shader(crate_dir: &Path) -> Result<(PathBuf, bool), String> {
     let output = shader_artifact(crate_dir)?;
     let target = workspace_root(crate_dir)?.join("target/isthmus");
     let shader = compile_shader(crate_dir, &target)?;
-    if fs::read_to_string(&output).is_ok_and(|current| current == shader) {
+    if fs::read(&output).is_ok_and(|current| current == shader) {
         return Ok((output, false));
     }
     let parent = output.parent().ok_or_else(|| String::from("shader artifact has no parent"))?;
@@ -29,13 +29,13 @@ pub fn build_shader(crate_dir: &Path) -> Result<(PathBuf, bool), String> {
     Ok((output, true))
 }
 
-fn compile_shader(source: &Path, target: &Path) -> Result<String, String> {
+fn compile_shader(source: &Path, target: &Path) -> Result<Vec<u8>, String> {
     let build = SpirvBuilder::new(source, SHADER_TARGET)
         .deny_warnings(true)
         .shader_crate_default_features(false)
-        .shader_crate_features(shader_features(source)?)
         .target_dir_path(target)
-        .spirv_metadata(SpirvMetadata::Full)
+        .spirv_metadata(SpirvMetadata::None)
+        .scalar_block_layout(true)
         .release(true)
         .build()
         .map_err(|error| std::format!("failed to build Rust-GPU shaders: {error}"))?;
@@ -45,6 +45,5 @@ fn compile_shader(source: &Path, target: &Path) -> Result<String, String> {
             return Err(String::from("Rust-GPU unexpectedly produced multiple modules"));
         }
     };
-    let shader = fs::read_to_string(module.with_extension("wgsl")).map_err(|error| std::format!("failed to read built WGSL shader: {error}"))?;
-    Ok(shader.lines().map(str::trim_end).collect::<Vec<_>>().join("\n") + "\n")
+    fs::read(module).map_err(|error| std::format!("failed to read built SPIR-V shader: {error}"))
 }

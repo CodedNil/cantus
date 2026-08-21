@@ -1,7 +1,7 @@
 use crate::render::{FrameData, smoothstep, text};
-use isthmus::{glam::Vec4, spirv_std::arch::kill};
+use isthmus::glam::{Vec2, Vec4};
 
-#[cfg(feature = "cpu")]
+#[cfg(not(target_arch = "spirv"))]
 use {
     crate::{
         app::music::{Enrichment, MusicBackend, PlaybackState, Track},
@@ -16,10 +16,9 @@ use {
 };
 
 pub const EXTENSION: f32 = 10.0;
-#[cfg(feature = "cpu")]
 pub(crate) const TEXT_GLYPHS: usize = 4_096;
 
-#[cfg(feature = "cpu")]
+#[cfg(not(target_arch = "spirv"))]
 pub struct LyricSegment {
     pub start_ms: f32,
     pub end_ms: f32,
@@ -28,14 +27,14 @@ pub struct LyricSegment {
     pub line_end: bool,
 }
 
-#[isthmus::pass]
-pub struct LyricsPass {
-    lines: isthmus::Instances<Self>,
+#[isthmus::system]
+pub struct LyricsRenderer {
+    lines: isthmus::Instances<text::Line>,
     enrichment: Enrichment,
     music: MusicBackend,
 }
 
-#[cfg(feature = "cpu")]
+#[cfg(not(target_arch = "spirv"))]
 #[derive(Default)]
 pub(crate) struct Lyrics {
     lines: [text::ShapedLine; 2],
@@ -43,7 +42,7 @@ pub(crate) struct Lyrics {
     span: f32,
 }
 
-#[cfg(feature = "cpu")]
+#[cfg(not(target_arch = "spirv"))]
 impl Lyrics {
     const STYLE: TextStyle = TextStyle::new(15.0, 700.0);
     const SILENCE_SPEED: f32 = 0.035;
@@ -122,7 +121,7 @@ impl Lyrics {
     }
 }
 
-#[cfg(feature = "cpu")]
+#[cfg(not(target_arch = "spirv"))]
 mod provider {
     use super::LyricSegment;
     use crate::app::music::TrackId;
@@ -291,15 +290,15 @@ mod provider {
     }
 }
 
-#[cfg(feature = "cpu")]
+#[cfg(not(target_arch = "spirv"))]
 pub(crate) use provider::{LyricsRequest, fetch};
 
-#[isthmus::pass]
-impl LyricsPass {
+#[isthmus::host]
+impl LyricsRenderer {
     pub fn new(passes: &Passes<'_>, text: &text::Renderer, enrichment: Enrichment, music: MusicBackend) -> Self {
         let (placed_glyphs, glyphs, edges) = text.resources();
         Self {
-            lines: passes.instances_with_capacity((placed_glyphs, glyphs, edges), 6),
+            lines: lyrics_shader::instances_with_capacity(passes, lyrics_shader::PipelineResources { placed_glyphs, glyphs, edges }, 6),
             enrichment,
             music,
         }
@@ -362,24 +361,19 @@ impl LyricsPass {
             x += span(track);
         }
     }
+}
 
-    #[gpu]
-    pub fn vertex(#[gpu(vertex_index)] vertex: u32, #[gpu(shared)] frame: FrameData, #[gpu(instance)] line: text::Line) -> isthmus::Vertex<text::Varyings> {
-        text::line_quad_effect(*line, vertex, frame, 1.2, 1.0)
+#[isthmus::shader]
+pub mod lyrics_shader {
+    pub fn vertex(vertex: u32, frame: FrameData, line: text::Line) -> Raster {
+        let output = text::line_quad_effect(*line, vertex, frame, 1.2, 1.0);
+        Raster {
+            position: output.position,
+            pixel: output.pixel,
+        }
     }
 
-    #[gpu]
-    pub fn fragment(
-        text::Varyings { pixel }: text::Varyings,
-        #[gpu(shared)] frame: FrameData,
-        #[gpu(instance)] line: text::Line,
-        #[gpu(resource)] placed_glyphs: &[text::PlacedGlyph],
-        #[gpu(resource)] glyphs: &[text::Glyph],
-        #[gpu(resource)] edges: &[text::Edge],
-    ) -> Vec4 {
-        if frame.launcher_open > 0.5 {
-            kill();
-        }
+    pub fn fragment(pixel: Vec2, frame: FrameData, line: text::Line, placed_glyphs: &[text::PlacedGlyph], glyphs: &[text::Glyph], edges: &[text::Edge]) -> Vec4 {
         let edge_fade = smoothstep(0.0, 32.0, pixel.x) * smoothstep(frame.screen_size.x, frame.screen_size.x - 32.0, pixel.x);
         let emphasis = smoothstep(110.0, 0.0, (pixel.x - frame.playhead_x).abs());
         let mut emphasized = *line;

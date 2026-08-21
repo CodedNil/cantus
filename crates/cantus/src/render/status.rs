@@ -3,11 +3,10 @@ use crate::render::{
     shader::{cloud_mass, fill, hash, pill_fragment, pill_vertex, sd_capsule_box, sd_chevron, sd_rounded_box, segment_distance, smooth_union, stroke},
     smoothstep,
     tempestas::{WeatherCondition, scene, sky_phase},
-    text,
+    text::{self, TextStyle},
 };
 use core::f32::consts::TAU;
 use isthmus::{
-    Vertex,
     glam::{FloatExt, Vec2, Vec3, Vec4, vec2, vec3},
     spirv_std::arch::kill,
 };
@@ -15,7 +14,7 @@ use isthmus::{
 #[cfg(target_arch = "spirv")]
 use isthmus::spirv_std::num_traits::Float;
 
-#[cfg(feature = "cpu")]
+#[cfg(not(target_arch = "spirv"))]
 use {
     crate::{
         app::{
@@ -23,10 +22,7 @@ use {
             interaction::Rect,
             platform::{Current as Platform, Platform as _},
         },
-        render::{
-            cpu::{Frame, Passes},
-            text::TextStyle,
-        },
+        render::cpu::{Frame, Passes},
     },
     arrayvec::ArrayString,
     std::{
@@ -40,7 +36,6 @@ use {
 
 const STATUS_HISTORY_SAMPLES: usize = 40;
 pub const AUDIO_SPECTRUM_BANDS: usize = 7;
-#[cfg(feature = "cpu")]
 pub(crate) const BATTERY_HIDDEN: f32 = 2.0;
 const DATA_WIDTH: f32 = 32.0;
 const ACTION_WIDTH: f32 = 24.0;
@@ -54,13 +49,11 @@ const BATTERY_X: f32 = GPU_X + GRAPH_WIDTH + GAP;
 const AUDIO_X: f32 = BATTERY_X;
 const REBOOT_X: f32 = AUDIO_X + DATA_WIDTH + GAP;
 const POWER_X: f32 = REBOOT_X + ACTION_WIDTH + GAP;
-#[cfg(feature = "cpu")]
 const MAX_LABEL_CHARS: usize = 16;
 const CHART_LINE_WIDTH: f32 = 0.85;
 const USAGE_COLOR: Vec3 = Vec3::new(0.32, 0.68, 1.0);
 const MEMORY_COLOR: Vec3 = Vec3::new(0.78, 0.3, 1.0);
 const MUTED_COLOR: Vec3 = Vec3::new(1.0, 0.24, 0.3);
-#[cfg(feature = "cpu")]
 const LABEL_STYLE: TextStyle = TextStyle::new(11.0, 700.0);
 const HISTORY_END: usize = STATUS_HISTORY_SAMPLES - 1;
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -75,7 +68,6 @@ enum StatusSection {
 }
 
 impl StatusSection {
-    #[cfg(feature = "cpu")]
     const POWER_ACTIONS: [Self; 2] = [Self::Power, Self::Reboot];
 
     const fn width(self) -> f32 {
@@ -127,14 +119,9 @@ pub struct StatusPill {
     pub labels: [text::Line; 2],
 }
 
-#[derive(isthmus::Varyings)]
-pub struct StatusVaryings {
-    pub pixel: Vec2,
-}
-
-#[isthmus::pass]
-pub struct StatusPass {
-    pub pill: isthmus::Instance<Self>,
+#[isthmus::system]
+pub struct StatusRenderer {
+    pub pill: isthmus::Instance<StatusPill>,
     pub(crate) temperature_targets: [f32; 2],
     audio_spectrum: Arc<[AtomicU32; AUDIO_SPECTRUM_BANDS]>,
     background: Background,
@@ -201,7 +188,7 @@ impl Default for UsageHistory {
     }
 }
 
-#[cfg(feature = "cpu")]
+#[cfg(not(target_arch = "spirv"))]
 impl UsageHistory {
     pub fn push(&mut self, value: f32) {
         self.samples.copy_within(1.., 0);
@@ -217,7 +204,7 @@ const fn pill_x(screen_width: f32, width: f32) -> f32 {
     screen_width - width - GAP
 }
 
-#[cfg(feature = "cpu")]
+#[cfg(not(target_arch = "spirv"))]
 fn section_rect(pill: &StatusPill, x: f32, height: f32, section: StatusSection) -> Rect {
     Rect::from_center(
         vec2(x + pill.section_center(section), PANEL_START + height * 0.5),
@@ -381,13 +368,15 @@ fn action_icon(point: Vec2, time: f32, action: f32, hover: f32, pill: &StatusPil
     color * icon * (1.0 + charge * 0.45)
 }
 
-#[isthmus::pass]
-impl StatusPass {
+#[isthmus::host]
+impl StatusRenderer {
     pub(crate) fn new(passes: &Passes<'_>, text: &text::Renderer, background: &Background, updater: AppUpdater) -> Self {
         let audio_spectrum = Arc::<[AtomicU32; AUDIO_SPECTRUM_BANDS]>::default();
         Platform::start_status_monitor(background, updater, Arc::clone(&audio_spectrum));
-        let pill = passes.instance(
-            text.resources(),
+        let (placed_glyphs, glyphs, edges) = text.resources();
+        let pill = status_shader::instance(
+            passes,
+            status_shader::PipelineResources { placed_glyphs, glyphs, edges },
             StatusPill {
                 battery_level: BATTERY_HIDDEN,
                 power_action: -1,
@@ -465,30 +454,18 @@ impl StatusPass {
             text.fit(&label, LABEL_STYLE, GAP + 5.0, section_center - half_width, section_center + half_width)
         });
     }
+}
 
-    #[gpu]
-    pub fn vertex(#[gpu(vertex_index)] vertex: u32, #[gpu(shared)] frame: FrameData, #[gpu(instance)] pill: StatusPill) -> Vertex<StatusVaryings> {
+#[isthmus::shader]
+pub mod status_shader {
+    pub fn vertex(vertex: u32, frame: FrameData, pill: StatusPill) -> Raster {
         let width = pill.width();
         let x = pill_x(frame.screen_size.x, width);
         let (position, pixel) = pill_vertex(vertex, frame, x, PANEL_START, vec2(width, 0.0));
-        Vertex {
-            position,
-            varyings: StatusVaryings { pixel },
-        }
+        Raster { position, pixel }
     }
 
-    #[gpu]
-    pub fn fragment(
-        StatusVaryings { pixel }: StatusVaryings,
-        #[gpu(shared)] frame: FrameData,
-        #[gpu(instance)] pill: StatusPill,
-        #[gpu(resource)] placed_glyphs: &[text::PlacedGlyph],
-        #[gpu(resource)] glyphs: &[text::Glyph],
-        #[gpu(resource)] edges: &[text::Edge],
-    ) -> Vec4 {
-        if frame.launcher_open > 0.5 {
-            kill();
-        }
+    pub fn fragment(pixel: Vec2, frame: FrameData, pill: StatusPill, placed_glyphs: &[text::PlacedGlyph], glyphs: &[text::Glyph], edges: &[text::Edge]) -> Vec4 {
         let width = pill.width();
         let x = pill_x(frame.screen_size.x, width);
         let (interaction, raw_local, size, surface) = pill_fragment(pixel, frame, x, PANEL_START, width);

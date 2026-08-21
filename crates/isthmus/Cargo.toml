@@ -4,30 +4,16 @@ version = "0.1.0"
 edition = "2024"
 
 [dependencies]
-bytemuck = { version = "1.25.2", optional = true }
 isthmus_macros = { path = "../isthmus_macros" }
 spirv-std = { git = "https://github.com/Rust-GPU/rust-gpu", rev = "9453497884c28bd52405f0abc9bfc7d0b3374666" }
-wgpu = { workspace = true, optional = true }
 
 [target.'cfg(target_arch = "spirv")'.dependencies]
 glam = { workspace = true, features = ["libm"] }
 
 [target.'cfg(not(target_arch = "spirv"))'.dependencies]
+ash.workspace = true
+bytemuck.workspace = true
 glam = { workspace = true, features = ["std"] }
-
-[features]
-default = []
-cpu = [
-    "dep:bytemuck",
-    "dep:wgpu",
-    "wgpu/wgsl",
-]
-dx12 = ["cpu", "wgpu/dx12", "wgpu/parking_lot", "wgpu/std"]
-gles = ["cpu", "wgpu/gles", "wgpu/parking_lot", "wgpu/std"]
-metal = ["cpu", "wgpu/metal", "wgpu/parking_lot", "wgpu/std"]
-vulkan = ["cpu", "wgpu/parking_lot", "wgpu/std", "wgpu/vulkan"]
-webgl = ["cpu", "wgpu/webgl"]
-webgpu = ["cpu", "wgpu/webgpu"]
 
 [lints]
 workspace = true

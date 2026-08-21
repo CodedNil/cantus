@@ -1,11 +1,12 @@
 use crate::render::{
     FrameData, PANEL_START,
     shader::{SdfSurface, avalanche, hover_mask, pill_fragment, pill_margin, pill_sheen, pixel_to_ndc, presence, quad_coord, sd_capsule_box, sd_star, simplex_noise},
-    smoothstep, text,
+    smoothstep,
+    text::{self, TextStyle},
 };
 use core::f32::consts::{FRAC_PI_2, TAU};
 use isthmus::{
-    Sampler, Texture2DArray, Unorm8x4, Vertex,
+    Sampler, Texture2DArray, Unorm8x4,
     glam::{FloatExt, UVec2, Vec2, Vec3, Vec4, uvec2, vec2, vec3},
     spirv_std::arch::{Derivative, kill},
 };
@@ -13,7 +14,7 @@ use isthmus::{
 #[cfg(target_arch = "spirv")]
 use isthmus::spirv_std::num_traits::Float;
 
-#[cfg(feature = "cpu")]
+#[isthmus::host]
 use crate::{
     app::{
         interaction::Rect,
@@ -24,7 +25,6 @@ use crate::{
         GAP,
         atlas::TextureAtlas,
         cpu::{Frame, Passes, approach},
-        text::TextStyle,
     },
 };
 
@@ -38,22 +38,14 @@ const ICON_WIDTH: f32 = 21.6;
 const ICON_SPACING: f32 = 18.0;
 /// Stars in the rating row; each holds a half-star either side of its centre.
 const STAR_RATINGS: usize = 5;
-#[cfg(feature = "cpu")]
-mod host {
-    use super::TextStyle;
+const MAX_TEXTURE_IMAGES: u32 = 32;
+const MAX_RENDER_INSTANCES: usize = 32;
+const TITLE_STYLE: TextStyle = TextStyle::new(16.0, 700.0);
+const DETAILS_STYLE: TextStyle = TextStyle::new(14.0, 700.0);
+const DETAIL_FADE_DURATION: f32 = 0.2;
+const PLAYLIST_EXPANSION_DURATION: f32 = 1.0 / 6.0;
 
-    pub const MAX_TEXTURE_IMAGES: u32 = 32;
-    pub const MAX_RENDER_INSTANCES: usize = 32;
-    pub const TITLE_STYLE: TextStyle = TextStyle::new(16.0, 700.0);
-    pub const DETAILS_STYLE: TextStyle = TextStyle::new(14.0, 700.0);
-    pub const DETAIL_FADE_DURATION: f32 = 0.2;
-    pub const PLAYLIST_EXPANSION_DURATION: f32 = 1.0 / 6.0;
-}
-
-#[cfg(feature = "cpu")]
-use host::{DETAIL_FADE_DURATION, DETAILS_STYLE, MAX_RENDER_INSTANCES, MAX_TEXTURE_IMAGES, PLAYLIST_EXPANSION_DURATION, TITLE_STYLE};
-
-#[cfg(feature = "cpu")]
+#[isthmus::host]
 impl TextureAtlas {
     fn track_index(&mut self, url: Option<&str>, art: Option<&AlbumArt>) -> i32 {
         let (Some(url), Some(art)) = (url, art) else {
@@ -63,18 +55,11 @@ impl TextureAtlas {
     }
 }
 
-#[isthmus::pass]
-pub struct TrackPass {
-    pub(crate) instances: isthmus::Instances<Self>,
+#[isthmus::system]
+pub struct TrackRenderer {
+    pub(crate) instances: isthmus::Instances<TrackPill>,
     images: TextureAtlas,
     pub current_track_palette: Option<[Unorm8x4; PALETTE_COLORS]>,
-}
-
-#[derive(isthmus::Varyings)]
-pub struct TrackVaryings {
-    pub pixel_pos: Vec2,
-    #[gpu(flat)]
-    pub pill_idx: u32,
 }
 
 #[isthmus::data]
@@ -121,7 +106,7 @@ impl TrackPill {
 /// Per-track character, every field normalised to 0..1 on arrival.
 #[isthmus::data]
 #[derive(Default)]
-#[cfg_attr(feature = "cpu", derive(serde::Deserialize))]
+#[cfg_attr(not(target_arch = "spirv"), derive(serde::Deserialize))]
 pub struct AudioFeatures {
     pub energy: f32,
     pub danceability: f32,
@@ -151,7 +136,6 @@ impl AudioFeatures {
     }
 
     /// Clamps freshly fetched features into the ranges the shader assumes.
-    #[cfg(feature = "cpu")]
     #[must_use]
     pub fn normalized(self) -> Self {
         Self {
@@ -174,7 +158,7 @@ struct PillIconRow {
 }
 
 /// Where one queued track sits on the timeline this frame.
-#[cfg(feature = "cpu")]
+#[isthmus::host]
 #[derive(Clone, Copy)]
 struct TrackLayout {
     start_ms: f32,
@@ -183,7 +167,7 @@ struct TrackLayout {
 }
 
 impl PillIconRow {
-    #[cfg(feature = "cpu")]
+    #[isthmus::host]
     fn hit(self, point: Vec2) -> Option<(usize, bool)> {
         let index = (point.x - self.center.x) / (ICON_SPACING * self.expansion) + (self.count - 1.0).max(0.0) * 0.5 + 0.5;
         let index = (self.expansion > 0.0 && (0.0..self.count).contains(&index)).then_some(index as usize)?;
@@ -236,7 +220,6 @@ fn over_icon(base: Vec4, color: Vec3, shape: f32, alpha: f32) -> Vec4 {
     base * (1.0 - layer.w) + layer
 }
 
-#[isthmus::outline]
 fn plasma_field(uv: Vec2, swatch: Vec4, x: f32, y: f32, phase: f32) -> Vec4 {
     let wave = (uv.dot(vec2(x, y)) + phase).sin() * 0.5 + 0.5;
     let weight = (0.12 + wave * wave) * (0.25 + swatch.w * 3.0);
@@ -281,14 +264,22 @@ fn caustics(p: Vec2, time: f32, seed: f32, effects: AudioFeatures) -> f32 {
     web * amount * 0.06
 }
 
-#[isthmus::pass]
-impl TrackPass {
+#[isthmus::host]
+impl TrackRenderer {
     pub fn new(passes: &Passes<'_>, text: &text::Renderer) -> Self {
         let images = TextureAtlas::new(passes, "Images", [IMAGE_SIZE; 2], MAX_TEXTURE_IMAGES as usize);
-        let sampler = passes.filtering_sampler("Linear Sampler");
         let (placed_glyphs, glyphs, edges) = text.resources();
         Self {
-            instances: passes.instances((images.view(), &sampler, placed_glyphs, glyphs, edges), []),
+            instances: track_shader::instances(
+                passes,
+                track_shader::PipelineResources {
+                    images: images.view(),
+                    placed_glyphs,
+                    glyphs,
+                    edges,
+                },
+                [],
+            ),
             images,
             current_track_palette: None,
         }
@@ -537,14 +528,11 @@ impl TrackPass {
         }
         self.current_track_palette = current_track.map(|(index, _)| playback.queue[index].runtime.art.palette());
     }
+}
 
-    #[gpu]
-    pub fn vertex(
-        #[gpu(vertex_index)] vertex: u32,
-        #[gpu(instance_index)] instance: u32,
-        #[gpu(shared)] frame: FrameData,
-        #[gpu(instance)] pill: TrackPill,
-    ) -> Vertex<TrackVaryings> {
+#[isthmus::shader]
+pub mod track_shader {
+    pub fn vertex(vertex: u32, frame: FrameData, pill: TrackPill) -> Raster {
         let margin = pill_margin(frame);
         let pill_size = vec2(pill.width, frame.panel_height);
         let pill_origin = vec2(pill.x, PANEL_START);
@@ -561,26 +549,22 @@ impl TrackPass {
         );
 
         let pixel_pos = render_min + quad_coord(vertex) * (render_max - render_min);
-        Vertex {
+        Raster {
             position: pixel_to_ndc(pixel_pos, frame.screen_size),
-            varyings: TrackVaryings { pixel_pos, pill_idx: instance },
+            pixel_pos,
         }
     }
 
-    #[gpu]
     pub fn fragment(
-        TrackVaryings { pixel_pos, pill_idx: _ }: TrackVaryings,
-        #[gpu(shared)] frame: FrameData,
-        #[gpu(instance = pill_idx as usize)] pill: TrackPill,
-        #[gpu(resource)] images: &Texture2DArray,
-        #[gpu(resource)] sampler: &Sampler,
-        #[gpu(resource)] placed_glyphs: &[text::PlacedGlyph],
-        #[gpu(resource)] glyphs: &[text::Glyph],
-        #[gpu(resource)] edges: &[text::Edge],
+        pixel_pos: Vec2,
+        frame: FrameData,
+        pill: TrackPill,
+        images: &Texture2DArray,
+        sampler: &Sampler,
+        placed_glyphs: &[text::PlacedGlyph],
+        glyphs: &[text::Glyph],
+        edges: &[text::Edge],
     ) -> Vec4 {
-        if frame.launcher_open > 0.5 {
-            kill();
-        }
         let (interaction, local_pixel, pill_size, body_surface) = pill_fragment(pixel_pos, frame, pill.x, PANEL_START, pill.width);
         let local_uv = local_pixel / pill_size;
         let local_centered = local_uv - 0.5;
@@ -650,8 +634,7 @@ impl TrackPass {
         let mut output = (color * mask).extend(alpha);
 
         if pill.rating >= 0 && pill.primary_alpha > 0.0 {
-            let mut star_index = 0;
-            while star_index < STAR_RATINGS {
+            for star_index in 0..STAR_RATINGS {
                 let star = star_index as f32;
                 let center = primary_row.icon_center(star);
                 if near_icon(pixel_pos, center) {
@@ -663,14 +646,12 @@ impl TrackPass {
                     let color = vec3(1.0, 0.85, 0.2).lerp(vec3(0.33, 0.33, 0.33), selection_mask);
                     output = over_icon(output, color, dist, pill.primary_alpha);
                 }
-                star_index += 1;
             }
         }
 
         let primary_playlists = pill.primary_playlist_count as usize;
         let playlist_count = (primary_playlists + pill.secondary_playlist_count as usize).min(MAX_PILL_PLAYLIST_ICONS);
-        let mut index = 0;
-        while index < playlist_count {
+        for index in 0..playlist_count {
             let image_index = pill.playlist_images[index];
             if image_index >= 0 {
                 let primary = index < primary_playlists;
@@ -694,7 +675,6 @@ impl TrackPass {
                     }
                 }
             }
-            index += 1;
         }
 
         let text_alpha = text::line_alpha(pill.lines[0], placed_glyphs, glyphs, edges, refracted).max(text::line_alpha(pill.lines[1], placed_glyphs, glyphs, edges, refracted))

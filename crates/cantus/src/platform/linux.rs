@@ -12,11 +12,8 @@ use crate::{
     },
 };
 use freedesktop_desktop_entry::{desktop_entries, get_languages_from_env};
+use isthmus::Surface;
 use isthmus::glam::vec2;
-use isthmus::wgpu::{
-    Surface, SurfaceTargetUnsafe,
-    rwh::{RawDisplayHandle, RawWindowHandle, WaylandDisplayHandle, WaylandWindowHandle},
-};
 use microfft::real::rfft_1024;
 use serde_json::Value;
 use std::{
@@ -467,9 +464,7 @@ pub fn run() {
 
     let wl_surface = compositor.create_surface(&qhandle, ());
     let handle = |pointer: Option<NonNull<c_void>>| pointer.expect("Failed to get Wayland pointer");
-    app.display_handle = Some(RawDisplayHandle::Wayland(WaylandDisplayHandle::new(handle(NonNull::new(
-        connection.backend().display_ptr().cast(),
-    )))));
+    app.display_handle = Some(handle(NonNull::new(connection.backend().display_ptr().cast())));
     let output = app.output.take().expect("No Wayland outputs found");
     // wl_pointer exposes a surface, not its output. Keep the configured output as the
     // best protocol-level target for the launcher rather than letting the compositor choose.
@@ -548,9 +543,9 @@ struct LayerShellApp {
     selection: Option<WlDataOffer>,
     offer_is_text: bool,
     output: Option<WlOutput>,
-    pending_bar_surface: Option<Surface<'static>>,
-    pending_launcher_surface: Option<Surface<'static>>,
-    display_handle: Option<RawDisplayHandle>,
+    pending_bar_surface: Option<Surface>,
+    pending_launcher_surface: Option<Surface>,
+    display_handle: Option<NonNull<c_void>>,
     wl_surface: Option<WlSurface>,
     launcher_wl_surface: Option<WlSurface>,
     layer_surface: Option<ZwlrLayerSurfaceV1>,
@@ -638,16 +633,10 @@ impl LayerShellApp {
         Some(text)
     }
 
-    fn create_render_surface(&self, wl_surface: &WlSurface) -> Surface<'static> {
+    fn create_render_surface(&self, wl_surface: &WlSurface) -> Surface {
         let display = self.display_handle.expect("missing Wayland display handle");
-        let window = RawWindowHandle::Wayland(WaylandWindowHandle::new(
-            NonNull::new(wl_surface.id().as_ptr().cast()).expect("missing Wayland surface pointer"),
-        ));
-        let target = SurfaceTargetUnsafe::RawHandle {
-            raw_display_handle: Some(display),
-            raw_window_handle: window,
-        };
-        unsafe { self.cantus.render.instance.create_surface_unsafe(target) }.expect("Failed to create surface")
+        let window = NonNull::new(wl_surface.id().as_ptr().cast()).expect("missing Wayland surface pointer");
+        unsafe { Surface::wayland(display, window) }
     }
 
     const fn active_surface(&self) -> &WlSurface {

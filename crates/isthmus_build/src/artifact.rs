@@ -1,5 +1,3 @@
-#[cfg(feature = "compiler")]
-use std::vec::Vec;
 use std::{
     fs,
     path::{Path, PathBuf},
@@ -16,20 +14,6 @@ pub fn shader_artifact(crate_dir: &Path) -> Result<PathBuf, String> {
         .and_then(toml_edit::Item::as_str)
         .ok_or_else(|| String::from("missing `package.metadata.isthmus.artifact`"))?;
     Ok(crate_dir.join(relative))
-}
-
-#[cfg(feature = "compiler")]
-pub(crate) fn shader_features(crate_dir: &Path) -> Result<Vec<String>, String> {
-    let manifest = read_manifest(crate_dir)?;
-    let Some(features) = manifest_path(&manifest, &["package", "metadata", "isthmus", "features"]) else {
-        return Ok(vec![String::from("shader")]);
-    };
-    features
-        .as_array()
-        .ok_or_else(|| String::from("package.metadata.isthmus.features must be an array"))?
-        .iter()
-        .map(|feature| feature.as_str().map(String::from).ok_or_else(|| String::from("Isthmus shader features must be strings")))
-        .collect()
 }
 
 fn read_manifest(crate_dir: &Path) -> Result<toml_edit::DocumentMut, String> {

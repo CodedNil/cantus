@@ -18,6 +18,7 @@ use std::{
     collections::HashMap,
     error::Error,
     ops::Range,
+    sync::Arc,
     time::{Duration, Instant},
 };
 use tokio::task::spawn_blocking;
@@ -108,7 +109,7 @@ impl<T> Fetch<T> {
 
 #[derive(Clone)]
 pub struct AlbumArt {
-    pub pixels: Box<[u8]>,
+    pub pixels: Arc<[u8]>,
     palette: [Unorm8x4; PALETTE_COLORS],
 }
 
@@ -157,7 +158,7 @@ async fn fetch_art(http: &Client, url: &str) -> ArtState {
                 .to_rgba8();
             Ok::<_, image::ImageError>(AlbumArt {
                 palette: image_palette(&image),
-                pixels: image.into_raw().into_boxed_slice(),
+                pixels: image.into_raw().into(),
             })
         })
         .await??)

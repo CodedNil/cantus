@@ -5,116 +5,72 @@ edition = "2024"
 default-run = "cantus"
 
 [package.metadata.isthmus]
-artifact = "../../assets/cantus.wgsl"
+artifact = "../../assets/cantus.spv"
 
 [[bin]]
 name = "cantus"
 path = "src/main.rs"
-required-features = ["cpu"]
 
 [features]
-default = ["cpu"]
-cpu = [
-    "shader",
-    "dep:arrayvec",
-    "dep:bytemuck",
-    "dep:fastrand",
-    "dep:form_urlencoded",
-    "dep:flate2",
-    "dep:futures-util",
-    "dep:freedesktop-desktop-entry",
-    "dep:freedesktop-icons",
-    "dep:hex",
-    "dep:image",
-    "dep:jiff",
-    "dep:microfft",
-    "dep:palette",
-    "dep:parking_lot",
-    "dep:pollster",
-    "dep:librespot-protocol",
-    "dep:librespot-core",
-    "dep:librespot-oauth",
-    "dep:quick-xml",
-    "dep:reqwest",
-    "dep:serde",
-    "dep:serde_json",
-    "dep:protobuf",
-    "dep:sysinfo",
-    "dep:ttf-parser",
-    "dep:toml",
-    "dep:tokio",
-    "dep:tracing",
-    "dep:tracing-subscriber",
-    "dep:zbus",
-    "dep:wayland-client",
-    "dep:wayland-protocols",
-    "dep:wayland-protocols-wlr",
-    "dep:xkbcommon",
-    "dep:fend-core",
-    "dep:resvg",
-    "isthmus/vulkan",
-]
-shader = []
-generate-nix = ["cpu", "dep:schemars"]
+generate-nix = ["dep:schemars"]
 
 [dependencies]
 isthmus = { path = "../isthmus" }
 
-# CPU application
-zbus = { version = "5.19.0", default-features = false, features = ["tokio"], optional = true }
-bytemuck = { workspace = true, optional = true }
-arrayvec = { version = "0.7.8", features = ["serde"], optional = true }
-tracing = { version = "0.1.44", default-features = false, features = ["std"], optional = true }
+[target.'cfg(not(target_arch = "spirv"))'.dependencies]
+zbus = { version = "5.19.0", default-features = false, features = ["tokio"] }
+bytemuck.workspace = true
+arrayvec = { version = "0.7.8", features = ["serde"] }
+tracing = { version = "0.1.44", default-features = false, features = ["std"] }
 tracing-subscriber = { version = "0.3.23", default-features = false, features = [
     "fmt",
     "smallvec",
     "tracing-log",
-], optional = true }
-pollster = { version = "1.0.1", optional = true }
-librespot-protocol = { version = "0.8.0", optional = true }
-librespot-core = { version = "0.8.0", default-features = false, features = ["rustls-tls-webpki-roots"], optional = true }
-librespot-oauth = { version = "0.8.0", default-features = false, features = ["rustls-tls-webpki-roots"], optional = true }
-protobuf = { version = "3.7.2", optional = true }
-quick-xml = { version = "0.41.0", optional = true }
-wayland-client = { version = "0.31.15", default-features = false, features = ["system"], optional = true }
-wayland-protocols = { version = "0.32.13", features = ["client", "staging"], optional = true }
-wayland-protocols-wlr = { version = "0.3.12", features = ["client"], optional = true }
-xkbcommon = { version = "0.9.0", default-features = false, features = ["wayland"], optional = true }
-fend-core = { version = "1.5.8", optional = true }
-resvg = { version = "0.48.1", default-features = false, features = ["raster-images"], optional = true }
-ttf-parser = { version = "0.25.1", optional = true }
+] }
+librespot-protocol = "0.8.0"
+librespot-core = { version = "0.8.0", default-features = false, features = ["rustls-tls-webpki-roots"] }
+librespot-oauth = { version = "0.8.0", default-features = false, features = ["rustls-tls-webpki-roots"] }
+protobuf = "3.7.2"
+quick-xml = "0.41.0"
+wayland-client = { version = "0.31.15", default-features = false, features = ["system"] }
+wayland-protocols = { version = "0.32.13", features = ["client", "staging"] }
+wayland-protocols-wlr = { version = "0.3.12", features = ["client"] }
+xkbcommon = { version = "0.9.0", default-features = false, features = ["wayland"] }
+fend-core = "1.5.8"
+resvg = { version = "0.48.1", default-features = false, features = ["raster-images"] }
+ttf-parser = "0.25.1"
 image = { version = "0.25.10", default-features = false, features = [
     "ico",
     "jpeg",
     "png",
-], optional = true }
-palette = { version = "0.7.7", default-features = false, features = ["std"], optional = true }
-parking_lot = { version = "0.12.5", optional = true }
-serde = { workspace = true, features = ["rc"], optional = true }
-serde_json = { version = "1.0.151", optional = true }
-toml = { version = "1.1.4", optional = true }
+] }
+palette = { version = "0.7.7", default-features = false, features = ["std"] }
+parking_lot = "0.12.5"
+serde = { workspace = true, features = ["rc"] }
+serde_json = "1.0.151"
+toml = "1.1.4"
 schemars = { version = "1.2.2", features = ["arrayvec07", "preserve_order"], optional = true }
-reqwest = { version = "0.12.28", default-features = false, features = ["json", "rustls-tls-webpki-roots"], optional = true }
-tokio = { version = "1.53.1", features = ["net", "rt-multi-thread", "sync", "time"], optional = true }
-form_urlencoded = { version = "1.2.2", optional = true }
-flate2 = { version = "1.1.9", optional = true }
-futures-util = { version = "0.3.34", optional = true }
-freedesktop-desktop-entry = { version = "0.8.1", default-features = false, optional = true }
-freedesktop-icons = { version = "0.4.0", optional = true }
-hex = { version = "0.4.3", optional = true }
-fastrand = { version = "2.5.0", optional = true }
-microfft = { version = "0.6.0", default-features = false, features = ["size-1024", "std"], optional = true }
+reqwest = { version = "0.12.28", default-features = false, features = ["json", "rustls-tls-webpki-roots"] }
+tokio = { version = "1.53.1", features = ["net", "rt-multi-thread", "sync", "time"] }
+form_urlencoded = "1.2.2"
+flate2 = "1.1.9"
+futures-util = "0.3.34"
+freedesktop-desktop-entry = { version = "0.8.1", default-features = false }
+freedesktop-icons = "0.4.0"
+hex = "0.4.3"
+fastrand = "2.5.0"
+microfft = { version = "0.6.0", default-features = false, features = ["size-1024", "std"] }
 sysinfo = { git = "https://github.com/CodedNil/sysinfo", branch = "gpu_temp", default-features = false, features = [
     "component",
     "system",
     "gpu",
-], optional = true }
+] }
 jiff = { version = "0.2.35", default-features = false, features = [
     "serde",
     "std",
     "tz-system",
     "tzdb-zoneinfo",
-], optional = true }
+] }
 
 [build-dependencies]
 # librespot-core 0.8's vergen-gitcl build dependency is incompatible with vergen 9.1.

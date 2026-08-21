@@ -5,7 +5,7 @@ A beautiful interactive music widget for Wayland
 
 ## Features
 
-**Graphics**: Powered by `wgpu` for high-performance, animated rendering of the music widget.
+**Graphics**: Heavily GPU accelerated for high-performance, animated rendering of the music widget.
 
 **Queue Display**: Displays your spotify queue in a visual timeline, shows upcoming songs as well as the history.
 
@@ -80,14 +80,6 @@ To build Cantus from source, ensure the following dependencies are installed:
 Then, from the root of the repository, run:
 
 ```cargo build --release```
-
-The application builds with stable Rust and embeds the checked-in Rust-GPU
-shader. Shader regeneration is a separate developer operation using nightly
-Rust; release and downstream package builds do not require it. Isthmus rejects
-stale shader artifacts during ordinary builds. Rebuild after changing shader
-code with:
-
-```just shader```
 
 ### To install it system-wide
 ```sudo cp target/release/cantus /usr/bin```

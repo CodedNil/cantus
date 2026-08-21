@@ -1,11 +1,11 @@
 use crate::render::{
     FrameData, GAP, PANEL_START, UNIT,
     shader::{PillInteraction, SdfSurface, cloud_mass, fbm, hash, pill_fragment, pill_interaction, pill_sheen, pill_vertex, sd_capsule_box, sd_rounded_box, sdf_coverage},
-    smoothstep, text,
+    smoothstep,
+    text::{self, TextStyle},
 };
 use core::f32::consts::PI;
 use isthmus::{
-    Vertex,
     glam::{FloatExt, Vec2, Vec3, Vec4, vec2, vec3},
     spirv_std::arch::kill,
 };
@@ -13,7 +13,7 @@ use isthmus::{
 #[cfg(target_arch = "spirv")]
 use isthmus::spirv_std::num_traits::Float;
 
-#[cfg(feature = "cpu")]
+#[cfg(not(target_arch = "spirv"))]
 use {
     crate::{
         app::{
@@ -23,7 +23,6 @@ use {
         render::{
             cpu::{Frame, Passes, approach},
             status,
-            text::TextStyle,
         },
     },
     arrayvec::{ArrayString, ArrayVec},
@@ -51,31 +50,20 @@ const FORECAST_X: f32 = WIDTH + GAP;
 /// A lookup grid maps each cell to the up to two labels whose padded bounds reach it.
 const TEXT_COLUMNS: usize = 24;
 const TEXT_ROWS: usize = 36;
-#[cfg(feature = "cpu")]
-mod host {
-    use super::{MAX_WORLD_CLOCKS, TextStyle, UNIT, Vec2, WIDTH};
-
-    pub const WEEKDAY_COUNT: usize = 7;
-    pub const GRID_CELLS: usize = WEEKDAY_COUNT * 6;
-    pub const GRID_ROW_HEIGHT: f32 = UNIT * 6.0;
-    pub const GRID_TOP_Y: f32 = UNIT * 24.0;
-    pub const WEEKDAY_Y: f32 = UNIT * 17.0;
-    pub const TITLE: Vec2 = Vec2::new(WIDTH * 0.5, UNIT * 10.0);
-    pub const WEEKDAYS: [&str; WEEKDAY_COUNT] = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"];
-    pub const ORDINALS: [&str; 10] = ["th", "st", "nd", "rd", "th", "th", "th", "th", "th", "th"];
-    pub const TEXT_CELLS: usize = super::TEXT_COLUMNS * super::TEXT_ROWS;
-    pub const MAX_TEXT_LINES: usize = 17 + (super::HOURLY_FORECASTS + super::DAILY_FORECASTS + MAX_WORLD_CLOCKS) * 2 + WEEKDAY_COUNT + GRID_CELLS;
-    pub const DETAILS_STYLE: TextStyle = TextStyle::new(14.0, 700.0);
-    pub const WEATHER_STYLE: TextStyle = TextStyle::new(24.0, 600.0);
-    pub const TITLE_STYLE: TextStyle = TextStyle::new(20.0, 750.0);
-    pub const CLOCK_STYLE: TextStyle = TextStyle::new(12.0, 700.0);
-}
-
-#[cfg(feature = "cpu")]
-use host::{
-    CLOCK_STYLE, DETAILS_STYLE, GRID_CELLS, GRID_ROW_HEIGHT, GRID_TOP_Y, MAX_TEXT_LINES, ORDINALS, TEXT_CELLS, TITLE, TITLE_STYLE, WEATHER_STYLE, WEEKDAY_COUNT, WEEKDAY_Y,
-    WEEKDAYS,
-};
+const WEEKDAY_COUNT: usize = 7;
+const GRID_CELLS: usize = WEEKDAY_COUNT * 6;
+const GRID_ROW_HEIGHT: f32 = UNIT * 6.0;
+const GRID_TOP_Y: f32 = UNIT * 24.0;
+const WEEKDAY_Y: f32 = UNIT * 17.0;
+const TITLE: Vec2 = Vec2::new(WIDTH * 0.5, UNIT * 10.0);
+const WEEKDAYS: [&str; WEEKDAY_COUNT] = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"];
+const ORDINALS: [&str; 10] = ["th", "st", "nd", "rd", "th", "th", "th", "th", "th", "th"];
+const TEXT_CELLS: usize = TEXT_COLUMNS * TEXT_ROWS;
+const MAX_TEXT_LINES: usize = 17 + (HOURLY_FORECASTS + DAILY_FORECASTS + MAX_WORLD_CLOCKS) * 2 + WEEKDAY_COUNT + GRID_CELLS;
+const DETAILS_STYLE: TextStyle = TextStyle::new(14.0, 700.0);
+const WEATHER_STYLE: TextStyle = TextStyle::new(24.0, 600.0);
+const TITLE_STYLE: TextStyle = TextStyle::new(20.0, 750.0);
+const CLOCK_STYLE: TextStyle = TextStyle::new(12.0, 700.0);
 
 #[isthmus::data]
 #[derive(Default)]
@@ -100,30 +88,23 @@ pub struct WeatherCondition {
     pub hail: f32,
 }
 
-#[cfg(feature = "cpu")]
+#[cfg(not(target_arch = "spirv"))]
 #[derive(Default)]
 struct ForecastItem {
     text: [String; 2],
     hover_text: String,
 }
 
-#[cfg(feature = "cpu")]
+#[cfg(not(target_arch = "spirv"))]
 struct WorldClock {
     label: String,
     timezone: TimeZone,
     weather: String,
 }
 
-#[derive(isthmus::Varyings)]
-pub struct Varyings {
-    pub pixel: Vec2,
-    #[gpu(flat)]
-    pub weather: Vec4,
-}
-
-#[isthmus::pass]
-pub struct TempestasPass {
-    pub pill: isthmus::Instance<Self>,
+#[isthmus::system]
+pub struct TempestasRenderer {
+    pub pill: isthmus::Instance<WeatherSurface>,
     text_lines: Storage<text::Line>,
     text_cells: Storage<u32>,
     labels: Vec<text::Line>,
@@ -137,7 +118,7 @@ pub struct TempestasPass {
     month_offset: i32,
 }
 
-#[cfg(feature = "cpu")]
+#[cfg(not(target_arch = "spirv"))]
 struct Labels<'a> {
     lines: &'a mut Vec<text::Line>,
     cells: &'a mut [u32; TEXT_CELLS],
@@ -150,7 +131,7 @@ struct Labels<'a> {
     expansion: f32,
 }
 
-#[cfg(feature = "cpu")]
+#[cfg(not(target_arch = "spirv"))]
 impl Labels<'_> {
     fn centered(&mut self, content: &str, style: TextStyle, center: Vec2, opacity: f32) {
         self.colored(content, style, center, text::COLOR, opacity);
@@ -202,7 +183,6 @@ impl WeatherCondition {
     }
 }
 
-#[cfg(feature = "cpu")]
 fn grid_cell(index: usize) -> Vec2 {
     let column_width = WIDTH / WEEKDAY_COUNT as f32;
     vec2(
@@ -234,7 +214,6 @@ fn forecast_row(height: f32, row: f32) -> (Vec2, Vec2) {
     (center - size * 0.5, size)
 }
 
-#[cfg(feature = "cpu")]
 fn world_clock_center(height: f32, index: usize) -> f32 {
     forecast_center(height, 1.0) + height * 0.5 + UNIT * (3.5 + index as f32 * 7.0)
 }
@@ -246,7 +225,6 @@ fn text_grid(frame: &FrameData, pill_x: f32) -> (Vec2, Vec2) {
     (vec2(expanded_x(pill_x, 1.0), PANEL_START), cell)
 }
 
-#[cfg(feature = "cpu")]
 fn reveal_progress(expansion: f32, y: f32) -> f32 {
     let delay = 0.5 + (y / EXTENSION) * 0.18;
     smoothstep(delay, delay + 0.24, expansion)
@@ -417,8 +395,8 @@ fn sample_forecast(pixel: Vec2, frame: &FrameData, pill: &WeatherSurface) -> For
     }
 }
 
-#[isthmus::pass]
-impl TempestasPass {
+#[isthmus::host]
+impl TempestasRenderer {
     pub(crate) fn new(passes: &Passes<'_>, text: &text::Renderer, timezones: &[String], background: &Background, updater: AppUpdater, http: Client) -> Self {
         let mut forecast_timezones = Vec::with_capacity(timezones.len());
         let timezones: ArrayVec<_, MAX_WORLD_CLOCKS> = timezones
@@ -437,8 +415,15 @@ impl TempestasPass {
         let text_lines = passes.storage_with_capacity("Tempestas Text", MAX_TEXT_LINES);
         let text_cells = passes.storage_with_capacity("Tempestas Text Grid", TEXT_CELLS);
         let (placed_glyphs, glyphs, edges) = text.resources();
-        let pill = passes.instance(
-            (&text_lines, &text_cells, placed_glyphs, glyphs, edges),
+        let pill = tempestas_shader::instance(
+            passes,
+            tempestas_shader::PipelineResources {
+                text_lines: &text_lines,
+                text_cells: &text_cells,
+                placed_glyphs,
+                glyphs,
+                edges,
+            },
             WeatherSurface {
                 sun_hours: [6.0, 18.0],
                 ..Default::default()
@@ -460,7 +445,7 @@ impl TempestasPass {
         }
     }
 
-    pub fn update(&mut self, text: &mut text::Renderer, status: Option<&mut status::StatusPass>, frame: &mut Frame) {
+    pub fn update(&mut self, text: &mut text::Renderer, status: Option<&mut status::StatusRenderer>, frame: &mut Frame) {
         let height = frame.config.height;
         let x = Self::pill_x(frame.shared.screen_size.x, frame.shared.status_width);
         let (weather_label, hour) = self.collapsed_label(x, height, frame);
@@ -630,34 +615,30 @@ impl TempestasPass {
         let x = expanded_x(pill.x0, expansion);
         [pill, Rect::new(x, pill.y1, x + size.x, pill.y1 + size.y)]
     }
+}
 
-    #[gpu]
-    pub fn vertex(#[gpu(vertex_index)] vertex: u32, #[gpu(shared)] frame: FrameData, #[gpu(instance)] pill: WeatherSurface) -> Vertex<Varyings> {
+#[isthmus::shader]
+pub mod tempestas_shader {
+    pub fn vertex(vertex: u32, frame: FrameData, pill: WeatherSurface) -> Raster {
         let expansion = smoothstep(0.0, 1.0, pill.calendar_expansion);
         let sun = sun_position(frame.weather_hour, pill.sun_hours);
         let weather = vec3(sun[0], sun[1], sun_position(12.0, pill.sun_hours)[1]).extend(expansion);
         // `pill_vertex` reserves space around the animated SDF for bulge and AA.
         let (position, pixel) = pill_vertex(vertex, frame, expanded_x(pill.x, expansion), PANEL_START, popup_size(expansion));
-        Vertex {
-            position,
-            varyings: Varyings { pixel, weather },
-        }
+        Raster { position, pixel, weather }
     }
 
-    #[gpu]
     pub fn fragment(
-        Varyings { pixel, weather }: Varyings,
-        #[gpu(shared)] frame: FrameData,
-        #[gpu(instance)] pill: WeatherSurface,
-        #[gpu(resource)] text_lines: &[text::Line],
-        #[gpu(resource)] text_cells: &[u32],
-        #[gpu(resource)] placed_glyphs: &[text::PlacedGlyph],
-        #[gpu(resource)] glyphs: &[text::Glyph],
-        #[gpu(resource)] edges: &[text::Edge],
+        pixel: Vec2,
+        weather: Vec4,
+        frame: FrameData,
+        pill: WeatherSurface,
+        text_lines: &[text::Line],
+        text_cells: &[u32],
+        placed_glyphs: &[text::PlacedGlyph],
+        glyphs: &[text::Glyph],
+        edges: &[text::Edge],
     ) -> Vec4 {
-        if frame.launcher_open > 0.5 {
-            kill();
-        }
         let (_, body_local, body_size, body_surface) = pill_fragment(pixel, frame, pill.x, PANEL_START, WIDTH);
         let expansion = weather.w;
         let interaction = pill_interaction(pixel, frame);
@@ -703,22 +684,20 @@ impl TempestasPass {
         let cell = ((pixel - grid_origin) / cell_size)
             .floor()
             .clamp(Vec2::ZERO, vec2(TEXT_COLUMNS as f32 - 1.0, TEXT_ROWS as f32 - 1.0));
-        let names = *isthmus::reference(text_cells, (cell.y * TEXT_COLUMNS as f32 + cell.x) as usize);
-        let mut slot = 0;
-        while slot < 2 {
-            let label = *isthmus::reference(text_lines, ((names >> (slot * 16)) & 0xffff) as usize);
+        let names = text_cells[(cell.y * TEXT_COLUMNS as f32 + cell.x) as usize];
+        for slot in 0..2 {
+            let label = text_lines[((names >> (slot * 16)) & 0xffff) as usize];
             let label_color = label.color.to_vec4();
             let text_alpha = text::line_alpha(label, placed_glyphs, glyphs, edges, pixel) * label_color.w;
             color = color * (1.0 - text_alpha) + label_color.truncate() * text_alpha;
-            slot += 1;
         }
         (color * mask).extend(alpha)
     }
 }
 
-#[cfg(feature = "cpu")]
+#[cfg(not(target_arch = "spirv"))]
 mod monitor {
-    use super::{ForecastItem, HOURLY_STEP_HOURS, ORDINALS, TempestasPass, WeatherCondition};
+    use super::{ForecastItem, HOURLY_STEP_HOURS, ORDINALS, TempestasRenderer, WeatherCondition};
     use crate::app::{AppUpdater, Background, send_update};
     use futures_util::StreamExt;
     use jiff::{
@@ -998,7 +977,7 @@ mod monitor {
         }
     }
 
-    fn apply_forecast(pass: &mut TempestasPass, index: usize, forecast: &Forecast) {
+    fn apply_forecast(pass: &mut TempestasRenderer, index: usize, forecast: &Forecast) {
         let Forecast {
             utc_offset_seconds,
             current,
@@ -1020,8 +999,8 @@ mod monitor {
         }
         pass.utc_offset = Offset::from_seconds(*utc_offset_seconds).ok();
         pass.temperature = format!("{:.1}°C", current.temperature_2m);
-        pass.pill.sun_hours = [daily.sunrise[0], daily.sunset[0]].map(TempestasPass::hour_of_day);
-        pass.pill.hourly_start = TempestasPass::hour_of_day(hourly.time[0]);
+        pass.pill.sun_hours = [daily.sunrise[0], daily.sunset[0]].map(TempestasRenderer::hour_of_day);
+        pass.pill.hourly_start = TempestasRenderer::hour_of_day(hourly.time[0]);
         pass.hourly = from_fn(|index| {
             let source = index * HOURLY_STEP_HOURS;
             let (description, conditions) = weather(hourly.weather_code[source]);

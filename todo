@@ -17,6 +17,9 @@ mouse gestures generic across programs
 bugs:
 liking a song clears my entire liked songs on spotify
 if a song doesnt have lyrics the previous songs always shows on the left
+empty space between tracks displays no lrics when it should just count as a large space
 text on the weather widget top needs outline show it doesnt blend into clouds
 outline still doesnt work perfectly for example for M
 make the playhead clickable surface shorter so its only around the button, then stars are still clickable
+launched programs by the launcher seem to be owned by cantus? when cantus is closed they close
+desktop isnt on the right monitor
