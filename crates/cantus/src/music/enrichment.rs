@@ -1,6 +1,6 @@
 use super::{MusicBackend, PlaybackState, Track, TrackId};
 use crate::{
-    app::{Background, CantusApp, Update},
+    app::{Background, CantusApp, update},
     render::{
         lyrics::{self, LyricsRequest},
         text,
@@ -11,6 +11,7 @@ use arrayvec::ArrayVec;
 use image::{RgbaImage, imageops};
 use isthmus::{Unorm8x4, glam::Vec3};
 use palette::{Clamp, IntoColor, Lch, color_theory::Analogous};
+use reqwest::Client;
 use serde::Deserialize;
 use std::{
     array,
@@ -19,8 +20,8 @@ use std::{
     ops::Range,
     time::{Duration, Instant},
 };
+use tokio::task::spawn_blocking;
 use tracing::warn;
-use ureq::Agent;
 
 const RECCO_FEATURES_URL: &str = "https://api.reccobeats.com/v1/audio-features";
 const RETRY_DELAY: Duration = Duration::from_secs(30);
@@ -28,32 +29,23 @@ pub const IMAGE_SIZE: u32 = 64;
 pub type ArtState = Fetch<AlbumArt>;
 #[derive(Clone)]
 pub struct Enrichment {
-    background: Background,
-    pub(crate) http: Agent,
+    pub(crate) background: Background,
+    pub(crate) http: Client,
 }
 
 impl Enrichment {
     pub(crate) fn new(background: Background) -> Self {
         Self {
             background,
-            http: Agent::config_builder()
+            http: Client::builder()
                 .user_agent(concat!("Cantus/", env!("CARGO_PKG_VERSION")))
-                .timeout_global(Some(Duration::from_secs(15)))
+                .timeout(Duration::from_secs(15))
                 .build()
-                .into(),
+                .expect("failed to construct HTTP client"),
         }
     }
 
-    fn submit(&self, work: impl FnOnce() -> Update<CantusApp> + Send + 'static) -> bool {
-        self.background.submit(work)
-    }
-
-    pub(crate) fn request_lyrics(
-        &self,
-        track: &Track,
-        music: MusicBackend,
-        shaper: text::Shaper,
-    ) -> bool {
+    pub(crate) fn request_lyrics(&self, track: &Track, music: MusicBackend, shaper: text::Shaper) {
         let request = LyricsRequest {
             uri: track.uri.clone(),
             track_id: track.id,
@@ -63,10 +55,10 @@ impl Enrichment {
             duration_ms: track.duration_ms,
         };
         let http = self.http.clone();
-        self.submit(move || {
+        self.background.spawn(async move {
             let uri = request.uri.clone();
-            let state = fetch_lyrics(&request, &http, &music, &shaper);
-            Box::new(move |app| {
+            let state = fetch_lyrics(&request, &http, &music, &shaper).await;
+            Some(update(move |app| {
                 if let Some(track) =
                     app.playback.queue.iter_mut().find(|track| {
                         track.uri == uri && matches!(track.runtime.lyrics, Fetch::Fetching)
@@ -74,8 +66,8 @@ impl Enrichment {
                 {
                     track.runtime.lyrics = state;
                 }
-            })
-        })
+            }))
+        });
     }
 }
 
@@ -139,20 +131,19 @@ impl Fetch<AlbumArt> {
     }
 }
 
-fn fetch_lyrics(
+async fn fetch_lyrics(
     request: &LyricsRequest,
-    http: &Agent,
+    http: &Client,
     music: &MusicBackend,
     shaper: &text::Shaper,
 ) -> Fetch<lyrics::Lyrics> {
-    let result = lyrics::fetch(http, request).map_or_else(
-        || {
-            request
-                .track_id
-                .map_or_else(|| Ok(Vec::new()), |id| music.lyrics(id))
-        },
-        Ok,
-    );
+    let result = if let Some(lyrics) = lyrics::fetch(http, request).await {
+        Ok(lyrics)
+    } else if let Some(id) = request.track_id {
+        music.lyrics(id).await
+    } else {
+        Ok(Vec::new())
+    };
     match result {
         Ok(segments) => Fetch::Ready(
             lyrics::Lyrics::shape(segments, request.duration_ms as f32, shaper).unwrap_or_default(),
@@ -164,17 +155,21 @@ fn fetch_lyrics(
     }
 }
 
-fn fetch_art(http: &Agent, url: &str) -> ArtState {
-    let result = (|| -> Result<_, Box<dyn Error + Send + Sync>> {
-        let bytes = http.get(url).call()?.body_mut().read_to_vec()?;
-        let image = image::load_from_memory(&bytes)?
-            .resize_to_fill(IMAGE_SIZE, IMAGE_SIZE, imageops::FilterType::Lanczos3)
-            .to_rgba8();
-        Ok(AlbumArt {
-            palette: image_palette(&image),
-            pixels: image.into_raw().into_boxed_slice(),
+async fn fetch_art(http: &Client, url: &str) -> ArtState {
+    let result: Result<_, Box<dyn Error + Send + Sync>> = async {
+        let bytes = http.get(url).send().await?.error_for_status()?.bytes().await?;
+        Ok(spawn_blocking(move || {
+            let image = image::load_from_memory(&bytes)?
+                .resize_to_fill(IMAGE_SIZE, IMAGE_SIZE, imageops::FilterType::Lanczos3)
+                .to_rgba8();
+            Ok::<_, image::ImageError>(AlbumArt {
+                palette: image_palette(&image),
+                pixels: image.into_raw().into_boxed_slice(),
+            })
         })
-    })();
+        .await??)
+    }
+    .await;
     match result {
         Ok(art) => Fetch::Ready(art),
         Err(error) => {
@@ -221,9 +216,9 @@ impl CantusApp {
 
         if !audio.is_empty() {
             let http = self.enrichment.http.clone();
-            self.enrichment.submit(move || {
-                let features = resolve_audio_features(&http, &audio);
-                Box::new(move |app| {
+            self.enrichment.background.spawn(async move {
+                let features = resolve_audio_features(&http, &audio).await;
+                Some(update(move |app| {
                     for track in &mut app.playback.queue {
                         let Some(features) = track.id.and_then(|id| features.get(&id)) else {
                             continue;
@@ -231,7 +226,7 @@ impl CantusApp {
                         track.runtime.audio_features =
                             features.map_or_else(Fetch::default, Fetch::Ready);
                     }
-                })
+                }))
             });
         }
 
@@ -242,13 +237,10 @@ impl CantusApp {
         art.dedup();
         for url in art {
             let http = self.enrichment.http.clone();
-            let requested = url.clone();
-            if !self.enrichment.submit(move || {
-                let state = fetch_art(&http, &url);
-                Box::new(move |app| app.set_art_state(&url, &state))
-            }) {
-                self.set_art_state(&requested, &Fetch::Missing(now));
-            }
+            self.enrichment.background.spawn(async move {
+                let state = fetch_art(&http, &url).await;
+                Some(update(move |app| app.set_art_state(&url, &state)))
+            });
         }
     }
 
@@ -261,8 +253,8 @@ impl CantusApp {
     }
 }
 
-fn resolve_audio_features(
-    http: &Agent,
+async fn resolve_audio_features(
+    http: &Client,
     track_ids: &[TrackId],
 ) -> HashMap<TrackId, Option<AudioFeatures>> {
     let mut output = track_ids.iter().map(|&id| (id, None)).collect::<HashMap<_, _>>();
@@ -270,10 +262,18 @@ fn resolve_audio_features(
         let ids = batch.iter().map(TrackId::as_str).collect::<Vec<_>>().join(",");
         let Ok(features) = http
             .get(RECCO_FEATURES_URL)
-            .query("ids", &ids)
-            .call()
-            .and_then(|response| response.into_body().read_json::<ReccoResponse>())
+            .query(&[("ids", &ids)])
+            .send()
+            .await
+            .and_then(reqwest::Response::error_for_status)
             .inspect_err(|err| warn!("Failed to fetch ReccoBeats audio features: {err}"))
+        else {
+            continue;
+        };
+        let Ok(features) = features
+            .json::<ReccoResponse>()
+            .await
+            .inspect_err(|err| warn!("Failed to decode ReccoBeats audio features: {err}"))
         else {
             continue;
         };

@@ -4,7 +4,7 @@ use isthmus::glam::Vec4;
 #[cfg(feature = "cpu")]
 use {
     crate::{
-        app::music::{Enrichment, Fetch, MusicBackend, PlaybackState, Track},
+        app::music::{Enrichment, MusicBackend, PlaybackState, Track},
         render::{
             PANEL_START,
             cpu::{Frame, Passes},
@@ -138,9 +138,9 @@ mod provider {
         escape::unescape,
         events::{BytesStart, Event},
     };
+    use reqwest::Client;
     use serde::Deserialize;
     use std::mem;
-    use ureq::Agent;
 
     const API: &str = "https://lyrics-api.binimum.org/";
 
@@ -165,27 +165,35 @@ mod provider {
         timing_type: String,
     }
 
-    pub fn fetch(http: &Agent, query: &LyricsRequest) -> Option<Vec<LyricSegment>> {
+    pub async fn fetch(http: &Client, query: &LyricsRequest) -> Option<Vec<LyricSegment>> {
         let result = http
             .get(API)
-            .query("track", &query.name)
-            .query("artist", &query.artist)
-            .query("album", &query.album)
-            .query("duration", (query.duration_ms / 1000).to_string())
-            .call()
+            .query(&[
+                ("track", query.name.clone()),
+                ("artist", query.artist.clone()),
+                ("album", query.album.clone()),
+                ("duration", (query.duration_ms / 1000).to_string()),
+            ])
+            .send()
+            .await
             .ok()?
-            .body_mut()
-            .read_json::<SearchResponse>()
+            .error_for_status()
+            .ok()?
+            .json::<SearchResponse>()
+            .await
             .ok()?
             .results
             .into_iter()
             .find(|result| result.timing_type == "word")?;
         let source = http
             .get(result.url)
-            .call()
+            .send()
+            .await
             .ok()?
-            .body_mut()
-            .read_to_string()
+            .error_for_status()
+            .ok()?
+            .text()
+            .await
             .ok()?;
         let segments = parse(&source);
         (!segments.is_empty()).then_some(segments)
@@ -346,12 +354,9 @@ impl LyricsPass {
             .skip(start.saturating_sub(1))
             .take(PREFETCH_TRACKS)
         {
-            if track.runtime.lyrics.request(now)
-                && !self
-                    .enrichment
-                    .request_lyrics(track, self.music.clone(), text.shaper())
-            {
-                track.runtime.lyrics = Fetch::Missing(now);
+            if track.runtime.lyrics.request(now) {
+                self.enrichment
+                    .request_lyrics(track, self.music.clone(), text.shaper());
             }
         }
 

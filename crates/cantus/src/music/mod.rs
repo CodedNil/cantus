@@ -1,5 +1,5 @@
 use crate::{
-    app::{AppUpdater, config::Config},
+    app::{AppUpdater, Background, config::Config},
     render::{lyrics::Lyrics, track::AudioFeatures},
 };
 use arrayvec::ArrayString;
@@ -20,7 +20,6 @@ pub(super) type PlaylistTracks = Arc<HashSet<TrackId>>;
 #[derive(Default)]
 pub struct PlaybackState {
     pub playing: bool,
-    pub volume: Option<u8>,
     pub queue: Vec<Track>,
     pub playlists: Vec<CondensedPlaylist>,
     pub timeline: Timeline,
@@ -195,7 +194,6 @@ pub fn playlist_icons(
 
 pub enum PlaybackCommand {
     SetPlaying(bool),
-    SetVolume(u8),
     Seek(u32),
     Skip(i8),
     UpdateLibrary {
@@ -205,23 +203,14 @@ pub enum PlaybackCommand {
     },
 }
 
-pub trait MusicService: Send + Sync {
-    fn command(&self, command: PlaybackCommand);
-
-    /// Fetches timed lyrics for a Spotify track.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error when the provider request or response fails.
-    fn lyrics(&self, track_id: TrackId) -> MusicResult<Vec<LyricSegment>>;
-}
-
 #[derive(Clone)]
-pub struct MusicBackend(Arc<dyn MusicService>);
+pub struct MusicBackend(Arc<spotify::SpotifyBackend>);
 
 impl MusicBackend {
-    pub(crate) fn spotify(config: &Config, updater: &AppUpdater, http: ureq::Agent) -> Self {
-        Self(Arc::new(spotify::SpotifyBackend::new(config, updater, http)))
+    pub(crate) fn spotify(config: &Config, updater: &AppUpdater, background: &Background) -> Self {
+        Self(Arc::new(spotify::SpotifyBackend::new(
+            config, updater, background,
+        )))
     }
 
     pub fn command(&self, command: PlaybackCommand) {
@@ -233,7 +222,7 @@ impl MusicBackend {
     /// # Errors
     ///
     /// Returns an error when the provider request or response fails.
-    pub fn lyrics(&self, track_id: TrackId) -> MusicResult<Vec<LyricSegment>> {
-        self.0.lyrics(track_id)
+    pub async fn lyrics(&self, track_id: TrackId) -> MusicResult<Vec<LyricSegment>> {
+        self.0.lyrics(track_id).await
     }
 }

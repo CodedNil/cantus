@@ -20,7 +20,7 @@ use isthmus::spirv_std::num_traits::Float;
 use {
     crate::{
         app::{
-            AppUpdater,
+            AppUpdater, Background,
             interaction::{InteractionState, Rect},
         },
         render::{
@@ -36,9 +36,9 @@ use {
         civil::{DateTime, Time},
         tz::{Offset, TimeZone},
     },
+    reqwest::Client,
     std::{fmt::Write, mem},
     tracing::warn,
-    ureq::Agent,
 };
 
 /// Number of conditions shown in the hourly forecast row.
@@ -492,12 +492,13 @@ fn sample_forecast(pixel: Vec2, frame: &FrameData, pill: &WeatherSurface) -> For
 
 #[isthmus::pass]
 impl TempestasPass {
-    pub fn new(
+    pub(crate) fn new(
         passes: &Passes<'_>,
         text: &text::Renderer,
         timezones: &[String],
+        background: &Background,
         updater: AppUpdater,
-        http: Agent,
+        http: Client,
     ) -> Self {
         let mut forecast_timezones = Vec::with_capacity(timezones.len());
         let timezones: ArrayVec<_, MAX_WORLD_CLOCKS> = timezones
@@ -514,7 +515,7 @@ impl TempestasPass {
                 })
             })
             .collect();
-        monitor::start(forecast_timezones, updater, http);
+        monitor::start(forecast_timezones, background, updater, http);
         let text_lines = passes.storage_with_capacity("Tempestas Text", MAX_TEXT_LINES);
         let text_cells = passes.storage_with_capacity("Tempestas Text Grid", TEXT_CELLS);
         let (placed_glyphs, glyphs, edges) = text.resources();
@@ -881,23 +882,23 @@ impl TempestasPass {
 #[cfg(feature = "cpu")]
 mod monitor {
     use super::{ForecastItem, HOURLY_STEP_HOURS, ORDINALS, TempestasPass, WeatherCondition};
-    use crate::app::{AppUpdater, send_update};
+    use crate::app::{AppUpdater, Background, send_update};
+    use futures_util::StreamExt;
     use jiff::{
         civil::DateTime,
         tz::{Offset, TimeZone},
     };
+    use reqwest::Client;
     use serde::{Deserialize, de::DeserializeOwned};
-    use std::{
-        array::from_fn,
-        collections::HashMap,
-        sync::mpsc::{self, Receiver, Sender},
-        thread,
-        time::Duration,
+    use std::{array::from_fn, collections::HashMap, time::Duration};
+    use tokio::{
+        sync::mpsc::{self, UnboundedReceiver, UnboundedSender},
+        time::{sleep, timeout},
     };
     use tracing::warn;
-    use ureq::Agent;
     use zbus::{
-        blocking::{Connection, Proxy, proxy::Builder as ProxyBuilder},
+        Connection, Proxy,
+        proxy::Builder as ProxyBuilder,
         proxy::CacheProperties,
         zvariant::{OwnedObjectPath, OwnedValue, Value},
     };
@@ -996,20 +997,29 @@ mod monitor {
         99 => "Thunderstorm Heavy Hail" { rain: 0.85, lightning: 1.0, hail: 1.0 };
     }
 
-    pub(super) fn start(timezones: Vec<String>, updater: AppUpdater, http: Agent) {
-        let (location_tx, locations) = mpsc::channel();
-        thread::spawn(move || {
-            if let Err(error) = stream_location(&location_tx) {
+    pub(super) fn start(
+        timezones: Vec<String>,
+        background: &Background,
+        updater: AppUpdater,
+        http: Client,
+    ) {
+        let (location_tx, locations) = mpsc::unbounded_channel();
+        background.spawn(async move {
+            if let Err(error) = stream_location(&location_tx).await {
                 warn!(%error, "Location portal unavailable");
             }
+            None
         });
-        thread::spawn(move || refresh_loop(&http, &timezones, &updater, &locations));
+        background.spawn(async move {
+            refresh_loop(&http, &timezones, &updater, locations).await;
+            None
+        });
     }
 
-    fn stream_location(sender: &Sender<[f32; 2]>) -> Result<(), String> {
+    async fn stream_location(sender: &UnboundedSender<[f32; 2]>) -> Result<(), String> {
         const DESTINATION: &str = "org.freedesktop.portal.Desktop";
         const PORTAL_PATH: &str = "/org/freedesktop/portal/desktop";
-        let connection = Connection::session().map_err(|error| error.to_string())?;
+        let connection = Connection::session().await.map_err(|error| error.to_string())?;
         let location: Proxy<'_> = ProxyBuilder::new(&connection)
             .destination(DESTINATION)
             .and_then(|builder| builder.path(PORTAL_PATH))
@@ -1017,6 +1027,7 @@ mod monitor {
             .map_err(|error| error.to_string())?
             .cache_properties(CacheProperties::No)
             .build()
+            .await
             .map_err(|error| error.to_string())?;
         let session_token = format!("cantus_{:x}", fastrand::u64(..));
         let session_path: OwnedObjectPath = location
@@ -1027,6 +1038,7 @@ mod monitor {
                     ("accuracy", Value::from(2u32)),
                 ]),
             )
+            .await
             .map_err(|error| error.to_string())?;
         let session: Proxy<'_> = ProxyBuilder::new(&connection)
             .destination(DESTINATION)
@@ -1035,10 +1047,12 @@ mod monitor {
             .map_err(|error| error.to_string())?
             .cache_properties(CacheProperties::No)
             .build()
+            .await
             .map_err(|error| error.to_string())?;
 
         let updates = location
             .receive_signal("LocationUpdated")
+            .await
             .map_err(|error| error.to_string())?;
         let request_token = format!("cantus_{:x}", fastrand::u64(..));
         let sender_name = connection
@@ -1055,9 +1069,11 @@ mod monitor {
             .map_err(|error| error.to_string())?
             .cache_properties(CacheProperties::No)
             .build()
+            .await
             .map_err(|error| error.to_string())?;
         let mut response = request
             .receive_signal("Response")
+            .await
             .map_err(|error| error.to_string())?;
         let returned_path: OwnedObjectPath = location
             .call(
@@ -1068,12 +1084,14 @@ mod monitor {
                     HashMap::from([("handle_token", Value::from(request_token.as_str()))]),
                 ),
             )
+            .await
             .map_err(|error| error.to_string())?;
         if returned_path.as_str() != request.path().as_str() {
             return Err("location portal returned an unexpected request path".into());
         }
         let response = response
             .next()
+            .await
             .ok_or("location portal closed without responding")?
             .body()
             .deserialize::<(u32, HashMap<String, OwnedValue>)>()
@@ -1082,7 +1100,8 @@ mod monitor {
             return Err(format!("location portal rejected request ({})", response.0));
         }
 
-        for message in updates {
+        let mut updates = updates;
+        while let Some(message) = updates.next().await {
             let (_, values) = message
                 .body()
                 .deserialize::<(OwnedObjectPath, HashMap<String, OwnedValue>)>()
@@ -1104,18 +1123,19 @@ mod monitor {
         }
         session
             .call::<_, _, ()>("Close", &())
+            .await
             .map_err(|error| error.to_string())
     }
 
-    fn refresh_loop(
-        http: &Agent,
+    async fn refresh_loop(
+        http: &Client,
         timezones: &[String],
         updater: &AppUpdater,
-        locations_rx: &Receiver<[f32; 2]>,
+        mut locations_rx: UnboundedReceiver<[f32; 2]>,
     ) {
         let mut locations = vec![None; timezones.len() + 1];
         if let Some(timezone) = TimeZone::system().iana_name() {
-            match geocode(http, timezone) {
+            match geocode(http, timezone).await {
                 Ok(location) => locations[0] = Some(location),
                 Err(error) => warn!(%error, timezone, "Failed to locate system timezone"),
             }
@@ -1131,6 +1151,7 @@ mod monitor {
             for (index, location) in locations.iter_mut().enumerate() {
                 if index > 0 && location.is_none() {
                     *location = geocode(http, &timezones[index - 1])
+                        .await
                         .inspect_err(|error| {
                             retry = true;
                             warn!(%error, timezone = timezones[index - 1], "Failed to locate timezone");
@@ -1143,7 +1164,7 @@ mod monitor {
                 };
                 ready.push((index, [latitude, longitude]));
             }
-            let forecasts = match fetch(http, &ready) {
+            let forecasts = match fetch(http, &ready).await {
                 Ok(results) => ready
                     .into_iter()
                     .zip(results)
@@ -1169,10 +1190,10 @@ mod monitor {
                 break;
             }
             let interval = if retry { RETRY_INTERVAL } else { REFRESH_INTERVAL };
-            match locations_rx.recv_timeout(interval) {
-                Ok(location) => locations[0] = Some(location),
-                Err(mpsc::RecvTimeoutError::Timeout) => {}
-                Err(mpsc::RecvTimeoutError::Disconnected) => thread::sleep(interval),
+            match timeout(interval, locations_rx.recv()).await {
+                Ok(Some(location)) => locations[0] = Some(location),
+                Ok(None) => sleep(interval).await,
+                Err(_) => {}
             }
         }
     }
@@ -1245,13 +1266,14 @@ mod monitor {
         );
     }
 
-    fn geocode(http: &Agent, timezone: &str) -> Result<[f32; 2], String> {
+    async fn geocode(http: &Client, timezone: &str) -> Result<[f32; 2], String> {
         let city = timezone.rsplit('/').next().unwrap_or(timezone).replace('_', " ");
         let query: String = form_urlencoded::byte_serialize(city.as_bytes()).collect();
         let results: SearchResults = get_json(
             http,
             format!("https://geocoding-api.open-meteo.com/v1/search?name={query}&count=10"),
-        )?;
+        )
+        .await?;
         let place = results
             .results
             .iter()
@@ -1261,7 +1283,7 @@ mod monitor {
         Ok([place.latitude, place.longitude])
     }
 
-    fn fetch(http: &Agent, locations: &[(usize, [f32; 2])]) -> Result<Vec<Forecast>, String> {
+    async fn fetch(http: &Client, locations: &[(usize, [f32; 2])]) -> Result<Vec<Forecast>, String> {
         if locations.is_empty() {
             return Ok(Vec::new());
         }
@@ -1279,14 +1301,20 @@ mod monitor {
             "https://api.open-meteo.com/v1/forecast?latitude={latitude}&longitude={longitude}&current={WEATHER_FIELDS},relative_humidity_2m,wind_speed_10m&hourly={WEATHER_FIELDS}&forecast_hours=24&daily=weather_code,temperature_2m_max,temperature_2m_min,sunrise,sunset&temperature_unit=celsius&timezone=auto&forecast_days=6"
         );
         if locations.len() == 1 {
-            get_json(http, url).map(|forecast| vec![forecast])
+            get_json(http, url).await.map(|forecast| vec![forecast])
         } else {
-            get_json(http, url)
+            get_json(http, url).await
         }
     }
 
-    fn get_json<T: DeserializeOwned>(http: &Agent, url: String) -> Result<T, String> {
-        let mut response = http.get(url).call().map_err(|error| error.to_string())?;
-        response.body_mut().read_json().map_err(|error| error.to_string())
+    async fn get_json<T: DeserializeOwned>(http: &Client, url: String) -> Result<T, String> {
+        http.get(url)
+            .send()
+            .await
+            .and_then(reqwest::Response::error_for_status)
+            .map_err(|error| error.to_string())?
+            .json()
+            .await
+            .map_err(|error| error.to_string())
     }
 }

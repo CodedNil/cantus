@@ -49,7 +49,6 @@ impl PlayheadPass {
     ) {
         const START_DURATION: f32 = 0.7;
         const TRANSITION_SPEED: f32 = 5.5;
-        const VOLUME_RECT_HALF_WIDTH: f32 = 100.0;
 
         let playhead_x = frame.shared.playhead_x;
         let height = frame.config.height;
@@ -58,14 +57,6 @@ impl PlayheadPass {
             vec2(playhead_x, PANEL_START + height * 0.5),
             vec2(height * 0.25, height * 0.5),
         ));
-        let volume_rect = Rect::new(
-            playhead_x - VOLUME_RECT_HALF_WIDTH,
-            PANEL_START,
-            playhead_x + VOLUME_RECT_HALF_WIDTH,
-            PANEL_START + height,
-        );
-        let volume_scroll = frame.interaction.scroll(volume_rect);
-
         let speed = TRANSITION_SPEED * frame.delta_time;
         let last_toggle = (time - *last_toggle_time) / START_DURATION;
         if !playhead.hovered && playback.playing && last_toggle < 1.0 {
@@ -83,9 +74,6 @@ impl PlayheadPass {
 
         if playhead.clicked {
             frame.interaction.toggle_playing(playback.playing);
-        }
-        if volume_scroll != 0 {
-            frame.interaction.adjust_volume(playback.volume, volume_scroll);
         }
     }
 

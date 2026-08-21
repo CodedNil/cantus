@@ -20,6 +20,7 @@ use {
             config::SearchProvider,
             interaction::Rect,
             platform::{Current as Platform, DesktopApp, Platform as _},
+            update,
         },
         render::{
             cpu::{Frame, Passes},
@@ -30,14 +31,15 @@ use {
     fend_core::Context,
     image::imageops::FilterType,
     isthmus::{FilterableFloatFormat, SampledTexture, wgpu::Extent3d},
+    reqwest::Client,
     resvg::{
         render,
         tiny_skia::{Pixmap, Transform},
         usvg::{self, Tree},
     },
     std::{collections::HashMap, error::Error, fs, ops::Range, path::Path, sync::OnceLock},
+    tokio::task::spawn_blocking,
     tracing::warn,
-    ureq::Agent,
 };
 
 const PANEL_WIDTH: f32 = 520.0;
@@ -294,7 +296,7 @@ enum LauncherEntry<'a> {
 impl LauncherState {
     pub(crate) fn new(
         background: &Background,
-        http: &Agent,
+        http: &Client,
         providers: impl IntoIterator<Item = SearchProvider>,
     ) -> Self {
         let mut calc = Context::new();
@@ -497,13 +499,18 @@ impl fend_core::ExchangeRateFnV2 for ExchangeRates {
 }
 
 #[cfg(feature = "cpu")]
-fn fetch_exchange_rates(background: &Background, http: Agent) {
-    background.run(move || {
-        if let Ok(mut response) = http.get("https://open.er-api.com/v6/latest/USD").call()
-            && let Ok(body) = response.body_mut().read_json::<CurrencyRates>()
+fn fetch_exchange_rates(background: &Background, http: Client) {
+    background.spawn(async move {
+        if let Ok(response) = http
+            .get("https://open.er-api.com/v6/latest/USD")
+            .send()
+            .await
+            .and_then(reqwest::Response::error_for_status)
+            && let Ok(body) = response.json::<CurrencyRates>().await
         {
             let _ = EXCHANGE_RATES.set(body.rates);
         }
+        None
     });
 }
 
@@ -844,7 +851,7 @@ impl LauncherPass {
 
 /// Scans installed apps and decodes their icons on a background thread, then applies the result.
 #[cfg(feature = "cpu")]
-fn start_scan(background: &Background, http: Agent, providers: &[SearchEngine]) {
+fn start_scan(background: &Background, http: Client, providers: &[SearchEngine]) {
     let provider_icon_count = providers.len().min(MAX_ICON_SLOTS);
     let provider_icons = providers
         .iter()
@@ -857,29 +864,42 @@ fn start_scan(background: &Background, http: Agent, providers: &[SearchEngine]) 
         })
         .collect::<Vec<_>>();
     let app_slots = MAX_ICON_SLOTS - provider_icon_count;
-    background.submit(move || {
-        let mut apps = Platform::desktop_apps();
-        apps.sort_by_key(|app| app.name.to_lowercase());
-        let mut icon_writes = Vec::new();
-        for (index, app) in apps.iter_mut().enumerate().take(app_slots) {
-            let Some(path) = app.icon_path.as_deref() else {
-                continue;
-            };
-            if let Some(pixels) = load_icon_pixels(path) {
-                icon_writes.push((index as u32, pixels));
-                app.icon_layer = index as i32;
-            } else {
-                warn!(?path, "Failed to decode app icon");
+    background.spawn(async move {
+        let (apps, mut icon_writes) = spawn_blocking(move || {
+            let mut apps = Platform::desktop_apps();
+            apps.sort_by_key(|app| app.name.to_lowercase());
+            let mut icon_writes = Vec::new();
+            for (index, app) in apps.iter_mut().enumerate().take(app_slots) {
+                let Some(path) = app.icon_path.as_deref() else {
+                    continue;
+                };
+                if let Some(pixels) = load_icon_pixels(path) {
+                    icon_writes.push((index as u32, pixels));
+                    app.icon_layer = index as i32;
+                } else {
+                    warn!(?path, "Failed to decode app icon");
+                }
             }
-        }
+            (apps, icon_writes)
+        })
+        .await
+        .unwrap_or_default();
         let mut provider_layers = Vec::new();
         for (index, url) in provider_icons {
             let pixels = http
                 .get(&url)
-                .call()
+                .send()
+                .await
                 .ok()
-                .and_then(|mut response| response.body_mut().read_to_vec().ok())
-                .and_then(|bytes| load_raster(&bytes));
+                .and_then(|response| response.error_for_status().ok());
+            let pixels = if let Some(response) = pixels {
+                match response.bytes().await {
+                    Ok(bytes) => spawn_blocking(move || load_raster(&bytes)).await.ok().flatten(),
+                    Err(_) => None,
+                }
+            } else {
+                None
+            };
             if let Some(pixels) = pixels {
                 let layer = (app_slots + index) as u32;
                 icon_writes.push((layer, pixels));
@@ -888,7 +908,7 @@ fn start_scan(background: &Background, http: Agent, providers: &[SearchEngine]) 
                 warn!(%url, "Failed to download search provider icon");
             }
         }
-        Box::new(move |app| {
+        Some(update(move |app| {
             let passes = app.render.program().passes_mut();
             for (layer, pixels) in &icon_writes {
                 passes.launcher.write_icon(*layer, pixels);
@@ -898,7 +918,7 @@ fn start_scan(background: &Background, http: Agent, providers: &[SearchEngine]) 
                 app.launcher.providers[index].icon_layer = layer;
             }
             app.launcher.refresh_matches();
-        })
+        }))
     });
 }
 

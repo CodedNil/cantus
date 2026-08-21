@@ -1,16 +1,14 @@
 use crate::render::{cpu::RenderState, launcher::LauncherState};
 use interaction::InteractionState;
 use music::{Enrichment, MusicBackend, PlaybackState};
-use parking_lot::Mutex;
 use platform::{Current as Platform, Platform as _};
 use std::{
+    future::Future,
     io,
-    sync::{
-        Arc,
-        mpsc::{self, Sender},
-    },
-    thread,
+    sync::mpsc::{self, Sender},
+    time::Duration,
 };
+use tokio::runtime::{Builder as RuntimeBuilder, Handle, Runtime};
 use tracing::{Level, level_filters::LevelFilter};
 use tracing_subscriber::{filter::Targets, fmt, layer::SubscriberExt, util::SubscriberInitExt};
 
@@ -24,41 +22,33 @@ pub mod music;
 pub mod platform;
 
 pub(crate) type Update<T> = Box<dyn FnOnce(&mut T) + Send>;
-pub(crate) type AppUpdater = Sender<Update<CantusApp>>;
-type Job = Box<dyn FnOnce(&AppUpdater) + Send>;
+pub type AppUpdater = Sender<Update<CantusApp>>;
 
 #[derive(Clone)]
-pub(crate) struct Background(Sender<Job>);
+pub struct Background {
+    runtime: Handle,
+    updater: AppUpdater,
+}
 
 impl Background {
-    fn new(updater: &AppUpdater) -> Self {
-        let (sender, receiver) = mpsc::channel::<Job>();
-        let receiver = Arc::new(Mutex::new(receiver));
-        for _ in 0..8 {
-            let receiver = Arc::clone(&receiver);
-            let updater = updater.clone();
-            thread::spawn(move || {
-                loop {
-                    let Ok(job) = receiver.lock().recv() else {
-                        break;
-                    };
-                    job(&updater);
-                }
-            });
+    fn new(runtime: &Runtime, updater: &AppUpdater) -> Self {
+        Self {
+            runtime: runtime.handle().clone(),
+            updater: updater.clone(),
         }
-        Self(sender)
     }
 
-    pub(crate) fn submit(&self, job: impl FnOnce() -> Update<CantusApp> + Send + 'static) -> bool {
-        self.0
-            .send(Box::new(move |updater| {
-                let _ = updater.send(job());
-            }))
-            .is_ok()
+    pub(crate) fn run(&self, job: impl FnOnce() + Send + 'static) {
+        self.runtime.spawn_blocking(job);
     }
 
-    pub(crate) fn run(&self, job: impl FnOnce() + Send + 'static) -> bool {
-        self.0.send(Box::new(move |_| job())).is_ok()
+    pub(crate) fn spawn(&self, task: impl Future<Output = Option<Update<CantusApp>>> + Send + 'static) {
+        let updater = self.updater.clone();
+        self.runtime.spawn(async move {
+            if let Some(event) = task.await {
+                let _ = updater.send(event);
+            }
+        });
     }
 }
 
@@ -72,16 +62,26 @@ pub struct CantusApp {
     pub(crate) updater: AppUpdater,
     pub(crate) enrichment: Enrichment,
     pub(crate) music: MusicBackend,
+    _runtime: Runtime,
 }
 
 impl Default for CantusApp {
     fn default() -> Self {
         let (updater, app_updates) = mpsc::channel();
-        let background = Background::new(&updater);
+        let runtime = RuntimeBuilder::new_multi_thread()
+            .worker_threads(2)
+            .max_blocking_threads(8)
+            .thread_keep_alive(Duration::from_secs(10))
+            .thread_name("cantus-async")
+            .thread_stack_size(1024 * 1024)
+            .enable_all()
+            .build()
+            .expect("failed to start Cantus async runtime");
+        let background = Background::new(&runtime, &updater);
         let enrichment = Enrichment::new(background.clone());
         let config = config::load();
-        let music = MusicBackend::spotify(&config, &updater, enrichment.http.clone());
-        Platform::start_launcher_listener(&updater);
+        let music = MusicBackend::spotify(&config, &updater, &background);
+        Platform::start_launcher_listener(&background, &updater);
         Self {
             render: RenderState::default(),
             interaction: InteractionState::new(music.clone()),
@@ -92,15 +92,20 @@ impl Default for CantusApp {
             enrichment,
             music,
             config,
+            _runtime: runtime,
         }
     }
 }
 
+pub(crate) fn update(work: impl FnOnce(&mut CantusApp) + Send + 'static) -> Update<CantusApp> {
+    Box::new(work)
+}
+
 pub(crate) fn send_update(
     sender: &AppUpdater,
-    update: impl FnOnce(&mut CantusApp) + Send + 'static,
+    work: impl FnOnce(&mut CantusApp) + Send + 'static,
 ) -> bool {
-    sender.send(Box::new(update)).is_ok()
+    sender.send(update(work)).is_ok()
 }
 
 pub fn run() {

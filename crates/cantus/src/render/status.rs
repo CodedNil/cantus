@@ -22,7 +22,7 @@ use isthmus::spirv_std::num_traits::Float;
 use {
     crate::{
         app::{
-            AppUpdater,
+            AppUpdater, Background,
             interaction::Rect,
             platform::{Current as Platform, Platform as _},
         },
@@ -140,6 +140,7 @@ pub struct StatusPass {
     pub pill: isthmus::Instance<Self>,
     pub(crate) temperature_targets: [f32; 2],
     audio_spectrum: Arc<[AtomicU32; AUDIO_SPECTRUM_BANDS]>,
+    background: Background,
 }
 
 impl StatusPill {
@@ -420,9 +421,14 @@ fn action_icon(point: Vec2, time: f32, action: f32, hover: f32, pill: &StatusPil
 
 #[isthmus::pass]
 impl StatusPass {
-    pub(crate) fn new(passes: &Passes<'_>, text: &text::Renderer, updater: AppUpdater) -> Self {
+    pub(crate) fn new(
+        passes: &Passes<'_>,
+        text: &text::Renderer,
+        background: &Background,
+        updater: AppUpdater,
+    ) -> Self {
         let audio_spectrum = Arc::<[AtomicU32; AUDIO_SPECTRUM_BANDS]>::default();
-        Platform::start_status_monitor(updater, Arc::clone(&audio_spectrum));
+        Platform::start_status_monitor(background, updater, Arc::clone(&audio_spectrum));
         let pill = passes.instance(
             text.resources(),
             StatusPill {
@@ -436,6 +442,7 @@ impl StatusPass {
             pill,
             temperature_targets: [0.0; 2],
             audio_spectrum,
+            background: background.clone(),
         }
     }
 
@@ -486,7 +493,7 @@ impl StatusPass {
                 pill.power_action = -1;
             } else if progress >= 1.0 {
                 pill.power_action = -1;
-                Platform::run_power_action(action);
+                Platform::run_power_action(&self.background, action);
             } else {
                 pill.power_progress = progress;
             }

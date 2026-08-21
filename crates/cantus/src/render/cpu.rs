@@ -140,6 +140,7 @@ impl Systems {
                 passes,
                 &text,
                 &app.config.timezones,
+                &app.enrichment.background,
                 app.updater.clone(),
                 app.enrichment.http.clone(),
             )
@@ -147,7 +148,7 @@ impl Systems {
         let status = app
             .config
             .status_enabled
-            .then(|| StatusPass::new(passes, &text, app.updater.clone()));
+            .then(|| StatusPass::new(passes, &text, &app.enrichment.background, app.updater.clone()));
         Self {
             lyrics: app
                 .config

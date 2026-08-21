@@ -225,16 +225,6 @@ impl InteractionState {
         self.music.command(PlaybackCommand::SetPlaying(playing));
     }
 
-    pub fn adjust_volume(&self, volume: Option<u8>, direction: i32) {
-        if let Some(volume) = volume {
-            let volume = volume
-                .saturating_add_signed(if direction < 0 { 5 } else { -5 })
-                .min(100);
-            info!("Setting volume to {volume}%");
-            self.music.command(PlaybackCommand::SetVolume(volume));
-        }
-    }
-
     /// Rates `track_id`, moving it into/out of whichever rating playlist matches `rating`.
     pub fn rate_track(&mut self, playlists: &mut [CondensedPlaylist], track_id: TrackId, rating: u8) {
         self.music.command(PlaybackCommand::UpdateLibrary {

@@ -1,25 +1,26 @@
 use super::{
-    ClientResult, PLAYLIST_TRACKS_CACHE, PlaylistTracks, RATING_PLAYLISTS, SpotifyClient, SpotifyWorker,
-    client_error, config_path, write_cache,
+    ClientResult, PLAYLIST_TRACKS_CACHE, PlaylistTracks, RATING_PLAYLISTS, SpotifyWorker, config_path,
+    write_cache,
 };
 use crate::app::{
     music::{ArtState, CondensedPlaylist, PlaylistId, TrackId},
     send_update,
 };
+use hyper::Method;
+use librespot_core::{Session, SpotifyId};
 use librespot_protocol::playlist4_external::{
     Add, Delta, Item, ListAttributes, ListChanges, Op, Rem, SelectedListContent, op,
 };
-use protobuf::MessageField;
+use protobuf::{Message as _, MessageField};
 use std::{
     str,
     sync::Arc,
     time::{SystemTime, UNIX_EPOCH},
 };
 use tracing::{error, warn};
-use ureq::http::Method;
 
 impl SpotifyWorker {
-    pub(super) fn update_library(
+    pub(super) async fn update_library(
         &mut self,
         track_id: TrackId,
         changes: &[(PlaylistId, bool)],
@@ -70,11 +71,13 @@ impl SpotifyWorker {
                 want_resulting_revisions: Some(true),
                 ..Default::default()
             };
-            let result = self.request_connected_proto(
-                Method::POST,
-                &format!("playlist/v2/playlist/{playlist_id}/changes"),
-                &request,
-            );
+            let result = self
+                .request_connected_proto(
+                    &Method::POST,
+                    &format!("/playlist/v2/playlist/{playlist_id}/changes"),
+                    &request,
+                )
+                .await;
             if let Err(error) = result {
                 error!(%error, %playlist_id, "Failed to update Spotify playlist");
             } else if let Some((_, tracks)) = self.playlist_cache.get_mut(&playlist_id) {
@@ -89,7 +92,7 @@ impl SpotifyWorker {
         let Some(should_like) = liked else {
             return;
         };
-        let username = self.client.session.lock().username.clone();
+        let username = self.session.username();
         let body = match collection_write(track_id, !should_like) {
             Ok(body) => body,
             Err(error) => {
@@ -97,24 +100,24 @@ impl SpotifyWorker {
                 return;
             }
         };
-        if let Err(error) =
-            self.request_connected(Method::PUT, &format!("collection/collection/{username}"), body)
+        if let Err(error) = self
+            .request_connected(&Method::PUT, &format!("/collection/collection/{username}"), body)
+            .await
         {
             error!(%error, %track_id, "Failed to update Spotify library");
         }
     }
 
-    pub(super) fn refresh_playlists(&mut self) {
-        if let Err(error) = self.load_playlists() {
+    pub(super) async fn refresh_playlists(&mut self) {
+        if let Err(error) = self.load_playlists().await {
             warn!(%error, "Failed to refresh Spotify playlists");
         }
     }
 
-    fn load_playlists(&mut self) -> ClientResult<()> {
-        let username = self.client.session.lock().username.clone();
-        let root: SelectedListContent = self.client.get_proto(&format!(
-                "playlist/v2/user/{username}/rootlist?decorate=revision,attributes,length,owner,capabilities,status_code&from=0&length=10000"
-            ))?;
+    async fn load_playlists(&mut self) -> ClientResult<()> {
+        let root = SelectedListContent::parse_from_bytes(
+            &self.session.spclient().get_rootlist(0, Some(10_000)).await?,
+        )?;
         let mut cache_changed = false;
         let mut updates = Vec::new();
         for (item, metadata) in root
@@ -148,7 +151,7 @@ impl SpotifyWorker {
             {
                 Arc::clone(tracks)
             } else {
-                let tracks = fetch_playlist_tracks(&self.client, id)?;
+                let tracks = fetch_playlist_tracks(&self.session, id).await?;
                 self.playlist_cache
                     .insert(id, (metadata.revision().to_vec(), Arc::clone(&tracks)));
                 cache_changed = true;
@@ -191,8 +194,10 @@ impl SpotifyWorker {
     }
 }
 
-fn fetch_playlist_tracks(client: &SpotifyClient, id: PlaylistId) -> ClientResult<PlaylistTracks> {
-    let playlist: SelectedListContent = client.get_proto(&format!("playlist/v2/playlist/{id}"))?;
+async fn fetch_playlist_tracks(session: &Session, id: PlaylistId) -> ClientResult<PlaylistTracks> {
+    let spotify_id = SpotifyId::from_base62(&id)?;
+    let playlist =
+        SelectedListContent::parse_from_bytes(&session.spclient().get_playlist(&spotify_id).await?)?;
     Ok(Arc::new(
         playlist
             .contents
@@ -230,7 +235,7 @@ fn playlist_image(attributes: &ListAttributes) -> Option<String> {
 
 fn collection_write(track_id: TrackId, removed: bool) -> ClientResult<Vec<u8>> {
     let mut item = vec![0x12, 0x10];
-    item.extend_from_slice(&base62(track_id.as_str())?);
+    item.extend_from_slice(&SpotifyId::from_base62(&track_id)?.to_raw());
     if removed {
         item.extend_from_slice(&[0x30, 1]);
     } else {
@@ -249,24 +254,4 @@ fn write_varint(output: &mut Vec<u8>, mut value: u64) {
         value >>= 7;
     }
     output.push(value as u8);
-}
-
-fn base62(id: &str) -> ClientResult<[u8; 16]> {
-    let mut value = num_bigint::BigUint::from(0u8);
-    for byte in id.bytes() {
-        let digit = match byte {
-            b'0'..=b'9' => byte - b'0',
-            b'a'..=b'z' => byte - b'a' + 10,
-            b'A'..=b'Z' => byte - b'A' + 36,
-            _ => return Err(client_error("invalid Spotify ID")),
-        };
-        value = value * 62u8 + digit;
-    }
-    let encoded = value.to_bytes_be();
-    if encoded.len() > 16 {
-        return Err(client_error("Spotify ID exceeds 128 bits"));
-    }
-    let mut bytes = [0; 16];
-    bytes[16 - encoded.len()..].copy_from_slice(&encoded);
-    Ok(bytes)
 }

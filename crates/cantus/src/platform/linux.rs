@@ -1,6 +1,6 @@
 use crate::{
     app::{
-        AppUpdater, CantusApp,
+        AppUpdater, Background, CantusApp,
         config::{Layer as ConfigLayer, LayerAnchor as ConfigLayerAnchor},
         send_update,
     },
@@ -25,7 +25,7 @@ use std::{
     ffi::c_void,
     fs::{self, File},
     io::{self, Read, Write},
-    os::{fd::AsFd, unix::net::UnixDatagram},
+    os::{fd::AsFd, unix::net::UnixDatagram as BlockingUnixDatagram},
     path::{Path, PathBuf},
     process::{self, Command, Stdio},
     ptr::NonNull,
@@ -37,6 +37,7 @@ use std::{
     time::{Duration, Instant},
 };
 use sysinfo::{Gpus, System};
+use tokio::net::UnixDatagram;
 use tracing::warn;
 use wayland_client::{
     Connection, Dispatch, Proxy, QueueHandle, WEnum, delegate_noop, event_created_child,
@@ -96,13 +97,17 @@ pub struct DesktopApp {
 pub trait Platform {
     const STATUS_SAMPLE_INTERVAL: Duration;
 
-    fn start_status_monitor(updater: AppUpdater, spectrum: Arc<[AtomicU32; AUDIO_SPECTRUM_BANDS]>);
+    fn start_status_monitor(
+        background: &Background,
+        updater: AppUpdater,
+        spectrum: Arc<[AtomicU32; AUDIO_SPECTRUM_BANDS]>,
+    );
     fn set_volume(volume: f32);
-    fn run_power_action(action: usize);
+    fn run_power_action(background: &Background, action: usize);
     fn desktop_apps() -> Vec<DesktopApp>;
     fn spawn(exec: &str);
     fn open_url(url: &str);
-    fn start_launcher_listener(updater: &AppUpdater);
+    fn start_launcher_listener(background: &Background, updater: &AppUpdater);
     fn trigger_launcher() -> !;
 }
 
@@ -113,11 +118,15 @@ pub type Current = Linux;
 impl Platform for Linux {
     const STATUS_SAMPLE_INTERVAL: Duration = Duration::from_millis(500);
 
-    fn start_status_monitor(updater: AppUpdater, spectrum: Arc<[AtomicU32; AUDIO_SPECTRUM_BANDS]>) {
+    fn start_status_monitor(
+        background: &Background,
+        updater: AppUpdater,
+        spectrum: Arc<[AtomicU32; AUDIO_SPECTRUM_BANDS]>,
+    ) {
         let volume_updater = updater.clone();
-        thread::spawn(move || monitor_playback(&spectrum));
-        thread::spawn(move || monitor_volume(&volume_updater));
-        thread::spawn(move || monitor_status(&updater));
+        background.run(move || monitor_playback(&spectrum));
+        background.run(move || monitor_volume(&volume_updater));
+        background.run(move || monitor_status(&updater));
     }
 
     fn set_volume(volume: f32) {
@@ -131,10 +140,10 @@ impl Platform for Linux {
     }
 
     /// Calls logind directly, which is what `systemctl poweroff` does under the hood.
-    fn run_power_action(action: usize) {
+    fn run_power_action(background: &Background, action: usize) {
         let method = ["PowerOff", "Reboot"][action];
-        thread::spawn(move || {
-            let call = async {
+        background.spawn(async move {
+            let result = async {
                 DbusConnection::system()
                     .await?
                     .call_method(
@@ -144,11 +153,14 @@ impl Platform for Linux {
                         method,
                         &(false,),
                     )
-                    .await
-            };
-            if let Err(error) = pollster::block_on(call) {
+                    .await?;
+                Ok::<_, zbus::Error>(())
+            }
+            .await;
+            if let Err(error) = result {
                 warn!(%error, method, "Failed to run held power action");
             }
+            None
         });
     }
 
@@ -202,25 +214,31 @@ impl Platform for Linux {
         }
     }
 
-    fn start_launcher_listener(updater: &AppUpdater) {
+    fn start_launcher_listener(background: &Background, updater: &AppUpdater) {
         let path = launcher_socket_path();
         let _ = fs::remove_file(&path);
-        let socket = match UnixDatagram::bind(&path) {
-            Ok(socket) => socket,
-            Err(error) => return warn!(%error, ?path, "Failed to bind launcher toggle socket"),
-        };
         let updater = updater.clone();
-        thread::spawn(move || {
+        background.spawn(async move {
+            let socket = match UnixDatagram::bind(&path) {
+                Ok(socket) => socket,
+                Err(error) => {
+                    warn!(%error, ?path, "Failed to bind launcher toggle socket");
+                    return None;
+                }
+            };
             let mut buffer = [0u8; 1];
-            while socket.recv(&mut buffer).is_ok() && send_update(&updater, |app| app.launcher.toggle())
-            {
-            }
+            while socket.recv(&mut buffer).await.is_ok()
+                && send_update(&updater, |app| app.launcher.toggle())
+            {}
+            None
         });
     }
 
     fn trigger_launcher() -> ! {
         let path = launcher_socket_path();
-        if let Err(error) = UnixDatagram::unbound().and_then(|socket| socket.send_to(&[0], &path)) {
+        if let Err(error) =
+            BlockingUnixDatagram::unbound().and_then(|socket| socket.send_to(&[0], &path))
+        {
             eprintln!(
                 "Failed to reach a running Cantus instance at {}: {error}",
                 path.display()
