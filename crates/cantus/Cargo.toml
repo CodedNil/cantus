@@ -6,6 +6,7 @@ default-run = "cantus"
 
 [package.metadata.isthmus]
 artifact = "../../assets/cantus.spv"
+source = "src/render/mod.rs"
 
 [[bin]]
 name = "cantus"
@@ -31,14 +32,13 @@ librespot-protocol = "0.8.0"
 librespot-core = { version = "0.8.0", default-features = false, features = ["rustls-tls-webpki-roots"] }
 librespot-oauth = { version = "0.8.0", default-features = false, features = ["rustls-tls-webpki-roots"] }
 protobuf = "3.7.2"
-quick-xml = "0.41.0"
+quick-xml = "0.42.0"
 wayland-client = { version = "0.31.15", default-features = false, features = ["system"] }
 wayland-protocols = { version = "0.32.13", features = ["client", "staging"] }
 wayland-protocols-wlr = { version = "0.3.12", features = ["client"] }
 xkbcommon = { version = "0.9.0", default-features = false, features = ["wayland"] }
 fend-core = "1.5.8"
 resvg = { version = "0.48.1", default-features = false, features = ["raster-images"] }
-ttf-parser = "0.25.1"
 image = { version = "0.25.10", default-features = false, features = [
     "ico",
     "jpeg",

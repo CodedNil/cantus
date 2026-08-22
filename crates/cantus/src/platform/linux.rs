@@ -6,14 +6,15 @@ use crate::{
     },
     render::{
         PANEL_START,
-        launcher::{BACKGROUND_RADIUS, LauncherKey, background_bounds},
+        launcher::{BACKGROUND_RADIUS, LauncherKey},
         lyrics::EXTENSION as LYRICS_EXTENSION,
-        status::{AUDIO_SPECTRUM_BANDS, BATTERY_HIDDEN},
+        status::{AUDIO_SPECTRUM_BANDS, BATTERY_HIDDEN, ProcessorSample, submit_system_sample, submit_volume},
+        tempestas::EXTENSION as WEATHER_EXTENSION,
     },
 };
 use freedesktop_desktop_entry::{desktop_entries, get_languages_from_env};
-use isthmus::Surface;
 use isthmus::glam::vec2;
+use isthmus::{InputEvent, Surface, SurfaceHandle};
 use microfft::real::rfft_1024;
 use serde_json::Value;
 use std::{
@@ -69,6 +70,8 @@ use wayland_protocols_wlr::layer_shell::v1::client::{
     zwlr_layer_shell_v1::{Layer as LayerStyle, ZwlrLayerShellV1},
     zwlr_layer_surface_v1::{self, Anchor as LayerAnchor, KeyboardInteractivity, ZwlrLayerSurfaceV1},
 };
+
+const PANEL_OVERFLOW: f32 = 16.0;
 use xkbcommon::xkb;
 use zbus::Connection as DbusConnection;
 
@@ -85,7 +88,7 @@ pub struct DesktopApp {
     pub comment: String,
     pub icon_path: Option<PathBuf>,
     pub action: Option<(String, String)>,
-    pub icon_layer: i32,
+    pub icon_index: i32,
 }
 
 /// Host integration used by app and render code.
@@ -167,7 +170,7 @@ impl Platform for Linux {
                     comment: entry.comment(&locales).unwrap_or_default().into_owned(),
                     icon_path: entry.icon().and_then(resolve_icon),
                     action,
-                    icon_layer: -1,
+                    icon_index: -1,
                 })
             })
             .collect()
@@ -202,7 +205,7 @@ impl Platform for Linux {
             };
             let mut buffer = [0u8; 1];
             while socket.recv(&mut buffer).await.is_ok() {
-                if !send_update(&updater, |app| app.launcher.toggle()) {
+                if !send_update(&updater, |app| app.ui.launcher.toggle()) {
                     warn!("Launcher toggle update was discarded");
                     break;
                 }
@@ -248,26 +251,17 @@ fn monitor_status(updater: &AppUpdater) {
         if let Some(gpus) = &mut gpus {
             gpus.refresh(false);
         }
-        let [cpu_temperature, cpu_usage, cpu_memory] = [
-            system.cpus().first().map_or(0.0, sysinfo::Cpu::temperature),
-            system.global_cpu_usage() / 100.0,
-            system.used_memory() as f32 / system.total_memory().max(1) as f32,
-        ];
-        let gpu = gpus.as_ref().and_then(gpu_sample);
+        let cpu = ProcessorSample {
+            temperature: system.cpus().first().map_or(0.0, sysinfo::Cpu::temperature),
+            usage: system.global_cpu_usage() / 100.0,
+            memory: system.used_memory() as f32 / system.total_memory().max(1) as f32,
+        };
+        let gpu = gpus
+            .as_ref()
+            .and_then(gpu_sample)
+            .map(|[temperature, usage, memory]| ProcessorSample { temperature, usage, memory });
         let battery_level = battery_sample(battery.as_deref());
-        if !send_update(updater, move |app| {
-            let status = app.status_pass();
-            status.temperature_targets[0] = cpu_temperature;
-            status.pill.cpu.usage.push(cpu_usage);
-            status.pill.cpu.memory.push(cpu_memory);
-            if let Some([temperature, usage, memory]) = gpu {
-                status.temperature_targets[1] = temperature;
-                status.pill.gpu.usage.push(usage);
-                status.pill.gpu.memory.push(memory);
-            }
-            status.pill.battery_level = battery_level;
-            status.pill.history_scroll = 0.0;
-        }) {
+        if !submit_system_sample(updater, cpu, gpu, battery_level) {
             break;
         }
         thread::sleep(Linux::STATUS_SAMPLE_INTERVAL);
@@ -381,7 +375,7 @@ fn capture_volume(updater: &AppUpdater) -> io::Result<bool> {
     for batch in serde_json::Deserializer::from_reader(output).into_iter::<Vec<Value>>() {
         for object in batch.map_err(io::Error::other)? {
             if let Some(volume) = state.update(&object)
-                && !send_update(updater, move |app| app.status_pass().pill.volume = volume)
+                && !submit_volume(updater, volume)
             {
                 child.kill()?;
                 child.wait()?;
@@ -506,7 +500,7 @@ pub fn run() {
         ConfigLayerAnchor::Bottom => LayerAnchor::Bottom | LayerAnchor::Left | LayerAnchor::Right,
     });
     layer_surface.set_exclusive_zone((PANEL_START + config.height + f32::from(config.lyrics_enabled) * LYRICS_EXTENSION) as i32);
-    resize_layer_surface(&layer_surface, &app.cantus);
+    resize_layer_surface(&layer_surface, &app);
     app.layer_surface = Some(layer_surface);
 
     app.pending_bar_surface = Some(app.create_render_surface(surface));
@@ -545,6 +539,12 @@ struct LayerShellApp {
     output: Option<WlOutput>,
     pending_bar_surface: Option<Surface>,
     pending_launcher_surface: Option<Surface>,
+    launcher_surface: Option<SurfaceHandle>,
+    scale: Option<f32>,
+    surface_width: Option<f32>,
+    launcher_width: Option<f32>,
+    launcher_height: Option<f32>,
+    output_height: Option<f32>,
     display_handle: Option<NonNull<c_void>>,
     wl_surface: Option<WlSurface>,
     launcher_wl_surface: Option<WlSurface>,
@@ -588,9 +588,9 @@ macro_rules! dispatch {
 }
 
 /// Resizes the bar surface and sets keyboard focus for the launcher.
-fn resize_layer_surface(layer_surface: &ZwlrLayerSurfaceV1, cantus: &CantusApp) {
-    layer_surface.set_size(0, cantus.bar_surface_size().1 as u32);
-    layer_surface.set_keyboard_interactivity(if cantus.launcher.open {
+fn resize_layer_surface(layer_surface: &ZwlrLayerSurfaceV1, app: &LayerShellApp) {
+    layer_surface.set_size(0, app.bar_surface_size().1 as u32);
+    layer_surface.set_keyboard_interactivity(if app.cantus.ui.launcher.open {
         KeyboardInteractivity::Exclusive
     } else {
         KeyboardInteractivity::None
@@ -598,12 +598,39 @@ fn resize_layer_surface(layer_surface: &ZwlrLayerSurfaceV1, cantus: &CantusApp) 
 }
 
 impl LayerShellApp {
+    fn scale(&self) -> f32 {
+        self.scale.unwrap_or(1.0)
+    }
+
+    fn bar_surface_size(&self) -> (f32, f32) {
+        let extension = if self.cantus.config.tempestas_enabled {
+            WEATHER_EXTENSION
+        } else if self.cantus.config.lyrics_enabled {
+            LYRICS_EXTENSION
+        } else {
+            0.0
+        } + PANEL_OVERFLOW;
+        (self.surface_width.unwrap_or(1920.0), self.cantus.config.height + PANEL_START + extension)
+    }
+
+    fn launcher_surface_size(&self) -> (f32, f32) {
+        (
+            self.launcher_width.or(self.surface_width).unwrap_or(1920.0),
+            self.launcher_height.or_else(|| self.output_height.map(|height| height / self.scale())).unwrap_or(1080.0),
+        )
+    }
+
+    fn buffer_size(&self, logical: (f32, f32)) -> (u32, u32) {
+        let scale = self.scale();
+        ((logical.0 * scale).round() as u32, (logical.1 * scale).round() as u32)
+    }
+
     /// Re-fires the held key for as long as it stays down, once the initial delay has passed.
     fn pump_key_repeat(&mut self) {
         let now = Instant::now();
         while let Some((keycode, next)) = self.repeat
             && next <= now
-            && self.cantus.launcher.open
+            && self.cantus.ui.launcher.open
         {
             self.repeat = Some((keycode, next + self.repeat_interval));
             handle_launcher_key(self, keycode);
@@ -656,15 +683,15 @@ impl LayerShellApp {
     }
 
     fn sync_launcher_surface(&mut self, qhandle: &QueueHandle<Self>) {
-        let open = self.cantus.launcher.open;
+        let open = self.cantus.ui.launcher.open;
         if open == self.launcher_layer_surface.is_some() {
             return;
         }
         self.repeat = None;
         if open {
             self.launcher_configured = false;
-            self.cantus.render.launcher_width = None;
-            self.cantus.render.launcher_height = None;
+            self.launcher_width = None;
+            self.launcher_height = None;
             let surface = self.compositor.as_ref().unwrap().create_surface(qhandle, ());
             let layer = self
                 .layer_shell
@@ -691,8 +718,10 @@ impl LayerShellApp {
             surface.commit();
         } else {
             drop(self.launcher_frame_callback.take());
-            if let Some(program) = self.cantus.render.program.as_mut() {
-                program.remove_secondary_surface();
+            if let Some(gpu) = self.cantus.gpu.as_mut()
+                && let Some(surface) = self.launcher_surface.take()
+            {
+                gpu.remove_surface(surface);
             }
             destroy_proxies!(
                 self,
@@ -716,40 +745,43 @@ impl LayerShellApp {
         }
 
         // Initialize the program before draining updates so startup jobs cannot race surface configuration.
-        if self.cantus.render.program.is_none()
+        if self.cantus.gpu.is_none()
             && let Some(surface) = self.pending_bar_surface.take()
         {
-            let (width, height) = self.cantus.buffer_size();
+            let (width, height) = self.buffer_size(self.bar_surface_size());
             if width > 0 && height > 0 {
-                self.cantus.initialize_gpu(surface, width, height);
+                self.cantus.initialize_renderer(surface, width, height);
             } else {
                 self.pending_bar_surface = Some(surface);
             }
         }
         if let Some(surface) = self.pending_launcher_surface.take() {
-            let (width, height) = self.cantus.launcher_buffer_size();
-            if let Some(program) = &mut self.cantus.render.program {
-                program.add_secondary_surface(surface, width, height).expect("launcher surface is incompatible");
+            let (width, height) = self.buffer_size(self.launcher_surface_size());
+            if let Some(gpu) = &mut self.cantus.gpu {
+                self.launcher_surface = Some(gpu.add_surface(surface, (width, height).into()).expect("launcher surface is incompatible"));
             }
         }
         self.update_scale_and_viewport();
         self.update_blur_region(qhandle);
 
-        let (buffer_width, buffer_height) = self.cantus.buffer_size();
-        let launcher_size = self.cantus.launcher_buffer_size();
+        let bar_size = self.bar_surface_size();
+        let launcher_logical_size = self.launcher_surface_size();
+        let (buffer_width, buffer_height) = self.buffer_size(bar_size);
+        let launcher_size = self.buffer_size(launcher_logical_size);
         if buffer_width > 0
             && buffer_height > 0
-            && let Some(program) = &mut self.cantus.render.program
+            && let Some(gpu) = &mut self.cantus.gpu
         {
-            program.resize(buffer_width, buffer_height);
-            if self.launcher_wl_surface.is_some() {
+            gpu.resize(SurfaceHandle::PRIMARY, [buffer_width, buffer_height]);
+            if let Some(surface) = self.launcher_surface {
                 let (width, height) = launcher_size;
-                program.resize_secondary(width, height);
+                gpu.resize(surface, (width, height).into());
             }
         }
 
-        let _ = self.cantus.render();
-        if let Some(text) = self.cantus.launcher.pending_copy.take() {
+        self.cantus
+            .render(bar_size.into(), self.launcher_surface.map(|surface| (surface, launcher_logical_size.into())));
+        if let Some(text) = self.cantus.ui.launcher.pending_copy.take() {
             self.set_clipboard(&text, qhandle);
         }
         self.update_input_region(qhandle);
@@ -767,8 +799,8 @@ impl LayerShellApp {
     }
 
     fn update_scale_and_viewport(&self) {
-        let scale = self.cantus.render.scale;
-        let (bar_width, bar_height) = self.cantus.bar_surface_size();
+        let scale = self.scale();
+        let (bar_width, bar_height) = self.bar_surface_size();
         self.wl_surface
             .as_ref()
             .unwrap()
@@ -777,7 +809,7 @@ impl LayerShellApp {
             viewport.set_destination(bar_width as i32, bar_height as i32);
         }
         if let Some(surface) = &self.launcher_wl_surface {
-            let (width, height) = self.cantus.launcher_surface_size();
+            let (width, height) = self.launcher_surface_size();
             surface.set_buffer_scale(self.launcher_viewport.as_ref().map_or_else(|| scale.ceil() as i32, |_| 1));
             if let Some(viewport) = &self.launcher_viewport {
                 viewport.set_destination(width as i32, height as i32);
@@ -789,9 +821,12 @@ impl LayerShellApp {
         let wl_surface = self.active_surface().clone();
         let compositor = self.compositor.as_ref().unwrap();
         let region = compositor.create_region(qhandle, ());
-        for rect in self.cantus.interaction.take_regions() {
-            let [x, y, width, height] = [rect.x0, rect.y0, rect.x1 - rect.x0, rect.y1 - rect.y0].map(|value| value.round() as i32);
-            region.add(x, y, width, height);
+        if let Some(gpu) = self.cantus.gpu.as_mut() {
+            let surface = self.launcher_surface.unwrap_or(SurfaceHandle::PRIMARY);
+            for rect in gpu.take_input_regions(surface) {
+                let [x, y, width, height] = [rect.x0, rect.y0, rect.x1 - rect.x0, rect.y1 - rect.y0].map(|value| value.round() as i32);
+                region.add(x, y, width, height);
+            }
         }
         wl_surface.set_input_region(Some(&region));
         region.destroy();
@@ -801,15 +836,15 @@ impl LayerShellApp {
         let Some(effect) = self.active_background_effect() else {
             return;
         };
-        if !self.cantus.launcher.open {
+        if !self.cantus.ui.launcher.open {
             effect.set_blur_region(None);
             return;
         }
 
         let compositor = self.compositor.as_ref().unwrap();
         let region = compositor.create_region(qhandle, ());
-        let (width, height) = self.cantus.launcher_surface_size();
-        let (origin, size) = background_bounds(vec2(width, height), self.cantus.config.height);
+        let (width, height) = self.launcher_surface_size();
+        let (origin, size) = self.cantus.ui.launcher.bounds(vec2(width, height), self.cantus.config.height);
         // Keep the integer input region one pixel inside the shader's antialiased edge.
         let x = origin.x.ceil() as i32 + 1;
         let y = origin.y.ceil() as i32 + 1;
@@ -836,13 +871,13 @@ dispatch!(ZwlrLayerSurfaceV1, |state, proxy, event, qhandle| {
             let is_launcher = state.launcher_layer_surface.as_ref().is_some_and(|launcher| launcher.id() == proxy.id());
             if width > 0 {
                 if is_launcher {
-                    state.cantus.render.launcher_width = Some(width as f32);
+                    state.launcher_width = Some(width as f32);
                 } else {
-                    state.cantus.render.surface_width = Some(width as f32);
+                    state.surface_width = Some(width as f32);
                 }
             }
             if height > 0 && is_launcher {
-                state.cantus.render.launcher_height = Some(height as f32);
+                state.launcher_height = Some(height as f32);
             }
             if is_launcher {
                 state.launcher_configured = true;
@@ -853,7 +888,7 @@ dispatch!(ZwlrLayerSurfaceV1, |state, proxy, event, qhandle| {
         }
         zwlr_layer_surface_v1::Event::Closed => {
             if state.launcher_layer_surface.as_ref().is_some_and(|launcher| launcher.id() == proxy.id()) {
-                state.cantus.launcher.open = false;
+                state.cantus.ui.launcher.open = false;
                 state.sync_launcher_surface(qhandle);
             } else {
                 state.should_exit = true;
@@ -865,9 +900,9 @@ dispatch!(ZwlrLayerSurfaceV1, |state, proxy, event, qhandle| {
 
 dispatch!(WpFractionalScaleV1, |state, _proxy, event, qhandle| {
     if let wp_fractional_scale_v1::Event::PreferredScale { scale } = event {
-        state.cantus.render.scale = scale as f32 / 120.0;
+        state.scale = Some(scale as f32 / 120.0);
 
-        if state.cantus.render.program.is_some() {
+        if state.cantus.gpu.is_some() {
             state.update_scale_and_viewport();
             state.try_render_frame(qhandle);
         }
@@ -895,7 +930,7 @@ dispatch!(WlOutput, |state, proxy, event, _qhandle| {
             height,
             ..
         } if flags.contains(wl_output::Mode::Current) => {
-            state.cantus.render.output_height = Some(height as f32);
+            state.output_height = Some(height as f32);
         }
         wl_output::Event::Name { name } | wl_output::Event::Description { description: name }
             if state.cantus.config.monitor.as_ref().is_none_or(|target| name.contains(target)) =>
@@ -1024,7 +1059,7 @@ dispatch!(WlKeyboard, |state, _proxy, event, _qhandle| {
 
 /// Applies one key press to the launcher's search field and selection while it is open.
 fn handle_launcher_key(state: &mut LayerShellApp, keycode: xkb::Keycode) {
-    if !state.cantus.launcher.open {
+    if !state.cantus.ui.launcher.open {
         return;
     }
     let Some(xkb_state) = &state.xkb_state else {
@@ -1043,7 +1078,7 @@ fn handle_launcher_key(state: &mut LayerShellApp, keycode: xkb::Keycode) {
     if control && letter == Some('v') {
         if let Some(pasted) = state.paste() {
             let pasted = pasted.replace(['\n', '\r'], " ");
-            state.cantus.launcher.edit(|field| field.insert(&pasted));
+            state.cantus.ui.launcher.edit(|field| field.insert(&pasted));
         }
         return;
     }
@@ -1064,41 +1099,44 @@ fn handle_launcher_key(state: &mut LayerShellApp, keycode: xkb::Keycode) {
         _ => None,
     };
     if let Some(key) = key {
-        state.cantus.launcher.key(key, shift);
+        state.cantus.ui.launcher.key(key, shift);
     } else if let Some(typed) = character.filter(|typed| !typed.is_control() && !control) {
-        state.cantus.launcher.edit(|field| field.insert(typed.encode_utf8(&mut [0u8; 4])));
+        state.cantus.ui.launcher.edit(|field| field.insert(typed.encode_utf8(&mut [0u8; 4])));
     }
 }
 
 dispatch!(WlPointer, |state, _proxy, event, _qhandle| {
-    let cantus = &mut state.cantus;
-    let interaction = &mut cantus.interaction;
-
-    let surface_id = state.wl_surface.as_ref().map(Proxy::id);
+    let surface_id = state.active_surface().id();
+    let surface = state.launcher_surface;
+    let Some(gpu) = state.cantus.gpu.as_mut() else {
+        return;
+    };
+    let surface = surface.unwrap_or(SurfaceHandle::PRIMARY);
     match event {
         wl_pointer::Event::Enter {
-            surface, surface_x, surface_y, ..
-        } if surface_id == Some(surface.id()) => {
-            interaction.motion(vec2(surface_x as f32, surface_y as f32));
-            interaction.hover();
+            surface: wl_surface,
+            surface_x,
+            surface_y,
+            ..
+        } if surface_id == wl_surface.id() => {
+            gpu.input(surface, InputEvent::Enter(vec2(surface_x as f32, surface_y as f32)));
         }
         wl_pointer::Event::Motion { surface_x, surface_y, .. } => {
             let position = vec2(surface_x as f32, surface_y as f32);
-            interaction.motion(position);
+            gpu.input(surface, InputEvent::Motion(position));
         }
         wl_pointer::Event::Leave { .. } => {
-            interaction.leave();
+            gpu.input(surface, InputEvent::Leave);
         }
         wl_pointer::Event::Button { button, state: button_state, .. } => match (button, button_state) {
             (0x110, WEnum::Value(wl_pointer::ButtonState::Pressed)) => {
-                interaction.press(interaction.pointer);
+                gpu.input(surface, InputEvent::Press);
             }
             (0x110, WEnum::Value(wl_pointer::ButtonState::Released)) => {
-                interaction.release();
+                gpu.input(surface, InputEvent::Release);
             }
-            (0x111, WEnum::Value(wl_pointer::ButtonState::Pressed)) if interaction.dragging => {
-                interaction.cancel_drag();
-                interaction.hover();
+            (0x111, WEnum::Value(wl_pointer::ButtonState::Pressed)) if gpu.dragging(surface) => {
+                gpu.input(surface, InputEvent::CancelDrag);
             }
             _ => {}
         },
@@ -1112,7 +1150,7 @@ dispatch!(WlPointer, |state, _proxy, event, _qhandle| {
             value120: discrete,
             ..
         } if discrete != 0 => {
-            state.cantus.interaction.scroll_input(discrete.signum());
+            gpu.input(surface, InputEvent::Scroll(discrete.signum()));
         }
         _ => {}
     }

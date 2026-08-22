@@ -1,15 +1,11 @@
-use crate::render::{FrameData, smoothstep, text};
-use isthmus::glam::{Vec2, Vec4};
+use crate::render::{Globals, TEXT_COLOR, text};
+use isthmus::{float::FloatExt, glam::Vec4};
 
 #[cfg(not(target_arch = "spirv"))]
 use {
     crate::{
         app::music::{Enrichment, MusicBackend, PlaybackState, Track},
-        render::{
-            PANEL_START,
-            cpu::{Frame, Passes},
-            text::TextStyle,
-        },
+        render::{Frame, PANEL_START, text::TextStyle},
     },
     isthmus::glam::vec2,
     std::time::Instant,
@@ -27,9 +23,8 @@ pub struct LyricSegment {
     pub line_end: bool,
 }
 
-#[isthmus::system]
-pub struct LyricsRenderer {
-    lines: isthmus::Instances<text::Line>,
+#[cfg(not(target_arch = "spirv"))]
+pub struct LyricsView {
     enrichment: Enrichment,
     music: MusicBackend,
 }
@@ -191,7 +186,7 @@ mod provider {
             .map(|seconds| seconds * 1000.0)
     }
 
-    fn attribute(tag: &BytesStart<'_>, name: &[u8]) -> Option<String> {
+    fn attribute(tag: &BytesStart<'_>, name: &str) -> Option<String> {
         tag.attributes()
             .flatten()
             .find(|attr| attr.key.local_name().as_ref() == name)?
@@ -210,20 +205,20 @@ mod provider {
         let mut span_roles = Vec::new();
         loop {
             match reader.read_event() {
-                Ok(Event::Start(tag)) if tag.local_name().as_ref() == b"p" => {
+                Ok(Event::Start(tag)) if tag.local_name().as_ref() == "p" => {
                     span_roles.clear();
                     line_text.clear();
-                    line_time = attribute(&tag, b"begin").as_deref().and_then(time).zip(attribute(&tag, b"end").as_deref().and_then(time));
-                    let agent = attribute(&tag, b"agent").unwrap_or_default();
+                    line_time = attribute(&tag, "begin").as_deref().and_then(time).zip(attribute(&tag, "end").as_deref().and_then(time));
+                    let agent = attribute(&tag, "agent").unwrap_or_default();
                     let lane = usize::from(primary_agent.as_ref().is_some_and(|primary| primary != &agent));
                     primary_agent.get_or_insert(agent);
                     line_lane = Some(lane);
                     line_start = segments.len();
                 }
-                Ok(Event::Start(tag)) if line_lane.is_some() && tag.local_name().as_ref() == b"span" => {
-                    let start = attribute(&tag, b"begin").as_deref().and_then(time);
-                    let end = attribute(&tag, b"end").as_deref().and_then(time);
-                    span_roles.push(match attribute(&tag, b"role").as_deref() {
+                Ok(Event::Start(tag)) if line_lane.is_some() && tag.local_name().as_ref() == "span" => {
+                    let start = attribute(&tag, "begin").as_deref().and_then(time);
+                    let end = attribute(&tag, "end").as_deref().and_then(time);
+                    span_roles.push(match attribute(&tag, "role").as_deref() {
                         Some("x-bg") => (true, false),
                         Some("x-translation" | "x-roman") => (false, true),
                         _ => (false, false),
@@ -241,9 +236,7 @@ mod provider {
                     }
                 }
                 Ok(Event::Text(value)) if line_lane.is_some() && !span_roles.iter().any(|&(_, ignored)| ignored) => {
-                    let Ok(value) = value.decode() else {
-                        return Vec::new();
-                    };
+                    let value = value.xml_content(XmlVersion::Implicit1_0);
                     let Ok(value) = unescape(&value) else {
                         return Vec::new();
                     };
@@ -259,10 +252,10 @@ mod provider {
                         }
                     }
                 }
-                Ok(Event::End(tag)) if tag.local_name().as_ref() == b"span" => {
+                Ok(Event::End(tag)) if tag.local_name().as_ref() == "span" => {
                     span_roles.pop();
                 }
-                Ok(Event::End(tag)) if tag.local_name().as_ref() == b"p" => {
+                Ok(Event::End(tag)) if tag.local_name().as_ref() == "p" => {
                     if segments.len() == line_start
                         && let Some((start_ms, end_ms)) = line_time
                         && !line_text.trim().is_empty()
@@ -293,18 +286,13 @@ mod provider {
 #[cfg(not(target_arch = "spirv"))]
 pub(crate) use provider::{LyricsRequest, fetch};
 
-#[isthmus::host]
-impl LyricsRenderer {
-    pub fn new(passes: &Passes<'_>, text: &text::Renderer, enrichment: Enrichment, music: MusicBackend) -> Self {
-        let (placed_glyphs, glyphs, edges) = text.resources();
-        Self {
-            lines: lyrics_shader::instances_with_capacity(passes, lyrics_shader::PipelineResources { placed_glyphs, glyphs, edges }, 6),
-            enrichment,
-            music,
-        }
+#[isthmus::paint]
+impl LyricsView {
+    pub const fn new(enrichment: Enrichment, music: MusicBackend) -> Self {
+        Self { enrichment, music }
     }
 
-    pub fn update(&mut self, text: &mut text::Renderer, playback: &mut PlaybackState, frame: &Frame<'_>) {
+    pub fn show(&mut self, frame: &mut Frame, playback: &mut PlaybackState) {
         const PREFETCH_TRACKS: usize = 4;
         const LANE_OFFSET: f32 = 8.0;
 
@@ -316,17 +304,15 @@ impl LyricsRenderer {
         let now = Instant::now();
         for track in playback.queue.iter_mut().skip(start.saturating_sub(1)).take(PREFETCH_TRACKS) {
             if track.runtime.lyrics.request(now) {
-                self.enrichment.request_lyrics(track, self.music.clone(), text.shaper());
+                self.enrichment.request_lyrics(track, self.music.clone(), frame.text_shaper());
             }
         }
 
         let Some((index, progress_ms)) = playback.timeline.track_at_playhead(&playback.queue) else {
-            self.lines.clear();
             return;
         };
         let visible = index.saturating_sub(1)..(index + 2).min(playback.queue.len());
-        let y = PANEL_START + frame.config.height + 10.0;
-        self.lines.clear();
+        let y = PANEL_START + frame.services.config.height + 10.0;
         let span = |track: &Track| {
             track
                 .runtime
@@ -341,7 +327,7 @@ impl LyricsRenderer {
             .lyrics
             .ready()
             .map_or(progress_ms * Lyrics::SILENCE_SPEED, |lyrics| lyrics.position(progress_ms));
-        let mut x = frame.shared.playhead_x - progress;
+        let mut x = frame.globals.playhead_x - progress;
         for track in &playback.queue[visible.start..index] {
             x -= span(track);
         }
@@ -349,42 +335,28 @@ impl LyricsRenderer {
             let track = &playback.queue[item];
             if let Some(lyrics) = track.runtime.lyrics.ready() {
                 for (lane, line) in lyrics.lines.iter().enumerate().filter(|(_, line)| line.width > 0.0) {
-                    if x <= frame.shared.screen_size.x && x + line.width >= 0.0 {
-                        let color = if lane == 0 { text::COLOR.extend(1.0) } else { Vec4::new(0.72, 0.86, 1.0, 1.0) };
-                        self.lines.push(
-                            text.place_visible(line, vec2(x, y + lane as f32 * LANE_OFFSET), 0.0..frame.shared.screen_size.x)
-                                .with_color(color),
-                        );
+                    if x <= frame.globals.info.screen_size.x && x + line.width >= 0.0 {
+                        let color = if lane == 0 { TEXT_COLOR.extend(1.0) } else { Vec4::new(0.72, 0.86, 1.0, 1.0) };
+                        let screen_width = frame.globals.info.screen_size.x;
+                        let placed = frame.visible_text(line, vec2(x, y + lane as f32 * LANE_OFFSET), 0.0..screen_width).with_color(color);
+                        let padding = placed.size * 0.2 + 1.0;
+                        // GPU: Scrolling lyrics line.
+                        frame.paint_text(placed.expanded(padding), |frame: Globals, text: isthmus::TextFragment| {
+                            let edge_fade = text.pixel.x.smoothstep(0.0, 32.0) * text.pixel.x.smoothstep(frame.info.screen_size.x, frame.info.screen_size.x - 32.0);
+                            let emphasis = (text.pixel.x - frame.playhead_x).abs().smoothstep(110.0, 0.0);
+                            let weight = (text.line.weight + emphasis * 0.15).min(1.0);
+                            let distance = text.distance_scaled_with_weight(text.pixel, 1.0 + emphasis * 0.2, weight);
+                            let fill = text::coverage(distance);
+                            let outline = text::coverage(distance + 0.9) * 0.4;
+                            let alpha = fill + outline * (1.0 - fill);
+                            let played = text.pixel.x.smoothstep(frame.playhead_x + 4.0, frame.playhead_x - 4.0);
+                            let color = text.line.color.to_vec3().lerp(text.line.color.to_vec3() * 0.42, played);
+                            (color * fill * edge_fade).extend(alpha * edge_fade)
+                        });
                     }
                 }
             }
             x += span(track);
         }
-    }
-}
-
-#[isthmus::shader]
-pub mod lyrics_shader {
-    pub fn vertex(vertex: u32, frame: FrameData, line: text::Line) -> Raster {
-        let output = text::line_quad_effect(*line, vertex, frame, 1.2, 1.0);
-        Raster {
-            position: output.position,
-            pixel: output.pixel,
-        }
-    }
-
-    pub fn fragment(pixel: Vec2, frame: FrameData, line: text::Line, placed_glyphs: &[text::PlacedGlyph], glyphs: &[text::Glyph], edges: &[text::Edge]) -> Vec4 {
-        let edge_fade = smoothstep(0.0, 32.0, pixel.x) * smoothstep(frame.screen_size.x, frame.screen_size.x - 32.0, pixel.x);
-        let emphasis = smoothstep(110.0, 0.0, (pixel.x - frame.playhead_x).abs());
-        let mut emphasized = *line;
-        emphasized.weight = (emphasized.weight + emphasis * 0.15).min(1.0);
-        let distance = text::line_distance_scaled(emphasized, placed_glyphs, glyphs, edges, pixel, 1.0 + emphasis * 0.2);
-        let fill = text::coverage(distance);
-
-        let outline = text::coverage(distance + 0.9) * 0.4;
-        let alpha = fill + outline * (1.0 - fill);
-        let played = smoothstep(frame.playhead_x + 4.0, frame.playhead_x - 4.0, pixel.x);
-        let color = line.color.to_vec3().lerp(line.color.to_vec3() * 0.42, played);
-        (color * fill * edge_fade).extend(alpha * edge_fade)
     }
 }

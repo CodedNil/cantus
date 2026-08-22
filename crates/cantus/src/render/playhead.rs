@@ -1,107 +1,89 @@
 use crate::render::{
-    FrameData, PANEL_START,
-    shader::{pixel_to_ndc, quad_coord, sd_capsule_box, sd_rounded_triangle},
-    smoothstep,
+    Globals, PANEL_START,
+    sdf::{sd_capsule_box, sd_rounded_triangle},
 };
 use isthmus::{
-    glam::{Vec2, Vec3, Vec4, vec2, vec3},
+    Quad,
+    float::FloatExt as _,
+    glam::{Vec3, vec2, vec3},
     spirv_std::arch::kill,
 };
 
-#[isthmus::host]
-use crate::{
-    app::{interaction::Rect, music::PlaybackState},
-    render::cpu::{Frame, Passes, approach},
+#[cfg(not(target_arch = "spirv"))]
+use {
+    crate::{app::music::PlaybackState, render::Frame},
+    isthmus::Rect,
 };
 
-#[isthmus::system]
-pub struct Playhead {
-    pill: isthmus::Instance<PlayheadState>,
-}
+const START_DURATION: f32 = 0.7;
+const TRANSITION_SPEED: f32 = 5.5;
 
 #[isthmus::data]
 #[derive(Default)]
-pub struct PlayheadState {
-    pub bar_split: f32,
-    pub icon_presence: f32,
-    pub icon_morph: f32,
+pub struct Playhead {
+    bar_split: f32,
+    icon_presence: f32,
+    icon_morph: f32,
 }
 
-#[isthmus::host]
+#[isthmus::paint]
 impl Playhead {
-    pub fn new(passes: &Passes<'_>) -> Self {
-        Self {
-            pill: playhead_shader::instance(passes, (), PlayheadState::default()),
-        }
-    }
-
-    pub fn update(&mut self, frame: &mut Frame, playback: &mut PlaybackState, last_toggle_time: &mut f32) {
-        const START_DURATION: f32 = 0.7;
-        const TRANSITION_SPEED: f32 = 5.5;
-
-        let playhead_x = frame.shared.playhead_x;
-        let height = frame.config.height;
-        let time = frame.shared.time;
-        let playhead = frame
-            .interaction
-            .surface(Rect::from_center(vec2(playhead_x, PANEL_START + height * 0.5), vec2(height * 0.25, height * 0.5)));
+    pub fn show(&mut self, frame: &mut Frame, playback: &mut PlaybackState) {
+        let response = frame.interact(Rect::from_center(
+            vec2(frame.globals.playhead_x, PANEL_START + frame.services.config.height * 0.5),
+            vec2(frame.services.config.height * 0.25, frame.services.config.height * 0.5),
+        ));
         let speed = TRANSITION_SPEED * frame.delta_time;
-        let last_toggle = (time - *last_toggle_time) / START_DURATION;
-        if !playhead.hovered && playback.playing && last_toggle < 1.0 {
-            self.pill.bar_split = 1.0 - last_toggle;
-            self.pill.icon_presence = 1.0 - last_toggle;
-            approach(&mut self.pill.icon_morph, 1.0, speed * 1.5);
+        let last_toggle = playback.last_toggle.elapsed().as_secs_f32() / START_DURATION;
+        if !response.hovered() && playback.playing && last_toggle < 1.0 {
+            self.bar_split = 1.0 - last_toggle;
+            self.icon_presence = 1.0 - last_toggle;
+            self.icon_morph.approach(1.0, speed * 1.5);
         } else {
-            let show_icon = f32::from(playhead.hovered || !playback.playing);
-            let play_icon = f32::from(playhead.hovered && !playback.playing);
-            approach(&mut self.pill.bar_split, show_icon, speed);
-            self.pill.icon_presence = self.pill.icon_presence.max(show_icon);
-            approach(&mut self.pill.icon_presence, show_icon, speed);
-            approach(&mut self.pill.icon_morph, play_icon, speed);
+            let show_icon = f32::from(response.hovered() || !playback.playing);
+            let play_icon = f32::from(response.hovered() && !playback.playing);
+            self.bar_split.approach(show_icon, speed);
+            self.icon_presence = self.icon_presence.max(show_icon);
+            self.icon_presence.approach(show_icon, speed);
+            self.icon_morph.approach(play_icon, speed);
         }
 
-        if playhead.clicked {
-            frame.interaction.toggle_playing(playback.playing);
+        if response.clicked() {
+            frame.services.music.toggle_playing(playback.playing);
         }
-    }
-}
-
-#[isthmus::shader]
-pub mod playhead_shader {
-    pub fn vertex(vertex: u32, frame: FrameData) -> Raster {
-        let uv = quad_coord(vertex);
-        let world_pos = vec2(
-            frame.playhead_x + (uv.x * 2.0 - 1.0) * frame.panel_height * 0.4,
-            PANEL_START - 5.0 + uv.y * (frame.panel_height + 10.0),
+        let half_width = frame.globals.panel_height * 0.4;
+        let quad = Quad::from_min_max(
+            vec2(frame.globals.playhead_x - half_width, PANEL_START - 5.0),
+            vec2(frame.globals.playhead_x + half_width, PANEL_START + frame.globals.panel_height + 5.0),
         );
-        Raster {
-            position: pixel_to_ndc(world_pos, frame.screen_size),
-            world_pos,
-        }
-    }
+        // GPU: Playhead and playback icon.
+        frame.paint_quad(quad, |frame: Globals, fragment: isthmus::Fragment, bar_split: f32, icon_presence: f32, icon_morph: f32| {
+            let mirrored = fragment.local.abs();
 
-    pub fn fragment(world_pos: Vec2, frame: FrameData, state: PlayheadState) -> Vec4 {
-        let center = vec2(frame.playhead_x, PANEL_START + frame.panel_height * 0.5);
-        let pause = (world_pos - center).abs();
+            // Vertical timeline bar.
+            let bar_len = frame.panel_height * (0.5 - 0.375 * bar_split);
+            let bar_center = (frame.panel_height - bar_len) * 0.5;
+            let bar_distance = sd_capsule_box(vec2(mirrored.y - bar_center, mirrored.x), bar_len * 0.5, 4.5);
 
-        // Bar splits into two capsule segments straddling the center as bar_split grows.
-        let bar_len = frame.panel_height * (0.5 - 0.375 * state.bar_split);
-        let bar_center = (frame.panel_height - bar_len) * 0.5;
-        let dist_bar = sd_capsule_box(vec2(pause.y - bar_center, pause.x), bar_len * 0.5, 4.5);
+            // Pause icon, whose bars separate as it appears.
+            let pause_x = (mirrored.x - 4.0 * bar_split).abs();
+            let pause_y = (mirrored.y - frame.panel_height * 0.1).max(0.0);
+            let pause_distance = vec2(pause_x, pause_y).length() - 3.5;
 
-        let dx = (pause.x - 4.0 * state.bar_split).abs();
-        let dy = (pause.y - frame.panel_height * 0.1).max(0.0);
-        let dist_pause = vec2(dx, dy).length() - 3.5;
-        let play_scale = frame.panel_height * 0.18 * (1.0 + state.icon_morph * (1.0 - state.icon_presence));
-        let dist_play = sd_rounded_triangle((world_pos - center).perp(), play_scale, play_scale * 0.5);
-        let dist_icon = dist_pause + (dist_play - dist_pause) * state.icon_morph;
-        let bar_mask = 1.0 - smoothstep(-0.8, 0.2, dist_bar);
-        let icon_mask = (1.0 - smoothstep(-0.8, 0.2, dist_icon)) * state.icon_presence;
-        let alpha = icon_mask.max(bar_mask);
-        if alpha <= 0.0 {
-            kill();
-        }
-        let edge = smoothstep(-2.5, -1.0, dist_bar.min(dist_icon));
-        vec3(1.0, 0.878, 0.824).lerp(Vec3::splat(0.15), edge).extend(alpha)
+            // Play icon and pause-to-play morph.
+            let play_scale = frame.panel_height * 0.18 * (1.0 + icon_morph * (1.0 - icon_presence));
+            let play_distance = sd_rounded_triangle(fragment.local.perp(), play_scale, play_scale * 0.5);
+            let icon_distance = pause_distance + (play_distance - pause_distance) * icon_morph;
+
+            // Coverage and shaded inset.
+            let bar_mask = 1.0 - bar_distance.smoothstep(-0.8, 0.2);
+            let icon_mask = (1.0 - icon_distance.smoothstep(-0.8, 0.2)) * icon_presence;
+            let alpha = icon_mask.max(bar_mask);
+            if alpha <= 0.0 {
+                kill();
+            }
+            let edge = bar_distance.min(icon_distance).smoothstep(-2.5, -1.0);
+            vec3(1.0, 0.878, 0.824).lerp(Vec3::splat(0.15), edge).extend(alpha)
+        });
     }
 }

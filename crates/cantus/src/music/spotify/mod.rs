@@ -1,10 +1,9 @@
-use super::{LyricSegment, MusicResult, PlaybackCommand, PlaylistId, PlaylistTracks, Track, TrackId, TrackRuntime};
+use super::{LyricSegment, MAX_PLAYLIST_TARGETS, MusicResult, PlaybackCommand, PlaylistId, PlaylistTracks, Track, TrackId, TrackRuntime};
 use crate::app::{
     AppUpdater, Background,
     config::{self, Config},
     send_update,
 };
-use crate::render::track::MAX_PILL_PLAYLIST_ICONS;
 use arrayvec::ArrayVec;
 use flate2::{Compression, write::GzEncoder};
 use futures_util::StreamExt;
@@ -185,7 +184,7 @@ async fn run_spotify(
     events: &mut UnboundedReceiver<WorkerEvent>,
     event_tx: UnboundedSender<WorkerEvent>,
     updater: AppUpdater,
-    playlist_targets: ArrayVec<String, MAX_PILL_PLAYLIST_ICONS>,
+    playlist_targets: ArrayVec<String, MAX_PLAYLIST_TARGETS>,
     ratings_enabled: bool,
 ) -> ClientResult<()> {
     let dealer = session.dealer();
@@ -242,7 +241,7 @@ struct SpotifyWorker {
     events: UnboundedSender<WorkerEvent>,
     updater: AppUpdater,
     active_device: Option<String>,
-    playlist_targets: ArrayVec<String, MAX_PILL_PLAYLIST_ICONS>,
+    playlist_targets: ArrayVec<String, MAX_PLAYLIST_TARGETS>,
     playlist_cache: PlaylistCache,
     /// `None` marks metadata currently being fetched.
     track_metadata: HashMap<String, Option<TrackDetails>>,
@@ -410,7 +409,7 @@ impl SpotifyWorker {
                 false
             };
             if playback.playing && !app.playback.playing {
-                app.render.last_toggle_time = app.render.start_time.elapsed().as_secs_f32();
+                app.playback.mark_toggle();
             }
             app.playback.playing = playback.playing;
             if queue_changed {

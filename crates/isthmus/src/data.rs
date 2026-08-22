@@ -6,6 +6,36 @@ use glam::{UVec2, UVec3, UVec4, Vec2, Vec3, Vec4};
 #[cfg_attr(not(target_arch = "spirv"), derive(bytemuck::Pod, bytemuck::Zeroable))]
 pub struct Unorm8x4(u32);
 
+/// Compact optional descriptor/layer pair into the shader-visible image heap.
+#[repr(transparent)]
+#[derive(Clone, Copy, Eq, PartialEq)]
+#[cfg_attr(not(target_arch = "spirv"), derive(bytemuck::Pod, bytemuck::Zeroable))]
+pub struct ImageHandle(i32);
+
+impl ImageHandle {
+    pub const NONE: Self = Self(-1);
+
+    #[cfg(not(target_arch = "spirv"))]
+    pub(crate) const fn new(image: u32, layer: u32) -> Self {
+        Self(((image & 0xff) << 23 | (layer & 0x7f_ffff)) as i32)
+    }
+
+    pub(crate) const fn parts(self) -> Option<(u32, u32)> {
+        if self.0 < 0 {
+            None
+        } else {
+            let value = self.0 as u32;
+            Some((value >> 23, value & 0x7f_ffff))
+        }
+    }
+}
+
+impl Default for ImageHandle {
+    fn default() -> Self {
+        Self::NONE
+    }
+}
+
 impl Unorm8x4 {
     pub fn from_vec4(value: Vec4) -> Self {
         let channel = |value: f32| (value.clamp(0.0, 1.0) * 255.0 + 0.5) as u32;
@@ -39,11 +69,11 @@ pub trait ShaderData: Copy {}
 #[cfg(not(target_arch = "spirv"))]
 pub trait ShaderData: Copy + bytemuck::Pod {}
 
-impl ShaderData for () {}
 impl ShaderData for u32 {}
 impl ShaderData for i32 {}
 impl ShaderData for f32 {}
 impl ShaderData for Unorm8x4 {}
+impl ShaderData for ImageHandle {}
 impl ShaderData for Vec2 {}
 impl ShaderData for Vec3 {}
 impl ShaderData for Vec4 {}

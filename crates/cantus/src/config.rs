@@ -1,4 +1,7 @@
-use crate::render::{GAP, tempestas, track::MAX_PILL_PLAYLIST_ICONS};
+use crate::{
+    app::music::MAX_PLAYLIST_TARGETS,
+    render::{GAP, tempestas},
+};
 use arrayvec::ArrayVec;
 use serde::{Deserialize, Serialize};
 use std::{env, fs, path::PathBuf};
@@ -25,7 +28,7 @@ pub struct Config {
     /// The width in logical pixels on the left where previous tracks are displayed.
     pub history_width: f32,
     /// Favourite playlists to display as buttons.
-    pub playlists: ArrayVec<String, MAX_PILL_PLAYLIST_ICONS>,
+    pub playlists: ArrayVec<String, MAX_PLAYLIST_TARGETS>,
     /// Whether star ratings should be enabled.
     pub ratings_enabled: bool,
     /// Whether to show synchronized lyrics.

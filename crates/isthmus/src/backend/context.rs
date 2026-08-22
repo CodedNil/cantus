@@ -1,14 +1,20 @@
+use crate::data::ShaderData;
 use ash::{Entry, Instance, khr, vk};
-use core::{error::Error, fmt};
+use core::{error::Error, fmt, mem};
 use std::{
     ffi::CStr,
     sync::{
-        Arc,
+        Arc, Mutex,
         atomic::{AtomicU64, Ordering},
     },
+    vec::Vec,
 };
 
-use super::surface::Surface;
+use super::{
+    buffer::{BufferRange, UploadRing},
+    image::{ImageAllocator, ImageUpload},
+    surface::Surface,
+};
 
 #[derive(Debug)]
 pub enum SetupError {
@@ -41,21 +47,23 @@ impl From<vk::Result> for SetupError {
 }
 
 pub struct Inner {
-    pub entry: Entry,
+    _entry: Entry,
     pub instance: Instance,
     pub surface_loader: khr::surface::Instance,
     pub wayland_loader: khr::wayland_surface::Instance,
     pub physical: vk::PhysicalDevice,
     pub device: ash::Device,
-    pub queue_family: u32,
     pub queue: vk::Queue,
     pub command_pool: vk::CommandPool,
-    pub descriptor_pool: vk::DescriptorPool,
+    pub push_descriptors: khr::push_descriptor::Device,
     pub sampler: vk::Sampler,
     pub timeline: vk::Semaphore,
     next_timeline: AtomicU64,
     pub properties: vk::PhysicalDeviceProperties,
     pub memory: vk::PhysicalDeviceMemoryProperties,
+    uploads: Mutex<UploadRing>,
+    image_memory: Mutex<ImageAllocator>,
+    image_uploads: Mutex<Vec<ImageUpload>>,
 }
 
 pub struct Context(pub(crate) Arc<Inner>);
@@ -94,7 +102,14 @@ impl Context {
         let (physical, queue_family, properties) = selected.ok_or(SetupError::UnsupportedSurface)?;
         let priorities = [1.0];
         let queue_info = [vk::DeviceQueueCreateInfo::default().queue_family_index(queue_family).queue_priorities(&priorities)];
-        let device_extensions = [khr::swapchain::NAME.as_ptr()];
+        let extensions = unsafe { instance.enumerate_device_extension_properties(physical) }?;
+        if !extensions
+            .iter()
+            .any(|extension| unsafe { CStr::from_ptr(extension.extension_name.as_ptr()) } == khr::push_descriptor::NAME)
+        {
+            return Err(SetupError::MissingFeature("VK_KHR_push_descriptor"));
+        }
+        let device_extensions = [khr::swapchain::NAME.as_ptr(), khr::push_descriptor::NAME.as_ptr()];
         let mut supported12 = vk::PhysicalDeviceVulkan12Features::default();
         let mut supported13 = vk::PhysicalDeviceVulkan13Features::default();
         let mut supported = vk::PhysicalDeviceFeatures2::default().push_next(&mut supported12).push_next(&mut supported13);
@@ -102,6 +117,12 @@ impl Context {
         for (enabled, name) in [
             (supported12.timeline_semaphore != 0, "timelineSemaphore"),
             (supported12.scalar_block_layout != 0, "scalarBlockLayout"),
+            (supported12.runtime_descriptor_array != 0, "runtimeDescriptorArray"),
+            (
+                supported12.shader_sampled_image_array_non_uniform_indexing != 0,
+                "shaderSampledImageArrayNonUniformIndexing",
+            ),
+            (supported12.descriptor_binding_partially_bound != 0, "descriptorBindingPartiallyBound"),
             (supported13.dynamic_rendering != 0, "dynamicRendering"),
             (supported13.synchronization2 != 0, "synchronization2"),
         ] {
@@ -109,7 +130,12 @@ impl Context {
                 return Err(SetupError::MissingFeature(name));
             }
         }
-        let mut features12 = vk::PhysicalDeviceVulkan12Features::default().timeline_semaphore(true).scalar_block_layout(true);
+        let mut features12 = vk::PhysicalDeviceVulkan12Features::default()
+            .timeline_semaphore(true)
+            .scalar_block_layout(true)
+            .runtime_descriptor_array(true)
+            .shader_sampled_image_array_non_uniform_indexing(true)
+            .descriptor_binding_partially_bound(true);
         let mut features13 = vk::PhysicalDeviceVulkan13Features::default().dynamic_rendering(true).synchronization2(true);
         let device_info = vk::DeviceCreateInfo::default()
             .queue_create_infos(&queue_info)
@@ -117,35 +143,13 @@ impl Context {
             .push_next(&mut features12)
             .push_next(&mut features13);
         let device = unsafe { instance.create_device(physical, &device_info, None) }?;
+        let push_descriptors = khr::push_descriptor::Device::new(&instance, &device);
         let queue = unsafe { device.get_device_queue(queue_family, 0) };
         let command_pool = unsafe {
             device.create_command_pool(
                 &vk::CommandPoolCreateInfo::default()
                     .queue_family_index(queue_family)
                     .flags(vk::CommandPoolCreateFlags::RESET_COMMAND_BUFFER),
-                None,
-            )
-        }?;
-        let descriptor_sizes = [
-            vk::DescriptorPoolSize {
-                ty: vk::DescriptorType::STORAGE_BUFFER,
-                descriptor_count: 128,
-            },
-            vk::DescriptorPoolSize {
-                ty: vk::DescriptorType::SAMPLED_IMAGE,
-                descriptor_count: 64,
-            },
-            vk::DescriptorPoolSize {
-                ty: vk::DescriptorType::SAMPLER,
-                descriptor_count: 64,
-            },
-        ];
-        let descriptor_pool = unsafe {
-            device.create_descriptor_pool(
-                &vk::DescriptorPoolCreateInfo::default()
-                    .flags(vk::DescriptorPoolCreateFlags::FREE_DESCRIPTOR_SET)
-                    .max_sets(64)
-                    .pool_sizes(&descriptor_sizes),
                 None,
             )
         }?;
@@ -164,22 +168,25 @@ impl Context {
             )
         }?;
         let memory = unsafe { instance.get_physical_device_memory_properties(physical) };
+        let uploads = Mutex::new(UploadRing::new(device.clone(), &memory, properties.limits.min_storage_buffer_offset_alignment as usize)?);
         Ok(Self(Arc::new(Inner {
-            entry,
+            _entry: entry,
             instance,
             surface_loader,
             wayland_loader,
             physical,
             device,
-            queue_family,
             queue,
             command_pool,
-            descriptor_pool,
+            push_descriptors,
             sampler,
             timeline,
             next_timeline: AtomicU64::new(1),
             properties,
             memory,
+            uploads,
+            image_memory: Mutex::new(ImageAllocator::default()),
+            image_uploads: Mutex::new(Vec::new()),
         })))
     }
 
@@ -195,6 +202,9 @@ impl Context {
         (0..self.0.memory.memory_type_count)
             .find(|index| bits & (1 << index) != 0 && self.0.memory.memory_types[*index as usize].property_flags.contains(flags))
             .ok_or(SetupError::UnsupportedSurface)
+    }
+    pub(crate) fn allocate_image_memory(&self, kind: u32, requirements: vk::MemoryRequirements) -> Result<(vk::DeviceMemory, u64), SetupError> {
+        self.0.image_memory.lock().unwrap().allocate(&self.0.device, kind, requirements).map_err(SetupError::Vulkan)
     }
     pub(crate) fn immediate(&self, record: impl FnOnce(vk::CommandBuffer)) -> Result<(), SetupError> {
         let inner = &self.0;
@@ -231,6 +241,93 @@ impl Context {
         }
         Ok(())
     }
+
+    pub(crate) fn begin_uploads(&self) -> Result<(), SetupError> {
+        let timeline = self.0.uploads.lock().unwrap().next();
+        self.0.wait_timeline(timeline)?;
+        Ok(())
+    }
+
+    pub(crate) fn upload<T: ShaderData>(&self, values: &[T]) -> BufferRange {
+        self.0.uploads.lock().unwrap().write(values)
+    }
+
+    pub(crate) fn upload_bytes(&self, values: &[u8]) -> BufferRange {
+        self.0.uploads.lock().unwrap().write_bytes(values, 4)
+    }
+
+    pub(crate) fn queue_image(&self, upload: ImageUpload) {
+        self.0.image_uploads.lock().unwrap().push(upload);
+    }
+
+    pub(crate) fn record_uploads(&self, command: vk::CommandBuffer) {
+        let mut uploads = mem::take(&mut *self.0.image_uploads.lock().unwrap());
+        uploads.sort_by_key(|upload| upload.image.as_ptr() as usize);
+        let mut start = 0;
+        while start < uploads.len() {
+            let key = uploads[start].image.as_ptr();
+            let end = uploads[start..]
+                .iter()
+                .position(|upload| upload.image.as_ptr() != key)
+                .map_or(uploads.len(), |offset| start + offset);
+            if let Some(image) = uploads[start].image.upgrade() {
+                transition_image(
+                    &self.0.device,
+                    command,
+                    image.raw,
+                    vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL,
+                    vk::ImageLayout::TRANSFER_DST_OPTIMAL,
+                    image.layers,
+                );
+                let mut copies = Vec::with_capacity(end - start);
+                let mut buffer = vk::Buffer::null();
+                for upload in &uploads[start..end] {
+                    let staging = self.upload_bytes(upload.pixels.as_ref());
+                    buffer = staging.raw;
+                    copies.push(
+                        vk::BufferImageCopy::default()
+                            .buffer_offset(staging.offset)
+                            .image_subresource(vk::ImageSubresourceLayers {
+                                aspect_mask: vk::ImageAspectFlags::COLOR,
+                                mip_level: 0,
+                                base_array_layer: upload.origin[2],
+                                layer_count: 1,
+                            })
+                            .image_offset(vk::Offset3D {
+                                x: upload.origin[0] as i32,
+                                y: upload.origin[1] as i32,
+                                z: 0,
+                            })
+                            .image_extent(vk::Extent3D {
+                                width: upload.size[0],
+                                height: upload.size[1],
+                                depth: 1,
+                            }),
+                    );
+                }
+                unsafe {
+                    self.0
+                        .device
+                        .cmd_copy_buffer_to_image(command, buffer, image.raw, vk::ImageLayout::TRANSFER_DST_OPTIMAL, &copies);
+                    transition_image(
+                        &self.0.device,
+                        command,
+                        image.raw,
+                        vk::ImageLayout::TRANSFER_DST_OPTIMAL,
+                        vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL,
+                        image.layers,
+                    );
+                }
+            }
+            start = end;
+        }
+        uploads.clear();
+        *self.0.image_uploads.lock().unwrap() = uploads;
+    }
+
+    pub(crate) fn upload_static<T: ShaderData>(&self, values: &[T]) -> BufferRange {
+        self.0.uploads.lock().unwrap().write_static(values)
+    }
 }
 
 impl Clone for Context {
@@ -244,9 +341,10 @@ impl Drop for Inner {
         unsafe {
             let _ = self.device.device_wait_idle();
             self.device.destroy_sampler(self.sampler, None);
-            self.device.destroy_descriptor_pool(self.descriptor_pool, None);
             self.device.destroy_semaphore(self.timeline, None);
             self.device.destroy_command_pool(self.command_pool, None);
+            self.uploads.lock().unwrap().destroy();
+            self.image_memory.lock().unwrap().destroy(&self.device);
             self.device.destroy_device(None);
             self.instance.destroy_instance(None);
         }
@@ -256,6 +354,10 @@ impl Drop for Inner {
 impl Inner {
     pub(crate) fn reserve_timeline(&self) -> u64 {
         self.next_timeline.fetch_add(1, Ordering::Relaxed)
+    }
+
+    pub(crate) fn uploads_submitted(&self, timeline: u64) {
+        self.uploads.lock().unwrap().submitted(timeline);
     }
 
     pub(crate) fn wait_timeline(&self, value: u64) -> Result<(), vk::Result> {
@@ -269,7 +371,7 @@ impl Inner {
     }
 }
 
-pub(crate) unsafe fn transition_image(device: &ash::Device, command: vk::CommandBuffer, image: vk::Image, old: vk::ImageLayout, new: vk::ImageLayout, layers: u32) {
+pub fn transition_image(device: &ash::Device, command: vk::CommandBuffer, image: vk::Image, old: vk::ImageLayout, new: vk::ImageLayout, layers: u32) {
     let (src_stage, src_access) = match old {
         vk::ImageLayout::UNDEFINED | vk::ImageLayout::PRESENT_SRC_KHR => (vk::PipelineStageFlags2::NONE, vk::AccessFlags2::NONE),
         vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL => (vk::PipelineStageFlags2::COLOR_ATTACHMENT_OUTPUT, vk::AccessFlags2::COLOR_ATTACHMENT_WRITE),
@@ -303,11 +405,6 @@ pub(crate) unsafe fn transition_image(device: &ash::Device, command: vk::Command
     unsafe { device.cmd_pipeline_barrier2(command, &vk::DependencyInfo::default().image_memory_barriers(&barrier)) };
 }
 
-pub trait Render {
-    fn prepare(&mut self);
-    fn draw(&self, frame: &RenderFrame<'_>);
-}
-
 pub struct RenderFrame<'a> {
     command: vk::CommandBuffer,
     shared: &'a [u8],
@@ -324,22 +421,5 @@ impl<'a> RenderFrame<'a> {
 
     pub(crate) const fn shared(&self) -> &[u8] {
         self.shared
-    }
-
-    pub fn draw(&self, render: &impl Render) {
-        render.draw(self);
-    }
-}
-
-impl<T: Render> Render for Option<T> {
-    fn prepare(&mut self) {
-        if let Some(value) = self {
-            value.prepare();
-        }
-    }
-    fn draw(&self, frame: &RenderFrame<'_>) {
-        if let Some(value) = self {
-            value.draw(frame);
-        }
     }
 }

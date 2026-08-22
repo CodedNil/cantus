@@ -15,11 +15,24 @@ mouse gestures generic across programs
 
 
 bugs:
-liking a song clears my entire liked songs on spotify
-if a song doesnt have lyrics the previous songs always shows on the left
-empty space between tracks displays no lrics when it should just count as a large space
 text on the weather widget top needs outline show it doesnt blend into clouds
 outline still doesnt work perfectly for example for M
 make the playhead clickable surface shorter so its only around the button, then stars are still clickable
+
+ripple doesnt fire when clicking status pill other than the buttons
+maybe ripple should be a generic click thing for any surface that doesnt get blocked by clicks above?
+
+lyrics:
+if a song doesnt have lyrics the previous songs always shows on the left without moving
+empty space between tracks displays no lrics when it should just count as a large space
+
+track:
+second icon row for tracks doesnt get a sdf background
+verify track runtime two alphas and what each really does
+
+launcher:
+enter key render icon should be a bit further left
 launched programs by the launcher seem to be owned by cantus? when cantus is closed they close
-desktop isnt on the right monitor
+cant search atm
+
+do a pass through everything, cantus and isthmus, identify cruft and legacy stuff to remove, identify places where we arent using immediate mode to its fullest potential, identify some radical suggestions to improve both the backend and frontend of isthmus/cantus

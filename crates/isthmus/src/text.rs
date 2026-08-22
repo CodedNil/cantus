@@ -1,32 +1,29 @@
-use crate::render::{
-    FrameData,
-    shader::{pixel_to_ndc, quad_coord},
-};
-use isthmus::{
-    Unorm8x4,
-    glam::{Vec2, Vec3, Vec4, vec2},
+#[cfg(not(target_arch = "spirv"))]
+use crate::glam::Vec3;
+use crate::{
+    Fragment, Quad, Unorm8x4,
+    glam::{Vec2, Vec4, vec2},
 };
 
 #[cfg(target_arch = "spirv")]
-use isthmus::spirv_std::num_traits::Float;
+use crate::float::FloatExt;
 
 #[cfg(not(target_arch = "spirv"))]
 use {
-    crate::render::cpu::Passes,
-    isthmus::Storage,
-    std::{
-        ops::{Deref, Range},
-        sync::Arc,
+    crate::{
+        ShaderData,
+        backend::{Buffer, canvas::Canvas},
     },
+    std::{ops::Range, sync::Arc, vec::Vec},
     ttf_parser::{Face, GlyphId, OutlineBuilder, Tag},
 };
 
-pub const MAX_LINE_GLYPHS: usize = 64;
-pub const COLOR: Vec3 = Vec3::splat(0.94);
 const EFFECT_PADDING: f32 = 3.5;
+#[cfg(not(target_arch = "spirv"))]
 const GLYPH_CAPACITY: usize = 16_384;
 
 #[isthmus::data]
+#[doc(hidden)]
 pub struct Edge {
     start: Vec2,
     end: Vec2,
@@ -49,14 +46,102 @@ pub struct Line {
 
 impl Line {
     #[must_use]
+    pub const fn is_empty(self) -> bool {
+        self.count == 0
+    }
+
+    #[doc(hidden)]
+    pub fn quad(self) -> Quad {
+        Quad::from_min_max(self.min, self.max)
+    }
+
+    /// Extends rasterization beyond the font's normal effect padding.
+    #[must_use]
+    pub fn expanded(mut self, padding: f32) -> Self {
+        self.min -= padding;
+        self.max += padding;
+        self
+    }
+
+    #[must_use]
+    pub fn translated(mut self, offset: Vec2) -> Self {
+        self.min += offset;
+        self.max += offset;
+        self.origin += offset;
+        self
+    }
+
+    #[must_use]
     pub fn with_color(mut self, color: Vec4) -> Self {
         self.color = Unorm8x4::from_vec4(color);
         self
+    }
+
+    fn distance(self, placed_glyphs: &[PlacedGlyph], glyphs: &[Glyph], edges: &[Edge], point: Vec2) -> f32 {
+        self.distance_scaled(placed_glyphs, glyphs, edges, point, 1.0)
+    }
+
+    fn distance_scaled(self, placed_glyphs: &[PlacedGlyph], glyphs: &[Glyph], edges: &[Edge], point: Vec2, scale: f32) -> f32 {
+        line_distance_scaled(self, placed_glyphs, glyphs, edges, point, scale)
+    }
+}
+
+/// Shader-side text geometry plus the fragment coordinates of its raster quad.
+pub struct TextFragment<'a> {
+    pub pixel: Vec2,
+    pub local: Vec2,
+    pub uv: Vec2,
+    pub line: Line,
+    placed_glyphs: &'a [PlacedGlyph],
+    glyphs: &'a [Glyph],
+    edges: &'a [Edge],
+}
+
+impl<'a> TextFragment<'a> {
+    #[doc(hidden)]
+    pub const fn new(fragment: Fragment, line: Line, placed_glyphs: &'a [PlacedGlyph], glyphs: &'a [Glyph], edges: &'a [Edge]) -> Self {
+        Self {
+            pixel: fragment.pixel,
+            local: fragment.local,
+            uv: fragment.uv,
+            line,
+            placed_glyphs,
+            glyphs,
+            edges,
+        }
+    }
+
+    pub fn distance(&self, point: Vec2) -> f32 {
+        self.line.distance(self.placed_glyphs, self.glyphs, self.edges, point)
+    }
+
+    pub fn distance_scaled(&self, point: Vec2, scale: f32) -> f32 {
+        self.line.distance_scaled(self.placed_glyphs, self.glyphs, self.edges, point, scale)
+    }
+
+    pub fn distance_scaled_with_weight(&self, point: Vec2, scale: f32, weight: f32) -> f32 {
+        let mut line = self.line;
+        line.weight = weight;
+        line.distance_scaled(self.placed_glyphs, self.glyphs, self.edges, point, scale)
+    }
+
+    pub fn alpha(&self) -> f32 {
+        self.alpha_at(self.pixel)
+    }
+
+    pub fn alpha_at(&self, point: Vec2) -> f32 {
+        coverage(self.distance(point))
+    }
+
+    pub fn color(&self, coverage: f32) -> Vec4 {
+        let alpha = coverage * self.line.color.to_vec4().w;
+        (self.line.color.to_vec3() * alpha).extend(alpha)
     }
 }
 
 #[isthmus::data]
 #[derive(Default)]
+#[doc(hidden)]
 pub struct Glyph {
     min: Vec2,
     max: Vec2,
@@ -66,14 +151,10 @@ pub struct Glyph {
 
 #[isthmus::data]
 #[derive(Default)]
+#[doc(hidden)]
 pub struct PlacedGlyph {
     pub x: f32,
     pub glyph: u32,
-}
-
-pub struct LineVertex {
-    pub position: Vec4,
-    pub pixel: Vec2,
 }
 
 #[derive(Clone, Copy)]
@@ -99,6 +180,7 @@ impl TextStyle {
         self
     }
 
+    #[cfg(not(target_arch = "spirv"))]
     fn normalized_weight(self) -> f32 {
         ((self.weight - 600.0) / 300.0).clamp(0.0, 1.0)
     }
@@ -154,11 +236,7 @@ fn glyph_after(placed_glyphs: &[PlacedGlyph], first: u32, count: u32, x: f32) ->
     low
 }
 
-pub fn line_distance(line: Line, placed_glyphs: &[PlacedGlyph], glyphs: &[Glyph], edges: &[Edge], local: Vec2) -> f32 {
-    line_distance_scaled(line, placed_glyphs, glyphs, edges, local, 1.0)
-}
-
-pub fn line_distance_scaled(line: Line, placed_glyphs: &[PlacedGlyph], glyphs: &[Glyph], edges: &[Edge], local: Vec2, scale: f32) -> f32 {
+fn line_distance_scaled(line: Line, placed_glyphs: &[PlacedGlyph], glyphs: &[Glyph], edges: &[Edge], local: Vec2, scale: f32) -> f32 {
     let inverse_size = 1.0 / line.size;
     let line_point = (local - line.origin) * inverse_size;
     let after = glyph_after(placed_glyphs, line.first, line.count, line_point.x);
@@ -186,33 +264,6 @@ pub fn coverage(distance: f32) -> f32 {
     coverage * coverage * (3.0 - 2.0 * coverage)
 }
 
-pub fn line_alpha(line: Line, placed_glyphs: &[PlacedGlyph], glyphs: &[Glyph], edges: &[Edge], local: Vec2) -> f32 {
-    coverage(line_distance(line, placed_glyphs, glyphs, edges, local))
-}
-
-/// One quad covering a placed line's bounds.
-pub fn line_quad(line: Line, vertex: u32, frame: &FrameData) -> LineVertex {
-    let pixel = line.min + quad_coord(vertex) * (line.max - line.min);
-    LineVertex {
-        position: pixel_to_ndc(pixel, frame.screen_size),
-        pixel,
-    }
-}
-
-/// A line quad conservatively enlarged for a fragment-only scale or stroke effect.
-pub fn line_quad_effect(line: Line, vertex: u32, frame: &FrameData, scale: f32, padding: f32) -> LineVertex {
-    let margin = line.size * (scale - 1.0).max(0.0) + padding;
-    let min = line.min - margin;
-    let max = line.max + margin;
-    let pixel = min + quad_coord(vertex) * (max - min);
-    LineVertex {
-        position: pixel_to_ndc(pixel, frame.screen_size),
-        pixel,
-    }
-}
-
-#[cfg(not(target_arch = "spirv"))]
-const FONT: &[u8] = include_bytes!(concat!(env!("CARGO_MANIFEST_DIR"), "/../../assets/NotoSans-Variable.ttf"));
 #[cfg(not(target_arch = "spirv"))]
 const WGHT: Tag = Tag::from_bytes(b"wght");
 #[cfg(not(target_arch = "spirv"))]
@@ -293,7 +344,7 @@ pub struct ShapedLine {
     glyphs: Vec<PlacedGlyph>,
     min: Vec2,
     max: Vec2,
-    pub(crate) width: f32,
+    pub width: f32,
     baseline: f32,
     size: f32,
     weight: f32,
@@ -307,23 +358,63 @@ pub struct Shaper {
 }
 
 #[cfg(not(target_arch = "spirv"))]
-pub struct Renderer {
+pub(crate) struct Text {
     shaper: Shaper,
-    edges: Storage<Edge>,
-    glyphs: Storage<Glyph>,
-    storage: Storage<PlacedGlyph>,
+    storage: Buffer<PlacedGlyph>,
     placed: Vec<PlacedGlyph>,
+    color: Unorm8x4,
 }
 
 #[cfg(not(target_arch = "spirv"))]
-impl Renderer {
+pub struct TextLayout<'a> {
+    text: &'a mut Text,
+    shaped: ShapedLine,
+}
+
+#[cfg(not(target_arch = "spirv"))]
+impl<'a> TextLayout<'a> {
+    pub(crate) fn new(text: &'a mut Text, content: &str, style: TextStyle) -> Self {
+        let shaped = text.shaper.shape(content, style);
+        Self { text, shaped }
+    }
+
+    pub fn shape(self) -> ShapedLine {
+        self.shaped
+    }
+
+    pub fn centered(self, center: Vec2) -> Line {
+        let origin = vec2(center.x - self.shaped.width * 0.5, center.y + self.shaped.baseline);
+        self.text.place(&self.shaped, origin)
+    }
+
+    pub fn left(self, position: Vec2) -> Line {
+        let baseline = self.shaped.baseline;
+        self.text.place(&self.shaped, vec2(position.x, position.y + baseline))
+    }
+
+    pub fn right(self, position: Vec2) -> Line {
+        let baseline = self.shaped.baseline;
+        self.text.place(&self.shaped, vec2(position.x - self.shaped.width, position.y + baseline))
+    }
+
+    pub fn fit(self, y: f32, bounds: Range<f32>) -> Line {
+        self.text.fit_shaped(&self.shaped, y, bounds.start, bounds.end)
+    }
+
+    pub fn visible(self, left: Vec2, clip: Range<f32>) -> Line {
+        self.text.place_visible(&self.shaped, left, clip)
+    }
+}
+
+#[cfg(not(target_arch = "spirv"))]
+impl Text {
     /// Creates the shared vector-font renderer and GPU storage.
     ///
     /// # Panics
     ///
-    /// Panics if Cantus's embedded font cannot be parsed or its outlines cannot be read.
-    pub fn new(passes: &Passes<'_>) -> Self {
-        let mut face = Face::parse(FONT, 0).expect("parse variable font");
+    /// Panics if the supplied variable font cannot be parsed or its outlines cannot be read.
+    pub(crate) fn new<Shared: ShaderData>(canvas: &mut Canvas<Shared>, font: &[u8], color: Vec3) -> Self {
+        let mut face = Face::parse(font, 0).expect("parse variable font");
         let characters = RANGES
             .iter()
             .flat_map(|&(a, b)| a..=b)
@@ -406,55 +497,38 @@ impl Renderer {
             .into_iter()
             .filter_map(|(character, id)| metadata.binary_search_by_key(&id, |&(id, _)| id).ok().map(|index| (character, metadata[index].1)))
             .collect::<Vec<_>>();
-        let edges = passes.storage("Vector Font Edges", curves);
-        let glyphs = passes.storage("Vector Font Glyphs", metadata.iter().map(|(_, meta)| meta.data));
+        let edges = canvas.storage(curves);
+        let glyphs = canvas.storage(metadata.iter().map(|(_, meta)| meta.data));
+        let storage = canvas.stream();
+        canvas.register_text(&storage, &glyphs, &edges);
         Self {
             shaper: Shaper {
                 characters: characters.into(),
                 baseline,
             },
-            edges,
-            glyphs,
-            storage: passes.storage_with_capacity("Text Glyphs", GLYPH_CAPACITY),
+            storage,
             placed: Vec::with_capacity(GLYPH_CAPACITY),
+            color: Unorm8x4::from_vec3(color),
         }
     }
 
-    pub fn shaper(&self) -> Shaper {
+    pub(crate) fn shaper(&self) -> Shaper {
         self.shaper.clone()
     }
 
-    pub const fn resources(&self) -> (&Storage<PlacedGlyph>, &Storage<Glyph>, &Storage<Edge>) {
-        (&self.storage, &self.glyphs, &self.edges)
+    pub(crate) fn width(&self, content: &str, style: TextStyle) -> f32 {
+        self.shaper.width(content, style)
     }
 
-    pub fn begin(&mut self) {
+    pub(crate) fn begin_frame(&mut self) {
         self.placed.clear();
     }
 
-    pub fn upload(&mut self) {
+    pub(crate) fn finish_frame(&self) {
         self.storage.upload(&self.placed);
     }
 
-    pub fn centered(&mut self, text: &str, style: TextStyle, center: Vec2) -> Line {
-        let shaped = self.shape(text, style);
-        let origin = vec2(center.x - shaped.width * 0.5, center.y + shaped.baseline);
-        self.place(&shaped, origin)
-    }
-
-    /// Places `text` with its left edge at `x`.
-    pub fn left(&mut self, text: &str, style: TextStyle, y: f32, x: f32) -> Line {
-        let shaped = self.shape(text, style);
-        self.place(&shaped, vec2(x, y + shaped.baseline))
-    }
-
-    /// Places `text` with its right edge at `x`.
-    pub fn right(&mut self, text: &str, style: TextStyle, y: f32, x: f32) -> Line {
-        let shaped = self.shape(text, style);
-        self.place(&shaped, vec2(x - shaped.width, y + shaped.baseline))
-    }
-
-    pub fn place_visible(&mut self, shaped: &ShapedLine, left: Vec2, clip: Range<f32>) -> Line {
+    pub(crate) fn place_visible(&mut self, shaped: &ShapedLine, left: Vec2, clip: Range<f32>) -> Line {
         let origin = vec2(left.x, left.y + shaped.baseline);
         let local = |x| (x - origin.x) / shaped.size;
         let start = shaped.glyphs.partition_point(|glyph| glyph.x < local(clip.start - EFFECT_PADDING)).saturating_sub(1);
@@ -465,12 +539,7 @@ impl Renderer {
         line
     }
 
-    pub fn fit(&mut self, text: &str, style: TextStyle, y: f32, left: f32, right: f32) -> Line {
-        let shaped = self.shape(text, style);
-        self.fit_shaped(&shaped, y, left, right)
-    }
-
-    pub fn fit_shaped(&mut self, shaped: &ShapedLine, y: f32, left: f32, right: f32) -> Line {
+    pub(crate) fn fit_shaped(&mut self, shaped: &ShapedLine, y: f32, left: f32, right: f32) -> Line {
         let x = if shaped.width <= right - left + 0.5 {
             (left + right - shaped.width) * 0.5
         } else {
@@ -501,17 +570,8 @@ impl Renderer {
             weight: shaped.weight,
             count: count as u32,
             first: first as u32,
-            color: Unorm8x4::from_vec3(COLOR),
+            color: self.color,
         }
-    }
-}
-
-#[cfg(not(target_arch = "spirv"))]
-impl Deref for Renderer {
-    type Target = Shaper;
-
-    fn deref(&self) -> &Self::Target {
-        &self.shaper
     }
 }
 
@@ -522,7 +582,7 @@ impl Shaper {
     }
 
     pub fn shape(&self, text: &str, style: TextStyle) -> ShapedLine {
-        self.shape_positioned([(text, 0.0)], style, MAX_LINE_GLYPHS)
+        self.shape_positioned([(text, 0.0)], style, usize::MAX)
     }
 
     pub fn width(&self, text: &str, style: TextStyle) -> f32 {
@@ -539,7 +599,7 @@ impl Shaper {
         let mut max = Vec2::splat(f32::MIN);
         let weight = style.normalized_weight();
         let mut width: f32 = 0.0;
-        let mut glyphs = Vec::with_capacity(max_glyphs.min(MAX_LINE_GLYPHS));
+        let mut glyphs = Vec::new();
         for (text, position) in parts {
             let mut x = position / style.size;
             for meta in text.chars().filter_map(|character| self.glyph(character)) {

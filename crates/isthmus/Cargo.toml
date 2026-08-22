@@ -14,6 +14,9 @@ glam = { workspace = true, features = ["libm"] }
 ash.workspace = true
 bytemuck.workspace = true
 glam = { workspace = true, features = ["std"] }
+smallvec.workspace = true
+ttf-parser.workspace = true
+tracing = "0.1.44"
 
 [lints]
 workspace = true

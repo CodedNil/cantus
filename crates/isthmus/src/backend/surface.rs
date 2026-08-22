@@ -10,9 +10,6 @@ pub struct Surface {
     surface: NonNull<c_void>,
 }
 
-unsafe impl Send for Surface {}
-unsafe impl Sync for Surface {}
-
 impl Surface {
     /// Wraps live Wayland display and surface pointers for Vulkan WSI.
     ///
@@ -36,7 +33,7 @@ pub enum Present {
     Validation,
 }
 
-pub(crate) struct SurfaceFrame {
+pub struct SurfaceFrame {
     pub image: vk::Image,
     pub view: vk::ImageView,
     pub index: u32,
@@ -64,7 +61,7 @@ pub struct SurfaceTarget {
     initialized: Vec<bool>,
     format: vk::Format,
     extent: vk::Extent2D,
-    frames: [FrameSlot; 3],
+    frames: [FrameSlot; 2],
     next_frame: usize,
 }
 
@@ -78,7 +75,7 @@ impl SurfaceTarget {
                 &vk::CommandBufferAllocateInfo::default()
                     .command_pool(inner.command_pool)
                     .level(vk::CommandBufferLevel::PRIMARY)
-                    .command_buffer_count(3),
+                    .command_buffer_count(2),
             )
         }?;
         let frames = from_fn(|index| FrameSlot {
@@ -121,7 +118,8 @@ impl SurfaceTarget {
         let chosen = formats
             .iter()
             .copied()
-            .find(|format| matches!(format.format, vk::Format::B8G8R8A8_UNORM | vk::Format::R8G8B8A8_UNORM))
+            .find(|format| format.format == vk::Format::B8G8R8A8_UNORM)
+            .or_else(|| formats.iter().copied().find(|format| format.format == vk::Format::R8G8B8A8_UNORM))
             .or_else(|| formats.first().copied())
             .ok_or(SetupError::UnsupportedSurface)?;
         let extent = if caps.current_extent.width == u32::MAX {
@@ -132,7 +130,7 @@ impl SurfaceTarget {
         } else {
             caps.current_extent
         };
-        let count = (caps.min_image_count + 1).min(if caps.max_image_count == 0 { u32::MAX } else { caps.max_image_count });
+        let count = caps.min_image_count;
         let alpha = [
             vk::CompositeAlphaFlagsKHR::PRE_MULTIPLIED,
             vk::CompositeAlphaFlagsKHR::POST_MULTIPLIED,
@@ -261,7 +259,7 @@ impl Drop for SurfaceTarget {
                 self.inner.device.destroy_semaphore(frame.acquire, None);
                 self.inner.device.destroy_semaphore(frame.complete, None);
             }
-            let commands: [vk::CommandBuffer; 3] = from_fn(|index| self.frames[index].command);
+            let commands = self.frames.iter().map(|frame| frame.command).collect::<Vec<_>>();
             self.inner.device.free_command_buffers(self.inner.command_pool, &commands);
             self.inner.surface_loader.destroy_surface(self.surface, None);
         }

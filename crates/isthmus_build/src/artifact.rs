@@ -16,6 +16,17 @@ pub fn shader_artifact(crate_dir: &Path) -> Result<PathBuf, String> {
     Ok(crate_dir.join(relative))
 }
 
+/// Resolves the Rust module that owns a package's paint declarations.
+///
+/// # Errors
+/// Returns an error when the manifest is unreadable.
+pub fn shader_source(crate_dir: &Path) -> Result<PathBuf, String> {
+    let manifest = read_manifest(crate_dir)?;
+    Ok(manifest_path(&manifest, &["package", "metadata", "isthmus", "source"])
+        .and_then(toml_edit::Item::as_str)
+        .map_or_else(|| crate_dir.join("src/lib.rs"), |source| crate_dir.join(source)))
+}
+
 fn read_manifest(crate_dir: &Path) -> Result<toml_edit::DocumentMut, String> {
     fs::read_to_string(crate_dir.join("Cargo.toml"))
         .map_err(|error| std::format!("failed to read shader package manifest: {error}"))?

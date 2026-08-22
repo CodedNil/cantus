@@ -7,35 +7,52 @@ extern crate self as isthmus;
 
 mod contract;
 mod data;
+pub mod float;
+#[cfg(not(target_arch = "spirv"))]
+mod frame;
+#[cfg(not(target_arch = "spirv"))]
+mod input;
+pub mod text;
 
 #[cfg(not(target_arch = "spirv"))]
-pub mod cpu;
+mod backend;
 
 pub use glam;
 pub use spirv_std;
 
 #[doc(hidden)]
-pub use isthmus_macros::{Render, data, host, shader, shader_module, system};
+pub use isthmus_macros::{data, paint, shader_module};
 
-pub use contract::{Sampler, Texture2D, Texture2DArray, pixel_to_ndc, quad_coord};
 #[cfg(not(target_arch = "spirv"))]
-pub use cpu::{
-    Storage, TextureView, ash,
-    context::{Context, Render, RenderFrame, SetupError},
-    pass::{Instance, Instances, PassBuilder},
-    program::{Color, Program},
-    surface::{Present, Surface, SurfaceTarget},
-    texture::{Extent3d, FilterableFloatFormat, SampledTexture, SampledTextureDimension, TextureWriteError},
+pub use backend::{
+    context::SetupError,
+    image::{ImageArray, TextureWriteError},
+    renderer::Renderer,
+    surface::Surface,
 };
-pub use data::{ShaderData, Unorm8x4};
+#[cfg(not(target_arch = "spirv"))]
+pub use contract::SurfaceHandle;
+pub use contract::{Fragment, FrameGlobals, FrameInfo, Quad};
+pub use data::{ImageHandle, ShaderData, Unorm8x4};
+#[cfg(not(target_arch = "spirv"))]
+pub use frame::Frame;
+#[cfg(not(target_arch = "spirv"))]
+pub use input::{InputEvent, Rect, Response};
+pub use text::TextFragment;
 
 #[doc(hidden)]
 pub mod __private {
+    pub use crate::contract::{DrawRecord, Fragment, Images, sample_image};
     #[cfg(not(target_arch = "spirv"))]
     pub use crate::{
-        contract::{Blend, PassContract, PassShared, Pipeline, ResourceType, pass_module_name},
-        cpu::{Binding, ResourceBinding},
+        backend::{Buffer, canvas::Canvas, renderer::ShaderModule},
+        contract::{IntoQuad, PipelineIdentity, PipelineKey, ShaderSpec, shader_module_name},
     };
     #[cfg(not(target_arch = "spirv"))]
     pub use bytemuck;
+
+    #[cfg(not(target_arch = "spirv"))]
+    pub trait Paint<Shared: crate::ShaderData>: Sized {
+        fn paint(self, canvas: &mut Canvas<Shared>);
+    }
 }

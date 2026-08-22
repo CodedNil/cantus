@@ -4,6 +4,7 @@ use crate::{
 };
 use arrayvec::ArrayString;
 use std::{collections::HashSet, error::Error, mem, sync::Arc, time::Instant};
+use tracing::{info, warn};
 
 mod enrichment;
 mod spotify;
@@ -15,14 +16,27 @@ pub type TrackId = ArrayString<22>;
 pub type PlaylistId = ArrayString<22>;
 pub type MusicResult<T> = Result<T, Box<dyn Error + Send + Sync>>;
 pub const TRACK_SPACING_MS: f32 = 4000.0;
+pub const MAX_PLAYLIST_TARGETS: usize = 8;
 pub(super) type PlaylistTracks = Arc<HashSet<TrackId>>;
 
-#[derive(Default)]
 pub struct PlaybackState {
     pub playing: bool,
     pub queue: Vec<Track>,
     pub playlists: Vec<CondensedPlaylist>,
     pub timeline: Timeline,
+    pub last_toggle: Instant,
+}
+
+impl Default for PlaybackState {
+    fn default() -> Self {
+        Self {
+            playing: false,
+            queue: Vec::new(),
+            playlists: Vec::new(),
+            timeline: Timeline::default(),
+            last_toggle: Instant::now(),
+        }
+    }
 }
 
 /// The observed and visually smoothed position of the playback queue.
@@ -60,6 +74,10 @@ impl Timeline {
 }
 
 impl PlaybackState {
+    pub fn mark_toggle(&mut self) {
+        self.last_toggle = Instant::now();
+    }
+
     fn observe(&mut self, index: usize, position_ms: f32, rate: f32, observed_at: Instant) {
         self.timeline.index = index.min(self.queue.len().saturating_sub(1));
         self.timeline.position_ms = position_ms;
@@ -134,11 +152,11 @@ pub struct Track {
 pub struct TrackRuntime {
     /// Album art, shared with other slots on the same URL and freed with the track.
     pub art: ArtState,
-    pub playlist_expansion: f32,
-    pub detail_alpha: f32,
-    pub primary_icon_alpha: f32,
     pub audio_features: Fetch<AudioFeatures>,
     pub(crate) lyrics: Fetch<Lyrics>,
+    pub(crate) detail_alpha: f32,
+    pub(crate) icon_alpha: f32,
+    pub(crate) playlist_expansion: f32,
 }
 
 impl Track {
@@ -190,6 +208,51 @@ impl MusicBackend {
 
     pub fn command(&self, command: PlaybackCommand) {
         self.0.command(command);
+    }
+
+    pub fn toggle_playing(&self, playing: bool) {
+        let playing = !playing;
+        info!("{} current track", if playing { "Playing" } else { "Pausing" });
+        self.command(PlaybackCommand::SetPlaying(playing));
+    }
+
+    pub fn rate_track(&self, playlists: &mut [CondensedPlaylist], track_id: TrackId, rating: u8) {
+        self.command(PlaybackCommand::UpdateLibrary {
+            track_id,
+            playlists: playlists
+                .iter_mut()
+                .filter_map(|playlist| {
+                    let add = playlist.rating_index? == rating;
+                    playlist.set_membership(track_id, add).then_some((playlist.id, add))
+                })
+                .collect(),
+            liked: Some(rating >= 5),
+        });
+    }
+
+    pub fn toggle_playlist(&self, playlists: &mut [CondensedPlaylist], track_id: TrackId, playlist_id: PlaylistId) {
+        let Some(playlist) = playlists.iter_mut().find(|playlist| playlist.id == playlist_id) else {
+            warn!(%playlist_id, %track_id, "Playlist not found for track");
+            return;
+        };
+        let add = !playlist.tracks.contains(&track_id);
+        playlist.set_membership(track_id, add);
+        self.command(PlaybackCommand::UpdateLibrary {
+            track_id,
+            playlists: vec![(playlist_id, add)],
+            liked: None,
+        });
+    }
+
+    pub fn seek(&self, timeline: &Timeline, clicked_index: usize, clicked_duration_ms: u32, fraction: f32) {
+        let skip_count = clicked_index.abs_diff(timeline.index);
+        if skip_count == 0 {
+            let milliseconds = if fraction < 0.05 { 0.0 } else { clicked_duration_ms as f32 * fraction }.round() as u32;
+            self.command(PlaybackCommand::Seek(milliseconds));
+        } else {
+            let direction = if timeline.index < clicked_index { 1 } else { -1 };
+            self.command(PlaybackCommand::Skip(direction * skip_count.min(10) as i8));
+        }
     }
 
     /// Fetches timed lyrics from the active music service.

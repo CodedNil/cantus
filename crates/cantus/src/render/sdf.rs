@@ -1,74 +1,125 @@
-use crate::render::{FrameData, smoothstep};
+use crate::render::Globals;
+#[cfg(not(target_arch = "spirv"))]
+use isthmus::Rect;
 use isthmus::{
-    glam::{FloatExt, UVec2, Vec2, Vec4, uvec2, vec2},
+    Quad,
+    float::FloatExt,
+    glam::{UVec2, Vec2, Vec3, Vec4, uvec2, vec2},
     spirv_std::arch::Derivative,
 };
-pub use isthmus::{pixel_to_ndc, quad_coord};
-
-#[cfg(target_arch = "spirv")]
-use isthmus::spirv_std::num_traits::Float;
 
 /// Where the drop shadow fades below the fragment kill threshold, plus an AA pixel.
 const SHADOW_REACH: f32 = 18.0;
 const ANTIALIAS_WIDTH: f32 = 0.55;
+/// Smallest coverage worth shading; analytic shadows never reach exact zero.
+pub const VISIBLE_ALPHA: f32 = 1.0 / 1024.0;
 
-/// Shared hover/click deformation used by every pill-shaped surface.
+#[isthmus::data]
+pub struct Pill {
+    pub x: f32,
+    pub y: f32,
+    pub width: f32,
+}
+
+impl Pill {
+    pub const fn new(x: f32, y: f32, width: f32) -> Self {
+        Self { x, y, width }
+    }
+
+    pub fn quad(self, frame: &Globals) -> Quad {
+        let margin = pill_margin(frame);
+        let min = vec2(self.x - margin, self.y - margin);
+        Quad::from_min_max(min, min + vec2(self.width + margin * 2.0, frame.panel_height + margin * 2.0))
+    }
+
+    pub fn sample(self, pixel: Vec2, frame: &Globals) -> Surface {
+        let size = vec2(self.width, frame.panel_height);
+        let local = pixel - vec2(self.x, self.y);
+        let distance = sd_capsule_box(local - size * 0.5, (size.x - size.y) * 0.5, size.y * 0.5);
+        let mouse_distance = if frame.info.mouse_pressure > 0.0 {
+            sd_capsule_box(frame.info.mouse_pos - vec2(self.x, self.y) - size * 0.5, (size.x - size.y) * 0.5, size.y * 0.5)
+        } else {
+            1.0
+        };
+        let (mouse_bulge, ripple_bulge, ripple, ripple_flash) = interaction(pixel, frame);
+        Surface::new(local, size, distance, mouse_distance, mouse_bulge, ripple_bulge, ripple, ripple_flash)
+    }
+
+    #[cfg(not(target_arch = "spirv"))]
+    pub const fn rect(self, height: f32) -> Rect {
+        Rect::new(self.x, self.y, self.x + self.width, self.y + height)
+    }
+}
+
 #[derive(Clone, Copy)]
-pub struct PillInteraction {
+pub struct Surface {
+    shape_distance: f32,
+    mouse_distance: f32,
     mouse_bulge: f32,
     ripple_bulge: f32,
+    /// Unmodified top-left-relative surface coordinates.
+    pub local: Vec2,
+    /// Ripple- and edge-refracted top-left-relative coordinates.
+    pub refracted: Vec2,
+    pub size: Vec2,
+    pub distance: f32,
+    pub mask: f32,
+    pub alpha: f32,
     pub ripple: Vec2,
     pub ripple_flash: f32,
 }
 
-#[derive(Clone, Copy)]
-pub struct SdfSurface {
-    pub distance: f32,
-    pub mouse_distance: f32,
-}
-
-impl SdfSurface {
-    pub const fn new(distance: f32, mouse_distance: f32) -> Self {
-        Self { distance, mouse_distance }
+impl Surface {
+    fn new(local: Vec2, size: Vec2, shape_distance: f32, mouse_distance: f32, mouse_bulge: f32, ripple_bulge: f32, ripple: Vec2, ripple_flash: f32) -> Self {
+        let mut surface = Self {
+            shape_distance,
+            mouse_distance,
+            mouse_bulge,
+            ripple_bulge,
+            local,
+            refracted: local,
+            size,
+            distance: shape_distance,
+            mask: 0.0,
+            alpha: 0.0,
+            ripple,
+            ripple_flash,
+        };
+        surface.resolve();
+        surface
     }
 
-    pub fn sample(pixel: Vec2, mouse: Vec2, shape: impl Fn(Vec2) -> f32) -> Self {
-        Self::new(shape(pixel), shape(mouse))
+    fn resolve(&mut self) {
+        self.distance = self.shape_distance - self.bulge() * 0.5;
+        let width = self.distance.fwidth().max(ANTIALIAS_WIDTH);
+        self.mask = self.distance.smoothstep(width, -width);
+        let shadow = (-self.distance.max(0.0) * 0.3).exp() * 0.16;
+        self.alpha = self.mask.max(shadow);
+        let uv = self.local / self.size;
+        self.refracted = (uv - (uv - 0.5) * (1.0 + self.distance.min(0.0) / 120.0).clamp(0.0, 0.6) * 0.08 - self.ripple * 0.04) * self.size;
     }
 
-    pub fn smooth_union(self, other: Self, radius: f32, blend: f32) -> Self {
-        Self {
-            distance: smooth_union(self.distance, other.distance, radius, blend),
-            mouse_distance: smooth_union(self.mouse_distance, other.mouse_distance, radius, blend),
-        }
-    }
-}
-
-impl PillInteraction {
-    pub fn bulge(self, surface: SdfSurface) -> f32 {
-        self.mouse_bulge * hover_mask(surface.mouse_distance) + self.ripple_bulge
+    pub fn union(mut self, shape_distance: f32, mouse_distance: f32, smoothing: f32, amount: f32) -> Self {
+        self.shape_distance = smooth_union(self.shape_distance, shape_distance, smoothing, amount);
+        self.mouse_distance = smooth_union(self.mouse_distance, mouse_distance, smoothing, amount);
+        self.resolve();
+        self
     }
 
-    /// Apply the shared hover/click expansion to an assembled signed-distance field.
-    pub fn expand(self, surface: SdfSurface) -> f32 {
-        surface.distance - self.bulge(surface) * 0.5
+    pub fn uv(self) -> Vec2 {
+        self.local / self.size
     }
 
-    /// Return the expanded distance, fill coverage, and combined fill/shadow alpha.
-    pub fn surface(self, surface: SdfSurface) -> (f32, f32, f32) {
-        Self::shade(self.expand(surface))
+    pub fn refracted_uv(self) -> Vec2 {
+        self.refracted / self.size
     }
 
-    /// Shade an already assembled and expanded surface distance.
-    pub fn shade(distance: f32) -> (f32, f32, f32) {
-        let mask = sdf_coverage(distance);
-        let shadow = (-distance.max(0.0) * 0.3).exp() * 0.16;
-        (distance, mask, mask.max(shadow))
+    pub fn bulge(self) -> f32 {
+        self.mouse_bulge * self.mouse_distance.smoothstep(0.5, -0.5) + self.ripple_bulge
     }
 
-    pub fn refract(self, local: Vec2, size: Vec2, distance: f32) -> Vec2 {
-        let uv = local / size;
-        uv - (uv - 0.5) * (1.0 + distance.min(0.0) / 120.0).clamp(0.0, 0.6) * 0.08 - self.ripple * 0.04
+    pub fn color(self, color: Vec3) -> Vec4 {
+        (color * self.mask).extend(self.alpha)
     }
 }
 
@@ -120,37 +171,14 @@ pub fn cloud_mass(p: Vec2, scale: f32, time: f32) -> f32 {
 }
 
 /// Pixels the pill can cover beyond its bounds: shadow always, bulges only while active.
-pub fn pill_margin(frame: &FrameData) -> f32 {
-    let mut bulge = frame.mouse_pressure * 8.0;
+pub fn pill_margin(frame: &Globals) -> f32 {
+    let mut bulge = frame.info.mouse_pressure * 8.0;
     for index in 0..frame.ripples.len() {
         let pulse = frame.ripples[index];
-        let fade = 1.0 - ((frame.time - pulse.start_time) * 1.2).saturate();
+        let fade = 1.0 - ((frame.info.time - pulse.start_time) * 1.2).saturate();
         bulge += pulse.strength * fade * fade * 11.0;
     }
     SHADOW_REACH + bulge * 0.5
-}
-
-pub fn pill_vertex(vertex: u32, frame: &FrameData, x: f32, y: f32, size: Vec2) -> (Vec4, Vec2) {
-    let margin = pill_margin(frame);
-    let pixel = vec2(x - margin, y - margin) + quad_coord(vertex) * (size + vec2(margin, frame.panel_height + margin) * 2.0);
-    (pixel_to_ndc(pixel, frame.screen_size), pixel)
-}
-
-pub fn pill_fragment(pixel: Vec2, frame: &FrameData, x: f32, y: f32, width: f32) -> (PillInteraction, Vec2, Vec2, SdfSurface) {
-    let size = vec2(width, frame.panel_height);
-    let local = pixel - vec2(x, y);
-    let distance = sd_capsule_box(local - size * 0.5, (size.x - size.y) * 0.5, size.y * 0.5);
-    let mouse_distance = if frame.mouse_pressure > 0.0 {
-        let mouse = frame.mouse_pos - vec2(x, y) - size * 0.5;
-        sd_capsule_box(mouse, (size.x - size.y) * 0.5, size.y * 0.5)
-    } else {
-        1.0
-    };
-    (pill_interaction(pixel, frame), local, size, SdfSurface::new(distance, mouse_distance))
-}
-
-pub fn hover_mask(mouse_distance: f32) -> f32 {
-    smoothstep(0.5, -0.5, mouse_distance)
 }
 
 /// 1.0 when positive, else 0.0; `f32::from(bool)` needs `OpCapability Int8`.
@@ -158,45 +186,38 @@ pub fn presence(value: f32) -> f32 {
     if value > 0.0 { 1.0 } else { 0.0 }
 }
 
-/// Derivative-aware coverage for an anti-aliased signed-distance edge.
-pub fn sdf_coverage(distance: f32) -> f32 {
-    let width = distance.fwidth().max(0.55);
-    smoothstep(width, -width, distance)
-}
-
-pub fn pill_interaction(pixel: Vec2, frame: &FrameData) -> PillInteraction {
+fn interaction(pixel: Vec2, frame: &Globals) -> (f32, f32, Vec2, f32) {
     let mut ripple = Vec2::ZERO;
     let mut ripple_flash = 0.0;
     for index in 0..frame.ripples.len() {
         let pulse = frame.ripples[index];
-        let progress = ((frame.time - pulse.start_time) * 1.2).saturate();
+        let progress = ((frame.info.time - pulse.start_time) * 1.2).saturate();
         // Uniform across the draw, so expired slots skip all per-pixel distance work.
         if pulse.strength > 0.0 && progress < 1.0 {
             let offset = pixel - pulse.origin;
             let distance = offset.length();
             let direction = offset.normalize_or_zero();
-            let wave = smoothstep(80.0, 0.0, (distance - progress * 600.0).abs()) * pulse.strength * (1.0 - progress);
+            let wave = (distance - progress * 600.0).abs().smoothstep(80.0, 0.0) * pulse.strength * (1.0 - progress);
             ripple += direction * wave * (1.0 - progress) * 0.5;
             ripple_flash = (ripple_flash + wave * 0.5).min(1.0);
         }
     }
 
-    let mouse_bulge = if frame.mouse_pressure > 0.0 {
-        smoothstep(150.0, 0.0, pixel.distance(frame.mouse_pos)) * frame.mouse_pressure * 8.0
+    let mouse_bulge = if frame.info.mouse_pressure > 0.0 {
+        pixel.distance(frame.info.mouse_pos).smoothstep(150.0, 0.0) * frame.info.mouse_pressure * 8.0
     } else {
         0.0
     };
-    PillInteraction {
-        mouse_bulge,
-        ripple_bulge: if ripple == Vec2::ZERO { 0.0 } else { ripple.length() * 22.0 },
-        ripple,
-        ripple_flash,
-    }
+    (mouse_bulge, if ripple == Vec2::ZERO { 0.0 } else { ripple.length() * 22.0 }, ripple, ripple_flash)
+}
+
+pub fn ripple_flash(pixel: Vec2, frame: &Globals) -> f32 {
+    interaction(pixel, frame).3
 }
 
 /// Edge light derived from the final SDF, so it follows every deformation.
 pub fn pill_sheen(distance: f32) -> f32 {
-    smoothstep(5.0, -3.0, distance) * 0.14
+    distance.smoothstep(5.0, -3.0) * 0.14
 }
 
 pub fn sd_rounded_box(point: Vec2, half_size: Vec2, radius: f32) -> f32 {
@@ -241,12 +262,16 @@ pub fn segment_distance(point: Vec2, start: Vec2, end: Vec2) -> f32 {
 
 /// Antialiased coverage of the outline of a shape at the given signed `distance`, `width` pixels wide.
 pub fn stroke(distance: f32, width: f32) -> f32 {
-    smoothstep(width + ANTIALIAS_WIDTH, width - ANTIALIAS_WIDTH, distance.abs())
+    distance.abs().smoothstep(width + ANTIALIAS_WIDTH, width - ANTIALIAS_WIDTH)
 }
 
 /// Antialiased coverage of the inside of a shape at the given signed `distance`.
 pub fn fill(distance: f32) -> f32 {
-    smoothstep(ANTIALIAS_WIDTH, -ANTIALIAS_WIDTH, distance)
+    distance.smoothstep(ANTIALIAS_WIDTH, -ANTIALIAS_WIDTH)
+}
+
+pub fn fill_rounded_box(point: Vec2, half_size: Vec2, radius: f32) -> f32 {
+    fill(sd_rounded_box(point, half_size, radius))
 }
 
 /// "‹" chevron with its tip at the origin, spanning to `extent` and its mirror; negate `extent.x` for a "›".
