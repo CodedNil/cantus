@@ -3,13 +3,12 @@ use crate::{
     app::{Background, CantusApp, update},
     render::{
         lyrics::{self, LyricsRequest},
-        text,
         track::{AudioFeatures, PALETTE_COLORS},
     },
 };
 use arrayvec::ArrayVec;
 use image::{RgbaImage, imageops};
-use isthmus::{Unorm8x4, glam::Vec3};
+use isthmus::{Image, Unorm8x4, glam::Vec3, text};
 use palette::{Clamp, IntoColor, Lch, color_theory::Analogous};
 use reqwest::Client;
 use serde::Deserialize;
@@ -18,7 +17,6 @@ use std::{
     collections::HashMap,
     error::Error,
     ops::Range,
-    sync::Arc,
     time::{Duration, Instant},
 };
 use tokio::task::spawn_blocking;
@@ -26,7 +24,7 @@ use tracing::warn;
 
 const RECCO_FEATURES_URL: &str = "https://api.reccobeats.com/v1/audio-features";
 const RETRY_DELAY: Duration = Duration::from_secs(30);
-pub const IMAGE_SIZE: u32 = 64;
+const IMAGE_SIZE: u32 = 64;
 pub type ArtState = Fetch<AlbumArt>;
 #[derive(Clone)]
 pub struct Enrichment {
@@ -56,7 +54,7 @@ impl Enrichment {
             duration_ms: track.duration_ms,
         };
         let http = self.http.clone();
-        self.background.spawn(async move {
+        self.background.spawn_update(async move {
             let uri = request.uri.clone();
             let state = fetch_lyrics(&request, &http, &music, &shaper).await;
             Some(update(move |app| {
@@ -109,7 +107,7 @@ impl<T> Fetch<T> {
 
 #[derive(Clone)]
 pub struct AlbumArt {
-    pub pixels: Arc<[u8]>,
+    pub image: Image,
     palette: [Unorm8x4; PALETTE_COLORS],
 }
 
@@ -133,7 +131,7 @@ impl Fetch<AlbumArt> {
 }
 
 async fn fetch_lyrics(request: &LyricsRequest, http: &Client, music: &MusicBackend, shaper: &text::Shaper) -> Fetch<lyrics::Lyrics> {
-    let result = if let Some(lyrics) = lyrics::fetch(http, request).await {
+    let result = if let Some(lyrics) = request.fetch(http).await {
         Ok(lyrics)
     } else if let Some(id) = request.track_id {
         music.lyrics(id).await
@@ -158,7 +156,7 @@ async fn fetch_art(http: &Client, url: &str) -> ArtState {
                 .to_rgba8();
             Ok::<_, image::ImageError>(AlbumArt {
                 palette: image_palette(&image),
-                pixels: image.into_raw().into(),
+                image: Image::rgba8([IMAGE_SIZE; 2], image.into_raw()),
             })
         })
         .await??)
@@ -211,7 +209,7 @@ impl CantusApp {
 
         if !audio.is_empty() {
             let http = self.enrichment.http.clone();
-            self.enrichment.background.spawn(async move {
+            self.enrichment.background.spawn_update(async move {
                 let features = resolve_audio_features(&http, &audio).await;
                 Some(update(move |app| {
                     for track in &mut app.playback.queue {
@@ -231,7 +229,7 @@ impl CantusApp {
         art.dedup();
         for url in art {
             let http = self.enrichment.http.clone();
-            self.enrichment.background.spawn(async move {
+            self.enrichment.background.spawn_update(async move {
                 let state = fetch_art(&http, &url).await;
                 Some(update(move |app| app.set_art_state(&url, &state)))
             });

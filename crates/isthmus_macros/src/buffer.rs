@@ -1,21 +1,15 @@
 use crate::isthmus_path;
-use proc_macro::TokenStream;
 use quote::quote;
-use syn::{Data, DeriveInput, Fields, parse_macro_input, parse_quote};
+use syn::{Data, DeriveInput, Fields, parse_quote};
 
-pub fn attribute(input: TokenStream) -> TokenStream {
-    let mut input = parse_macro_input!(input as DeriveInput);
-    let isthmus = isthmus_path();
-    input.attrs.push(parse_quote!(#[repr(C)]));
-    input.attrs.push(parse_quote!(#[derive(Clone, Copy)]));
-    input
+pub fn derive(input: &DeriveInput) -> proc_macro2::TokenStream {
+    if !input
         .attrs
-        .push(parse_quote!(#[cfg_attr(not(target_arch = "spirv"), derive(#isthmus::__private::bytemuck::Pod, #isthmus::__private::bytemuck::Zeroable))]));
-    let implementation = implementation(&input);
-    quote!(#input #implementation).into()
-}
-
-fn implementation(input: &DeriveInput) -> proc_macro2::TokenStream {
+        .iter()
+        .any(|attribute| matches!(&attribute.meta, syn::Meta::List(list) if attribute.path().is_ident("repr") && list.tokens.to_string() == "C"))
+    {
+        return syn::Error::new_spanned(input, "ShaderData requires #[repr(C)]").to_compile_error();
+    }
     let name = &input.ident;
     let isthmus = isthmus_path();
     let Data::Struct(data) = &input.data else {
@@ -31,6 +25,10 @@ fn implementation(input: &DeriveInput) -> proc_macro2::TokenStream {
     }
     let (impl_generics, type_generics, where_clause) = generics.split_for_impl();
     quote! {
-        impl #impl_generics #isthmus::ShaderData for #name #type_generics #where_clause {}
+        #[cfg(not(target_arch = "spirv"))]
+        unsafe impl #impl_generics #isthmus::__private::bytemuck::Zeroable for #name #type_generics #where_clause {}
+        #[cfg(not(target_arch = "spirv"))]
+        unsafe impl #impl_generics #isthmus::__private::bytemuck::Pod for #name #type_generics #where_clause {}
+        unsafe impl #impl_generics #isthmus::ShaderData for #name #type_generics #where_clause {}
     }
 }

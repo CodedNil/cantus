@@ -12,7 +12,7 @@ use crate::float::FloatExt;
 use {
     crate::{
         ShaderData,
-        backend::{Buffer, canvas::Canvas},
+        backend::{buffer::BufferRange, canvas::Canvas, context::Context},
     },
     std::{ops::Range, sync::Arc, vec::Vec},
     ttf_parser::{Face, GlyphId, OutlineBuilder, Tag},
@@ -22,7 +22,8 @@ const EFFECT_PADDING: f32 = 3.5;
 #[cfg(not(target_arch = "spirv"))]
 const GLYPH_CAPACITY: usize = 16_384;
 
-#[isthmus::data]
+#[repr(C)]
+#[derive(Clone, Copy, crate::ShaderData)]
 #[doc(hidden)]
 pub struct Edge {
     start: Vec2,
@@ -31,8 +32,8 @@ pub struct Edge {
     end_delta: Vec2,
 }
 
-#[isthmus::data]
-#[derive(Default)]
+#[repr(C)]
+#[derive(Clone, Copy, Default, crate::ShaderData)]
 pub struct Line {
     pub min: Vec2,
     pub max: Vec2,
@@ -139,8 +140,8 @@ impl<'a> TextFragment<'a> {
     }
 }
 
-#[isthmus::data]
-#[derive(Default)]
+#[repr(C)]
+#[derive(Clone, Copy, crate::ShaderData)]
 #[doc(hidden)]
 pub struct Glyph {
     min: Vec2,
@@ -149,8 +150,8 @@ pub struct Glyph {
     count: u32,
 }
 
-#[isthmus::data]
-#[derive(Default)]
+#[repr(C)]
+#[derive(Clone, Copy, crate::ShaderData)]
 #[doc(hidden)]
 pub struct PlacedGlyph {
     pub x: f32,
@@ -208,6 +209,7 @@ fn edge_distance(edge: Edge, weight: f32, point: Vec2, best_distance: f32) -> (f
 fn glyph_distance(edges: &[Edge], start: u32, count: u32, weight: f32, point: Vec2, size: f32) -> f32 {
     let mut distance_squared = f32::MAX;
     let mut winding = 0;
+    // Rust-GPU cannot lower this runtime slice iterator without a pointer-to-integer conversion.
     for index in 0..count {
         let (distance, edge_winding) = edge_distance(edges[(start + index) as usize], weight, point, distance_squared);
         distance_squared = distance;
@@ -360,7 +362,7 @@ pub struct Shaper {
 #[cfg(not(target_arch = "spirv"))]
 pub(crate) struct Text {
     shaper: Shaper,
-    storage: Buffer<PlacedGlyph>,
+    context: Context,
     placed: Vec<PlacedGlyph>,
     color: Unorm8x4,
 }
@@ -369,6 +371,38 @@ pub(crate) struct Text {
 pub struct TextLayout<'a> {
     text: &'a mut Text,
     shaped: ShapedLine,
+}
+
+#[cfg(not(target_arch = "spirv"))]
+pub struct TextScope<'a> {
+    text: &'a mut Text,
+}
+
+#[cfg(not(target_arch = "spirv"))]
+impl<'a> TextScope<'a> {
+    pub(crate) const fn new(text: &'a mut Text) -> Self {
+        Self { text }
+    }
+
+    pub fn line(&mut self, content: &str, style: TextStyle) -> TextLayout<'_> {
+        TextLayout::new(self.text, content, style)
+    }
+
+    pub fn width(&self, content: &str, style: TextStyle) -> f32 {
+        self.text.width(content, style)
+    }
+
+    pub fn fit(&mut self, shaped: &ShapedLine, y: f32, bounds: Range<f32>) -> Line {
+        self.text.fit_shaped(shaped, y, bounds.start, bounds.end)
+    }
+
+    pub fn visible(&mut self, shaped: &ShapedLine, left: Vec2, clip: Range<f32>) -> Line {
+        self.text.place_visible(shaped, left, clip)
+    }
+
+    pub fn shaper(&self) -> Shaper {
+        self.text.shaper()
+    }
 }
 
 #[cfg(not(target_arch = "spirv"))]
@@ -497,16 +531,16 @@ impl Text {
             .into_iter()
             .filter_map(|(character, id)| metadata.binary_search_by_key(&id, |&(id, _)| id).ok().map(|index| (character, metadata[index].1)))
             .collect::<Vec<_>>();
-        let edges = canvas.storage(curves);
-        let glyphs = canvas.storage(metadata.iter().map(|(_, meta)| meta.data));
-        let storage = canvas.stream();
-        canvas.register_text(&storage, &glyphs, &edges);
+        let context = canvas.context();
+        let edges = context.upload_static(&curves);
+        let glyphs = context.upload_static(&metadata.iter().map(|(_, meta)| meta.data).collect::<Vec<_>>());
+        canvas.register_text(glyphs, edges);
         Self {
             shaper: Shaper {
                 characters: characters.into(),
                 baseline,
             },
-            storage,
+            context,
             placed: Vec::with_capacity(GLYPH_CAPACITY),
             color: Unorm8x4::from_vec3(color),
         }
@@ -524,8 +558,8 @@ impl Text {
         self.placed.clear();
     }
 
-    pub(crate) fn finish_frame(&self) {
-        self.storage.upload(&self.placed);
+    pub(crate) fn finish_frame(&self) -> BufferRange {
+        self.context.upload(&self.placed)
     }
 
     pub(crate) fn place_visible(&mut self, shaped: &ShapedLine, left: Vec2, clip: Range<f32>) -> Line {
@@ -545,8 +579,7 @@ impl Text {
         } else {
             left
         };
-        let baseline = shaped.baseline;
-        self.place(shaped, vec2(x, y + baseline))
+        self.place(shaped, vec2(x, y + shaped.baseline))
     }
 
     fn place(&mut self, shaped: &ShapedLine, origin: Vec2) -> Line {

@@ -8,14 +8,17 @@ use crate::{
         PANEL_START,
         launcher::{BACKGROUND_RADIUS, LauncherKey},
         lyrics::EXTENSION as LYRICS_EXTENSION,
-        status::{AUDIO_SPECTRUM_BANDS, BATTERY_HIDDEN, ProcessorSample, submit_system_sample, submit_volume},
+        status::{AUDIO_SPECTRUM_BANDS, AudioMonitor, ProcessorSample, SystemSample},
         tempestas::EXTENSION as WEATHER_EXTENSION,
     },
 };
 use freedesktop_desktop_entry::{desktop_entries, get_languages_from_env};
 use isthmus::glam::vec2;
-use isthmus::{InputEvent, Surface, SurfaceHandle};
+use isthmus::{Image, InputEvent, SurfaceHandle};
 use microfft::real::rfft_1024;
+use raw_window_handle::{
+    DisplayHandle, HandleError, HasDisplayHandle, HasWindowHandle, RawDisplayHandle, RawWindowHandle, WaylandDisplayHandle, WaylandWindowHandle, WindowHandle,
+};
 use serde_json::Value;
 use std::{
     collections::{HashMap, HashSet},
@@ -23,13 +26,17 @@ use std::{
     ffi::c_void,
     fs::{self, File},
     io::{self, Read, Write},
-    os::{fd::AsFd, unix::net::UnixDatagram as BlockingUnixDatagram},
+    os::{
+        fd::AsFd,
+        unix::{net::UnixDatagram as BlockingUnixDatagram, process::CommandExt},
+    },
     path::{Path, PathBuf},
     process::{self, Command, Stdio},
     ptr::NonNull,
     sync::{
         Arc,
         atomic::{AtomicU32, Ordering},
+        mpsc::Sender,
     },
     thread,
     time::{Duration, Instant},
@@ -70,10 +77,10 @@ use wayland_protocols_wlr::layer_shell::v1::client::{
     zwlr_layer_shell_v1::{Layer as LayerStyle, ZwlrLayerShellV1},
     zwlr_layer_surface_v1::{self, Anchor as LayerAnchor, KeyboardInteractivity, ZwlrLayerSurfaceV1},
 };
-
-const PANEL_OVERFLOW: f32 = 16.0;
 use xkbcommon::xkb;
 use zbus::Connection as DbusConnection;
+
+const PANEL_OVERFLOW: f32 = 16.0;
 
 const AUDIO_SAMPLE_RATE: u32 = 48_000;
 const AUDIO_WINDOW_SIZE: usize = 1024;
@@ -88,14 +95,14 @@ pub struct DesktopApp {
     pub comment: String,
     pub icon_path: Option<PathBuf>,
     pub action: Option<(String, String)>,
-    pub icon_index: i32,
+    pub icon: Option<Image>,
 }
 
 /// Host integration used by app and render code.
 pub trait Platform {
     const STATUS_SAMPLE_INTERVAL: Duration;
 
-    fn start_status_monitor(background: &Background, updater: AppUpdater, spectrum: Arc<[AtomicU32; AUDIO_SPECTRUM_BANDS]>);
+    fn start_status_monitor(background: &Background, updates: Sender<SystemSample>, audio: Arc<AudioMonitor>);
     fn set_volume(volume: f32);
     fn run_power_action(background: &Background, action: usize);
     fn desktop_apps() -> Vec<DesktopApp>;
@@ -107,16 +114,15 @@ pub trait Platform {
 
 /// The Linux desktop [`Platform`].
 pub struct Linux;
-pub type Current = Linux;
 
 impl Platform for Linux {
     const STATUS_SAMPLE_INTERVAL: Duration = Duration::from_millis(500);
 
-    fn start_status_monitor(background: &Background, updater: AppUpdater, spectrum: Arc<[AtomicU32; AUDIO_SPECTRUM_BANDS]>) {
-        let volume_updater = updater.clone();
-        background.run(move || monitor_playback(&spectrum));
-        background.run(move || monitor_volume(&volume_updater));
-        background.run(move || monitor_status(&updater));
+    fn start_status_monitor(background: &Background, updates: Sender<SystemSample>, audio: Arc<AudioMonitor>) {
+        let volume = Arc::clone(&audio);
+        background.spawn_blocking(move || monitor_playback(&audio.spectrum));
+        background.spawn_blocking(move || monitor_volume(&volume.volume));
+        background.spawn_blocking(move || monitor_status(&updates));
     }
 
     fn set_volume(volume: f32) {
@@ -129,7 +135,7 @@ impl Platform for Linux {
     /// Calls logind directly, which is what `systemctl poweroff` does under the hood.
     fn run_power_action(background: &Background, action: usize) {
         let method = ["PowerOff", "Reboot"][action];
-        background.spawn(async move {
+        background.spawn_update(async move {
             let result = async {
                 DbusConnection::system()
                     .await?
@@ -170,7 +176,7 @@ impl Platform for Linux {
                     comment: entry.comment(&locales).unwrap_or_default().into_owned(),
                     icon_path: entry.icon().and_then(resolve_icon),
                     action,
-                    icon_index: -1,
+                    icon: None,
                 })
             })
             .collect()
@@ -178,9 +184,29 @@ impl Platform for Linux {
 
     /// Strips desktop-entry field codes (`%f %F %u %U %i %c %k`) and launches the command, detached.
     fn spawn(exec: &str) {
-        let mut args = exec.split_whitespace().filter(|token| !token.starts_with('%'));
-        let Some(program) = args.next() else { return };
-        if let Err(error) = Command::new(program).args(args).stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::null()).spawn() {
+        let mut fields = exec.split_whitespace().filter(|token| !token.starts_with('%'));
+        let Some(program) = fields.next() else { return };
+        let args = fields.collect::<Vec<_>>();
+        if Command::new("systemd-run")
+            .args(["--user", "--collect", "--quiet", "--"])
+            .arg(program)
+            .args(&args)
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .is_ok()
+        {
+            return;
+        }
+        if let Err(error) = Command::new(program)
+            .args(args)
+            .process_group(0)
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+        {
             warn!(%error, program, "Failed to launch application");
         }
     }
@@ -195,7 +221,7 @@ impl Platform for Linux {
         let path = launcher_socket_path();
         let _ = fs::remove_file(&path);
         let updater = updater.clone();
-        background.spawn(async move {
+        background.spawn_update(async move {
             let socket = match UnixDatagram::bind(&path) {
                 Ok(socket) => socket,
                 Err(error) => {
@@ -237,7 +263,7 @@ fn resolve_icon(icon: &str) -> Option<PathBuf> {
     freedesktop_icons::lookup(icon).with_size(64).find()
 }
 
-fn monitor_status(updater: &AppUpdater) {
+fn monitor_status(updates: &Sender<SystemSample>) {
     let Ok(mut system) = System::new() else {
         warn!("sysinfo unavailable; system status monitor disabled");
         return;
@@ -256,25 +282,22 @@ fn monitor_status(updater: &AppUpdater) {
             usage: system.global_cpu_usage() / 100.0,
             memory: system.used_memory() as f32 / system.total_memory().max(1) as f32,
         };
-        let gpu = gpus
-            .as_ref()
-            .and_then(gpu_sample)
-            .map(|[temperature, usage, memory]| ProcessorSample { temperature, usage, memory });
+        let gpu = gpus.as_ref().and_then(gpu_sample);
         let battery_level = battery_sample(battery.as_deref());
-        if !submit_system_sample(updater, cpu, gpu, battery_level) {
+        if updates.send(SystemSample { cpu, gpu, battery_level }).is_err() {
             break;
         }
         thread::sleep(Linux::STATUS_SAMPLE_INTERVAL);
     }
 }
 
-fn gpu_sample(gpus: &Gpus) -> Option<[f32; 3]> {
+fn gpu_sample(gpus: &Gpus) -> Option<ProcessorSample> {
     let device = gpus.iter().max_by_key(|gpu| gpu.total_memory().unwrap_or_default())?;
-    Some([
-        device.temperature().unwrap_or_default(),
-        device.usage().unwrap_or_default() / 100.0,
-        device.used_memory().unwrap_or_default() as f32 / device.total_memory().unwrap_or_default().max(1) as f32,
-    ])
+    Some(ProcessorSample {
+        temperature: device.temperature().unwrap_or_default(),
+        usage: device.usage().unwrap_or_default() / 100.0,
+        memory: device.used_memory().unwrap_or_default() as f32 / device.total_memory().unwrap_or_default().max(1) as f32,
+    })
 }
 
 fn find_battery() -> Option<PathBuf> {
@@ -285,24 +308,17 @@ fn find_battery() -> Option<PathBuf> {
         .find(|path| fs::read_to_string(path.join("type")).is_ok_and(|kind| kind.trim().eq_ignore_ascii_case("battery")))
 }
 
-/// Charge level, negated while charging, or `BATTERY_HIDDEN` with no battery or idle at full.
-fn battery_sample(path: Option<&Path>) -> f32 {
-    let Some(path) = path else {
-        return BATTERY_HIDDEN;
-    };
+/// Charge level, negated while charging, or absent with no battery or idle at full.
+fn battery_sample(path: Option<&Path>) -> Option<f32> {
+    let path = path?;
     let read = |name: &str| fs::read_to_string(path.join(name));
-    let Ok(level) = read("capacity").map(|level| level.trim().parse::<f32>()) else {
-        return BATTERY_HIDDEN;
-    };
-    let Ok(level) = level.map(|level| level / 100.0) else {
-        return BATTERY_HIDDEN;
-    };
+    let level = read("capacity").ok()?.trim().parse::<f32>().ok()? / 100.0;
     if read("status").is_ok_and(|status| status.trim().eq_ignore_ascii_case("charging")) {
-        -level.max(f32::EPSILON)
+        Some(-level.max(f32::EPSILON))
     } else if level >= 0.995 {
-        BATTERY_HIDDEN
+        None
     } else {
-        level
+        Some(level)
     }
 }
 
@@ -352,12 +368,10 @@ impl PipeWireState {
     }
 }
 
-fn monitor_volume(updater: &AppUpdater) {
+fn monitor_volume(volume: &AtomicU32) {
     loop {
-        match capture_volume(updater) {
-            Ok(false) => break,
-            Err(error) => warn!(%error, "PipeWire volume monitor stopped"),
-            Ok(true) => {}
+        if let Err(error) = capture_volume(volume) {
+            warn!(%error, "PipeWire volume monitor stopped");
         }
         thread::sleep(Duration::from_secs(1));
     }
@@ -369,22 +383,18 @@ fn piped(command: &mut Command) -> io::Result<(process::Child, process::ChildStd
     Ok((child, output))
 }
 
-fn capture_volume(updater: &AppUpdater) -> io::Result<bool> {
+fn capture_volume(volume: &AtomicU32) -> io::Result<()> {
     let (mut child, output) = piped(Command::new("pw-dump").args(["--monitor", "--no-colors", "--indent", "0"]))?;
     let mut state = PipeWireState::default();
     for batch in serde_json::Deserializer::from_reader(output).into_iter::<Vec<Value>>() {
         for object in batch.map_err(io::Error::other)? {
-            if let Some(volume) = state.update(&object)
-                && !submit_volume(updater, volume)
-            {
-                child.kill()?;
-                child.wait()?;
-                return Ok(false);
+            if let Some(level) = state.update(&object) {
+                volume.store(level.to_bits(), Ordering::Relaxed);
             }
         }
     }
     child.wait()?;
-    Ok(true)
+    Ok(())
 }
 
 fn capture_playback(levels: &[AtomicU32; AUDIO_SPECTRUM_BANDS]) -> io::Result<()> {
@@ -512,6 +522,26 @@ pub fn run() {
     }
 }
 
+#[derive(Clone, Copy)]
+struct NativeSurface {
+    display: NonNull<c_void>,
+    window: NonNull<c_void>,
+}
+
+impl HasDisplayHandle for NativeSurface {
+    fn display_handle(&self) -> Result<DisplayHandle<'_>, HandleError> {
+        let handle = RawDisplayHandle::Wayland(WaylandDisplayHandle::new(self.display));
+        Ok(unsafe { DisplayHandle::borrow_raw(handle) })
+    }
+}
+
+impl HasWindowHandle for NativeSurface {
+    fn window_handle(&self) -> Result<WindowHandle<'_>, HandleError> {
+        let handle = RawWindowHandle::Wayland(WaylandWindowHandle::new(self.window));
+        Ok(unsafe { WindowHandle::borrow_raw(handle) })
+    }
+}
+
 #[derive(Default)]
 struct LayerShellApp {
     cantus: CantusApp,
@@ -537,8 +567,8 @@ struct LayerShellApp {
     selection: Option<WlDataOffer>,
     offer_is_text: bool,
     output: Option<WlOutput>,
-    pending_bar_surface: Option<Surface>,
-    pending_launcher_surface: Option<Surface>,
+    pending_bar_surface: Option<NativeSurface>,
+    pending_launcher_surface: Option<NativeSurface>,
     launcher_surface: Option<SurfaceHandle>,
     scale: Option<f32>,
     surface_width: Option<f32>,
@@ -660,10 +690,10 @@ impl LayerShellApp {
         Some(text)
     }
 
-    fn create_render_surface(&self, wl_surface: &WlSurface) -> Surface {
+    fn create_render_surface(&self, wl_surface: &WlSurface) -> NativeSurface {
         let display = self.display_handle.expect("missing Wayland display handle");
         let window = NonNull::new(wl_surface.id().as_ptr().cast()).expect("missing Wayland surface pointer");
-        unsafe { Surface::wayland(display, window) }
+        NativeSurface { display, window }
     }
 
     const fn active_surface(&self) -> &WlSurface {
@@ -689,6 +719,7 @@ impl LayerShellApp {
         }
         self.repeat = None;
         if open {
+            drop(self.bar_frame_callback.take());
             self.launcher_configured = false;
             self.launcher_width = None;
             self.launcher_height = None;
@@ -750,7 +781,7 @@ impl LayerShellApp {
         {
             let (width, height) = self.buffer_size(self.bar_surface_size());
             if width > 0 && height > 0 {
-                self.cantus.initialize_renderer(surface, width, height);
+                self.cantus.initialize_renderer(&surface, width, height);
             } else {
                 self.pending_bar_surface = Some(surface);
             }
@@ -758,7 +789,7 @@ impl LayerShellApp {
         if let Some(surface) = self.pending_launcher_surface.take() {
             let (width, height) = self.buffer_size(self.launcher_surface_size());
             if let Some(gpu) = &mut self.cantus.gpu {
-                self.launcher_surface = Some(gpu.add_surface(surface, (width, height).into()).expect("launcher surface is incompatible"));
+                self.launcher_surface = Some(gpu.add_surface(&surface, (width, height).into()).expect("launcher surface is incompatible"));
             }
         }
         self.update_scale_and_viewport();
@@ -772,7 +803,9 @@ impl LayerShellApp {
             && buffer_height > 0
             && let Some(gpu) = &mut self.cantus.gpu
         {
-            gpu.resize(SurfaceHandle::PRIMARY, [buffer_width, buffer_height]);
+            if let Some(surface) = self.cantus.bar_surface {
+                gpu.resize(surface, [buffer_width, buffer_height]);
+            }
             if let Some(surface) = self.launcher_surface {
                 let (width, height) = launcher_size;
                 gpu.resize(surface, (width, height).into());
@@ -785,16 +818,17 @@ impl LayerShellApp {
             self.set_clipboard(&text, qhandle);
         }
         self.update_input_region(qhandle);
-        let bar = self.wl_surface.as_ref().unwrap().clone();
-        if self.bar_frame_callback.is_none() {
-            self.bar_frame_callback = Some(bar.frame(qhandle, ()));
-        }
-        bar.commit();
         if let Some(launcher) = self.launcher_wl_surface.clone() {
             if self.launcher_frame_callback.is_none() {
                 self.launcher_frame_callback = Some(launcher.frame(qhandle, ()));
             }
             launcher.commit();
+        } else {
+            let bar = self.wl_surface.as_ref().unwrap().clone();
+            if self.bar_frame_callback.is_none() {
+                self.bar_frame_callback = Some(bar.frame(qhandle, ()));
+            }
+            bar.commit();
         }
     }
 
@@ -822,9 +856,11 @@ impl LayerShellApp {
         let compositor = self.compositor.as_ref().unwrap();
         let region = compositor.create_region(qhandle, ());
         if let Some(gpu) = self.cantus.gpu.as_mut() {
-            let surface = self.launcher_surface.unwrap_or(SurfaceHandle::PRIMARY);
+            let Some(surface) = self.launcher_surface.or(self.cantus.bar_surface) else {
+                return;
+            };
             for rect in gpu.take_input_regions(surface) {
-                let [x, y, width, height] = [rect.x0, rect.y0, rect.x1 - rect.x0, rect.y1 - rect.y0].map(|value| value.round() as i32);
+                let [x, y, width, height] = [rect.min.x, rect.min.y, rect.max.x - rect.min.x, rect.max.y - rect.min.y].map(|value| value.round() as i32);
                 region.add(x, y, width, height);
             }
         }
@@ -911,11 +947,14 @@ dispatch!(WpFractionalScaleV1, |state, _proxy, event, qhandle| {
 
 dispatch!(WlCallback, |state, proxy, event, qhandle| {
     if matches!(event, wl_callback::Event::Done { .. }) {
-        let is_bar = state.bar_frame_callback.as_ref().is_some_and(|callback| callback.id() == proxy.id());
-        let consumed = if is_bar {
-            state.bar_frame_callback.take().is_some()
+        let consumed = if state.bar_frame_callback.as_ref().is_some_and(|callback| callback.id() == proxy.id()) {
+            state.bar_frame_callback.take();
+            true
+        } else if state.launcher_frame_callback.as_ref().is_some_and(|callback| callback.id() == proxy.id()) {
+            state.launcher_frame_callback.take();
+            true
         } else {
-            state.launcher_frame_callback.take().is_some_and(|callback| callback.id() == proxy.id())
+            false
         };
         if consumed {
             state.try_render_frame(qhandle);
@@ -1111,7 +1150,9 @@ dispatch!(WlPointer, |state, _proxy, event, _qhandle| {
     let Some(gpu) = state.cantus.gpu.as_mut() else {
         return;
     };
-    let surface = surface.unwrap_or(SurfaceHandle::PRIMARY);
+    let Some(surface) = surface.or(state.cantus.bar_surface) else {
+        return;
+    };
     match event {
         wl_pointer::Event::Enter {
             surface: wl_surface,

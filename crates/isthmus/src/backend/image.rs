@@ -1,18 +1,15 @@
-use super::context::{Context, Inner, transition_image};
-use crate::ImageHandle;
+use super::context::{Context, Inner};
+use crate::data::ImageHandle;
 use ash::vk;
-use core::{error::Error, fmt};
 use std::{
-    borrow::ToOwned,
-    cell::{Cell, Ref, RefCell},
-    rc::Rc,
-    string::String,
+    cell::Cell,
+    rc::{Rc, Weak as RcWeak},
     sync::{Arc, Weak},
-    vec,
     vec::Vec,
 };
 
 const IMAGE_BLOCK_BYTES: u64 = 4 * 1024 * 1024;
+const CACHE_LAYERS: usize = 64;
 
 #[derive(Default)]
 pub(super) struct ImageAllocator {
@@ -53,31 +50,19 @@ impl ImageAllocator {
     }
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum TextureWriteError {
-    EmptyRegion,
-    OutOfBounds,
-    InvalidDataLength { expected: usize, actual: usize },
-}
-impl fmt::Display for TextureWriteError {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "{self:?}")
-    }
-}
-impl Error for TextureWriteError {}
-
-pub struct Image {
-    inner: Arc<Inner>,
-    pub raw: vk::Image,
-    pub view: vk::ImageView,
-    pub layers: u32,
+pub(super) struct Image {
+    inner: Rc<Inner>,
+    pub(super) raw: vk::Image,
+    pub(super) view: vk::ImageView,
+    pub(super) layers: u32,
+    pub(super) initialized: Cell<bool>,
 }
 
-pub struct ImageUpload {
-    pub image: Weak<Image>,
-    pub origin: [u32; 3],
-    pub size: [u32; 2],
-    pub pixels: Arc<[u8]>,
+pub(super) struct ImageUpload {
+    pub(super) image: RcWeak<Image>,
+    pub(super) origin: [u32; 3],
+    pub(super) size: [u32; 2],
+    pub(super) pixels: Arc<[u8]>,
 }
 impl Drop for Image {
     fn drop(&mut self) {
@@ -93,115 +78,97 @@ struct Extent3d {
     height: u32,
     depth_or_array_layers: u32,
 }
-pub struct SampledTexture {
+struct SampledTexture {
     context: Context,
-    pub(crate) image: Arc<Image>,
+    pub(crate) image: Rc<Image>,
     size: Extent3d,
-    bytes: u32,
 }
 
-#[derive(Clone)]
-pub struct TextureHeap {
-    images: Rc<RefCell<Vec<Arc<Image>>>>,
-    frame: Rc<Cell<u64>>,
+pub(super) struct ImageCache {
+    textures: Vec<CachedTexture>,
+    frame: u64,
     capacity: u32,
 }
 
-impl TextureHeap {
+impl ImageCache {
     pub(crate) fn new(capacity: u32) -> Self {
         Self {
-            images: Rc::new(RefCell::new(Vec::with_capacity(capacity as usize))),
-            frame: Rc::new(Cell::new(0)),
+            textures: Vec::with_capacity(capacity as usize),
+            frame: 0,
             capacity,
         }
     }
 
-    pub(crate) fn insert(&self, image: Arc<Image>) -> u32 {
-        let mut images = self.images.borrow_mut();
-        assert!(images.len() < self.capacity as usize, "texture heap is full");
-        let index = images.len() as u32;
-        images.push(image);
-        index
-    }
-
-    pub(crate) fn images(&self) -> Ref<'_, [Arc<Image>]> {
-        Ref::map(self.images.borrow(), Vec::as_slice)
-    }
-
-    pub(crate) fn begin_frame(&self) {
-        self.frame.set(self.frame.get().wrapping_add(1));
-    }
-}
-
-pub struct ImageArray {
-    texture: SampledTexture,
-    index: u32,
-    layers: Vec<Layer>,
-    frame: Rc<Cell<u64>>,
-}
-
-#[derive(Clone)]
-enum Layer {
-    Available,
-    Permanent,
-    Cached { key: String, used: u64 },
-}
-
-impl ImageArray {
-    pub(crate) fn new(context: &Context, heap: &TextureHeap, size: [u32; 2], layers: usize) -> Self {
+    pub(crate) fn image(&mut self, context: &Context, size: [u32; 2], pixels: &Arc<[u8]>) -> ImageHandle {
+        let source = Arc::downgrade(pixels);
+        for texture in &mut self.textures {
+            if texture.size == size
+                && let Some(layer) = texture
+                    .layers
+                    .iter_mut()
+                    .position(|layer| layer.source.as_ref().is_some_and(|cached| cached.ptr_eq(&source)))
+            {
+                texture.layers[layer].used = self.frame;
+                return ImageHandle::new(texture.index, layer as u32);
+            }
+        }
+        for texture in &mut self.textures {
+            if texture.size == size
+                && let Some(layer) = texture.layers.iter_mut().position(|layer| layer.used != self.frame)
+                && texture.texture.write([0, 0, layer as u32], size, Arc::clone(pixels))
+            {
+                texture.layers[layer] = CachedLayer {
+                    source: Some(source),
+                    used: self.frame,
+                };
+                return ImageHandle::new(texture.index, layer as u32);
+            }
+        }
+        assert!(self.textures.len() < self.capacity as usize, "image descriptor capacity exceeded");
+        let index = self.textures.len() as u32;
         let texture = SampledTexture::new(
             context,
             Extent3d {
                 width: size[0],
                 height: size[1],
-                depth_or_array_layers: layers as u32,
+                depth_or_array_layers: CACHE_LAYERS as u32,
             },
         );
-        let index = heap.insert(texture.image.clone());
-        Self {
-            texture,
-            index,
-            layers: vec![Layer::Available; layers],
-            frame: Rc::clone(&heap.frame),
-        }
+        assert!(texture.write([0, 0, 0], size, Arc::clone(pixels)), "validated image upload was rejected");
+        let mut layers = Vec::with_capacity(CACHE_LAYERS);
+        layers.push(CachedLayer {
+            source: Some(source),
+            used: self.frame,
+        });
+        layers.resize_with(CACHE_LAYERS, CachedLayer::default);
+        self.textures.push(CachedTexture { texture, size, index, layers });
+        ImageHandle::new(index, 0)
     }
 
-    pub fn cache(&mut self, key: &str, size: [u32; 2], pixels: &Arc<[u8]>) -> Option<ImageHandle> {
-        let frame = self.frame.get();
-        let existing = self.layers.iter().position(|layer| matches!(layer, Layer::Cached { key: cached, .. } if cached == key));
-        if let Some(layer) = existing {
-            if let Layer::Cached { used, .. } = &mut self.layers[layer] {
-                *used = frame;
-            }
-            return Some(ImageHandle::new(self.index, layer as u32));
-        }
-        let layer = self.available(frame)?;
-        self.texture.write([0, 0, layer as u32], size, Arc::clone(pixels)).ok()?;
-        self.layers[layer] = Layer::Cached { key: key.to_owned(), used: frame };
-        Some(ImageHandle::new(self.index, layer as u32))
+    pub(crate) const fn begin_frame(&mut self) {
+        self.frame = self.frame.wrapping_add(1);
     }
 
-    /// # Errors
-    /// Returns an error when the array is full or the pixel data is invalid.
-    pub fn insert(&mut self, size: [u32; 2], data: Vec<u8>) -> Result<ImageHandle, TextureWriteError> {
-        let frame = self.frame.get();
-        let layer = self.available(frame).ok_or(TextureWriteError::OutOfBounds)?;
-        self.texture.write([0, 0, layer as u32], size, data)?;
-        self.layers[layer] = Layer::Permanent;
-        Ok(ImageHandle::new(self.index, layer as u32))
+    pub(crate) fn images(&self) -> impl Iterator<Item = &Rc<Image>> {
+        self.textures.iter().map(|texture| &texture.texture.image)
     }
+}
 
-    fn available(&self, frame: u64) -> Option<usize> {
-        self.layers.iter().position(|layer| match layer {
-            Layer::Available => true,
-            Layer::Cached { used, .. } => *used != frame,
-            Layer::Permanent => false,
-        })
-    }
+struct CachedTexture {
+    texture: SampledTexture,
+    size: [u32; 2],
+    index: u32,
+    layers: Vec<CachedLayer>,
+}
+
+#[derive(Default)]
+struct CachedLayer {
+    source: Option<Weak<[u8]>>,
+    used: u64,
 }
 impl SampledTexture {
     fn new(context: &Context, size: Extent3d) -> Self {
-        let inner = context.inner();
+        let inner = context.0.clone();
         let vk_format = vk::Format::R8G8B8A8_UNORM;
         let raw = unsafe {
             inner.device.create_image(
@@ -248,46 +215,36 @@ impl SampledTexture {
             )
         }
         .expect("create image view");
-        let image = Arc::new(Image {
+        let image = Rc::new(Image {
             inner,
             raw,
             view,
             layers: size.depth_or_array_layers,
+            initialized: Cell::new(false),
         });
-        let result = Self {
+        Self {
             context: context.clone(),
             image,
             size,
-            bytes: 4,
-        };
-        result.transition(vk::ImageLayout::UNDEFINED, vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL);
-        result
+        }
     }
-    fn transition(&self, old: vk::ImageLayout, new: vk::ImageLayout) {
-        let image = self.image.raw;
-        let layers = self.size.depth_or_array_layers;
-        self.context
-            .immediate(|command| transition_image(&self.context.0.device, command, image, old, new, layers))
-            .expect("transition Vulkan image");
-    }
-    fn write(&self, [x, y, layer]: [u32; 3], [width, height]: [u32; 2], data: impl Into<Arc<[u8]>>) -> Result<(), TextureWriteError> {
+    fn write(&self, [x, y, layer]: [u32; 3], [width, height]: [u32; 2], data: impl Into<Arc<[u8]>>) -> bool {
         let data = data.into();
         if width == 0 || height == 0 {
-            return Err(TextureWriteError::EmptyRegion);
+            return false;
         }
         if x + width > self.size.width || y + height > self.size.height || layer >= self.size.depth_or_array_layers {
-            return Err(TextureWriteError::OutOfBounds);
+            return false;
         }
-        let expected = (width * height * self.bytes) as usize;
-        if data.len() != expected {
-            return Err(TextureWriteError::InvalidDataLength { expected, actual: data.len() });
+        if data.len() != (width * height * 4) as usize {
+            return false;
         }
         self.context.queue_image(ImageUpload {
-            image: Arc::downgrade(&self.image),
+            image: Rc::downgrade(&self.image),
             origin: [x, y, layer],
             size: [width, height],
             pixels: data,
         });
-        Ok(())
+        true
     }
 }

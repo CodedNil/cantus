@@ -15,24 +15,23 @@ mouse gestures generic across programs
 
 
 bugs:
-text on the weather widget top needs outline show it doesnt blend into clouds
+text on the weather widget top needs outline so it doesnt blend into clouds
 outline still doesnt work perfectly for example for M
 make the playhead clickable surface shorter so its only around the button, then stars are still clickable
-
-ripple doesnt fire when clicking status pill other than the buttons
-maybe ripple should be a generic click thing for any surface that doesnt get blocked by clicks above?
 
 lyrics:
 if a song doesnt have lyrics the previous songs always shows on the left without moving
 empty space between tracks displays no lrics when it should just count as a large space
+the lyric to word could be a lot better and simpler, the variable speed
 
 track:
-second icon row for tracks doesnt get a sdf background
-verify track runtime two alphas and what each really does
+shouldnt have mod host
 
-launcher:
-enter key render icon should be a bit further left
-launched programs by the launcher seem to be owned by cantus? when cantus is closed they close
-cant search atm
+tempestas:
+shouldnt have mod host
 
 do a pass through everything, cantus and isthmus, identify cruft and legacy stuff to remove, identify places where we arent using immediate mode to its fullest potential, identify some radical suggestions to improve both the backend and frontend of isthmus/cantus
+
+
+remove #[isthmus::shader_data] since we build teh structs ourselves
+maybe better data transfer? dont reupload if its same as previous frame unless thats not an issue to do

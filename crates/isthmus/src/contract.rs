@@ -1,8 +1,31 @@
-use crate::ShaderData;
+#[cfg(not(target_arch = "spirv"))]
+use crate::backend::renderer::ShaderModule;
+use crate::{ShaderData, data::ImageHandle};
 use spirv_std::image::{Image2dArray, SampledImage};
+#[cfg(not(target_arch = "spirv"))]
+use std::sync::{
+    OnceLock,
+    atomic::{AtomicUsize, Ordering},
+};
+
+pub type ImageHeap = spirv_std::RuntimeArray<SampledImage<Image2dArray>>;
 
 #[doc(hidden)]
-pub type Images = spirv_std::RuntimeArray<SampledImage<Image2dArray>>;
+pub struct ShaderImage<'a> {
+    heap: &'a ImageHeap,
+    handle: ImageHandle,
+}
+
+impl<'a> ShaderImage<'a> {
+    pub const fn new(heap: &'a ImageHeap, handle: ImageHandle) -> Self {
+        Self { heap, handle }
+    }
+
+    pub fn sample(&self, uv: glam::Vec2) -> glam::Vec4 {
+        let (image, layer) = self.handle.parts();
+        unsafe { self.heap.index(image as usize) }.sample(uv.extend(layer as f32))
+    }
+}
 
 #[repr(C)]
 #[derive(Clone, Copy, Default)]
@@ -14,21 +37,52 @@ pub struct FrameInfo {
     pub time: f32,
 }
 
-pub trait FrameGlobals: ShaderData {
-    fn frame_info(&self) -> &FrameInfo;
-    fn frame_info_mut(&mut self) -> &mut FrameInfo;
+#[cfg(not(target_arch = "spirv"))]
+pub struct Program<Shared> {
+    pub(crate) shader: ShaderModule,
+    pub(crate) frame_info_mut: fn(&mut Shared) -> &mut FrameInfo,
 }
 
-impl ShaderData for FrameInfo {}
-
-/// Samples an image handle whose descriptor index was created by Isthmus.
-///
-/// The unchecked descriptor-array access is confined here: `ImageHandle` is
-/// opaque and host code can only construct one through Isthmus image storage.
-#[doc(hidden)]
-pub fn sample_image(heap: &Images, handle: crate::ImageHandle, uv: glam::Vec2) -> Option<glam::Vec4> {
-    handle.parts().map(|(image, layer)| unsafe { heap.index(image as usize) }.sample(uv.extend(layer as f32)))
+#[cfg(not(target_arch = "spirv"))]
+impl<Shared> Program<Shared> {
+    pub const fn new(shader: ShaderModule, frame_info_mut: fn(&mut Shared) -> &mut FrameInfo) -> Self {
+        Self { shader, frame_info_mut }
+    }
 }
+
+#[cfg(not(target_arch = "spirv"))]
+#[derive(Clone, Copy)]
+pub struct PaintPipeline {
+    pub(crate) token: &'static PipelineToken,
+    pub(crate) entry: &'static str,
+}
+
+#[cfg(not(target_arch = "spirv"))]
+impl PaintPipeline {
+    pub const fn new(token: &'static PipelineToken, entry: &'static str) -> Self {
+        Self { token, entry }
+    }
+}
+
+#[cfg(not(target_arch = "spirv"))]
+static NEXT_PIPELINE: AtomicUsize = AtomicUsize::new(0);
+
+#[cfg(not(target_arch = "spirv"))]
+#[derive(Default)]
+pub struct PipelineToken(OnceLock<usize>);
+
+#[cfg(not(target_arch = "spirv"))]
+impl PipelineToken {
+    pub const fn new() -> Self {
+        Self(OnceLock::new())
+    }
+
+    pub(crate) fn index(&self) -> usize {
+        *self.0.get_or_init(|| NEXT_PIPELINE.fetch_add(1, Ordering::Relaxed))
+    }
+}
+
+unsafe impl ShaderData for FrameInfo {}
 
 #[repr(C)]
 #[derive(Clone, Copy)]
@@ -39,9 +93,8 @@ pub struct Quad {
     pub axis: glam::Vec2,
 }
 
-impl ShaderData for Quad {}
+unsafe impl ShaderData for Quad {}
 
-#[doc(hidden)]
 #[repr(C)]
 #[derive(Clone, Copy)]
 #[cfg_attr(not(target_arch = "spirv"), derive(bytemuck::Pod, bytemuck::Zeroable))]
@@ -50,20 +103,7 @@ pub struct DrawRecord {
     pub payload: u32,
 }
 
-impl ShaderData for DrawRecord {}
-
-#[cfg(not(target_arch = "spirv"))]
-#[doc(hidden)]
-pub trait IntoQuad {
-    fn into_quad(self) -> Quad;
-}
-
-#[cfg(not(target_arch = "spirv"))]
-impl IntoQuad for Quad {
-    fn into_quad(self) -> Quad {
-        self
-    }
-}
+unsafe impl ShaderData for DrawRecord {}
 
 impl Quad {
     pub const fn new(center: glam::Vec2, size: glam::Vec2, axis: glam::Vec2) -> Self {
@@ -83,20 +123,34 @@ impl Quad {
         }
     }
 
-    #[doc(hidden)]
     pub fn local(self, pixel: glam::Vec2) -> glam::Vec2 {
         let offset = pixel - self.center;
         glam::vec2(offset.dot(self.axis), offset.dot(self.axis.perp()))
     }
+
+    #[must_use]
+    pub fn expanded(mut self, amount: f32) -> Self {
+        let expansion = glam::Vec2::splat(amount);
+        self.size += expansion * 2.0;
+        self
+    }
 }
 
-#[allow(dead_code)]
 #[derive(Clone, Copy)]
 pub struct Fragment {
     pub pixel: glam::Vec2,
     pub local: glam::Vec2,
     pub uv: glam::Vec2,
-    pub size: glam::Vec2,
+}
+
+impl Fragment {
+    pub fn new(pixel: glam::Vec2, local: glam::Vec2, size: glam::Vec2) -> Self {
+        Self {
+            pixel,
+            local,
+            uv: local / size + 0.5,
+        }
+    }
 }
 
 pub struct RasterSample {
@@ -120,14 +174,23 @@ fn pixel_to_ndc(pixel: glam::Vec2, screen_size: glam::Vec2) -> glam::Vec4 {
 
 #[cfg(not(target_arch = "spirv"))]
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
-pub struct SurfaceHandle(pub(crate) usize);
+pub struct SurfaceHandle {
+    index: u32,
+    generation: u32,
+}
 
 #[cfg(not(target_arch = "spirv"))]
 impl SurfaceHandle {
-    pub const PRIMARY: Self = Self(0);
+    pub(crate) const fn new(index: usize, generation: u32) -> Self {
+        Self { index: index as u32, generation }
+    }
 
     pub(crate) const fn index(self) -> usize {
-        self.0
+        self.index as usize
+    }
+
+    pub(crate) const fn generation(self) -> u32 {
+        self.generation
     }
 }
 
@@ -136,30 +199,7 @@ impl SurfaceHandle {
 pub trait ShaderSpec {
     type Shared: ShaderData;
     type Instance: ShaderData;
-    const NAME: &'static str;
-}
-
-#[cfg(not(target_arch = "spirv"))]
-#[doc(hidden)]
-#[derive(Clone, Copy, PartialEq, Eq)]
-pub struct PipelineKey(usize);
-
-#[cfg(not(target_arch = "spirv"))]
-impl PipelineKey {
-    #[doc(hidden)]
-    pub const fn new(index: usize) -> Self {
-        Self(index)
-    }
-
-    pub(crate) const fn index(self) -> usize {
-        self.0
-    }
-}
-
-#[cfg(not(target_arch = "spirv"))]
-#[doc(hidden)]
-pub trait PipelineIdentity {
-    const KEY: PipelineKey;
+    const PIPELINE: PaintPipeline;
 }
 
 /// Removes the crate name from a Rust module path.

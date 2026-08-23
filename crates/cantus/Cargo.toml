@@ -20,6 +20,7 @@ isthmus = { path = "../isthmus" }
 
 [target.'cfg(not(target_arch = "spirv"))'.dependencies]
 zbus = { version = "5.19.0", default-features = false, features = ["tokio"] }
+ashpd = { version = "0.13.13", default-features = false, features = ["location", "tokio"] }
 bytemuck.workspace = true
 arrayvec = { version = "0.7.8", features = ["serde"] }
 tracing = { version = "0.1.44", default-features = false, features = ["std"] }
@@ -46,6 +47,7 @@ image = { version = "0.25.10", default-features = false, features = [
 ] }
 palette = { version = "0.7.7", default-features = false, features = ["std"] }
 parking_lot = "0.12.5"
+raw-window-handle.workspace = true
 serde = { workspace = true, features = ["rc"] }
 serde_json = "1.0.151"
 toml = "1.1.4"

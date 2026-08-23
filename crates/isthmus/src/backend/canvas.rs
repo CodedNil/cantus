@@ -1,13 +1,11 @@
 use super::{
-    Buffer, BufferLifetime,
-    buffer::{BufferBinding, BufferRange},
+    buffer::BufferRange,
     context::{Context, Inner, RenderFrame},
-    image::{ImageArray, TextureHeap},
+    image::ImageCache,
 };
 use crate::{
-    contract::{DrawRecord, PipelineIdentity, PipelineKey, Quad, ShaderSpec, SurfaceHandle},
-    data::ShaderData,
-    text::{Edge, Glyph, Line, PlacedGlyph},
+    contract::{DrawRecord, PaintPipeline, Quad, ShaderSpec, SurfaceHandle},
+    data::{ImageHandle, ShaderData},
 };
 use ash::vk;
 use core::{marker::PhantomData, mem::size_of, slice::from_ref};
@@ -17,25 +15,26 @@ use std::{ffi::CString, format, rc::Rc, sync::Arc, vec::Vec};
 const IMAGE_CAPACITY: u32 = 16;
 
 struct GpuPipeline {
-    inner: Arc<Inner>,
+    inner: Rc<Inner>,
     pipeline: vk::Pipeline,
-    layout: Rc<PipelineLayout>,
 }
 
 impl GpuPipeline {
-    fn new(context: &Context, shader: vk::ShaderModule, format: vk::Format, root: &str, name: &str, layout: Rc<PipelineLayout>) -> Self {
-        let inner = context.inner();
+    fn new(context: &Context, shader: &[u32], format: vk::Format, root: &str, name: &str, layout: vk::PipelineLayout) -> Self {
+        let inner = context.0.clone();
         let vertex = CString::new(format!("{root}::__isthmus_quad::vertex")).unwrap();
         let fragment = CString::new(format!("{name}::fragment")).unwrap();
+        let mut vertex_module = vk::ShaderModuleCreateInfo::default().code(shader);
+        let mut fragment_module = vk::ShaderModuleCreateInfo::default().code(shader);
         let stages = [
             vk::PipelineShaderStageCreateInfo::default()
                 .stage(vk::ShaderStageFlags::VERTEX)
-                .module(shader)
-                .name(&vertex),
+                .name(&vertex)
+                .push_next(&mut vertex_module),
             vk::PipelineShaderStageCreateInfo::default()
                 .stage(vk::ShaderStageFlags::FRAGMENT)
-                .module(shader)
-                .name(&fragment),
+                .name(&fragment)
+                .push_next(&mut fragment_module),
         ];
         let assembly = vk::PipelineInputAssemblyStateCreateInfo::default().topology(vk::PrimitiveTopology::TRIANGLE_STRIP);
         let viewport = vk::PipelineViewportStateCreateInfo::default().viewport_count(1).scissor_count(1);
@@ -60,52 +59,15 @@ impl GpuPipeline {
             .multisample_state(&multisample)
             .color_blend_state(&color_blend)
             .dynamic_state(&dynamic_state)
-            .layout(layout.raw)
+            .layout(layout)
             .push_next(&mut rendering);
         let pipeline = unsafe { inner.device.create_graphics_pipelines(vk::PipelineCache::null(), &[info], None) }.unwrap()[0];
-        Self { inner, pipeline, layout }
+        Self { inner, pipeline }
     }
 
-    fn draw(&self, frame: &RenderFrame<'_>, draws: BufferRange, payload: BufferRange, text: &[Rc<dyn BufferBinding>; 3], images: &TextureHeap, first: u32, count: u32) {
-        let command = frame.command();
-        let text = text.each_ref().map(|buffer| buffer.range());
-        let buffers = [draws, payload, text[0], text[1], text[2]];
-        let buffer_infos = buffers.map(|range| vk::DescriptorBufferInfo::default().buffer(range.raw).offset(range.offset).range(range.size));
-        let image_infos = images
-            .images()
-            .iter()
-            .map(|image| {
-                vk::DescriptorImageInfo::default()
-                    .sampler(self.inner.sampler)
-                    .image_view(image.view)
-                    .image_layout(vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL)
-            })
-            .collect::<SmallVec<[vk::DescriptorImageInfo; IMAGE_CAPACITY as usize]>>();
-        let mut writes = SmallVec::<[vk::WriteDescriptorSet<'_>; 6]>::new();
-        for (binding, info) in buffer_infos.iter().enumerate() {
-            writes.push(
-                vk::WriteDescriptorSet::default()
-                    .dst_binding(binding as u32)
-                    .descriptor_type(vk::DescriptorType::STORAGE_BUFFER)
-                    .buffer_info(from_ref(info)),
-            );
-        }
-        if !image_infos.is_empty() {
-            writes.push(
-                vk::WriteDescriptorSet::default()
-                    .dst_binding(5)
-                    .descriptor_type(vk::DescriptorType::COMBINED_IMAGE_SAMPLER)
-                    .image_info(&image_infos),
-            );
-        }
+    fn draw(&self, command: vk::CommandBuffer, first: u32, count: u32) {
         unsafe {
             self.inner.device.cmd_bind_pipeline(command, vk::PipelineBindPoint::GRAPHICS, self.pipeline);
-            self.inner
-                .device
-                .cmd_push_constants(command, self.layout.raw, vk::ShaderStageFlags::ALL_GRAPHICS, 0, frame.shared());
-            self.inner
-                .push_descriptors
-                .cmd_push_descriptor_set(command, vk::PipelineBindPoint::GRAPHICS, self.layout.raw, 0, &writes);
             self.inner.device.cmd_draw(command, 4, count, 0, first);
         }
     }
@@ -118,15 +80,15 @@ impl Drop for GpuPipeline {
 }
 
 struct PipelineLayout {
-    inner: Arc<Inner>,
+    inner: Rc<Inner>,
     raw: vk::PipelineLayout,
     descriptors: vk::DescriptorSetLayout,
 }
 
 impl PipelineLayout {
     fn new<Shared: ShaderData>(context: &Context) -> Self {
-        const { assert!(size_of::<Shared>() <= 128, "shared push constants exceed Vulkan 1.3's guaranteed 128 bytes") };
-        let inner = context.inner();
+        const { assert!(size_of::<Shared>() <= 256, "shared push constants exceed Vulkan 1.4's guaranteed 256 bytes") };
+        let inner = context.0.clone();
         let bindings = [
             storage_binding(0),
             storage_binding(1),
@@ -203,62 +165,59 @@ fn blend() -> vk::PipelineColorBlendAttachmentState {
 
 pub struct Canvas<Shared> {
     context: Context,
-    shader: vk::ShaderModule,
+    shader: Vec<u32>,
     format: vk::Format,
     root: &'static str,
-    layout: Rc<PipelineLayout>,
-    pipelines: Vec<RegisteredPipeline>,
-    default_text: Option<PipelineKey>,
+    pipelines: Vec<Option<GpuPipeline>>,
+    layout: PipelineLayout,
     draws: Vec<DrawRecord>,
     payload: Vec<u8>,
     uploaded_draws: BufferRange,
     uploaded_payload: BufferRange,
     paints: Vec<Vec<Paint>>,
-    surface: Option<SurfaceHandle>,
-    images: TextureHeap,
-    text: Option<[Rc<dyn BufferBinding>; 3]>,
+    images: ImageCache,
+    text: [BufferRange; 3],
     marker: PhantomData<Shared>,
 }
 
 impl<Shared: ShaderData> Canvas<Shared> {
-    pub(crate) fn new(context: &Context, shader: vk::ShaderModule, format: vk::Format, root: &'static str) -> Self {
+    pub(crate) fn new(context: &Context, shader: Vec<u32>, format: vk::Format, root: &'static str) -> Self {
         Self {
             context: context.clone(),
             shader,
             format,
             root,
-            layout: Rc::new(PipelineLayout::new::<Shared>(context)),
             pipelines: Vec::new(),
-            default_text: None,
+            layout: PipelineLayout::new::<Shared>(context),
             draws: Vec::new(),
             payload: Vec::new(),
             uploaded_draws: BufferRange::default(),
             uploaded_payload: BufferRange::default(),
             paints: Vec::new(),
-            surface: None,
-            images: TextureHeap::new(IMAGE_CAPACITY),
-            text: None,
+            images: ImageCache::new(IMAGE_CAPACITY),
+            text: [BufferRange::default(); 3],
             marker: PhantomData,
         }
     }
 
-    pub fn image_array(&self, size: [u32; 2], layers: usize) -> ImageArray {
-        ImageArray::new(&self.context, &self.images, size, layers)
+    pub(crate) fn image(&mut self, size: [u32; 2], pixels: &Arc<[u8]>) -> ImageHandle {
+        self.images.image(&self.context, size, pixels)
     }
 
-    pub fn storage<T: ShaderData>(&self, values: impl IntoIterator<Item = T>) -> Buffer<T> {
-        Buffer::with_data(&self.context, &values.into_iter().collect::<Vec<_>>())
+    pub(crate) fn context(&self) -> Context {
+        self.context.clone()
     }
 
-    pub fn stream<T: ShaderData>(&self) -> Buffer<T> {
-        Buffer::new(&self.context, BufferLifetime::Frame)
+    pub(crate) const fn format(&self) -> vk::Format {
+        self.format
     }
 
-    pub(crate) fn register_text(&mut self, placed: &Buffer<PlacedGlyph>, glyphs: &Buffer<Glyph>, edges: &Buffer<Edge>) {
-        self.text = Some([placed.binding(), glyphs.binding(), edges.binding()]);
+    pub(crate) const fn register_text(&mut self, glyphs: BufferRange, edges: BufferRange) {
+        self.text[1] = glyphs;
+        self.text[2] = edges;
     }
 
-    pub fn begin_frame(&mut self) {
+    pub(super) fn begin_frame(&mut self) {
         self.draws.clear();
         self.payload.clear();
         self.uploaded_draws = BufferRange::default();
@@ -267,74 +226,53 @@ impl<Shared: ShaderData> Canvas<Shared> {
             paints.clear();
         }
         self.images.begin_frame();
-        self.surface = Some(SurfaceHandle::PRIMARY);
     }
 
-    pub(crate) const fn replace_surface(&mut self, surface: SurfaceHandle) -> SurfaceHandle {
-        self.surface.replace(surface).expect("frame has no active surface")
-    }
-
-    #[doc(hidden)]
-    pub fn register<S>(&mut self)
+    pub(crate) fn emit<S>(&mut self, surface: SurfaceHandle, quad: Quad, value: S::Instance)
     where
-        S: ShaderSpec<Shared = Shared> + PipelineIdentity,
+        S: ShaderSpec<Shared = Shared>,
     {
         const {
-            assert!(size_of::<S::Instance>() > 0, "shader payloads cannot be zero-sized");
             assert!(size_of::<S::Instance>() % 4 == 0, "shader payload size must be a multiple of four bytes");
         }
-        self.pipelines.push(RegisteredPipeline { name: S::NAME, gpu: None });
+        self.emit_raw(surface, S::PIPELINE, quad, bytemuck::bytes_of(&value));
     }
 
-    #[doc(hidden)]
-    pub fn register_default_text<S>(&mut self)
-    where
-        S: ShaderSpec<Shared = Shared, Instance = Line> + PipelineIdentity,
-    {
-        self.register::<S>();
-        self.default_text = Some(S::KEY);
-    }
-
-    #[doc(hidden)]
-    pub fn emit<S>(&mut self, quad: Quad, value: S::Instance)
-    where
-        S: ShaderSpec<Shared = Shared> + PipelineIdentity,
-    {
-        self.emit_raw(S::KEY, quad, bytemuck::bytes_of(&value));
-    }
-
-    pub(crate) fn emit_text(&mut self, line: Line) {
-        if line.is_empty() {
-            return;
+    fn emit_raw(&mut self, surface: SurfaceHandle, spec: PaintPipeline, quad: Quad, value: &[u8]) {
+        let pipeline = spec.token.index();
+        if self.pipelines.len() <= pipeline {
+            self.pipelines.resize_with(pipeline + 1, || None);
         }
-        self.emit_raw(self.default_text.expect("default text pipeline is not registered"), line.quad(), bytemuck::bytes_of(&line));
-    }
-
-    fn emit_raw(&mut self, key: PipelineKey, quad: Quad, value: &[u8]) {
-        let pipeline = key.index();
-        if self.pipelines[pipeline].gpu.is_none() {
-            let name = self.pipelines[pipeline].name;
-            self.pipelines[pipeline].gpu = Some(GpuPipeline::new(&self.context, self.shader, self.format, self.root, name, Rc::clone(&self.layout)));
+        if self.pipelines[pipeline].is_none() {
+            self.pipelines[pipeline] = Some(GpuPipeline::new(&self.context, &self.shader, self.format, self.root, spec.entry, self.layout.raw));
         }
         let payload = u32::try_from(self.payload.len()).expect("frame payload exceeds four gigabytes");
         self.payload.extend_from_slice(value);
         let draw = u32::try_from(self.draws.len()).expect("frame draw count exceeds u32");
         self.draws.push(DrawRecord { quad, payload });
-        let surface = self.surface.expect("paint emitted outside a surface scope").index();
+        let surface = surface.index();
         if self.paints.len() <= surface {
             self.paints.resize_with(surface + 1, Vec::new);
         }
-        self.paints[surface].push(Paint { pipeline: key, draw });
+        self.paints[surface].push(Paint { pipeline, draw });
     }
 
-    pub(crate) fn prepare(&mut self) {
+    pub(crate) fn prepare(&mut self, placed_glyphs: BufferRange) {
+        self.text[0] = placed_glyphs;
         self.uploaded_draws = self.context.upload(&self.draws);
         self.uploaded_payload = self.context.upload_bytes(&self.payload);
     }
 
-    pub(crate) fn draw_surface(&self, frame: &RenderFrame<'_>, surface: SurfaceHandle) {
+    pub(super) fn has_draws(&self, surface: SurfaceHandle) -> bool {
+        self.paints.get(surface.index()).is_some_and(|paints| !paints.is_empty())
+    }
+
+    pub(super) fn draw_surface(&self, frame: &RenderFrame<'_>, surface: SurfaceHandle) {
         let Some(paints) = self.paints.get(surface.index()) else { return };
-        let text = self.text.as_ref().expect("text renderer is not initialized");
+        if paints.is_empty() {
+            return;
+        }
+        self.bind_frame(frame);
         let mut start = 0;
         while start < paints.len() {
             let first = paints[start];
@@ -342,27 +280,59 @@ impl<Shared: ShaderData> Canvas<Shared> {
             while end < paints.len() && paints[end].pipeline == first.pipeline && paints[end].draw == paints[end - 1].draw + 1 {
                 end += 1;
             }
-            self.pipelines[first.pipeline.index()].gpu.as_ref().expect("paint pipeline is not initialized").draw(
-                frame,
-                self.uploaded_draws,
-                self.uploaded_payload,
-                text,
-                &self.images,
-                first.draw,
-                (end - start) as u32,
-            );
+            self.pipelines[first.pipeline]
+                .as_ref()
+                .expect("paint pipeline is not initialized")
+                .draw(frame.command, first.draw, (end - start) as u32);
             start = end;
+        }
+    }
+
+    fn bind_frame(&self, frame: &RenderFrame<'_>) {
+        let buffers = [self.uploaded_draws, self.uploaded_payload, self.text[0], self.text[1], self.text[2]];
+        let buffer_infos = buffers.map(|range| vk::DescriptorBufferInfo::default().buffer(range.raw).offset(range.offset).range(range.size));
+        let image_infos = self
+            .images
+            .images()
+            .map(|image| {
+                vk::DescriptorImageInfo::default()
+                    .sampler(self.context.0.sampler)
+                    .image_view(image.view)
+                    .image_layout(vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL)
+            })
+            .collect::<SmallVec<[vk::DescriptorImageInfo; IMAGE_CAPACITY as usize]>>();
+        let mut writes = SmallVec::<[vk::WriteDescriptorSet<'_>; 6]>::new();
+        for (binding, info) in buffer_infos.iter().enumerate() {
+            writes.push(
+                vk::WriteDescriptorSet::default()
+                    .dst_binding(binding as u32)
+                    .descriptor_type(vk::DescriptorType::STORAGE_BUFFER)
+                    .buffer_info(from_ref(info)),
+            );
+        }
+        if !image_infos.is_empty() {
+            writes.push(
+                vk::WriteDescriptorSet::default()
+                    .dst_binding(5)
+                    .descriptor_type(vk::DescriptorType::COMBINED_IMAGE_SAMPLER)
+                    .image_info(&image_infos),
+            );
+        }
+        unsafe {
+            self.context
+                .0
+                .device
+                .cmd_push_constants(frame.command, self.layout.raw, vk::ShaderStageFlags::ALL_GRAPHICS, 0, frame.shared);
+            self.context
+                .0
+                .push_descriptors
+                .cmd_push_descriptor_set(frame.command, vk::PipelineBindPoint::GRAPHICS, self.layout.raw, 0, &writes);
         }
     }
 }
 
 #[derive(Clone, Copy)]
 struct Paint {
-    pipeline: PipelineKey,
+    pipeline: usize,
     draw: u32,
-}
-
-struct RegisteredPipeline {
-    name: &'static str,
-    gpu: Option<GpuPipeline>,
 }

@@ -1,7 +1,7 @@
 use crate::render::{Globals, PANEL_START};
 use core::f32::consts::TAU;
 use isthmus::{
-    Quad,
+    Fragment, Quad,
     float::FloatExt,
     glam::{Vec2, Vec3, vec2, vec3},
 };
@@ -21,12 +21,11 @@ pub struct Particles {
     emission_debt: f32,
 }
 
-#[isthmus::data]
-#[derive(Default)]
+#[derive(Clone, Copy, Default)]
 pub struct Particle {
     pub spawn_pos: Vec2,
     pub spawn_vel: Vec2,
-    pub end_time: f32,
+    pub spawn_time: f32,
     pub duration: f32,
     pub color: Vec3,
 }
@@ -37,19 +36,17 @@ impl Particles {
         self.emit_playhead(playback, frame);
 
         let time = frame.globals.info.time;
-        for &particle in self.particles.iter().filter(|particle| particle.end_time > time) {
-            let dt = time - (particle.end_time - particle.duration);
+        for &particle in self.particles.iter().filter(|p| p.spawn_time + p.duration > time) {
+            let dt = time - particle.spawn_time;
             let half_size = vec2(5.0, 2.5) * (dt / particle.duration + 0.5);
             let quad = Quad::new(particle.spawn_pos + particle.spawn_vel * dt, half_size * 2.0, particle.spawn_vel.normalize_or_zero());
+            let opacity = (1.0 - dt / particle.duration) * dt.smoothstep(0.0, 0.15) * 0.3;
+            let premultiplied = particle.color * opacity;
             // GPU: Particle sprite.
-            frame.paint_quad(quad, |frame: Globals, fragment: isthmus::Fragment, particle: Particle| {
-                let dt = frame.info.time - (particle.end_time - particle.duration);
-                let life = dt / particle.duration;
+            frame.paint_quad(quad, |fragment: Fragment, _frame: Globals, premultiplied: Vec3, opacity: f32| {
                 let centered = fragment.uv * 2.0 - 1.0;
                 let shape = (centered * vec2(0.8, 1.0)).length().smoothstep(1.0, 0.2);
-                let fade = (1.0 - life) * dt.smoothstep(0.0, 0.15);
-                let alpha = fade * shape * 0.3;
-                (particle.color * alpha).extend(alpha)
+                (premultiplied * shape).extend(opacity * shape)
             });
         }
     }
@@ -66,24 +63,24 @@ impl Particles {
             let emit_count = self.emission_debt.floor() as usize;
             self.emission_debt -= emit_count as f32;
             let horizontal_bias = (movement.abs().powf(0.2) * movement.signum()).clamp(-3.0, 3.0);
-            for particle in self.particles.iter_mut().filter(|particle| particle.end_time <= frame.globals.info.time).take(emit_count) {
+            for particle in self.particles.iter_mut().filter(|p| p.spawn_time + p.duration <= frame.globals.info.time).take(emit_count) {
                 let y_fraction = fastrand::f32();
                 particle.spawn_pos = vec2(frame.globals.playhead_x, PANEL_START + frame.services.config.height * (0.1 + y_fraction * 0.85));
                 particle.spawn_vel = vec2(fastrand::usize(40..60) as f32 * horizontal_bias, (y_fraction - 0.5) * 2.0 * VELOCITY_Y);
                 particle.duration = LIFETIME_START + (LIFETIME_END - LIFETIME_START) * fastrand::f32();
                 particle.color = spark_color(palette[fastrand::usize(0..palette.len())].to_vec3());
-                particle.end_time = frame.globals.info.time + particle.duration;
+                particle.spawn_time = frame.globals.info.time;
             }
         }
     }
 
-    pub fn burst(&mut self, frame: &Frame) {
-        for particle in self.particles.iter_mut().filter(|particle| particle.end_time <= frame.globals.info.time).take(20) {
+    pub fn burst(&mut self, position: Vec2, time: f32) {
+        for particle in self.particles.iter_mut().filter(|p| p.spawn_time + p.duration <= time).take(20) {
             particle.duration = 0.5 + fastrand::f32();
-            particle.spawn_pos = frame.pointer();
+            particle.spawn_pos = position;
             particle.spawn_vel = Vec2::from_angle(fastrand::f32() * TAU) * (30.0 + fastrand::f32() * 20.0);
             particle.color = spark_color(vec3(1.0, 0.843, 0.196));
-            particle.end_time = frame.globals.info.time + particle.duration;
+            particle.spawn_time = time;
         }
     }
 }

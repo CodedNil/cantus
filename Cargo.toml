@@ -10,10 +10,12 @@ default-members = ["crates/cantus"]
 
 [workspace.dependencies]
 ash = "0.38.0"
+ash-window = "0.13.0"
 bytemuck = { version = "1.25.2", features = ["derive", "min_const_generics"] }
 glam = { version = "0.33.5", default-features = false, features = ["bytemuck", "u32"] }
 serde = { version = "1.0.229", features = ["derive"] }
 smallvec = "1.15.2"
+raw-window-handle = "0.6.2"
 ttf-parser = "0.25.1"
 
 [workspace.lints.rust]

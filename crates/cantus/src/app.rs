@@ -1,7 +1,8 @@
-use crate::render::{Globals, Interface, SHADER, Services, TEXT_COLOR, capture_click_ripple};
-use isthmus::{Renderer, Surface, SurfaceHandle, glam::vec2};
+use crate::render::{Globals, Interface, Services, TEXT_COLOR};
+use isthmus::{Renderer, SurfaceHandle, glam::vec2};
 use music::{Enrichment, MusicBackend, PlaybackState};
-use platform::{Current as Platform, Platform as _};
+use platform::{Linux as Platform, Platform as _};
+use raw_window_handle::{HasDisplayHandle, HasWindowHandle};
 use std::{
     future::Future,
     io,
@@ -13,11 +14,15 @@ use tracing::{Level, level_filters::LevelFilter};
 use tracing_subscriber::{filter::Targets, fmt, layer::SubscriberExt, util::SubscriberInitExt};
 
 #[path = "config.rs"]
-pub mod config;
+pub(crate) mod config;
 #[path = "music/mod.rs"]
-pub mod music;
+pub(crate) mod music;
 #[path = "platform/linux.rs"]
-pub mod platform;
+pub(crate) mod platform;
+
+pub fn trigger_launcher() -> ! {
+    Platform::trigger_launcher()
+}
 
 pub(crate) type Update<T> = Box<dyn FnOnce(&mut T) + Send>;
 pub type AppUpdater = Sender<Update<CantusApp>>;
@@ -36,11 +41,11 @@ impl Background {
         }
     }
 
-    pub(crate) fn run(&self, job: impl FnOnce() + Send + 'static) {
+    pub(crate) fn spawn_blocking(&self, job: impl FnOnce() + Send + 'static) {
         self.runtime.spawn_blocking(job);
     }
 
-    pub(crate) fn spawn(&self, task: impl Future<Output = Option<Update<CantusApp>>> + Send + 'static) {
+    pub(crate) fn spawn_update(&self, task: impl Future<Output = Option<Update<CantusApp>>> + Send + 'static) {
         let updater = self.updater.clone();
         self.runtime.spawn(async move {
             if let Some(event) = task.await {
@@ -48,10 +53,15 @@ impl Background {
             }
         });
     }
+
+    pub(crate) fn spawn(&self, task: impl Future<Output = ()> + Send + 'static) {
+        self.runtime.spawn(task);
+    }
 }
 
 pub struct CantusApp {
     pub(crate) gpu: Option<Renderer<Globals>>,
+    pub(crate) bar_surface: Option<SurfaceHandle>,
     pub(crate) playback: PlaybackState,
     pub(crate) ui: Interface,
     pub(crate) app_updates: mpsc::Receiver<Update<Self>>,
@@ -79,9 +89,10 @@ impl Default for CantusApp {
         let config = config::load();
         let music = MusicBackend::spotify(&config, &updater, &background);
         Platform::start_launcher_listener(&background, &updater);
-        let ui = Interface::new(&config, &background, updater.clone(), &enrichment, &music);
+        let ui = Interface::new(&config, &background, &enrichment);
         Self {
             gpu: None,
+            bar_surface: None,
             playback: PlaybackState::default(),
             ui,
             app_updates,
@@ -98,11 +109,19 @@ impl CantusApp {
     ///
     /// # Panics
     /// Panics if initialized twice or Vulkan setup fails.
-    pub fn initialize_renderer(&mut self, surface: Surface, width: u32, height: u32) {
+    pub fn initialize_renderer(&mut self, surface: &(impl HasDisplayHandle + HasWindowHandle), width: u32, height: u32) {
         assert!(self.gpu.is_none(), "GPU initialized twice");
-        let gpu = Renderer::new(surface, [width, height], SHADER, include_bytes!("../../../assets/NotoSans-Variable.ttf"), TEXT_COLOR).expect("failed to initialize renderer");
+        let (gpu, bar_surface) = Renderer::new(
+            Globals::program(),
+            surface,
+            [width, height],
+            include_bytes!("../../../assets/NotoSans-Variable.ttf"),
+            TEXT_COLOR,
+        )
+        .expect("failed to initialize renderer");
         tracing::info!("Using Vulkan device: {}", gpu.device_name());
         self.gpu = Some(gpu);
+        self.bar_surface = Some(bar_surface);
     }
 
     pub fn apply_pending_updates(&mut self) {
@@ -115,26 +134,32 @@ impl CantusApp {
         let Some(gpu) = &mut self.gpu else {
             return;
         };
+        let Some(bar_surface) = self.bar_surface else {
+            return;
+        };
         let screen_size = vec2(screen_size[0], screen_size[1]);
-        gpu.render(
-            Services {
-                config: &self.config,
-                music: &self.music,
-            },
-            |frame| {
-                frame.globals.panel_height = self.config.height;
-                if let Some((surface, size)) = launcher {
-                    frame.surface(surface, |frame| {
-                        frame.globals.panel_height = self.config.height;
-                        frame.globals.info.screen_size = vec2(size[0], size[1]);
-                        self.ui.launcher.show(frame);
-                        capture_click_ripple(frame);
-                    });
-                }
-                frame.globals.info.screen_size = screen_size;
-                self.ui.show(frame, &mut self.playback);
-            },
-        );
+        let services = Services {
+            config: &self.config,
+            music: &self.music,
+        };
+        gpu.render(|render| {
+            if let Some((surface, size)) = launcher {
+                render.surface(surface, services, |frame| {
+                    frame.globals.panel_height = self.config.height;
+                    frame.globals.info.screen_size = vec2(size[0], size[1]);
+                    if let Some(position) = frame.press_position() {
+                        frame.globals.ripple(position);
+                    }
+                    self.ui.launcher.show(frame);
+                });
+            } else {
+                render.surface(bar_surface, services, |frame| {
+                    frame.globals.panel_height = self.config.height;
+                    frame.globals.info.screen_size = screen_size;
+                    self.ui.show(frame, &mut self.playback);
+                });
+            }
+        });
     }
 }
 

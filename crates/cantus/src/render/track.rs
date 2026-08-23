@@ -1,24 +1,14 @@
 use crate::render::{
     Globals, PANEL_START,
-    sdf::{Pill, Surface, VISIBLE_ALPHA, avalanche, pill_sheen, sd_capsule_box, sd_star, simplex_noise},
-    text::{self, TextStyle},
+    sdf::{PillSample, VISIBLE_ALPHA, avalanche, pill_margin, pill_sheen, sample_pill, sd_capsule_box, sd_rounded_box, sd_star, simplex_noise},
 };
 use core::f32::consts::{FRAC_PI_2, TAU};
 use isthmus::{
-    ImageHandle, Quad, Unorm8x4,
+    Fragment, Image, Quad, TextFragment, Unorm8x4,
     float::FloatExt,
     glam::{UVec2, Vec2, Vec3, Vec4, uvec2, vec2, vec3},
     spirv_std::arch::{Derivative, kill},
-};
-
-#[cfg(not(target_arch = "spirv"))]
-use {
-    crate::{
-        app::music::{AlbumArt, CondensedPlaylist, IMAGE_SIZE, PlaybackState, TRACK_SPACING_MS, Timeline, Track, TrackId, playlist_icons},
-        render::{Frame, GAP, particles::Particles},
-    },
-    arrayvec::ArrayVec,
-    isthmus::{ImageArray, Rect},
+    text::{self, TextStyle},
 };
 
 /// Number of colors extracted from album artwork.
@@ -30,22 +20,14 @@ const ICON_SPACING: f32 = 18.0;
 const ICON_REACTION_RADIUS: f32 = ICON_WIDTH * 2.5;
 /// Stars in the rating row; each holds a half-star either side of its centre.
 const STAR_RATINGS: usize = 5;
-const MAX_TEXTURE_IMAGES: usize = 32;
 const MAX_RENDER_INSTANCES: usize = 32;
 const TITLE_STYLE: TextStyle = TextStyle::new(16.0, 700.0);
 const DETAILS_STYLE: TextStyle = TextStyle::new(14.0, 700.0);
-const DETAIL_FADE_DURATION: f32 = 0.2;
 const PLAYLIST_EXPANSION_DURATION: f32 = 1.0 / 6.0;
 
-#[cfg(not(target_arch = "spirv"))]
-#[derive(Default)]
-pub struct TrackView {
-    images: Option<ImageArray>,
-}
-
 /// Per-track character, every field normalised to 0..1 on arrival.
-#[isthmus::data]
-#[derive(Default)]
+#[repr(C)]
+#[derive(Clone, Copy, Default, isthmus::ShaderData)]
 #[cfg_attr(not(target_arch = "spirv"), derive(serde::Deserialize))]
 pub struct AudioFeatures {
     energy: f32,
@@ -99,11 +81,8 @@ struct TrackLayout {
     width: f32,
 }
 
-fn icon_center(pill: Pill, panel_height: f32, count: usize, index: usize, expansion: f32, secondary: bool) -> Vec2 {
-    let center = vec2(
-        pill.x + pill.width * 0.5,
-        PANEL_START + panel_height * 0.975 - 1.0 + f32::from(secondary) * ICON_SPACING * expansion,
-    );
+fn icon_center(pill: Quad, panel_height: f32, count: usize, index: usize, expansion: f32, secondary: bool) -> Vec2 {
+    let center = vec2(pill.center.x, PANEL_START + panel_height * 0.975 - 1.0 + f32::from(secondary) * ICON_SPACING * expansion);
     center + vec2((index as f32 - (count.saturating_sub(1)) as f32 * 0.5) * ICON_SPACING * expansion, 0.0)
 }
 
@@ -145,23 +124,21 @@ fn stable_seed(value: &str) -> f32 {
 
 /// Twinkling points for acoustic tracks.
 fn speckle(pixel: Vec2, time: f32, seed: f32, effects: AudioFeatures) -> f32 {
-    let amount = effects.acousticness;
     let drift = vec2(0.16 + seed.fract() * 0.08, 0.055 + (seed * 0.7).sin() * 0.025);
-    let uv = pixel / (8.0 - amount) + time * (0.35 + effects.energy * 0.55) * drift;
+    let uv = pixel / (8.0 - effects.acousticness) + time * (0.35 + effects.energy * 0.55) * drift;
     let cell = uv.floor();
     let phase = hash(vec2(cell.y, cell.x), seed + 2.71);
     let center = vec2(phase, (phase * 7.13).fract()) * 0.56 - 0.28;
     let twinkle = time * (0.7 + phase * 0.9 + effects.energy * 0.8) + phase * TAU;
-    hash(cell, seed).smoothstep(0.985 - amount * 0.09, 1.0)
+    hash(cell, seed).smoothstep(0.985 - effects.acousticness * 0.09, 1.0)
         * (1.0 - (uv - cell - 0.5 - center).length().smoothstep(0.06, 0.28))
         * (twinkle.sin() * 0.5 + 0.5)
-        * (0.12 + amount * 0.48)
+        * (0.12 + effects.acousticness * 0.48)
 }
 
 /// Caustic web for instrumental tracks.
 fn caustics(p: Vec2, time: f32, seed: f32, effects: AudioFeatures) -> f32 {
-    let amount = effects.instrumentalness;
-    if amount <= 1.0 / 256.0 {
+    if effects.instrumentalness <= 1.0 / 256.0 {
         return 0.0;
     }
     let flow = time * (0.5 + effects.energy * 0.35);
@@ -172,29 +149,23 @@ fn caustics(p: Vec2, time: f32, seed: f32, effects: AudioFeatures) -> f32 {
         line * line * line
     };
     let web = ridge(p * 0.7 + warp + drift).max(ridge(p * 1.1 - warp - drift * 0.8));
-    web * amount * 0.06
+    web * effects.instrumentalness * 0.06
 }
 
 #[isthmus::paint]
-impl TrackView {
-    fn image(&mut self, url: Option<&str>, art: Option<&AlbumArt>) -> ImageHandle {
-        let (Some(url), Some(art)) = (url, art) else {
-            return ImageHandle::NONE;
-        };
-        self.images.as_mut().and_then(|images| images.cache(url, [IMAGE_SIZE; 2], &art.pixels)).unwrap_or_default()
-    }
+mod host {
+    use super::*;
+    use crate::{
+        app::music::{CondensedPlaylist, PlaybackState, TRACK_SPACING_MS, Timeline, Track},
+        render::{Frame, GAP, particles::Particles},
+    };
+    use arrayvec::ArrayVec;
+    use isthmus::{Rect, Response};
 
-    fn playlists(track_id: TrackId, playlists: &[CondensedPlaylist], include_secondary: bool) -> impl Iterator<Item = &CondensedPlaylist> {
-        playlist_icons(track_id, playlists, true).chain(playlist_icons(track_id, playlists, false).filter(move |_| include_secondary))
-    }
-
-    fn display_title(track: &Track) -> &str {
+    fn shape_text(frame: &mut Frame, track: &Track, start_ms: f32) -> (text::ShapedLine, text::ShapedLine) {
         let without_suffix = track.name.split_once(" -").map_or(track.name.as_str(), |(name, _)| name);
         let title = without_suffix.split_once('(').map_or(without_suffix, |(name, _)| name).trim();
-        if title.is_empty() { track.name.trim() } else { title }
-    }
-
-    fn track_details(track: &Track, start_ms: f32) -> String {
+        let title = if title.is_empty() { track.name.trim() } else { title };
         let seconds = (start_ms / 1000.0).abs();
         let time = if seconds >= 60.0 {
             let whole_seconds = seconds as u32;
@@ -202,16 +173,34 @@ impl TrackView {
         } else {
             format!("{}s", seconds.round())
         };
-        format!("{time}\u{2004}•\u{2004}{}", track.artist)
+        let details = format!("{time}\u{2004}•\u{2004}{}", track.artist);
+        let mut text = frame.text();
+        (text.line(title, TITLE_STYLE).shape(), text.line(&details, DETAILS_STYLE).shape())
     }
 
-    fn show_track(&mut self, track: &mut Track, mut layout: TrackLayout, playlists: &mut [CondensedPlaylist], timeline: &Timeline, particles: &mut Particles, frame: &mut Frame) {
+    fn paint_text(frame: &mut Frame, line: text::Line, pill: Quad, visibility: f32) {
+        if line.is_empty() {
+            return;
+        }
+        // GPU: Track label.
+        frame.paint_text(
+            line.expanded(20.0).translated(pill.center - pill.size * 0.5),
+            |text: TextFragment, frame: Globals, pill: Quad, visibility: f32| {
+                let surface = sample_pill(pill, text.pixel, &frame);
+                let image_center = vec2(surface.size.x - surface.size.y, 0.0) + Vec2::splat(surface.size.y * 0.5);
+                let alpha = text.alpha_at(pill.center - pill.size * 0.5 + surface.refracted)
+                    * sd_capsule_box(surface.refracted - image_center, 0.0, surface.size.y * 0.5).smoothstep(2.0, 18.0)
+                    * surface.mask
+                    * visibility;
+                text.color(alpha)
+            },
+        );
+    }
+
+    fn show_track(track: &mut Track, mut layout: TrackLayout, playlists: &mut [CondensedPlaylist], timeline: &Timeline, particles: &mut Particles, frame: &mut Frame) -> Response {
         let height = frame.services.config.height;
         let playlist_expansion = track.runtime.playlist_expansion.smoothstep(0.0, 1.0);
-        let track_text = (layout.width > height + 26.0 || playlist_expansion > 0.0).then(|| {
-            let details = Self::track_details(track, layout.start_ms);
-            (frame.text(Self::display_title(track), TITLE_STYLE).shape(), frame.text(&details, DETAILS_STYLE).shape())
-        });
+        let track_text = (layout.width > height + 26.0 || playlist_expansion > 0.0).then(|| shape_text(frame, track, layout.start_ms));
         if playlist_expansion > 0.0
             && let Some((title, details)) = &track_text
         {
@@ -222,44 +211,49 @@ impl TrackView {
             layout.width += extra_width;
         }
         let show_details = layout.width > frame.services.config.height;
-        track.runtime.detail_alpha.approach(f32::from(show_details), frame.delta_time / DETAIL_FADE_DURATION);
-        let detail_alpha = track.runtime.detail_alpha;
 
-        let (mut primary_count, mut secondary_count) = (0, 0);
-        let mut rating = -1;
+        let (mut primary_playlists, mut secondary_playlists) = (ArrayVec::<_, MAX_RENDER_INSTANCES>::new(), ArrayVec::<_, MAX_RENDER_INSTANCES>::new());
+        let mut rating = None;
         if show_details && let Some(track_id) = track.id {
-            for playlist in Self::playlists(track_id, playlists, playlist_expansion > 0.0) {
-                let primary = playlist.tracks.contains(&track_id);
-                primary_count += u32::from(primary);
-                secondary_count += u32::from(!primary);
+            for (index, playlist) in playlists.iter().enumerate().filter(|(_, playlist)| playlist.rating_index.is_none()) {
+                let group = if playlist.tracks.contains(&track_id) {
+                    &mut primary_playlists
+                } else if playlist_expansion > 0.0 {
+                    &mut secondary_playlists
+                } else {
+                    continue;
+                };
+                let _ = group.try_push(index);
             }
             if frame.services.config.ratings_enabled {
-                rating = playlists
-                    .iter()
-                    .find_map(|playlist| playlist.rating_index.filter(|_| playlist.tracks.contains(&track_id)))
-                    .map_or(0, |rating| i32::from(rating) + 1);
+                rating = Some(
+                    playlists
+                        .iter()
+                        .find_map(|playlist| playlist.rating_index.filter(|_| playlist.tracks.contains(&track_id)))
+                        .map_or(0, |rating| i32::from(rating) + 1),
+                );
             }
         }
 
-        let stars = if rating >= 0 { STAR_RATINGS } else { 0 };
+        let (primary_count, secondary_count) = (primary_playlists.len(), secondary_playlists.len());
+        let stars = rating.map_or(0, |_| STAR_RATINGS);
         let primary_icons = stars as f32 + primary_count as f32;
-        track.runtime.icon_alpha.approach(
-            f32::from(primary_icons > 0.0 && layout.width >= ICON_SPACING * 1.05 * primary_icons),
-            frame.delta_time / DETAIL_FADE_DURATION,
-        );
-        let primary_alpha = track.runtime.icon_alpha;
-        let pill = Pill::new(layout.x, PANEL_START, layout.width.max(height));
+        let primary_alpha = if primary_icons > 0.0 {
+            let threshold = ICON_SPACING * 1.05 * primary_icons;
+            layout.width.smoothstep(threshold, threshold + ICON_SPACING)
+        } else {
+            0.0
+        };
+        let pill_rect = Rect::new(layout.x, PANEL_START, layout.x + layout.width.max(height), PANEL_START + height);
+        let pill: Quad = pill_rect.into();
         let colors = track.runtime.art.palette();
-        let image = self.image(track.image.as_deref(), track.runtime.art.ready());
-        let visibility = detail_alpha.max(f32::from(layout.start_ms <= 0.0));
+        let art = track.runtime.art.ready();
+        let visibility = layout.width.smoothstep(height, height + 26.0).max(f32::from(layout.start_ms <= 0.0));
         let seed = stable_seed(&track.uri);
         let effects = track.runtime.audio_features.ready().copied().unwrap_or_default();
 
-        let body = frame.interact(pill.rect(height));
+        let body = frame.drag(pill_rect);
         let mut hovered = body.hovered();
-        if body.pressed() {
-            frame.enable_drag();
-        }
         if body.clicked() && track.id.is_some() {
             let natural_start = frame.globals.playhead_x + layout.start_ms * frame.globals.px_per_ms;
             let fraction = if frame.pointer().x < frame.services.config.history_width + 40.0 {
@@ -270,45 +264,76 @@ impl TrackView {
             frame.services.music.seek(timeline, layout.queue_index, track.duration_ms, fraction);
         }
         // GPU: Track pill.
+        let margin = pill_margin(frame.globals);
+        let render_quad = Quad::from_min_max(
+            pill.center - pill.size * 0.5 - Vec2::splat(margin),
+            pill.center + pill.size * 0.5 + vec2(margin, margin + primary_alpha * 7.0 + ICON_SPACING * playlist_expansion),
+        );
+        let secondary_icons = secondary_count as f32;
         frame.paint_quad(
-            pill.quad(&frame.globals),
-            |frame: Globals,
-             fragment: isthmus::Fragment,
-             pill: Pill,
+            render_quad,
+            |fragment: Fragment,
+             frame: Globals,
+             pill: Quad,
+             primary_icons: f32,
+             secondary_icons: f32,
+             primary_alpha: f32,
+             playlist_expansion: f32,
              colors: [Unorm8x4; PALETTE_COLORS],
-             image: ImageHandle,
              visibility: f32,
              seed: f32,
              effects: AudioFeatures| {
-                let surface = pill.sample(fragment.pixel, &frame);
-                let image_center = vec2(surface.size.x - surface.size.y, 0.0) + Vec2::splat(surface.size.y * 0.5);
-                let offset = surface.local - image_center;
-                let mut album = Vec4::ZERO;
-                if offset.abs().max_element() < surface.size.y {
-                    let radius = surface.size.y * 0.5 + surface.bulge() * 0.5;
-                    let image_distance = offset.length() - radius;
-                    if let Some(texture) = fragment.sample_image(image, offset / (radius * 2.0) + 0.5) {
-                        album = texture;
-                        album.w *= (1.0 - image_distance.smoothstep(-4.0, 0.0)) * (1.0 - surface.distance.smoothstep(-0.5, 0.5));
-                    }
-                }
-                shade_track(fragment.pixel, &frame, colors, visibility, seed, effects, surface, album)
+                let bottom = pill.center.y + pill.size.y * 0.5;
+                let primary_width = ((primary_icons - 1.0).max(0.0) * ICON_SPACING + ICON_WIDTH * 0.7).max(ICON_WIDTH);
+                let primary_depth = primary_alpha * 7.0;
+                let primary_half_size = vec2(primary_width * 0.5, primary_depth * 0.5 + 2.0);
+                let primary_center = vec2(pill.center.x, bottom + primary_depth * 0.5 - 2.0);
+                let primary_support = sd_rounded_box(fragment.pixel - primary_center, primary_half_size, primary_half_size.y);
+                let primary_mouse_support = sd_rounded_box(frame.info.mouse_pos - primary_center, primary_half_size, primary_half_size.y);
+                let primary_surface = sample_pill(pill, fragment.pixel, &frame).union(primary_support, primary_mouse_support, 9.0, primary_alpha);
+
+                let secondary_expansion = if secondary_icons > 0.0 { playlist_expansion } else { 0.0 };
+                let secondary_width = ((secondary_icons - 1.0).max(0.0) * ICON_SPACING + ICON_WIDTH * 0.7).max(ICON_WIDTH);
+                let secondary_depth = secondary_expansion * ICON_SPACING;
+                let secondary_half_size = vec2(secondary_width * 0.5, secondary_depth * 0.5 + 2.0);
+                let secondary_center = vec2(pill.center.x, bottom + primary_depth + secondary_depth * 0.5 - 2.0);
+                let secondary_support = sd_rounded_box(fragment.pixel - secondary_center, secondary_half_size, secondary_half_size.y);
+                let secondary_mouse_support = sd_rounded_box(frame.info.mouse_pos - secondary_center, secondary_half_size, secondary_half_size.y);
+                let surface = primary_surface.union(secondary_support, secondary_mouse_support, 9.0, secondary_expansion);
+                shade_track(fragment.pixel, &frame, colors, visibility, seed, effects, surface)
             },
         );
+        if let Some(art) = art {
+            let image = &art.image;
+            let center = pill.center + vec2((pill.size.x - pill.size.y) * 0.5, 0.0);
+            let quad = Quad::new(center, Vec2::splat(pill.size.y), Vec2::X).expanded(pill_margin(frame.globals));
+            // GPU: Track album artwork.
+            frame.paint_quad(quad, |fragment: Fragment, frame: Globals, pill: Quad, image: Image, visibility: f32| {
+                let surface = sample_pill(pill, fragment.pixel, &frame);
+                let image_center = vec2(surface.size.x - surface.size.y, 0.0) + Vec2::splat(surface.size.y * 0.5);
+                let offset = surface.local - image_center;
+                let radius = surface.size.y * 0.5 + surface.bulge() * 0.5;
+                let texture = image.sample(offset / (radius * 2.0) + 0.5);
+                let alpha = texture.w * (1.0 - (offset.length() - radius).smoothstep(-4.0, 0.0)) * (1.0 - surface.distance.smoothstep(-0.5, 0.5)) * visibility;
+                (texture.truncate() * alpha).extend(alpha)
+            });
+        }
         let (left, right) = (18.0, layout.width - height - 8.0);
         if right > left
             && let Some((title, details)) = track_text
         {
-            let title = frame.fit_text(&title, (height * 0.26).floor(), left..right);
-            Self::paint_track_text(frame, title, pill, visibility);
-            let details = frame.fit_text(&details, (height * 0.57).floor(), left..right);
-            Self::paint_track_text(frame, details, pill, visibility);
+            let title = frame.text().fit(&title, (height * 0.26).floor(), left..right);
+            paint_text(frame, title, pill, visibility);
+            let details = frame.text().fit(&details, (height * 0.57).floor(), left..right);
+            paint_text(frame, details, pill, visibility);
         }
 
-        let primary_alpha = primary_alpha.max(playlist_expansion * f32::from(primary_icons > 0.0));
-        if rating >= 0 && primary_alpha > 0.0 {
+        let alpha = primary_alpha.max(playlist_expansion * f32::from(primary_icons > 0.0));
+        if let Some(mut rating) = rating
+            && alpha > 0.0
+        {
             for index in 0..STAR_RATINGS as u32 {
-                let center = icon_center(pill, height, stars + primary_count as usize, index as usize, 1.0, false);
+                let center = icon_center(pill, height, stars + primary_count, index as usize, 1.0, false);
                 frame.input_region(Rect::from_center(center, Vec2::splat(ICON_REACTION_RADIUS)));
                 let response = frame.interact(Rect::from_center(center, Vec2::splat(ICON_WIDTH * 0.5)));
                 hovered |= response.hovered();
@@ -320,32 +345,31 @@ impl TrackView {
                     && let Some(track_id) = track.id
                 {
                     frame.services.music.rate_track(playlists, track_id, index as u8 * 2 + u8::from(right_half));
-                    particles.burst(frame);
+                    particles.burst(frame.pointer(), frame.globals.info.time);
                 }
-                let (quad, _) = icon_geometry(center, &frame.globals);
+                let (quad, _) = icon_geometry(center, frame.globals);
+                let fill = ((rating as f32 - index as f32 * 2.0) * 0.5).saturate();
                 // GPU: Track rating star.
-                frame.paint_quad(quad, |_frame: Globals, fragment: isthmus::Fragment, rating: i32, index: u32, primary_alpha: f32| {
-                    let radius = (fragment.size.x - 14.0) * 0.5;
-                    let fill = ((rating as f32 - index as f32 * 2.0) * 0.5).saturate();
+                frame.paint_quad(quad, |fragment: Fragment, _frame: Globals, fill: f32, alpha: f32| {
                     let split = fragment.uv.x - fill;
                     let unselected = (split / split.fwidth() + 0.5).saturate();
-                    let star = sd_star(fragment.local, radius * 0.5, radius * 0.32) - radius * 0.1;
-                    over_icon(Vec4::ZERO, vec3(1.0, 0.85, 0.2).lerp(Vec3::splat(0.33), unselected), star, primary_alpha)
+                    let point = (fragment.uv * 2.0 - 1.0) * 18.0;
+                    let star = sd_star(point, 5.6, 3.58) - 1.12;
+                    over_icon(Vec4::ZERO, vec3(1.0, 0.85, 0.2).lerp(Vec3::splat(0.33), unselected), star, alpha)
                 });
             }
         }
-        let primary_count = primary_count as usize;
         let mut toggled_playlist = None;
         if let Some(track_id) = track.id {
-            for (index, playlist) in Self::playlists(track_id, playlists, playlist_expansion > 0.0).enumerate() {
+            let icons = primary_playlists.into_iter().chain(secondary_playlists).map(|index| &playlists[index]);
+            for (index, playlist) in icons.enumerate() {
                 let primary = index < primary_count;
                 let (icon, count, alpha, expansion) = if primary {
-                    (index + stars, stars + primary_count, primary_alpha, 1.0)
+                    (index + stars, stars + primary_count, alpha, 1.0)
                 } else {
-                    (index - primary_count, secondary_count as usize, playlist_expansion, playlist_expansion)
+                    (index - primary_count, secondary_count, playlist_expansion, playlist_expansion)
                 };
                 if alpha > 0.0 {
-                    let image = self.image(playlist.image_url.as_deref(), playlist.art.ready());
                     let center = icon_center(pill, height, count, icon, expansion, !primary);
                     frame.input_region(Rect::from_center(center, Vec2::splat(ICON_REACTION_RADIUS)));
                     let rect = Rect::from_center(center, Vec2::splat(ICON_WIDTH * 0.5));
@@ -354,65 +378,40 @@ impl TrackView {
                     if response.clicked() {
                         toggled_playlist = Some(playlist.id);
                     }
-                    let (quad, mouse_distance) = icon_geometry(center, &frame.globals);
-                    // GPU: Track playlist icon.
-                    frame.paint_quad(
-                        quad,
-                        |frame: Globals, fragment: isthmus::Fragment, image: ImageHandle, alpha: f32, primary: bool, mouse_distance: f32| {
-                            let radius = (fragment.size.x - 14.0) * 0.5;
-                            let desaturation = if primary || (frame.info.mouse_pressure > 0.0 && mouse_distance <= ICON_WIDTH * 0.5) {
-                                0.0
-                            } else {
-                                0.2
-                            };
-                            let Some(texture) = fragment.sample_image(image, fragment.uv) else {
-                                kill();
-                            };
+                    let (quad, mouse_distance) = icon_geometry(center, frame.globals);
+                    if let Some(art) = playlist.art.ready() {
+                        let image = &art.image;
+                        let desaturation = if primary || (frame.globals.info.mouse_pressure > 0.0 && mouse_distance <= ICON_WIDTH * 0.5) {
+                            0.0
+                        } else {
+                            0.2
+                        };
+                        // GPU: Track playlist icon.
+                        frame.paint_quad(quad, |fragment: Fragment, _frame: Globals, image: Image, alpha: f32, desaturation: f32| {
+                            let texture = image.sample(fragment.uv);
                             over_icon(
                                 Vec4::ZERO,
                                 texture.truncate().lerp(Vec3::splat(0.24), desaturation),
-                                sd_capsule_box(fragment.local, 0.0, radius * 0.6),
+                                sd_capsule_box((fragment.uv * 2.0 - 1.0) * 18.0, 0.0, 6.7),
                                 alpha,
                             )
-                        },
-                    );
+                        });
+                    }
                 }
             }
             if let Some(playlist_id) = toggled_playlist {
                 frame.services.music.toggle_playlist(playlists, track_id, playlist_id);
-                particles.burst(frame);
+                particles.burst(frame.pointer(), frame.globals.info.time);
             }
         }
         track.runtime.playlist_expansion.approach(
-            f32::from(hovered && show_details && detail_alpha >= 1.0),
+            f32::from(hovered && show_details && visibility >= 1.0),
             frame.delta_time.min(0.1) / PLAYLIST_EXPANSION_DURATION,
         );
+        body
     }
 
-    fn paint_track_text(frame: &mut Frame, line: text::Line, pill: Pill, visibility: f32) {
-        if line.is_empty() {
-            return;
-        }
-        let origin = vec2(pill.x, pill.y);
-        // GPU: Track label.
-        frame.paint_text(
-            line.expanded(20.0).translated(origin),
-            |frame: Globals, text: isthmus::TextFragment, pill: Pill, visibility: f32| {
-                let surface = pill.sample(text.pixel, &frame);
-                let image_center = vec2(surface.size.x - surface.size.y, 0.0) + Vec2::splat(surface.size.y * 0.5);
-                let alpha = text.alpha_at(vec2(pill.x, pill.y) + surface.refracted)
-                    * sd_capsule_box(surface.refracted - image_center, 0.0, surface.size.y * 0.5).smoothstep(2.0, 18.0)
-                    * surface.mask
-                    * visibility;
-                text.color(alpha)
-            },
-        );
-    }
-
-    pub fn show(&mut self, frame: &mut Frame, playback: &mut PlaybackState, particles: &mut Particles) {
-        if self.images.is_none() {
-            self.images = Some(frame.image_array([IMAGE_SIZE; 2], MAX_TEXTURE_IMAGES));
-        }
+    pub fn show(frame: &mut Frame, playback: &mut PlaybackState, particles: &mut Particles) {
         if playback.queue.is_empty() {
             return;
         }
@@ -462,26 +461,36 @@ impl TrackView {
             }
         }
         layouts.reverse();
+        let mut current_response = None;
         for layout in layouts {
             let track = &mut playback.queue[layout.queue_index];
-            self.show_track(track, layout, &mut playback.playlists, &playback.timeline, particles, frame);
-        }
-        if frame.released() {
-            if frame.dragging()
-                && let Some(layout) = current_track
-                && playback.queue[layout.queue_index].id.is_some()
-            {
-                let duration_ms = playback.queue[layout.queue_index].duration_ms;
-                let natural_start = frame.globals.playhead_x + layout.start_ms * frame.globals.px_per_ms;
-                let fraction = (frame.globals.playhead_x.max(layout.x) - natural_start) / (duration_ms as f32 * frame.globals.px_per_ms);
-                frame.services.music.seek(&playback.timeline, layout.queue_index, duration_ms, fraction);
+            let response = show_track(track, layout, &mut playback.playlists, &playback.timeline, particles, frame);
+            if current_index == Some(layout.queue_index) {
+                current_response = Some(response);
             }
-            frame.cancel_drag();
+        }
+        let dragging = current_response.is_some_and(|response| response.dragging());
+        let drag_offset_ms = current_response
+            .filter(Response::dragging)
+            .map_or(0.0, |response| (frame.globals.info.mouse_pos.x - response.drag_origin.x) / frame.globals.px_per_ms);
+        playback.update_timeline(drag_offset_ms, dragging, frame.delta_time);
+        if current_response.is_some_and(|response| response.released())
+            && dragging
+            && let Some(layout) = current_track
+            && playback.queue[layout.queue_index].id.is_some()
+        {
+            let duration_ms = playback.queue[layout.queue_index].duration_ms;
+            let natural_start = frame.globals.playhead_x + layout.start_ms * frame.globals.px_per_ms;
+            let fraction = (frame.globals.playhead_x.max(layout.x) - natural_start) / (duration_ms as f32 * frame.globals.px_per_ms);
+            frame.services.music.seek(&playback.timeline, layout.queue_index, duration_ms, fraction);
         }
     }
 }
 
-fn shade_track(pixel: Vec2, frame: &Globals, colors: [Unorm8x4; PALETTE_COLORS], visibility: f32, seed: f32, effects: AudioFeatures, surface: Surface, album: Vec4) -> Vec4 {
+#[cfg(not(target_arch = "spirv"))]
+pub use host::show;
+
+fn shade_track(pixel: Vec2, frame: &Globals, colors: [Unorm8x4; PALETTE_COLORS], visibility: f32, seed: f32, effects: AudioFeatures, surface: PillSample) -> Vec4 {
     let local_uv = surface.uv();
     let local_centered = local_uv - 0.5;
 
@@ -520,8 +529,6 @@ fn shade_track(pixel: Vec2, frame: &Globals, colors: [Unorm8x4; PALETTE_COLORS],
 
     color += colors[3].to_vec3().lerp(Vec3::ONE, 0.25) * speckle(surface.local, frame.info.time, seed, effects);
     color += color.lerp(Vec3::ONE, 0.75) * caustics(surface.local / surface.size.y, frame.info.time, seed, effects);
-
-    color = color.lerp(album.truncate(), album.w);
 
     color += color.lerp(Vec3::ONE, 0.32) * pill_sheen(surface.distance);
     color = color.lerp(color * 1.5 + 0.1, surface.ripple_flash);

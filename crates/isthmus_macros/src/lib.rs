@@ -1,15 +1,46 @@
-use isthmus_build::artifact::{shader_artifact, shader_source};
+use isthmus_build::artifact::{shader_artifact, shader_dependency, shader_is_fresh, shader_source};
 use proc_macro::TokenStream;
 use proc_macro_crate::{FoundCrate, crate_name};
 use proc_macro2::TokenStream as TokenStream2;
 use quote::{format_ident, quote};
-use std::{collections::HashSet, env, fs, path::Path};
+use std::{collections::HashSet, env, path::Path};
 use syn::visit::{self, Visit};
-use syn::visit_mut::{VisitMut, visit_expr_method_call_mut, visit_expr_mut};
-use syn::{parse::Parse, parse::ParseStream};
+use syn::visit_mut::{VisitMut, visit_expr_mut};
 
 mod buffer;
 mod paint;
+
+fn fragment_entry(frame: &TokenStream2, text: bool, payload: bool, images: bool, body: &TokenStream2) -> TokenStream2 {
+    let isthmus = isthmus_path();
+    let text_resources = text.then(|| {
+        quote! {
+            #[spirv(storage_buffer, descriptor_set = 0, binding = 2)] placed_glyphs: &[#isthmus::text::PlacedGlyph],
+            #[spirv(storage_buffer, descriptor_set = 0, binding = 3)] glyphs: &[#isthmus::text::Glyph],
+            #[spirv(storage_buffer, descriptor_set = 0, binding = 4)] edges: &[#isthmus::text::Edge],
+        }
+    });
+    let payload_resource = payload.then(|| quote!(#[spirv(storage_buffer, descriptor_set = 0, binding = 1)] payload: &[u32],));
+    let image_resource = images.then(|| quote!(#[spirv(descriptor_set = 0, binding = 5)] images: &#isthmus::__private::ImageHeap,));
+    quote! {
+        #[#isthmus::spirv_std::spirv(fragment)]
+        pub fn fragment(
+            #[spirv(location = 0)] pixel: #isthmus::glam::Vec2,
+            #[spirv(location = 1, flat)] draw_index: u32,
+            #[spirv(push_constant)] __isthmus_frame: &#frame,
+            #[spirv(storage_buffer, descriptor_set = 0, binding = 0)] draws: &[#isthmus::__private::DrawRecord],
+            #payload_resource
+            #text_resources
+            #image_resource
+            #[spirv(location = 0)] out_color: &mut #isthmus::glam::Vec4,
+        ) {
+            let _ = (&__isthmus_frame, draws);
+            let draw = draws[draw_index as usize];
+            let local = draw.quad.local(pixel);
+            let fragment = #isthmus::Fragment::new(pixel, local, draw.quad.size);
+            #body
+        }
+    }
+}
 
 fn isthmus_path() -> TokenStream2 {
     match crate_name("isthmus") {
@@ -22,13 +53,22 @@ fn isthmus_path() -> TokenStream2 {
     }
 }
 
-/// Declares host/GPU data and rejects layouts that Rust-GPU cannot expose to SPIR-V.
-#[proc_macro_attribute]
-pub fn data(_args: TokenStream, input: TokenStream) -> TokenStream {
-    buffer::attribute(input)
+#[proc_macro_derive(ShaderData)]
+pub fn derive_shader_data(input: TokenStream) -> TokenStream {
+    let input = syn::parse_macro_input!(input as syn::DeriveInput);
+    buffer::derive(&input).into()
+}
+
+#[proc_macro_derive(Program)]
+pub fn derive_program(input: TokenStream) -> TokenStream {
+    let input = syn::parse_macro_input!(input as syn::DeriveInput);
+    program_items(&input).unwrap_or_else(syn::Error::into_compile_error).into()
 }
 
 /// Extracts inline paint closures and keeps their surrounding implementation on the host.
+///
+/// Generated shaders receive Isthmus' cross-target float extension methods and lower
+/// captured images to the renderer's internal descriptor heap.
 #[proc_macro_attribute]
 pub fn paint(args: TokenStream, input: TokenStream) -> TokenStream {
     if !args.is_empty() {
@@ -45,7 +85,7 @@ fn extract_paints(input: TokenStream) -> TokenStream {
         return error.to_compile_error().into();
     }
     let shaders = inline.shaders;
-    quote!(#(#shaders)* #[cfg(not(target_arch = "spirv"))] #item).into()
+    quote!(#(#shaders)* #[cfg(not(target_arch = "spirv"))] #[allow(clippy::wildcard_imports)] #item).into()
 }
 
 #[derive(Default)]
@@ -73,149 +113,174 @@ impl VisitMut for InlinePaints {
         self.visit_block_mut(&mut i.block);
     }
 
-    fn visit_expr_method_call_mut(&mut self, i: &mut syn::ExprMethodCall) {
-        let text = i.method == "paint_text";
-        if (i.method != "paint_quad" && !text) || i.args.is_empty() {
-            visit_expr_method_call_mut(self, i);
-            return;
-        }
-        if i.args.len() != 2 {
-            self.error = Some(syn::Error::new_spanned(
-                &i.args,
-                "paint_quad and paint_text take geometry followed by a typed shader closure; closure captures are inferred",
-            ));
-            return;
-        }
-        let Some(syn::Expr::Closure(closure)) = i.args.last().cloned() else {
-            visit_expr_method_call_mut(self, i);
-            return;
-        };
-        let geometry = i.args.first().cloned();
-        let mut captures = Vec::<syn::Expr>::new();
-        let input_start = 2;
-        let captured_count = closure
-            .inputs
-            .iter()
-            .skip(input_start)
-            .filter(|input| {
-                let syn::Pat::Type(input) = input else { return true };
-                !paint::is_image_heap(input.ty.as_ref()) && !paint::is_text_resource(input.ty.as_ref())
-            })
-            .count();
-        if captured_count != 0 {
-            for input in closure.inputs.iter().skip(input_start) {
-                let syn::Pat::Type(input) = input else { continue };
-                if paint::is_image_heap(input.ty.as_ref()) || paint::is_text_resource(input.ty.as_ref()) {
-                    continue;
+    fn visit_expr_mut(&mut self, i: &mut syn::Expr) {
+        if let syn::Expr::MethodCall(call) = i {
+            let text = call.method == "paint_text";
+            if (call.method == "paint_quad" || text) && !call.args.is_empty() {
+                match self.expand_call(call, text) {
+                    Ok(Some(replacement)) => {
+                        *i = replacement;
+                        return;
+                    }
+                    Ok(None) => {}
+                    Err(error) => {
+                        self.error = Some(error);
+                        return;
+                    }
                 }
-                let syn::Pat::Ident(name) = input.pat.as_ref() else {
-                    self.error = Some(syn::Error::new_spanned(&input.pat, "implicit paint captures require identifier parameters"));
-                    return;
-                };
-                let name = &name.ident;
-                captures.push(if self.bindings.contains(&name.to_string()) || !self.method_receiver {
-                    syn::parse_quote!(#name)
-                } else {
-                    syn::parse_quote!(self.#name)
-                });
             }
         }
-        if captured_count != captures.len() {
-            self.error = Some(syn::Error::new_spanned(
-                &closure.inputs,
-                "inline paint closure takes globals and fragment followed by typed inferred captures; image heaps are implicit",
+        visit_expr_mut(self, i);
+    }
+}
+
+impl InlinePaints {
+    fn expand_call(&mut self, call: &syn::ExprMethodCall, text: bool) -> syn::Result<Option<syn::Expr>> {
+        if call.args.len() != 2 {
+            return Err(syn::Error::new_spanned(
+                &call.args,
+                "paint_quad and paint_text take geometry followed by a typed shader closure; shader inputs are inferred",
             ));
-            return;
         }
+        let Some(syn::Expr::Closure(closure)) = call.args.last().cloned() else {
+            return Ok(None);
+        };
         if !closure.inputs.iter().all(|input| matches!(input, syn::Pat::Type(_))) {
-            self.error = Some(syn::Error::new_spanned(&closure.inputs, "inline paint closure parameters require explicit types"));
-            return;
+            return Err(syn::Error::new_spanned(&closure.inputs, "inline paint closure parameters require explicit types"));
         }
-        let mut block = match closure.body.as_ref() {
+        if closure.inputs.len() < 2 {
+            return Err(syn::Error::new_spanned(
+                &closure.inputs,
+                "inline paint closures require the fragment input followed by the program globals",
+            ));
+        }
+        let input_start = 2;
+        let input_values = self.input_values(&closure, input_start)?;
+        let block = match closure.body.as_ref() {
             syn::Expr::Block(body) => body.block.clone(),
             expression => syn::parse_quote!({ #expression }),
         };
-        let isthmus = isthmus_path();
-        let mut image_access = ImageAccess { isthmus: &isthmus, used: false };
-        image_access.visit_block_mut(&mut block);
-        let images = image_access.used.then(|| quote!(images: &#isthmus::__private::Images,));
         let name = format_ident!("__isthmus_inline_{}_{}", self.method, self.next);
         self.next += 1;
-        let inputs = &closure.inputs;
-        let block = &block;
-        let mut inputs = inputs.iter();
-        let frame = inputs.next().unwrap();
-        let shader_input = inputs.next().unwrap();
-        let function = if text {
-            let syn::Pat::Type(text) = shader_input else { unreachable!() };
-            let syn::Pat::Ident(text_name) = text.pat.as_ref() else {
-                self.error = Some(syn::Error::new_spanned(&text.pat, "text fragment requires an identifier"));
-                return;
-            };
-            let text_type = match text.ty.as_ref() {
+        let mut inputs = closure.inputs.iter();
+        let syn::Pat::Type(shader_input) = inputs.next().unwrap() else { unreachable!() };
+        let syn::Pat::Type(frame) = inputs.next().unwrap() else { unreachable!() };
+        let syn::Pat::Ident(shader_name) = shader_input.pat.as_ref() else {
+            return Err(syn::Error::new_spanned(&shader_input.pat, "shader fragment requires an identifier"));
+        };
+        if text {
+            let shader_type = match shader_input.ty.as_ref() {
                 syn::Type::Path(path) => path.path.segments.last().map(|segment| segment.ident.to_string()),
                 _ => None,
             };
-            if text_type.as_deref() != Some("TextFragment") {
-                self.error = Some(syn::Error::new_spanned(&text.ty, "paint_text closure's second parameter must be TextFragment"));
-                return;
+            if shader_type.as_deref() != Some("TextFragment") {
+                return Err(syn::Error::new_spanned(&shader_input.ty, "paint_text closure's first parameter must be TextFragment"));
             }
-            let text_name = &text_name.ident;
-            let rest = inputs;
-            syn::parse2::<syn::ItemFn>(quote! {
-                fn #name(
-                    #frame,
-                    line: ::isthmus::text::Line,
-                    #(#rest,)*
-                    placed_glyphs: &[::isthmus::text::PlacedGlyph],
-                    glyphs: &[::isthmus::text::Glyph],
-                    edges: &[::isthmus::text::Edge],
-                    #images
-                ) {
-                    line.quad().shade(|fragment| {
-                        let #text_name = ::isthmus::TextFragment::new(fragment, line, placed_glyphs, glyphs, edges);
-                        #block
-                    })
-                }
-            })
-        } else {
-            let syn::Pat::Type(fragment) = shader_input else { unreachable!() };
-            let fragment = &fragment.pat;
-            let rest = inputs;
-            syn::parse2::<syn::ItemFn>(quote! {
-                fn #name(#frame, quad: ::isthmus::Quad, #(#rest,)* #images) {
-                    quad.shade(|#fragment| #block)
-                }
-            })
-        };
-        let mut function = match function {
-            Ok(function) => function,
-            Err(error) => {
-                self.error = Some(error);
-                return;
-            }
-        };
-        if let Some(syn::FnArg::Typed(frame)) = function.sig.inputs.first_mut()
-            && let syn::Pat::Ident(name) = frame.pat.as_mut()
-            && name.ident == "_frame"
-        {
-            name.ident = format_ident!("frame");
+        } else if shader_name.ident != "fragment" {
+            return Err(syn::Error::new_spanned(
+                &shader_input.pat,
+                "paint_quad shader input must be the first parameter and named `fragment`",
+            ));
         }
-        match paint::expand(&function) {
-            Ok(shader) => self.shaders.push(shader),
-            Err(error) => {
-                self.error = Some(error);
-                return;
-            }
-        }
-        let geometry = geometry.unwrap();
-        i.method = syn::parse_quote!(paint);
-        i.args = if text {
-            syn::parse_quote!(#name(#geometry, #(#captures),*))
-        } else {
-            syn::parse_quote!(#name(#isthmus::__private::IntoQuad::into_quad(#geometry), #(#captures),*))
-        };
+        let shader_inputs = inputs
+            .map(|input| {
+                let syn::Pat::Type(input) = input else { unreachable!() };
+                input.clone()
+            })
+            .collect::<Vec<_>>();
+        let captures = shader_inputs.iter().map(paint::Capture::new).collect::<syn::Result<Vec<_>>>()?;
+        let expansion = paint::expand(&name, frame, shader_input, &captures, &block, text)?;
+        let paint::Expansion { items, instance, pipeline } = expansion;
+        self.shaders.push(items);
+        let geometry = call.args.first().unwrap().clone();
+        Ok(Some(rewrite_call(
+            call,
+            &Rewrite {
+                text,
+                closure: &closure,
+                geometry: &geometry,
+                captures: &captures,
+                input_values: &input_values,
+                instance: &instance,
+                pipeline: &pipeline,
+            },
+        )))
     }
+
+    fn input_values(&self, closure: &syn::ExprClosure, input_start: usize) -> syn::Result<Vec<syn::Expr>> {
+        closure
+            .inputs
+            .iter()
+            .skip(input_start)
+            .map(|input| {
+                let syn::Pat::Type(input) = input else { unreachable!() };
+                let syn::Pat::Ident(name) = input.pat.as_ref() else {
+                    return Err(syn::Error::new_spanned(&input.pat, "inferred shader inputs require identifier parameters"));
+                };
+                let name = &name.ident;
+                Ok(if self.bindings.contains(&name.to_string()) || !self.method_receiver {
+                    syn::parse_quote!(#name)
+                } else {
+                    syn::parse_quote!(self.#name)
+                })
+            })
+            .collect()
+    }
+}
+
+struct Rewrite<'a> {
+    text: bool,
+    closure: &'a syn::ExprClosure,
+    geometry: &'a syn::Expr,
+    captures: &'a [paint::Capture],
+    input_values: &'a [syn::Expr],
+    instance: &'a syn::Ident,
+    pipeline: &'a syn::Ident,
+}
+
+fn rewrite_call(call: &syn::ExprMethodCall, rewrite: &Rewrite<'_>) -> syn::Expr {
+    let Rewrite {
+        text,
+        closure,
+        geometry,
+        captures,
+        input_values,
+        instance,
+        pipeline,
+    } = rewrite;
+    let values = captures
+        .iter()
+        .zip(input_values.iter())
+        .map(|(capture, value)| {
+            let frame: syn::Expr = syn::parse_quote!(__isthmus_frame);
+            let field = &capture.name;
+            let value = capture.encode(value, &frame);
+            quote!(#field: #value)
+        })
+        .collect::<Vec<_>>();
+    let payload = if *text {
+        quote!(#instance { line: __isthmus_geometry, #(#values),* })
+    } else if values.is_empty() {
+        quote!(#instance {})
+    } else {
+        quote!(#instance { #(#values),* })
+    };
+    let isthmus = isthmus_path();
+    let generics = if *text {
+        quote!(::<#pipeline::Pipeline, _>)
+    } else {
+        quote!(::<#pipeline::Pipeline, _, _>)
+    };
+    let receiver = &call.receiver;
+    let method = &call.method;
+    syn::parse2(quote!(
+        #receiver.#method #generics (#geometry, |__isthmus_frame, __isthmus_geometry| {
+            use #isthmus::float::FloatExt as _;
+            let _ = #closure;
+            #payload
+        })
+    ))
+    .unwrap()
 }
 
 fn host_bindings<'a>(inputs: impl Iterator<Item = &'a syn::FnArg>, block: &syn::Block) -> HashSet<String> {
@@ -243,68 +308,58 @@ impl<'ast> Visit<'ast> for HostBindings {
     fn visit_expr_closure(&mut self, _closure: &'ast syn::ExprClosure) {}
 }
 
-struct ImageAccess<'a> {
-    isthmus: &'a TokenStream2,
-    used: bool,
-}
-
-impl VisitMut for ImageAccess<'_> {
-    fn visit_expr_mut(&mut self, i: &mut syn::Expr) {
-        let syn::Expr::MethodCall(call) = i else {
-            visit_expr_mut(self, i);
-            return;
-        };
-        let syn::Expr::Path(receiver) = call.receiver.as_ref() else {
-            visit_expr_method_call_mut(self, call);
-            return;
-        };
-        if !receiver.path.is_ident("fragment") {
-            visit_expr_method_call_mut(self, call);
-            return;
-        }
-        if call.method == "sample_image" && call.args.len() == 2 {
-            let isthmus = self.isthmus;
-            let mut arguments = call.args.iter();
-            let handle = arguments.next().unwrap();
-            let uv = arguments.next().unwrap();
-            *i = syn::parse_quote!(#isthmus::__private::sample_image(images, #handle, #uv));
-            self.used = true;
-        } else {
-            visit_expr_method_call_mut(self, call);
-        }
+fn program_items(input: &syn::DeriveInput) -> syn::Result<TokenStream2> {
+    let name = input.ident.clone();
+    let syn::Data::Struct(data) = &input.data else {
+        return Err(syn::Error::new_spanned(input, "program globals require a struct"));
+    };
+    let syn::Fields::Named(fields) = &data.fields else {
+        return Err(syn::Error::new_spanned(input, "program globals require named fields"));
+    };
+    if !fields.named.iter().any(|field| field.ident.as_ref().is_some_and(|field| field == "info")) {
+        return Err(syn::Error::new_spanned(input, "program globals require an `info: FrameInfo` field"));
     }
+    let module = program_module(&name)?;
+    let isthmus = isthmus_path();
+    Ok(quote! {
+        #module
+
+        #[cfg(not(target_arch = "spirv"))]
+        impl #name {
+            fn __isthmus_frame_info_mut(&mut self) -> &mut #isthmus::FrameInfo {
+                let _: &mut #isthmus::FrameInfo = &mut self.info;
+                &mut self.info
+            }
+
+            pub const fn program() -> #isthmus::__private::Program<Self> {
+                #isthmus::__private::Program::new(__ISTHMUS_SHADER, Self::__isthmus_frame_info_mut)
+            }
+        }
+
+    })
 }
 
-/// Declares the package's checked-in SPIR-V module and its typed pipeline table.
-#[proc_macro]
-pub fn shader_module(input: TokenStream) -> TokenStream {
-    let declaration = syn::parse_macro_input!(input as ShaderModuleDeclaration);
+fn program_module(shared: &syn::Ident) -> syn::Result<TokenStream2> {
     let Ok(crate_dir) = env::var("CARGO_MANIFEST_DIR") else {
-        return syn::Error::new(proc_macro2::Span::call_site(), "missing package directory").to_compile_error().into();
+        return Err(syn::Error::new(proc_macro2::Span::call_site(), "missing package directory"));
     };
     let artifact = match shader_artifact(Path::new(&crate_dir)) {
         Ok(artifact) => artifact,
-        Err(error) => {
-            return syn::Error::new(proc_macro2::Span::call_site(), error).to_compile_error().into();
-        }
+        Err(error) => return Err(syn::Error::new(proc_macro2::Span::call_site(), error)),
     };
+    if env::var("CARGO_PKG_NAME").as_deref() != Ok("isthmus-shader") {
+        let source = shader_source(Path::new(&crate_dir)).map_err(|error| syn::Error::new(proc_macro2::Span::call_site(), error))?;
+        let dependency = shader_dependency(Path::new(&crate_dir)).map_err(|error| syn::Error::new(proc_macro2::Span::call_site(), error))?;
+        ensure_fresh(&artifact, &source, dependency.as_deref())?;
+    }
     let artifact = artifact.to_string_lossy();
-    let pipelines = match pipeline_paths(Path::new(&crate_dir)) {
-        Ok(pipelines) => pipelines,
-        Err(error) => return syn::Error::new(proc_macro2::Span::call_site(), error).to_compile_error().into(),
-    };
-    let indices = 0..pipelines.len();
-    let default_text_index = pipelines.len();
     let isthmus = isthmus_path();
-    let visibility = declaration.visibility;
-    let name = declaration.name;
-    let shared = declaration.shared;
-    quote! {
+    Ok(quote! {
         #[doc(hidden)]
         pub mod __isthmus_quad {
             use super::*;
+            use #isthmus::float::FloatExt as _;
 
-            #[allow(unused_variables)]
             #[#isthmus::spirv_std::spirv(vertex)]
             pub fn vertex(
                 #[spirv(vertex_index)] vertex: u32,
@@ -316,176 +371,25 @@ pub fn shader_module(input: TokenStream) -> TokenStream {
                 #[spirv(location = 1, flat)] out_draw_index: &mut u32,
             ) {
                 let draw = draws[draw_index as usize];
-                let sample = draw.quad.sample(vertex, #isthmus::FrameGlobals::frame_info(frame).screen_size);
+                let sample = draw.quad.sample(vertex, frame.info.screen_size);
                 *out_position = sample.position;
                 *out_pixel = sample.pixel;
                 *out_draw_index = draw_index;
             }
         }
 
-        #[doc(hidden)]
-        pub mod __isthmus_text {
-            use super::*;
-
-            #[cfg(not(target_arch = "spirv"))]
-            pub struct Pipeline;
-
-            #[cfg(not(target_arch = "spirv"))]
-            impl #isthmus::__private::ShaderSpec for Pipeline {
-                type Shared = #shared;
-                type Instance = #isthmus::text::Line;
-                const NAME: &'static str = #isthmus::__private::shader_module_name(module_path!());
-            }
-
-            #[allow(unused_variables)]
-            #[#isthmus::spirv_std::spirv(fragment)]
-            pub fn fragment(
-                #[spirv(location = 0)] pixel: #isthmus::glam::Vec2,
-                #[spirv(location = 1, flat)] draw_index: u32,
-                #[spirv(push_constant)] frame: &#shared,
-                #[spirv(storage_buffer, descriptor_set = 0, binding = 0)] draws: &[#isthmus::__private::DrawRecord],
-                #[spirv(storage_buffer, descriptor_set = 0, binding = 1)] payload: &[u32],
-                #[spirv(storage_buffer, descriptor_set = 0, binding = 2)] placed_glyphs: &[#isthmus::text::PlacedGlyph],
-                #[spirv(storage_buffer, descriptor_set = 0, binding = 3)] glyphs: &[#isthmus::text::Glyph],
-                #[spirv(storage_buffer, descriptor_set = 0, binding = 4)] edges: &[#isthmus::text::Edge],
-                #[spirv(location = 0)] out_color: &mut #isthmus::glam::Vec4,
-            ) {
-                let draw = draws[draw_index as usize];
-                let line = unsafe {
-                    #isthmus::spirv_std::ByteAddressableBuffer::from_slice(payload).load::<#isthmus::text::Line>(draw.payload)
-                };
-                let local = draw.quad.local(pixel);
-                let fragment = #isthmus::__private::Fragment {
-                    pixel,
-                    local,
-                    uv: local / draw.quad.size + 0.5,
-                    size: draw.quad.size,
-                };
-                let text = #isthmus::TextFragment::new(fragment, line, placed_glyphs, glyphs, edges);
-                *out_color = text.color(text.alpha());
-            }
-        }
-
-        #(#[cfg(not(target_arch = "spirv"))]
-        impl #isthmus::__private::PipelineIdentity for #pipelines {
-            const KEY: #isthmus::__private::PipelineKey = #isthmus::__private::PipelineKey::new(#indices);
-        })*
-
         #[cfg(not(target_arch = "spirv"))]
-        impl #isthmus::__private::PipelineIdentity for __isthmus_text::Pipeline {
-            const KEY: #isthmus::__private::PipelineKey = #isthmus::__private::PipelineKey::new(#default_text_index);
-        }
-
-        #[cfg(not(target_arch = "spirv"))]
-        fn __isthmus_register_pipelines(canvas: &mut #isthmus::__private::Canvas<#shared>) {
-            #(canvas.register::<#pipelines>();)*
-            canvas.register_default_text::<__isthmus_text::Pipeline>();
-        }
-
-        #[cfg(not(target_arch = "spirv"))]
-        #visibility const #name: #isthmus::__private::ShaderModule<#shared> =
+        const __ISTHMUS_SHADER: #isthmus::__private::ShaderModule =
             #isthmus::__private::ShaderModule::new(
                 include_bytes!(#artifact),
-                __isthmus_register_pipelines,
                 #isthmus::__private::shader_module_name(module_path!()),
             );
-    }
-    .into()
+    })
 }
 
-struct ShaderModuleDeclaration {
-    visibility: syn::Visibility,
-    name: syn::Ident,
-    shared: syn::Type,
-}
-
-impl Parse for ShaderModuleDeclaration {
-    fn parse(input: ParseStream<'_>) -> syn::Result<Self> {
-        let visibility = input.parse()?;
-        let name = input.parse()?;
-        input.parse::<syn::Token![:]>()?;
-        let shared = input.parse()?;
-        Ok(Self { visibility, name, shared })
-    }
-}
-
-fn pipeline_paths(crate_dir: &Path) -> Result<Vec<syn::Path>, String> {
-    let source = shader_source(crate_dir)?;
-    let root = source
-        .parent()
-        .and_then(Path::file_name)
-        .and_then(|name| name.to_str())
-        .filter(|_| source.file_name().is_some_and(|name| name == "mod.rs"))
-        .map(str::to_owned);
-    let mut pipelines = Vec::new();
-    scan_module(&source, &root.into_iter().collect::<Vec<_>>(), &mut pipelines)?;
-    pipelines
-        .into_iter()
-        .map(|path| syn::parse_str(&std::format!("crate::{}", path.join("::"))).map_err(|error| error.to_string()))
-        .collect()
-}
-
-fn scan_module(source: &Path, module: &[String], pipelines: &mut Vec<Vec<String>>) -> Result<(), String> {
-    let text = fs::read_to_string(source).map_err(|error| std::format!("failed to read shader source {}: {error}", source.display()))?;
-    let file = syn::parse_file(&text).map_err(|error| std::format!("failed to parse shader source {}: {error}", source.display()))?;
-    let directory = source.parent().unwrap_or_else(|| Path::new("."));
-    for item in &file.items {
-        let attributes: &[syn::Attribute] = match item {
-            syn::Item::Fn(item) => &item.attrs,
-            syn::Item::Impl(item) => &item.attrs,
-            _ => &[],
-        };
-        let painted = attributes
-            .iter()
-            .any(|attribute| attribute.path().segments.last().is_some_and(|segment| segment.ident == "paint"));
-        if painted {
-            let mut calls = PaintCalls::default();
-            calls.visit_item(item);
-            for name in calls.names {
-                let mut path = module.to_owned();
-                path.push(name);
-                path.push(String::from("Pipeline"));
-                pipelines.push(path);
-            }
-        }
-        if let syn::Item::Mod(child) = item {
-            let mut child_module = module.to_owned();
-            child_module.push(child.ident.to_string());
-            if child.content.is_some() {
-                continue;
-            }
-            let direct = directory.join(std::format!("{}.rs", child.ident));
-            let nested = directory.join(child.ident.to_string()).join("mod.rs");
-            let child_source = if direct.exists() { direct } else { nested };
-            scan_module(&child_source, &child_module, pipelines)?;
-        }
+fn ensure_fresh(artifact: &Path, source: &Path, dependency: Option<&Path>) -> syn::Result<()> {
+    if !shader_is_fresh(artifact, source, dependency) {
+        return Err(syn::Error::new(proc_macro2::Span::call_site(), "shader artifact is missing or stale; run `isthmus build`"));
     }
     Ok(())
-}
-
-#[derive(Default)]
-struct PaintCalls {
-    method: String,
-    next: usize,
-    names: Vec<String>,
-}
-
-impl<'ast> Visit<'ast> for PaintCalls {
-    fn visit_impl_item_fn(&mut self, i: &'ast syn::ImplItemFn) {
-        self.method = i.sig.ident.to_string();
-        visit::visit_block(self, &i.block);
-    }
-
-    fn visit_item_fn(&mut self, i: &'ast syn::ItemFn) {
-        self.method = i.sig.ident.to_string();
-        visit::visit_block(self, &i.block);
-    }
-
-    fn visit_expr_method_call(&mut self, i: &'ast syn::ExprMethodCall) {
-        if matches!(i.method.to_string().as_str(), "paint_quad" | "paint_text") && matches!(i.args.last(), Some(syn::Expr::Closure(_))) {
-            self.names.push(std::format!("__isthmus_paint___isthmus_inline_{}_{}", self.method, self.next));
-            self.next += 1;
-        }
-        visit::visit_expr_method_call(self, i);
-    }
 }

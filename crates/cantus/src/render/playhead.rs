@@ -3,7 +3,7 @@ use crate::render::{
     sdf::{sd_capsule_box, sd_rounded_triangle},
 };
 use isthmus::{
-    Quad,
+    Fragment, Quad,
     float::FloatExt as _,
     glam::{Vec3, vec2, vec3},
     spirv_std::arch::kill,
@@ -18,7 +18,6 @@ use {
 const START_DURATION: f32 = 0.7;
 const TRANSITION_SPEED: f32 = 5.5;
 
-#[isthmus::data]
 #[derive(Default)]
 pub struct Playhead {
     bar_split: f32,
@@ -28,7 +27,7 @@ pub struct Playhead {
 
 #[isthmus::paint]
 impl Playhead {
-    pub fn show(&mut self, frame: &mut Frame, playback: &mut PlaybackState) {
+    pub fn show(&mut self, frame: &mut Frame, playback: &PlaybackState) {
         let response = frame.interact(Rect::from_center(
             vec2(frame.globals.playhead_x, PANEL_START + frame.services.config.height * 0.5),
             vec2(frame.services.config.height * 0.25, frame.services.config.height * 0.5),
@@ -57,7 +56,7 @@ impl Playhead {
             vec2(frame.globals.playhead_x + half_width, PANEL_START + frame.globals.panel_height + 5.0),
         );
         // GPU: Playhead and playback icon.
-        frame.paint_quad(quad, |frame: Globals, fragment: isthmus::Fragment, bar_split: f32, icon_presence: f32, icon_morph: f32| {
+        frame.paint_quad(quad, |fragment: Fragment, frame: Globals, bar_split: f32, icon_presence: f32, icon_morph: f32| {
             let mirrored = fragment.local.abs();
 
             // Vertical timeline bar.
@@ -83,7 +82,8 @@ impl Playhead {
                 kill();
             }
             let edge = bar_distance.min(icon_distance).smoothstep(-2.5, -1.0);
-            vec3(1.0, 0.878, 0.824).lerp(Vec3::splat(0.15), edge).extend(alpha)
+            let color = vec3(1.0, 0.878, 0.824).lerp(Vec3::splat(0.15), edge);
+            (color * alpha).extend(alpha)
         });
     }
 }

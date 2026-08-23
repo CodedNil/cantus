@@ -12,8 +12,10 @@ glam = { workspace = true, features = ["libm"] }
 
 [target.'cfg(not(target_arch = "spirv"))'.dependencies]
 ash.workspace = true
+ash-window.workspace = true
 bytemuck.workspace = true
 glam = { workspace = true, features = ["std"] }
+raw-window-handle.workspace = true
 smallvec.workspace = true
 ttf-parser.workspace = true
 tracing = "0.1.44"

@@ -1,69 +1,103 @@
 use super::{
     canvas::Canvas,
-    context::{Context, RenderFrame, SetupError, transition_image},
-    surface::{Present, Surface, SurfaceFrame, SurfaceTarget},
+    context::{Context, Inner, RenderFrame, SetupError, transition_image},
+    surface::{Present, SurfaceFrame, SurfaceTarget},
 };
-use crate::{Frame, FrameGlobals, InputEvent, Rect, SurfaceHandle, glam::Vec3, input::Input, text::Text};
+use crate::{Frame, InputEvent, Rect, ShaderData, SurfaceHandle, contract::Program, glam::Vec3, input::Input, text::Text};
 use ash::{util::read_spv, vk};
 use core::slice::from_ref;
-use std::{io::Cursor, time::Instant, vec, vec::Vec};
+use raw_window_handle::{HasDisplayHandle, HasWindowHandle};
+use std::{io::Cursor, rc::Rc, time::Instant, vec, vec::Vec};
 
-pub struct Renderer<Shared: FrameGlobals> {
+pub struct Renderer<Shared: ShaderData> {
     context: Context,
-    surfaces: Vec<Option<SurfaceSlot<Shared>>>,
-    shader: vk::ShaderModule,
+    surfaces: Vec<SurfaceEntry<Shared>>,
     canvas: Canvas<Shared>,
     text: Text,
     started: Instant,
     last_frame: f32,
+    frame_info_mut: fn(&mut Shared) -> &mut crate::FrameInfo,
 }
 
-pub struct SurfaceSlot<Shared> {
-    pub target: SurfaceTarget,
-    pub globals: Shared,
-    pub input: Input,
+struct SurfaceEntry<Shared> {
+    generation: u32,
+    slot: Option<SurfaceSlot<Shared>>,
 }
 
-#[derive(Clone, Copy)]
-pub struct ShaderModule<Shared> {
-    bytes: &'static [u8],
-    register: fn(&mut Canvas<Shared>),
-    root: &'static str,
+struct SurfaceSlot<Shared> {
+    target: SurfaceTarget,
+    globals: Shared,
+    input: Input,
 }
 
-impl<Shared> ShaderModule<Shared> {
-    #[doc(hidden)]
-    pub const fn new(bytes: &'static [u8], register: fn(&mut Canvas<Shared>), root: &'static str) -> Self {
-        Self { bytes, register, root }
+pub struct Render<'a, Shared: ShaderData> {
+    surfaces: &'a mut [SurfaceEntry<Shared>],
+    delta_time: f32,
+    text: &'a mut Text,
+    canvas: &'a mut Canvas<Shared>,
+}
+
+impl<Shared: ShaderData> Render<'_, Shared> {
+    pub fn surface<Services>(&mut self, surface: SurfaceHandle, services: Services, draw: impl FnOnce(&mut Frame<'_, Shared, Services>)) {
+        let Some(entry) = self.surfaces.get_mut(surface.index()).filter(|entry| entry.generation == surface.generation()) else {
+            return;
+        };
+        let Some(slot) = entry.slot.as_mut() else {
+            return;
+        };
+        let mut frame = Frame::new(&mut slot.globals, &mut slot.input, self.delta_time, self.text, self.canvas, surface, services);
+        draw(&mut frame);
     }
 }
 
-impl<Shared: FrameGlobals + Default> Renderer<Shared> {
+pub struct ShaderModule {
+    bytes: &'static [u8],
+    root: &'static str,
+}
+
+impl ShaderModule {
+    pub const fn new(bytes: &'static [u8], root: &'static str) -> Self {
+        Self { bytes, root }
+    }
+}
+
+impl<Shared: ShaderData + Default> Renderer<Shared> {
     /// Creates the Vulkan renderer and its primary presentation surface.
     ///
     /// # Errors
     /// Returns an error when Vulkan initialization or shader loading fails.
-    pub fn new(surface: Surface, [width, height]: [u32; 2], module: ShaderModule<Shared>, font: &[u8], text_color: Vec3) -> Result<Self, SetupError> {
-        let context = Context::new(&surface)?;
-        let target = SurfaceTarget::new(&context, surface, width, height)?;
+    pub fn new(
+        program: Program<Shared>,
+        surface: &(impl HasDisplayHandle + HasWindowHandle),
+        [width, height]: [u32; 2],
+        font: &[u8],
+        text_color: Vec3,
+    ) -> Result<(Self, SurfaceHandle), SetupError> {
+        let (context, surface) = Context::new(surface)?;
+        let target = SurfaceTarget::from_raw(&context, surface, width, height)?;
+        let module = program.shader;
         let words = read_spv(&mut Cursor::new(module.bytes)).map_err(|_| SetupError::InvalidShader)?;
-        let shader = unsafe { context.0.device.create_shader_module(&vk::ShaderModuleCreateInfo::default().code(&words), None) }?;
-        let mut canvas = Canvas::new(&context, shader, target.format(), module.root);
-        (module.register)(&mut canvas);
+        let mut canvas = Canvas::new(&context, words, target.format, module.root);
         let text = Text::new(&mut canvas, font, text_color);
-        Ok(Self {
-            context,
-            surfaces: vec![Some(SurfaceSlot {
-                target,
-                globals: Shared::default(),
-                input: Input::default(),
-            })],
-            shader,
-            canvas,
-            text,
-            started: Instant::now(),
-            last_frame: 0.0,
-        })
+        Ok((
+            Self {
+                context,
+                surfaces: vec![SurfaceEntry {
+                    generation: 0,
+                    slot: Some(SurfaceSlot {
+                        target,
+                        globals: Shared::default(),
+                        input: Input::default(),
+                    }),
+                }],
+                canvas,
+                text,
+                started: Instant::now(),
+                last_frame: 0.0,
+                frame_info_mut: program.frame_info_mut,
+            },
+            SurfaceHandle::new(0, 0),
+        ))
     }
 
     /// Starts the next upload and instance-collection frame.
@@ -84,48 +118,59 @@ impl<Shared: FrameGlobals + Default> Renderer<Shared> {
     ///
     /// # Errors
     /// Returns an error when the next mapped upload arena is still in use.
-    pub fn render<Services>(&mut self, services: Services, draw: impl FnOnce(&mut Frame<'_, Shared, Services>)) {
+    pub fn render(&mut self, draw: impl FnOnce(&mut Render<'_, Shared>)) {
         let Ok((elapsed, delta)) = self.begin_frame() else {
             tracing::error!("GPU frame could not begin");
             return;
         };
-        for surface in self.surfaces.iter_mut().flatten() {
+        for surface in self.surfaces.iter_mut().filter_map(|entry| entry.slot.as_mut()) {
             surface.input.begin_frame(delta);
-            let info = surface.globals.frame_info_mut();
+            let info = (self.frame_info_mut)(&mut surface.globals);
             info.time = elapsed;
             info.mouse_pos = surface.input.pointer();
             info.mouse_pressure = surface.input.pressure();
         }
         {
-            let mut frame = Frame::new(&mut self.surfaces, delta, &mut self.text, &mut self.canvas, services);
-            draw(&mut frame);
+            let mut render = Render {
+                surfaces: &mut self.surfaces,
+                delta_time: delta,
+                text: &mut self.text,
+                canvas: &mut self.canvas,
+            };
+            draw(&mut render);
         }
-        for surface in self.surfaces.iter_mut().flatten() {
+        for surface in self.surfaces.iter_mut().filter_map(|entry| entry.slot.as_mut()) {
             surface.input.end_frame();
         }
-        self.text.finish_frame();
-        self.canvas.prepare();
-        let present = self.present(SurfaceHandle::PRIMARY);
-        for index in 1..self.surfaces.len() {
-            if self.surfaces[index].is_some() {
-                let _ = self.present(SurfaceHandle(index));
+        let placed_glyphs = self.text.finish_frame();
+        self.canvas.prepare(placed_glyphs);
+        for index in 0..self.surfaces.len() {
+            let Some(generation) = self.surfaces[index].slot.as_ref().map(|_| self.surfaces[index].generation) else {
+                continue;
+            };
+            let surface = SurfaceHandle::new(index, generation);
+            if !self.canvas.has_draws(surface) {
+                continue;
             }
-        }
-        match present {
-            Present::Lost => tracing::error!("Vulkan presentation surface was lost"),
-            Present::Validation => tracing::error!("Vulkan frame failed validation"),
-            Present::Rendered | Present::Unavailable => {}
+            match self.present(surface) {
+                Present::Lost => tracing::error!("Vulkan presentation surface was lost"),
+                Present::Validation => tracing::error!("Vulkan frame failed validation"),
+                Present::Rendered | Present::Unavailable => {}
+            }
         }
     }
 
     fn present(&mut self, surface: SurfaceHandle) -> Present {
-        let Some(slot) = self.surfaces.get_mut(surface.index()).and_then(Option::as_mut) else {
+        let Some(entry) = self.surfaces.get_mut(surface.index()).filter(|entry| entry.generation == surface.generation()) else {
+            return Present::Unavailable;
+        };
+        let Some(slot) = entry.slot.as_mut() else {
             return Present::Unavailable;
         };
         let frame = FrameEncoder::new(&self.context, &mut slot.target, bytemuck::bytes_of(&slot.globals));
         match frame {
             Ok(frame) => {
-                self.canvas.draw_surface(frame.render_frame(), surface);
+                self.canvas.draw_surface(&frame.frame, surface);
                 frame.present()
             }
             Err(present) => present,
@@ -137,78 +182,81 @@ impl<Shared: FrameGlobals + Default> Renderer<Shared> {
     }
 
     pub fn input(&mut self, surface: SurfaceHandle, event: InputEvent) {
-        if let Some(slot) = self.surfaces.get_mut(surface.index()).and_then(Option::as_mut) {
+        if let Some(slot) = self.slot_mut(surface) {
             slot.input.apply(event);
         }
     }
 
     pub fn dragging(&self, surface: SurfaceHandle) -> bool {
-        self.surfaces.get(surface.index()).and_then(Option::as_ref).is_some_and(|slot| slot.input.dragging())
+        self.slot(surface).is_some_and(|slot| slot.input.dragging())
     }
 
     pub fn take_input_regions(&mut self, surface: SurfaceHandle) -> Vec<Rect> {
-        self.surfaces
-            .get_mut(surface.index())
-            .and_then(Option::as_mut)
-            .map(|slot| slot.input.take_regions().collect())
-            .unwrap_or_default()
+        self.slot_mut(surface).map(|slot| slot.input.take_regions().collect()).unwrap_or_default()
     }
 
     pub fn resize(&mut self, surface: SurfaceHandle, [width, height]: [u32; 2]) {
-        if let Some(slot) = self.surfaces.get_mut(surface.index()).and_then(Option::as_mut) {
+        if let Some(slot) = self.slot_mut(surface) {
             slot.target.resize(width, height);
         }
     }
 
-    /// Adds the optional second presentation surface.
+    /// Adds another presentation surface.
     ///
     /// # Errors
     /// Returns an error when the surface is incompatible with this Vulkan device.
-    pub fn add_surface(&mut self, target: Surface, [width, height]: [u32; 2]) -> Result<SurfaceHandle, SetupError> {
+    pub fn add_surface(&mut self, target: &(impl HasDisplayHandle + HasWindowHandle), [width, height]: [u32; 2]) -> Result<SurfaceHandle, SetupError> {
         let target = SurfaceTarget::new(&self.context, target, width, height)?;
-        let Some(main) = self.surfaces.first().and_then(Option::as_ref) else {
-            return Err(SetupError::IncompatibleSurface);
-        };
-        if target.format() != main.target.format() {
+        if target.format != self.canvas.format() {
             return Err(SetupError::IncompatibleSurface);
         }
-        let surface = SurfaceHandle(self.surfaces.len());
-        self.surfaces.push(Some(SurfaceSlot {
+        let slot = SurfaceSlot {
             target,
             globals: Shared::default(),
             input: Input::default(),
-        }));
-        Ok(surface)
+        };
+        if let Some((index, entry)) = self.surfaces.iter_mut().enumerate().find(|(_, entry)| entry.slot.is_none()) {
+            entry.slot = Some(slot);
+            Ok(SurfaceHandle::new(index, entry.generation))
+        } else {
+            let index = self.surfaces.len();
+            self.surfaces.push(SurfaceEntry { generation: 0, slot: Some(slot) });
+            Ok(SurfaceHandle::new(index, 0))
+        }
     }
 
     pub fn remove_surface(&mut self, surface: SurfaceHandle) {
-        if surface.index() > 0
-            && let Some(target) = self.surfaces.get_mut(surface.index())
+        if let Some(entry) = self.surfaces.get_mut(surface.index())
+            && entry.generation == surface.generation()
         {
-            *target = None;
+            entry.slot = None;
+            entry.generation = entry.generation.wrapping_add(1);
         }
     }
-}
 
-impl<Shared: FrameGlobals> Drop for Renderer<Shared> {
-    fn drop(&mut self) {
-        unsafe {
-            let _ = self.context.0.device.device_wait_idle();
-            self.context.0.device.destroy_shader_module(self.shader, None);
-        }
+    fn slot(&self, surface: SurfaceHandle) -> Option<&SurfaceSlot<Shared>> {
+        self.surfaces.get(surface.index()).filter(|entry| entry.generation == surface.generation())?.slot.as_ref()
+    }
+
+    fn slot_mut(&mut self, surface: SurfaceHandle) -> Option<&mut SurfaceSlot<Shared>> {
+        self.surfaces
+            .get_mut(surface.index())
+            .filter(|entry| entry.generation == surface.generation())?
+            .slot
+            .as_mut()
     }
 }
 
 #[must_use = "a frame encoder must be presented"]
 struct FrameEncoder<'a> {
-    context: &'a Context,
+    inner: Rc<Inner>,
     target: &'a mut SurfaceTarget,
     surface: SurfaceFrame,
-    frame: RenderFrame<'a>,
+    pub(super) frame: RenderFrame<'a>,
 }
 
 impl<'a> FrameEncoder<'a> {
-    fn new(context: &'a Context, target: &'a mut SurfaceTarget, shared: &'a [u8]) -> Result<Self, Present> {
+    fn new(context: &Context, target: &'a mut SurfaceTarget, shared: &'a [u8]) -> Result<Self, Present> {
         let surface = target.acquire()?;
         let command = surface.command;
         let inner = &context.0;
@@ -234,7 +282,7 @@ impl<'a> FrameEncoder<'a> {
                 &vk::RenderingInfo::default()
                     .render_area(vk::Rect2D {
                         offset: vk::Offset2D::default(),
-                        extent: target.extent(),
+                        extent: target.extent,
                     })
                     .layer_count(1)
                     .color_attachments(from_ref(&attachment)),
@@ -243,8 +291,8 @@ impl<'a> FrameEncoder<'a> {
                 command,
                 0,
                 &[vk::Viewport {
-                    width: target.extent().width as f32,
-                    height: target.extent().height as f32,
+                    width: target.extent.width as f32,
+                    height: target.extent.height as f32,
                     max_depth: 1.0,
                     ..Default::default()
                 }],
@@ -254,23 +302,18 @@ impl<'a> FrameEncoder<'a> {
                 0,
                 &[vk::Rect2D {
                     offset: vk::Offset2D::default(),
-                    extent: target.extent(),
+                    extent: target.extent,
                 }],
             );
         }
         Ok(Self {
-            context,
+            inner: context.0.clone(),
             target,
             surface,
             frame: RenderFrame::new(command, shared),
         })
     }
-
-    pub const fn render_frame(&self) -> &RenderFrame<'_> {
-        &self.frame
-    }
-
-    pub fn present(mut self) -> Present {
+    fn present(mut self) -> Present {
         if self.finish().is_err() {
             return Present::Validation;
         }
@@ -278,20 +321,19 @@ impl<'a> FrameEncoder<'a> {
     }
 
     fn finish(&mut self) -> Result<(), SetupError> {
-        let inner = &self.context.0;
         let command = self.surface.command;
         unsafe {
-            inner.device.cmd_end_rendering(command);
+            self.inner.device.cmd_end_rendering(command);
             transition_image(
-                &inner.device,
+                &self.inner.device,
                 command,
                 self.surface.image,
                 vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL,
                 vk::ImageLayout::PRESENT_SRC_KHR,
                 1,
             );
-            inner.device.end_command_buffer(command)?;
-            let timeline = inner.reserve_timeline();
+            self.inner.device.end_command_buffer(command)?;
+            let timeline = self.inner.reserve_timeline();
             let waits = [vk::SemaphoreSubmitInfo::default()
                 .semaphore(self.surface.acquire)
                 .stage_mask(vk::PipelineStageFlags2::COLOR_ATTACHMENT_OUTPUT)];
@@ -301,12 +343,12 @@ impl<'a> FrameEncoder<'a> {
                     .semaphore(self.surface.complete)
                     .stage_mask(vk::PipelineStageFlags2::ALL_GRAPHICS),
                 vk::SemaphoreSubmitInfo::default()
-                    .semaphore(inner.timeline)
+                    .semaphore(self.inner.timeline)
                     .value(timeline)
                     .stage_mask(vk::PipelineStageFlags2::ALL_COMMANDS),
             ];
-            inner.device.queue_submit2(
-                inner.queue,
+            self.inner.device.queue_submit2(
+                self.inner.queue,
                 &[vk::SubmitInfo2::default()
                     .wait_semaphore_infos(&waits)
                     .command_buffer_infos(&command_info)
@@ -314,7 +356,7 @@ impl<'a> FrameEncoder<'a> {
                 vk::Fence::null(),
             )?;
             self.target.submitted(&self.surface, timeline);
-            inner.uploads_submitted(timeline);
+            self.inner.uploads_submitted(timeline);
         }
         Ok(())
     }

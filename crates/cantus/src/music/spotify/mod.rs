@@ -107,7 +107,7 @@ impl SpotifyBackend {
         let updater = updater.clone();
         let playlist_targets = config.playlists.clone();
         let ratings_enabled = config.ratings_enabled;
-        background.spawn(async move {
+        background.spawn_update(async move {
             let mut receiver = receiver;
             loop {
                 match connect().await {
@@ -134,7 +134,7 @@ impl SpotifyBackend {
         }
     }
 
-    pub async fn lyrics(&self, track_id: TrackId) -> MusicResult<Vec<LyricSegment>> {
+    pub(super) async fn lyrics(&self, track_id: TrackId) -> MusicResult<Vec<LyricSegment>> {
         let session = self.session.lock().clone().ok_or_else(|| io::Error::other("Spotify is not connected"))?;
         let id = SpotifyId::from_base62(&track_id)?;
         let response = match session.spclient().get_lyrics(&id).await {

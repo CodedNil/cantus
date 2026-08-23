@@ -1,4 +1,4 @@
-use crate::artifact::{shader_artifact, shader_source, workspace_root};
+use crate::artifact::{shader_artifact, shader_dependency, shader_is_fresh, shader_source, workspace_root};
 use spirv_builder::{Capability, ModuleResult, SpirvBuilder, SpirvMetadata};
 use std::{
     fs,
@@ -7,23 +7,25 @@ use std::{
     vec::Vec,
 };
 
-const SHADER_TARGET: &str = "spirv-unknown-vulkan1.3";
+const SHADER_TARGET: &str = "spirv-unknown-vulkan1.4";
 
 /// Compiles a Rust-GPU crate to SPIR-V, then updates its artifact.
 ///
-/// Returns whether the artifact changed.
+/// Returns whether compilation ran and refreshed the artifact.
 ///
 /// # Errors
 ///
 /// Returns an error if compilation or file access fails.
 pub fn build_shader(crate_dir: &Path) -> Result<(PathBuf, bool), String> {
     let output = shader_artifact(crate_dir)?;
+    let shader_source = shader_source(crate_dir)?;
+    let dependency = shader_dependency(crate_dir)?;
+    if shader_is_fresh(&output, &shader_source, dependency.as_deref()) {
+        return Ok((output, false));
+    }
     let target = workspace_root(crate_dir)?.join("target/isthmus");
     let source = shader_workspace(crate_dir, &target)?;
     let shader = compile_shader(&source, &target.join("build"))?;
-    if fs::read(&output).is_ok_and(|current| current == shader) {
-        return Ok((output, false));
-    }
     let parent = output.parent().ok_or_else(|| String::from("shader artifact has no parent"))?;
     fs::create_dir_all(parent).map_err(|error| std::format!("failed to create shader artifact directory: {error}"))?;
     fs::write(&output, shader).map_err(|error| std::format!("failed to write shader artifact: {error}"))?;
@@ -51,25 +53,31 @@ fn shader_workspace(crate_dir: &Path, target: &Path) -> Result<PathBuf, String> 
     let dependency = fs::canonicalize(crate_dir.join(dependency)).map_err(|error| std::format!("failed to locate isthmus dependency: {error}"))?;
     let generated = target.join("source");
     fs::create_dir_all(&generated).map_err(|error| std::format!("failed to create shader workspace: {error}"))?;
-    fs::write(
-        generated.join("Cargo.toml"),
-        std::format!(
-            "[package]\nname = \"isthmus-shader\"\nversion = \"0.0.0\"\nedition = \"2024\"\n\n[package.metadata.isthmus]\nartifact = {:?}\nsource = {:?}\n\n[lib]\npath = \"lib.rs\"\n\n[workspace]\n\n[dependencies]\nisthmus = {{ path = {:?} }}\n",
-            artifact, source, dependency
+    write_if_changed(
+        &generated.join("Cargo.toml"),
+        &std::format!(
+            "[package]\nname = \"isthmus-shader\"\nversion = \"0.0.0\"\nedition = \"2024\"\n\n[package.metadata.isthmus]\nartifact = {:?}\n\n[lib]\npath = \"lib.rs\"\n\n[workspace]\n\n[dependencies]\nisthmus = {{ path = {:?} }}\n",
+            artifact,
+            dependency
         ),
-    )
-    .map_err(|error| std::format!("failed to write shader manifest: {error}"))?;
-    fs::write(
-        generated.join("lib.rs"),
-        std::format!("#![no_std]\n#![allow(dead_code, unused_imports)]\n#[path = {:?}]\npub mod render;\n", source),
-    )
-    .map_err(|error| std::format!("failed to write shader root: {error}"))?;
+    )?;
+    write_if_changed(
+        &generated.join("lib.rs"),
+        &std::format!("#![no_std]\n#![allow(dead_code, unused_imports)]\n#[path = {:?}]\npub mod render;\n", source),
+    )?;
     Ok(generated)
+}
+
+fn write_if_changed(path: &Path, contents: &str) -> Result<(), String> {
+    if fs::read_to_string(path).is_ok_and(|current| current == contents) {
+        return Ok(());
+    }
+    fs::write(path, contents).map_err(|error| std::format!("failed to write {}: {error}", path.display()))
 }
 
 fn compile_shader(source: &Path, target: &Path) -> Result<Vec<u8>, String> {
     let build = SpirvBuilder::new(source, SHADER_TARGET)
-        .deny_warnings(false)
+        .deny_warnings(true)
         .shader_crate_default_features(false)
         .target_dir_path(target)
         .spirv_metadata(SpirvMetadata::None)

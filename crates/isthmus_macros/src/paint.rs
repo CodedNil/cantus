@@ -1,118 +1,140 @@
-use crate::isthmus_path;
+use crate::{fragment_entry, isthmus_path};
 use quote::{format_ident, quote};
-use syn::{Expr, FnArg, ItemFn, Pat, Stmt, Type, parse_quote};
+use syn::{Block, Expr, Ident, Pat, PatType, Type, parse_quote};
 
-pub fn expand(function: &ItemFn) -> syn::Result<proc_macro2::TokenStream> {
+#[derive(Clone)]
+pub struct Capture {
+    pub name: Ident,
+    source: Type,
+    kind: CaptureKind,
+}
+
+#[derive(Clone, Copy)]
+enum CaptureKind {
+    Plain,
+    Bool,
+    Image,
+}
+
+impl Capture {
+    pub fn new(input: &PatType) -> syn::Result<Self> {
+        let Pat::Ident(name) = input.pat.as_ref() else {
+            return Err(syn::Error::new_spanned(&input.pat, "shader inputs require identifiers"));
+        };
+        let source = input.ty.as_ref().clone();
+        let kind = if matches!(&source, Type::Path(path) if path.path.is_ident("bool")) {
+            CaptureKind::Bool
+        } else if matches!(&source, Type::Path(path) if path.path.segments.last().is_some_and(|segment| segment.ident == "Image")) {
+            CaptureKind::Image
+        } else {
+            CaptureKind::Plain
+        };
+        Ok(Self {
+            name: name.ident.clone(),
+            source,
+            kind,
+        })
+    }
+
+    pub const fn is_image(&self) -> bool {
+        matches!(self.kind, CaptureKind::Image)
+    }
+
+    fn storage(&self, isthmus: &proc_macro2::TokenStream) -> Type {
+        match self.kind {
+            CaptureKind::Bool => parse_quote!(u32),
+            CaptureKind::Image => parse_quote!(#isthmus::__private::ImageHandle),
+            CaptureKind::Plain => self.source.clone(),
+        }
+    }
+
+    fn unpack(&self, isthmus: &proc_macro2::TokenStream) -> proc_macro2::TokenStream {
+        let name = &self.name;
+        match self.kind {
+            CaptureKind::Plain => quote!(let #name = instance.#name;),
+            CaptureKind::Bool => quote!(let #name = instance.#name != 0;),
+            CaptureKind::Image => quote!(let #name = #isthmus::__private::ShaderImage::new(images, instance.#name);),
+        }
+    }
+
+    pub fn encode(&self, value: &Expr, frame: &Expr) -> proc_macro2::TokenStream {
+        match self.kind {
+            CaptureKind::Plain => quote!(#value),
+            CaptureKind::Bool => quote!(u32::from(#value)),
+            CaptureKind::Image => quote!((#frame).__image(&(#value))),
+        }
+    }
+}
+
+pub struct Expansion {
+    pub items: proc_macro2::TokenStream,
+    pub instance: Ident,
+    pub pipeline: Ident,
+}
+
+pub fn expand(name: &Ident, frame: &PatType, shader_input: &PatType, captures: &[Capture], body: &Block, text: bool) -> syn::Result<Expansion> {
     let isthmus = isthmus_path();
-    let name = &function.sig.ident;
-    let visibility = &function.vis;
     let shader_name = format_ident!("__isthmus_paint_{name}");
     let instance_name = format_ident!("__IsthmusPaint{}", pascal(&name.to_string()));
-    let drawable_name = format_ident!("__IsthmusDrawable{}", pascal(&name.to_string()));
-    let mut frame = None;
-    let mut values = Vec::new();
-    let mut resources = Vec::new();
-    for argument in &function.sig.inputs {
-        let FnArg::Typed(argument) = argument else {
-            return Err(syn::Error::new_spanned(argument, "paint functions cannot have a receiver"));
-        };
-        let Pat::Ident(pattern) = argument.pat.as_ref() else {
-            return Err(syn::Error::new_spanned(&argument.pat, "paint parameters require identifiers"));
-        };
-        if pattern.ident == "frame" {
-            frame = Some(argument.clone());
-        } else if matches!(argument.ty.as_ref(), Type::Reference(_)) {
-            if !is_image_heap(argument.ty.as_ref()) && !is_text_resource(argument.ty.as_ref()) {
-                return Err(syn::Error::new_spanned(
-                    argument,
-                    "paint resources are internal; capture ShaderData values, Images, or text resources",
-                ));
-            }
-            resources.push(argument.clone());
-        } else {
-            values.push(argument.clone());
-        }
-    }
-    let frame = frame.ok_or_else(|| syn::Error::new_spanned(&function.sig, "paint requires `frame`"))?;
-    if !matches!(function.sig.inputs.first(), Some(FnArg::Typed(argument)) if matches!(argument.pat.as_ref(), Pat::Ident(pattern) if pattern.ident == "frame")) {
-        return Err(syn::Error::new_spanned(&frame, "paint globals must be the first parameter"));
-    }
-    let (last, setup) = function
-        .block
-        .stmts
-        .split_last()
-        .ok_or_else(|| syn::Error::new_spanned(&function.block, "paint function is empty"))?;
-    let Stmt::Expr(Expr::MethodCall(shade), _) = last else {
-        return Err(syn::Error::new_spanned(last, "paint must end with `quad.shade(|fragment| ...)`"));
+    let Pat::Ident(frame_name) = frame.pat.as_ref() else {
+        return Err(syn::Error::new_spanned(&frame.pat, "paint globals require an identifier"));
     };
-    if shade.method != "shade" || shade.args.len() != 1 {
-        return Err(syn::Error::new_spanned(shade, "paint must end with `quad.shade(|fragment| ...)`"));
-    }
-    let Expr::Closure(closure) = shade.args.first().unwrap() else {
-        return Err(syn::Error::new_spanned(&shade.args, "shade requires a fragment closure"));
+    let Pat::Ident(shader_input_name) = shader_input.pat.as_ref() else {
+        return Err(syn::Error::new_spanned(&shader_input.pat, "shader fragment requires an identifier"));
     };
-    if closure.inputs.len() != 1 || !matches!(closure.inputs.first(), Some(Pat::Ident(pattern)) if pattern.ident == "fragment") {
-        return Err(syn::Error::new_spanned(&closure.inputs, "shade closure must accept `fragment`"));
-    }
-
-    let quad = &shade.receiver;
-    let shade_body = &closure.body;
+    let frame_name = &frame_name.ident;
+    let shader_input_name = &shader_input_name.ident;
     let frame_ty = &frame.ty;
-    let payload = values
-        .iter()
-        .filter(|argument| !matches!(argument.pat.as_ref(), Pat::Ident(pattern) if pattern.ident == "quad"))
-        .collect::<Vec<_>>();
-    let payload_names = payload.iter().map(|argument| argument.pat.as_ref().clone()).collect::<Vec<_>>();
-    let payload_types = payload
-        .iter()
-        .map(|argument| {
-            if is_bool(argument.ty.as_ref()) {
-                parse_quote!(u32)
-            } else {
-                argument.ty.as_ref().clone()
-            }
-        })
-        .collect::<Vec<_>>();
-    let value_arguments = values.iter();
-    let payload_fields = if payload.is_empty() {
-        quote!(_isthmus: u32)
-    } else {
-        quote!(#(#payload_names: #payload_types),*)
-    };
-    let payload_values = payload.iter().map(|argument| {
-        let name = argument.pat.as_ref();
-        if is_bool(argument.ty.as_ref()) {
-            quote!(#name: u32::from(#name))
-        } else {
-            quote!(#name: #name)
-        }
-    });
-    let payload_init = if payload.is_empty() {
-        quote!(#instance_name { _isthmus: 0 })
-    } else {
-        quote!(#instance_name { #(#payload_values),* })
-    };
-    let payload_unpack = payload.iter().map(|argument| {
-        let name = argument.pat.as_ref();
-        if is_bool(argument.ty.as_ref()) {
-            quote!(let #name = instance.#name != 0;)
-        } else {
-            quote!(let #name = instance.#name;)
-        }
-    });
-    let resource_names = resources.iter().map(|resource| resource.pat.as_ref());
-    let mut shader_resources = resources.clone();
-    for resource in &mut shader_resources {
-        let binding = text_binding(resource.ty.as_ref()).unwrap_or(5);
-        let storage = matches!(resource.ty.as_ref(), Type::Reference(reference) if matches!(reference.elem.as_ref(), Type::Slice(_)));
-        resource.attrs.push(if storage {
-            parse_quote!(#[spirv(storage_buffer, descriptor_set = 0, binding = #binding)])
-        } else {
-            parse_quote!(#[spirv(descriptor_set = 0, binding = #binding)])
-        });
+    let frame_binding = (!frame_name.to_string().starts_with('_')).then(|| quote!(let #frame_name = *__isthmus_frame;));
+    let line_type = syn::parse2::<Type>(quote!(#isthmus::text::Line))?;
+    let mut payload = Vec::<(Ident, Type)>::new();
+    if text {
+        payload.push((format_ident!("line"), line_type));
     }
+    for capture in captures {
+        payload.push((capture.name.clone(), capture.storage(&isthmus)));
+    }
+    let payload_names = payload.iter().map(|(name, _)| name);
+    let payload_types = payload.iter().map(|(_, storage)| storage);
+    let payload_fields = quote!(#(#payload_names: #payload_types),*);
+    let payload_types = payload.iter().map(|(_, storage)| storage);
+    let shader_data = if payload.is_empty() {
+        quote!(unsafe impl #isthmus::ShaderData for #instance_name {})
+    } else {
+        quote!(unsafe impl #isthmus::ShaderData for #instance_name where #(#payload_types: #isthmus::ShaderData,)* {})
+    };
+    let line_unpack = text.then(|| quote!(let line = instance.line;));
+    let payload_unpack = captures.iter().map(|capture| capture.unpack(&isthmus));
+    let instance_load = (!payload.is_empty()).then(|| {
+        quote! {
+            let instance = unsafe {
+                #isthmus::spirv_std::ByteAddressableBuffer::from_slice(payload).load::<#instance_name>(draw.payload)
+            };
+        }
+    });
+    let shade_body = if text {
+        quote!({
+            let #shader_input_name = #isthmus::TextFragment::new(fragment, line, placed_glyphs, glyphs, edges);
+            #body
+        })
+    } else {
+        quote!(#body)
+    };
+    let entry = fragment_entry(
+        &quote!(#frame_ty),
+        text,
+        !payload.is_empty(),
+        captures.iter().any(Capture::is_image),
+        &quote! {
+            #instance_load
+            #line_unpack
+            #(#payload_unpack)*
+            #frame_binding
+            *out_color = #shade_body;
+        },
+    );
     let module_name = quote!(#isthmus::__private::shader_module_name(module_path!()));
-    Ok(quote! {
+    let items = quote! {
         #[repr(C)]
         #[derive(Clone, Copy)]
         #[cfg_attr(not(target_arch = "spirv"), derive(#isthmus::__private::bytemuck::Pod, #isthmus::__private::bytemuck::Zeroable))]
@@ -120,108 +142,33 @@ pub fn expand(function: &ItemFn) -> syn::Result<proc_macro2::TokenStream> {
         pub struct #instance_name {
             #payload_fields
         }
-        impl #isthmus::ShaderData for #instance_name {}
+        #shader_data
 
         pub mod #shader_name {
             use super::*;
+            use #isthmus::float::FloatExt as _;
 
             #[cfg(not(target_arch = "spirv"))]
             pub struct Pipeline;
 
             #[cfg(not(target_arch = "spirv"))]
+            static PIPELINE_TOKEN: #isthmus::__private::PipelineToken = #isthmus::__private::PipelineToken::new();
+
+            #[cfg(not(target_arch = "spirv"))]
             impl #isthmus::__private::ShaderSpec for Pipeline {
                 type Shared = #frame_ty;
                 type Instance = #instance_name;
-                const NAME: &'static str = #module_name;
+                const PIPELINE: #isthmus::__private::PaintPipeline = #isthmus::__private::PaintPipeline::new(&PIPELINE_TOKEN, #module_name);
             }
 
-            #[cfg_attr(not(target_arch = "spirv"), allow(clippy::needless_pass_by_value, clippy::trivially_copy_pass_by_ref))]
-            fn fragment_impl(
-                pixel: #isthmus::glam::Vec2,
-                frame: &#frame_ty,
-                instance: #instance_name,
-                quad: #isthmus::Quad,
-                #(#resources,)*
-            ) -> #isthmus::glam::Vec4 {
-                #(#payload_unpack)*
-                let frame = *frame;
-                #(#setup)*
-                let local = quad.local(pixel);
-                let fragment = #isthmus::__private::Fragment {
-                    pixel,
-                    local,
-                    uv: local / quad.size + 0.5,
-                    size: quad.size,
-                };
-                #shade_body
-            }
-
-            #[allow(unused_variables)]
-            #[#isthmus::spirv_std::spirv(fragment)]
-            pub fn fragment(
-                #[spirv(location = 0)] pixel: #isthmus::glam::Vec2,
-                #[spirv(location = 1, flat)] draw_index: u32,
-                #[spirv(push_constant)] frame: &#frame_ty,
-                #[spirv(storage_buffer, descriptor_set = 0, binding = 0)] draws: &[#isthmus::__private::DrawRecord],
-                #[spirv(storage_buffer, descriptor_set = 0, binding = 1)] payload: &[u32],
-                #(#shader_resources,)*
-                #[spirv(location = 0)] out_color: &mut #isthmus::glam::Vec4,
-            ) {
-                let draw = draws[draw_index as usize];
-                let instance = unsafe {
-                    #isthmus::spirv_std::ByteAddressableBuffer::from_slice(payload).load::<#instance_name>(draw.payload)
-                };
-                *out_color = fragment_impl(pixel, frame, instance, draw.quad, #(#resource_names),*);
-            }
+            #entry
         }
-
-        #[cfg(not(target_arch = "spirv"))]
-        #[repr(C)]
-        struct #drawable_name {
-            quad: #isthmus::Quad,
-            instance: #instance_name,
-        }
-
-        #[cfg(not(target_arch = "spirv"))]
-        impl #isthmus::__private::Paint<#frame_ty> for #drawable_name {
-            fn paint(self, canvas: &mut #isthmus::__private::Canvas<#frame_ty>) {
-                canvas.emit::<#shader_name::Pipeline>(self.quad, self.instance);
-            }
-        }
-
-        #[cfg(not(target_arch = "spirv"))]
-        #visibility fn #name(#(#value_arguments),*) -> impl #isthmus::__private::Paint<#frame_ty> + use<> {
-            #drawable_name {
-                quad: #quad,
-                instance: #payload_init,
-            }
-        }
+    };
+    Ok(Expansion {
+        items,
+        instance: instance_name,
+        pipeline: shader_name,
     })
-}
-
-pub fn is_image_heap(ty: &Type) -> bool {
-    let Type::Reference(reference) = ty else { return false };
-    matches!(reference.elem.as_ref(), Type::Path(path) if path.path.segments.last().is_some_and(|segment| segment.ident == "Images"))
-}
-
-pub fn is_text_resource(ty: &Type) -> bool {
-    text_binding(ty).is_some()
-}
-
-fn text_binding(ty: &Type) -> Option<u32> {
-    let Type::Reference(reference) = ty else { return None };
-    let Type::Slice(slice) = reference.elem.as_ref() else { return None };
-    let Type::Path(path) = slice.elem.as_ref() else { return None };
-    match path.path.segments.last()?.ident.to_string().as_str() {
-        "PlacedGlyph" => Some(2),
-        "Glyph" => Some(3),
-        "Edge" => Some(4),
-        _ => None,
-    }
-}
-
-fn is_bool(ty: &Type) -> bool {
-    matches!(ty, Type::Path(path) if path.path.is_ident("bool"))
 }
 
 fn pascal(name: &str) -> String {

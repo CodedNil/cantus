@@ -9,8 +9,7 @@ use tracing::{info, warn};
 mod enrichment;
 mod spotify;
 
-pub(crate) use crate::render::lyrics::LyricSegment;
-pub use enrichment::{AlbumArt, ArtState, Enrichment, Fetch, IMAGE_SIZE};
+pub use enrichment::{ArtState, Enrichment, Fetch};
 
 pub type TrackId = ArrayString<22>;
 pub type PlaylistId = ArrayString<22>;
@@ -18,6 +17,14 @@ pub type MusicResult<T> = Result<T, Box<dyn Error + Send + Sync>>;
 pub const TRACK_SPACING_MS: f32 = 4000.0;
 pub const MAX_PLAYLIST_TARGETS: usize = 8;
 pub(super) type PlaylistTracks = Arc<HashSet<TrackId>>;
+
+pub struct LyricSegment {
+    pub start_ms: f32,
+    pub end_ms: f32,
+    pub text: String,
+    pub lane: usize,
+    pub line_end: bool,
+}
 
 pub struct PlaybackState {
     pub playing: bool,
@@ -33,7 +40,14 @@ impl Default for PlaybackState {
             playing: false,
             queue: Vec::new(),
             playlists: Vec::new(),
-            timeline: Timeline::default(),
+            timeline: Timeline {
+                index: 0,
+                position_ms: 0.0,
+                rate: 0.0,
+                observed_at: Instant::now(),
+                queue_start_ms: 0.0,
+                movement: 0.0,
+            },
             last_toggle: Instant::now(),
         }
     }
@@ -47,19 +61,6 @@ pub struct Timeline {
     pub observed_at: Instant,
     pub queue_start_ms: f32,
     pub movement: f32,
-}
-
-impl Default for Timeline {
-    fn default() -> Self {
-        Self {
-            index: 0,
-            position_ms: 0.0,
-            rate: 0.0,
-            observed_at: Instant::now(),
-            queue_start_ms: 0.0,
-            movement: 0.0,
-        }
-    }
 }
 
 impl Timeline {
@@ -154,8 +155,6 @@ pub struct TrackRuntime {
     pub art: ArtState,
     pub audio_features: Fetch<AudioFeatures>,
     pub(crate) lyrics: Fetch<Lyrics>,
-    pub(crate) detail_alpha: f32,
-    pub(crate) icon_alpha: f32,
     pub(crate) playlist_expansion: f32,
 }
 
@@ -179,12 +178,6 @@ impl CondensedPlaylist {
         let tracks = Arc::make_mut(&mut self.tracks);
         if add { tracks.insert(track_id) } else { tracks.remove(&track_id) }
     }
-}
-
-pub fn playlist_icons(track_id: TrackId, playlists: &[CondensedPlaylist], contains_track: bool) -> impl Iterator<Item = &CondensedPlaylist> {
-    playlists
-        .iter()
-        .filter(move |playlist| playlist.rating_index.is_none() && playlist.tracks.contains(&track_id) == contains_track)
 }
 
 pub enum PlaybackCommand {
@@ -260,7 +253,7 @@ impl MusicBackend {
     /// # Errors
     ///
     /// Returns an error when the provider request or response fails.
-    pub async fn lyrics(&self, track_id: TrackId) -> MusicResult<Vec<LyricSegment>> {
+    pub(crate) async fn lyrics(&self, track_id: TrackId) -> MusicResult<Vec<LyricSegment>> {
         self.0.lyrics(track_id).await
     }
 }

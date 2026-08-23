@@ -1,6 +1,4 @@
 use crate::render::Globals;
-#[cfg(not(target_arch = "spirv"))]
-use isthmus::Rect;
 use isthmus::{
     Quad,
     float::FloatExt,
@@ -14,45 +12,21 @@ const ANTIALIAS_WIDTH: f32 = 0.55;
 /// Smallest coverage worth shading; analytic shadows never reach exact zero.
 pub const VISIBLE_ALPHA: f32 = 1.0 / 1024.0;
 
-#[isthmus::data]
-pub struct Pill {
-    pub x: f32,
-    pub y: f32,
-    pub width: f32,
-}
-
-impl Pill {
-    pub const fn new(x: f32, y: f32, width: f32) -> Self {
-        Self { x, y, width }
-    }
-
-    pub fn quad(self, frame: &Globals) -> Quad {
-        let margin = pill_margin(frame);
-        let min = vec2(self.x - margin, self.y - margin);
-        Quad::from_min_max(min, min + vec2(self.width + margin * 2.0, frame.panel_height + margin * 2.0))
-    }
-
-    pub fn sample(self, pixel: Vec2, frame: &Globals) -> Surface {
-        let size = vec2(self.width, frame.panel_height);
-        let local = pixel - vec2(self.x, self.y);
-        let distance = sd_capsule_box(local - size * 0.5, (size.x - size.y) * 0.5, size.y * 0.5);
-        let mouse_distance = if frame.info.mouse_pressure > 0.0 {
-            sd_capsule_box(frame.info.mouse_pos - vec2(self.x, self.y) - size * 0.5, (size.x - size.y) * 0.5, size.y * 0.5)
-        } else {
-            1.0
-        };
-        let (mouse_bulge, ripple_bulge, ripple, ripple_flash) = interaction(pixel, frame);
-        Surface::new(local, size, distance, mouse_distance, mouse_bulge, ripple_bulge, ripple, ripple_flash)
-    }
-
-    #[cfg(not(target_arch = "spirv"))]
-    pub const fn rect(self, height: f32) -> Rect {
-        Rect::new(self.x, self.y, self.x + self.width, self.y + height)
-    }
+pub fn sample_pill(quad: Quad, pixel: Vec2, frame: &Globals) -> PillSample {
+    let size = quad.size;
+    let local = quad.local(pixel) + size * 0.5;
+    let distance = sd_capsule_box(local - size * 0.5, (size.x - size.y) * 0.5, size.y * 0.5);
+    let mouse_distance = if frame.info.mouse_pressure > 0.0 {
+        sd_capsule_box(quad.local(frame.info.mouse_pos), (size.x - size.y) * 0.5, size.y * 0.5)
+    } else {
+        1.0
+    };
+    let (mouse_bulge, ripple_bulge, ripple, ripple_flash) = interaction(pixel, frame);
+    PillSample::new(local, size, distance, mouse_distance, mouse_bulge, ripple_bulge, ripple, ripple_flash)
 }
 
 #[derive(Clone, Copy)]
-pub struct Surface {
+pub struct PillSample {
     shape_distance: f32,
     mouse_distance: f32,
     mouse_bulge: f32,
@@ -69,7 +43,7 @@ pub struct Surface {
     pub ripple_flash: f32,
 }
 
-impl Surface {
+impl PillSample {
     fn new(local: Vec2, size: Vec2, shape_distance: f32, mouse_distance: f32, mouse_bulge: f32, ripple_bulge: f32, ripple: Vec2, ripple_flash: f32) -> Self {
         let mut surface = Self {
             shape_distance,
@@ -140,6 +114,9 @@ pub fn hash(p: Vec2) -> Vec2 {
     vec2(value.x as f32, value.y as f32) * 2.328_306_4e-10
 }
 
+// This substantial helper is shared across shader entry points; keeping it as
+// one SPIR-V function avoids duplicating the complete noise graph in each one.
+#[inline(never)]
 pub fn simplex_noise(p: Vec2) -> f32 {
     const K1: f32 = 0.366_025_42;
     const K2: f32 = 0.211_324_87;
@@ -173,15 +150,14 @@ pub fn cloud_mass(p: Vec2, scale: f32, time: f32) -> f32 {
 /// Pixels the pill can cover beyond its bounds: shadow always, bulges only while active.
 pub fn pill_margin(frame: &Globals) -> f32 {
     let mut bulge = frame.info.mouse_pressure * 8.0;
-    for index in 0..frame.ripples.len() {
-        let pulse = frame.ripples[index];
+    for pulse in &frame.ripples {
         let fade = 1.0 - ((frame.info.time - pulse.start_time) * 1.2).saturate();
         bulge += pulse.strength * fade * fade * 11.0;
     }
     SHADOW_REACH + bulge * 0.5
 }
 
-/// 1.0 when positive, else 0.0; `f32::from(bool)` needs `OpCapability Int8`.
+/// 1.0 when positive, else 0.0; core lowers `f32::from(bool)` through `u8`, which costs an extra conversion.
 pub fn presence(value: f32) -> f32 {
     if value > 0.0 { 1.0 } else { 0.0 }
 }
@@ -189,6 +165,7 @@ pub fn presence(value: f32) -> f32 {
 fn interaction(pixel: Vec2, frame: &Globals) -> (f32, f32, Vec2, f32) {
     let mut ripple = Vec2::ZERO;
     let mut ripple_flash = 0.0;
+    // Rust-GPU cannot lower this slice iterator without a pointer-to-integer conversion.
     for index in 0..frame.ripples.len() {
         let pulse = frame.ripples[index];
         let progress = ((frame.info.time - pulse.start_time) * 1.2).saturate();

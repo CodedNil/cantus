@@ -6,33 +6,21 @@ use glam::{UVec2, UVec3, UVec4, Vec2, Vec3, Vec4};
 #[cfg_attr(not(target_arch = "spirv"), derive(bytemuck::Pod, bytemuck::Zeroable))]
 pub struct Unorm8x4(u32);
 
-/// Compact optional descriptor/layer pair into the shader-visible image heap.
+/// Compact descriptor/layer pair into the shader-visible image heap.
 #[repr(transparent)]
-#[derive(Clone, Copy, Eq, PartialEq)]
+#[derive(Clone, Copy)]
 #[cfg_attr(not(target_arch = "spirv"), derive(bytemuck::Pod, bytemuck::Zeroable))]
 pub struct ImageHandle(i32);
 
 impl ImageHandle {
-    pub const NONE: Self = Self(-1);
-
     #[cfg(not(target_arch = "spirv"))]
     pub(crate) const fn new(image: u32, layer: u32) -> Self {
         Self(((image & 0xff) << 23 | (layer & 0x7f_ffff)) as i32)
     }
 
-    pub(crate) const fn parts(self) -> Option<(u32, u32)> {
-        if self.0 < 0 {
-            None
-        } else {
-            let value = self.0 as u32;
-            Some((value >> 23, value & 0x7f_ffff))
-        }
-    }
-}
-
-impl Default for ImageHandle {
-    fn default() -> Self {
-        Self::NONE
+    pub(crate) const fn parts(self) -> (u32, u32) {
+        let value = self.0 as u32;
+        (value >> 23, value & 0x7f_ffff)
     }
 }
 
@@ -63,24 +51,30 @@ impl Unorm8x4 {
 }
 
 /// Plain data whose Rust representation is also its scalar-layout SPIR-V ABI.
+///
+/// # Safety
+/// Implementations must have identical Rust and scalar-layout SPIR-V representations.
 #[cfg(target_arch = "spirv")]
-pub trait ShaderData: Copy {}
+pub unsafe trait ShaderData: Copy {}
 /// Plain data whose Rust representation is also its scalar-layout SPIR-V ABI.
+///
+/// # Safety
+/// Implementations must have identical Rust and scalar-layout SPIR-V representations.
 #[cfg(not(target_arch = "spirv"))]
-pub trait ShaderData: Copy + bytemuck::Pod {}
+pub unsafe trait ShaderData: Copy + bytemuck::Pod {}
 
-impl ShaderData for u32 {}
-impl ShaderData for i32 {}
-impl ShaderData for f32 {}
-impl ShaderData for Unorm8x4 {}
-impl ShaderData for ImageHandle {}
-impl ShaderData for Vec2 {}
-impl ShaderData for Vec3 {}
-impl ShaderData for Vec4 {}
-impl ShaderData for UVec2 {}
-impl ShaderData for UVec3 {}
-impl ShaderData for UVec4 {}
+unsafe impl ShaderData for u32 {}
+unsafe impl ShaderData for i32 {}
+unsafe impl ShaderData for f32 {}
+unsafe impl ShaderData for Unorm8x4 {}
+unsafe impl ShaderData for ImageHandle {}
+unsafe impl ShaderData for Vec2 {}
+unsafe impl ShaderData for Vec3 {}
+unsafe impl ShaderData for Vec4 {}
+unsafe impl ShaderData for UVec2 {}
+unsafe impl ShaderData for UVec3 {}
+unsafe impl ShaderData for UVec4 {}
 #[cfg(target_arch = "spirv")]
-impl<T: ShaderData, const N: usize> ShaderData for [T; N] {}
+unsafe impl<T: ShaderData, const N: usize> ShaderData for [T; N] {}
 #[cfg(not(target_arch = "spirv"))]
-impl<T: ShaderData, const N: usize> ShaderData for [T; N] where [T; N]: bytemuck::Pod {}
+unsafe impl<T: ShaderData, const N: usize> ShaderData for [T; N] where [T; N]: bytemuck::Pod {}

@@ -1,37 +1,45 @@
-use crate::render::{Globals, TEXT_COLOR, text};
-use isthmus::{float::FloatExt, glam::Vec4};
+use crate::render::{Globals, TEXT_COLOR};
+use isthmus::{TextFragment, glam::Vec4, text};
 
 #[cfg(not(target_arch = "spirv"))]
 use {
     crate::{
-        app::music::{Enrichment, MusicBackend, PlaybackState, Track},
-        render::{Frame, PANEL_START, text::TextStyle},
+        app::music::{Enrichment, LyricSegment, PlaybackState, Track, TrackId},
+        render::{Frame, PANEL_START},
     },
     isthmus::glam::vec2,
+    isthmus::text::TextStyle,
     std::time::Instant,
 };
 
 pub const EXTENSION: f32 = 10.0;
-pub(crate) const TEXT_GLYPHS: usize = 4_096;
-
-#[cfg(not(target_arch = "spirv"))]
-pub struct LyricSegment {
-    pub start_ms: f32,
-    pub end_ms: f32,
-    pub text: String,
-    pub lane: usize,
-    pub line_end: bool,
-}
+pub const TEXT_GLYPHS: usize = 4_096;
 
 #[cfg(not(target_arch = "spirv"))]
 pub struct LyricsView {
     enrichment: Enrichment,
-    music: MusicBackend,
+}
+
+#[cfg(not(target_arch = "spirv"))]
+pub struct LyricsRequest {
+    pub uri: String,
+    pub track_id: Option<TrackId>,
+    pub name: String,
+    pub artist: String,
+    pub album: String,
+    pub duration_ms: u32,
+}
+
+#[cfg(not(target_arch = "spirv"))]
+impl LyricsRequest {
+    pub async fn fetch(&self, http: &reqwest::Client) -> Option<Vec<LyricSegment>> {
+        provider::fetch(http, self).await
+    }
 }
 
 #[cfg(not(target_arch = "spirv"))]
 #[derive(Default)]
-pub(crate) struct Lyrics {
+pub struct Lyrics {
     lines: [text::ShapedLine; 2],
     timeline: Vec<(f32, f32)>,
     span: f32,
@@ -118,8 +126,7 @@ impl Lyrics {
 
 #[cfg(not(target_arch = "spirv"))]
 mod provider {
-    use super::LyricSegment;
-    use crate::app::music::TrackId;
+    use super::{LyricSegment, LyricsRequest};
     use quick_xml::{
         Reader, XmlVersion,
         escape::unescape,
@@ -130,15 +137,6 @@ mod provider {
     use std::mem;
 
     const API: &str = "https://lyrics-api.binimum.org/";
-
-    pub struct LyricsRequest {
-        pub uri: String,
-        pub track_id: Option<TrackId>,
-        pub name: String,
-        pub artist: String,
-        pub album: String,
-        pub duration_ms: u32,
-    }
 
     #[derive(Deserialize)]
     struct SearchResponse {
@@ -152,7 +150,7 @@ mod provider {
         timing_type: String,
     }
 
-    pub async fn fetch(http: &Client, query: &LyricsRequest) -> Option<Vec<LyricSegment>> {
+    pub(super) async fn fetch(http: &Client, query: &LyricsRequest) -> Option<Vec<LyricSegment>> {
         let result = http
             .get(API)
             .query(&[
@@ -283,16 +281,13 @@ mod provider {
     }
 }
 
-#[cfg(not(target_arch = "spirv"))]
-pub(crate) use provider::{LyricsRequest, fetch};
-
 #[isthmus::paint]
 impl LyricsView {
-    pub const fn new(enrichment: Enrichment, music: MusicBackend) -> Self {
-        Self { enrichment, music }
+    pub const fn new(enrichment: Enrichment) -> Self {
+        Self { enrichment }
     }
 
-    pub fn show(&mut self, frame: &mut Frame, playback: &mut PlaybackState) {
+    pub fn show(&self, frame: &mut Frame, playback: &mut PlaybackState) {
         const PREFETCH_TRACKS: usize = 4;
         const LANE_OFFSET: f32 = 8.0;
 
@@ -304,7 +299,7 @@ impl LyricsView {
         let now = Instant::now();
         for track in playback.queue.iter_mut().skip(start.saturating_sub(1)).take(PREFETCH_TRACKS) {
             if track.runtime.lyrics.request(now) {
-                self.enrichment.request_lyrics(track, self.music.clone(), frame.text_shaper());
+                self.enrichment.request_lyrics(track, frame.services.music.clone(), frame.text().shaper());
             }
         }
 
@@ -338,10 +333,10 @@ impl LyricsView {
                     if x <= frame.globals.info.screen_size.x && x + line.width >= 0.0 {
                         let color = if lane == 0 { TEXT_COLOR.extend(1.0) } else { Vec4::new(0.72, 0.86, 1.0, 1.0) };
                         let screen_width = frame.globals.info.screen_size.x;
-                        let placed = frame.visible_text(line, vec2(x, y + lane as f32 * LANE_OFFSET), 0.0..screen_width).with_color(color);
+                        let placed = frame.text().visible(line, vec2(x, y + lane as f32 * LANE_OFFSET), 0.0..screen_width).with_color(color);
                         let padding = placed.size * 0.2 + 1.0;
                         // GPU: Scrolling lyrics line.
-                        frame.paint_text(placed.expanded(padding), |frame: Globals, text: isthmus::TextFragment| {
+                        frame.paint_text(placed.expanded(padding), |text: TextFragment, frame: Globals| {
                             let edge_fade = text.pixel.x.smoothstep(0.0, 32.0) * text.pixel.x.smoothstep(frame.info.screen_size.x, frame.info.screen_size.x - 32.0);
                             let emphasis = (text.pixel.x - frame.playhead_x).abs().smoothstep(110.0, 0.0);
                             let weight = (text.line.weight + emphasis * 0.15).min(1.0);
@@ -349,8 +344,8 @@ impl LyricsView {
                             let fill = text::coverage(distance);
                             let outline = text::coverage(distance + 0.9) * 0.4;
                             let alpha = fill + outline * (1.0 - fill);
-                            let played = text.pixel.x.smoothstep(frame.playhead_x + 4.0, frame.playhead_x - 4.0);
-                            let color = text.line.color.to_vec3().lerp(text.line.color.to_vec3() * 0.42, played);
+                            let progress = text.pixel.x.smoothstep(frame.playhead_x + 4.0, frame.playhead_x - 4.0);
+                            let color = text.line.color.to_vec3().lerp(text.line.color.to_vec3() * 0.42, progress);
                             (color * fill * edge_fade).extend(alpha * edge_fade)
                         });
                     }
