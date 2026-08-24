@@ -77,7 +77,7 @@
   };
   search_providers = lib.mkOption {
     type = lib.types.listOf (lib.types.attrs);
-    default = builtins.fromJSON "[{\"name\":\"DuckDuckGo\",\"url\":\"https://duckduckgo.com/?q={searchTerms}\",\"alias\":\"!ddg\"}]";
+    default = builtins.fromJSON "[{\"name\":\"DuckDuckGo\",\"url\":\"https://duckduckgo.com/?q={searchTerms}\",\"icon\":\"https://duckduckgo.com/assets/logo_header.v109.svg\",\"alias\":\"!ddg\"}]";
     description = "Web search providers; the first is the unprefixed fallback.";
   };
 }

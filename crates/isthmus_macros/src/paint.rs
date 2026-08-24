@@ -72,20 +72,15 @@ pub struct Expansion {
     pub pipeline: Ident,
 }
 
-pub fn expand(name: &Ident, frame: &PatType, shader_input: &PatType, captures: &[Capture], body: &Block, text: bool) -> syn::Result<Expansion> {
+pub fn expand(name: &Ident, shader_input: &PatType, captures: &[Capture], body: &Block, text: bool) -> syn::Result<Expansion> {
     let isthmus = isthmus_path();
     let shader_name = format_ident!("__isthmus_paint_{name}");
     let instance_name = format_ident!("__IsthmusPaint{}", pascal(&name.to_string()));
-    let Pat::Ident(frame_name) = frame.pat.as_ref() else {
-        return Err(syn::Error::new_spanned(&frame.pat, "paint globals require an identifier"));
-    };
     let Pat::Ident(shader_input_name) = shader_input.pat.as_ref() else {
         return Err(syn::Error::new_spanned(&shader_input.pat, "shader fragment requires an identifier"));
     };
-    let frame_name = &frame_name.ident;
     let shader_input_name = &shader_input_name.ident;
-    let frame_ty = &frame.ty;
-    let frame_binding = (!frame_name.to_string().starts_with('_')).then(|| quote!(let #frame_name = *__isthmus_frame;));
+    let shader_input_type = shader_input.ty.as_ref();
     let line_type = syn::parse2::<Type>(quote!(#isthmus::text::Line))?;
     let mut payload = Vec::<(Ident, Type)>::new();
     if text {
@@ -114,22 +109,22 @@ pub fn expand(name: &Ident, frame: &PatType, shader_input: &PatType, captures: &
     });
     let shade_body = if text {
         quote!({
-            let #shader_input_name = #isthmus::TextFragment::new(fragment, line, placed_glyphs, glyphs, edges);
+            let #shader_input_name: #shader_input_type = #isthmus::TextFragment::new(fragment, line, placed_glyphs, glyphs, edges);
             #body
         })
     } else {
         quote!(#body)
     };
     let entry = fragment_entry(
-        &quote!(#frame_ty),
         text,
         !payload.is_empty(),
         captures.iter().any(Capture::is_image),
+        shader_input.ty.as_ref(),
+        shader_input_name,
         &quote! {
             #instance_load
             #line_unpack
             #(#payload_unpack)*
-            #frame_binding
             *out_color = #shade_body;
         },
     );
@@ -146,19 +141,15 @@ pub fn expand(name: &Ident, frame: &PatType, shader_input: &PatType, captures: &
 
         pub mod #shader_name {
             use super::*;
-            use #isthmus::float::FloatExt as _;
+            use #isthmus::FloatExt as _;
 
             #[cfg(not(target_arch = "spirv"))]
             pub struct Pipeline;
 
             #[cfg(not(target_arch = "spirv"))]
-            static PIPELINE_TOKEN: #isthmus::__private::PipelineToken = #isthmus::__private::PipelineToken::new();
-
-            #[cfg(not(target_arch = "spirv"))]
             impl #isthmus::__private::ShaderSpec for Pipeline {
-                type Shared = #frame_ty;
                 type Instance = #instance_name;
-                const PIPELINE: #isthmus::__private::PaintPipeline = #isthmus::__private::PaintPipeline::new(&PIPELINE_TOKEN, #module_name);
+                const PIPELINE: #isthmus::__private::PaintPipeline = #isthmus::__private::PaintPipeline::new(#module_name);
             }
 
             #entry

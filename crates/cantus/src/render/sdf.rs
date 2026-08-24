@@ -1,7 +1,6 @@
 use crate::render::Globals;
 use isthmus::{
-    Quad,
-    float::FloatExt,
+    FloatExt, Quad,
     glam::{UVec2, Vec2, Vec3, Vec4, uvec2, vec2},
     spirv_std::arch::Derivative,
 };
@@ -12,16 +11,16 @@ const ANTIALIAS_WIDTH: f32 = 0.55;
 /// Smallest coverage worth shading; analytic shadows never reach exact zero.
 pub const VISIBLE_ALPHA: f32 = 1.0 / 1024.0;
 
-pub fn sample_pill(quad: Quad, pixel: Vec2, frame: &Globals) -> PillSample {
+pub fn sample_pill(quad: Quad, pixel: Vec2, globals: Globals, time: f32) -> PillSample {
     let size = quad.size;
     let local = quad.local(pixel) + size * 0.5;
     let distance = sd_capsule_box(local - size * 0.5, (size.x - size.y) * 0.5, size.y * 0.5);
-    let mouse_distance = if frame.info.mouse_pressure > 0.0 {
-        sd_capsule_box(quad.local(frame.info.mouse_pos), (size.x - size.y) * 0.5, size.y * 0.5)
+    let mouse_distance = if globals.pressure > 0.0 {
+        sd_capsule_box(quad.local(globals.pointer), (size.x - size.y) * 0.5, size.y * 0.5)
     } else {
         1.0
     };
-    let (mouse_bulge, ripple_bulge, ripple, ripple_flash) = interaction(pixel, frame);
+    let (mouse_bulge, ripple_bulge, ripple, ripple_flash) = interaction(pixel, globals, time);
     PillSample::new(local, size, distance, mouse_distance, mouse_bulge, ripple_bulge, ripple, ripple_flash)
 }
 
@@ -126,7 +125,7 @@ pub fn simplex_noise(p: Vec2) -> f32 {
     let b = a - corner + K2;
     let c = a - 1.0 + 2.0 * K2;
     let contribution = |offset: Vec2, point: Vec2| {
-        let falloff = (0.5 - point.dot(point)).max(0.0);
+        let falloff = (0.5 - point.length_squared()).max(0.0);
         falloff * falloff * falloff * falloff * point.dot(hash(cell + offset) * 2.0 - 1.0)
     };
     70.0 * (contribution(Vec2::ZERO, a) + contribution(corner, b) + contribution(Vec2::ONE, c))
@@ -148,11 +147,11 @@ pub fn cloud_mass(p: Vec2, scale: f32, time: f32) -> f32 {
 }
 
 /// Pixels the pill can cover beyond its bounds: shadow always, bulges only while active.
-pub fn pill_margin(frame: &Globals) -> f32 {
-    let mut bulge = frame.info.mouse_pressure * 8.0;
-    for pulse in &frame.ripples {
-        let fade = 1.0 - ((frame.info.time - pulse.start_time) * 1.2).saturate();
-        bulge += pulse.strength * fade * fade * 11.0;
+pub fn pill_margin(globals: Globals, time: f32) -> f32 {
+    let mut bulge = globals.pressure * 8.0;
+    for pulse in &globals.ripples {
+        let fade = 1.0 - ((time - pulse.start_time) * 1.2).saturate();
+        bulge += presence(pulse.start_time) * fade * fade * 11.0;
     }
     SHADOW_REACH + bulge * 0.5
 }
@@ -162,34 +161,38 @@ pub fn presence(value: f32) -> f32 {
     if value > 0.0 { 1.0 } else { 0.0 }
 }
 
-fn interaction(pixel: Vec2, frame: &Globals) -> (f32, f32, Vec2, f32) {
+fn interaction(pixel: Vec2, globals: Globals, time: f32) -> (f32, f32, Vec2, f32) {
     let mut ripple = Vec2::ZERO;
     let mut ripple_flash = 0.0;
     // Rust-GPU cannot lower this slice iterator without a pointer-to-integer conversion.
-    for index in 0..frame.ripples.len() {
-        let pulse = frame.ripples[index];
-        let progress = ((frame.info.time - pulse.start_time) * 1.2).saturate();
+    for index in 0..globals.ripples.len() {
+        let pulse = globals.ripples[index];
+        let progress = ((time - pulse.start_time) * 1.2).saturate();
         // Uniform across the draw, so expired slots skip all per-pixel distance work.
-        if pulse.strength > 0.0 && progress < 1.0 {
+        if pulse.start_time > 0.0 && progress < 1.0 {
             let offset = pixel - pulse.origin;
             let distance = offset.length();
             let direction = offset.normalize_or_zero();
-            let wave = (distance - progress * 600.0).abs().smoothstep(80.0, 0.0) * pulse.strength * (1.0 - progress);
+            let wave = (distance - progress * 600.0).abs().smoothstep(80.0, 0.0) * (1.0 - progress);
             ripple += direction * wave * (1.0 - progress) * 0.5;
             ripple_flash = (ripple_flash + wave * 0.5).min(1.0);
         }
     }
 
-    let mouse_bulge = if frame.info.mouse_pressure > 0.0 {
-        pixel.distance(frame.info.mouse_pos).smoothstep(150.0, 0.0) * frame.info.mouse_pressure * 8.0
+    let mouse_bulge = if globals.pressure > 0.0 {
+        pixel.distance(globals.pointer).smoothstep(150.0, 0.0) * globals.pressure * 8.0
     } else {
         0.0
     };
     (mouse_bulge, if ripple == Vec2::ZERO { 0.0 } else { ripple.length() * 22.0 }, ripple, ripple_flash)
 }
 
-pub fn ripple_flash(pixel: Vec2, frame: &Globals) -> f32 {
-    interaction(pixel, frame).3
+pub fn ripple_flash(pixel: Vec2, globals: Globals, time: f32) -> f32 {
+    interaction(pixel, globals, time).3
+}
+
+pub fn ripple_light(color: Vec3, flash: f32) -> Vec3 {
+    color.lerp(color * 1.5 + 0.1, flash)
 }
 
 /// Edge light derived from the final SDF, so it follows every deformation.
@@ -216,7 +219,7 @@ pub fn sd_star(point: Vec2, radius: f32, indent: f32) -> f32 {
     point.x = point.x.abs();
     point.y -= radius;
     let edge = indent * vec2(-k1.y, k1.x) - vec2(0.0, radius);
-    let edge_t = (point.dot(edge) / edge.dot(edge)).saturate();
+    let edge_t = (point.dot(edge) / edge.length_squared()).saturate();
     let cross = point.y * edge.x - point.x * edge.y;
     (point - edge * edge_t).length() * if cross < 0.0 { -1.0 } else { 1.0 }
 }
@@ -233,7 +236,7 @@ pub fn sd_rounded_triangle(point: Vec2, side_len: f32, radius: f32) -> f32 {
 /// Shortest distance from `point` to the line segment between `start` and `end`.
 pub fn segment_distance(point: Vec2, start: Vec2, end: Vec2) -> f32 {
     let segment = end - start;
-    let along = ((point - start).dot(segment) / segment.dot(segment).max(0.001)).saturate();
+    let along = ((point - start).dot(segment) / segment.length_squared().max(0.001)).saturate();
     (point - start - segment * along).length()
 }
 
@@ -258,6 +261,6 @@ pub fn sd_chevron(point: Vec2, extent: Vec2) -> f32 {
 
 pub fn smooth_union(base: f32, shape: f32, smoothing: f32, amount: f32) -> f32 {
     let blend = (0.5 + 0.5 * (shape - base) / smoothing).saturate();
-    let union = shape + (base - shape) * blend - smoothing * blend * (1.0 - blend);
-    base + (union - base) * amount
+    let union = shape.lerp(base, blend) - smoothing * blend * (1.0 - blend);
+    base.lerp(union, amount)
 }

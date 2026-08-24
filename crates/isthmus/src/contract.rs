@@ -2,13 +2,13 @@
 use crate::backend::renderer::ShaderModule;
 use crate::{ShaderData, data::ImageHandle};
 use spirv_std::image::{Image2dArray, SampledImage};
-#[cfg(not(target_arch = "spirv"))]
-use std::sync::{
-    OnceLock,
-    atomic::{AtomicUsize, Ordering},
-};
 
 pub type ImageHeap = spirv_std::RuntimeArray<SampledImage<Image2dArray>>;
+
+/// Produces a premultiplied RGBA fragment output for the default source-over blend.
+pub fn rgba(color: glam::Vec3, alpha: f32) -> glam::Vec4 {
+    (color * alpha).extend(alpha)
+}
 
 #[doc(hidden)]
 pub struct ShaderImage<'a> {
@@ -27,62 +27,44 @@ impl<'a> ShaderImage<'a> {
     }
 }
 
+#[doc(hidden)]
 #[repr(C)]
 #[derive(Clone, Copy, Default)]
-#[cfg_attr(not(target_arch = "spirv"), derive(bytemuck::Pod, bytemuck::Zeroable))]
-pub struct FrameInfo {
+pub struct PushBlock {
     pub screen_size: glam::Vec2,
-    pub mouse_pos: glam::Vec2,
-    pub mouse_pressure: f32,
     pub time: f32,
 }
 
+unsafe impl ShaderData for PushBlock {}
 #[cfg(not(target_arch = "spirv"))]
-pub struct Program<Shared> {
+unsafe impl bytemuck::Zeroable for PushBlock {}
+#[cfg(not(target_arch = "spirv"))]
+unsafe impl bytemuck::Pod for PushBlock {}
+
+#[cfg(not(target_arch = "spirv"))]
+pub struct Program {
     pub(crate) shader: ShaderModule,
-    pub(crate) frame_info_mut: fn(&mut Shared) -> &mut FrameInfo,
 }
 
 #[cfg(not(target_arch = "spirv"))]
-impl<Shared> Program<Shared> {
-    pub const fn new(shader: ShaderModule, frame_info_mut: fn(&mut Shared) -> &mut FrameInfo) -> Self {
-        Self { shader, frame_info_mut }
+impl Program {
+    pub const fn new(shader: ShaderModule) -> Self {
+        Self { shader }
     }
 }
 
 #[cfg(not(target_arch = "spirv"))]
 #[derive(Clone, Copy)]
 pub struct PaintPipeline {
-    pub(crate) token: &'static PipelineToken,
     pub(crate) entry: &'static str,
 }
 
 #[cfg(not(target_arch = "spirv"))]
 impl PaintPipeline {
-    pub const fn new(token: &'static PipelineToken, entry: &'static str) -> Self {
-        Self { token, entry }
+    pub const fn new(entry: &'static str) -> Self {
+        Self { entry }
     }
 }
-
-#[cfg(not(target_arch = "spirv"))]
-static NEXT_PIPELINE: AtomicUsize = AtomicUsize::new(0);
-
-#[cfg(not(target_arch = "spirv"))]
-#[derive(Default)]
-pub struct PipelineToken(OnceLock<usize>);
-
-#[cfg(not(target_arch = "spirv"))]
-impl PipelineToken {
-    pub const fn new() -> Self {
-        Self(OnceLock::new())
-    }
-
-    pub(crate) fn index(&self) -> usize {
-        *self.0.get_or_init(|| NEXT_PIPELINE.fetch_add(1, Ordering::Relaxed))
-    }
-}
-
-unsafe impl ShaderData for FrameInfo {}
 
 #[repr(C)]
 #[derive(Clone, Copy)]
@@ -110,8 +92,14 @@ impl Quad {
         Self { center, size, axis }
     }
 
+    /// Creates a rotated quad from a direction, falling back to an unrotated quad
+    /// when the direction has no usable length.
+    pub fn oriented(center: glam::Vec2, size: glam::Vec2, direction: glam::Vec2) -> Self {
+        Self::new(center, size, direction.normalize_or(glam::Vec2::X))
+    }
+
     pub fn from_min_max(min: glam::Vec2, max: glam::Vec2) -> Self {
-        Self::new((min + max) * 0.5, max - min, glam::Vec2::X)
+        Self::new(min.midpoint(max), max - min, glam::Vec2::X)
     }
 
     pub fn sample(self, vertex: u32, screen_size: glam::Vec2) -> RasterSample {
@@ -137,18 +125,22 @@ impl Quad {
 }
 
 #[derive(Clone, Copy)]
-pub struct Fragment {
+pub struct Fragment<Globals = ()> {
     pub pixel: glam::Vec2,
     pub local: glam::Vec2,
     pub uv: glam::Vec2,
+    pub time: f32,
+    pub globals: Globals,
 }
 
-impl Fragment {
-    pub fn new(pixel: glam::Vec2, local: glam::Vec2, size: glam::Vec2) -> Self {
+impl<Globals> Fragment<Globals> {
+    pub fn new(pixel: glam::Vec2, local: glam::Vec2, size: glam::Vec2, time: f32, globals: Globals) -> Self {
         Self {
             pixel,
             local,
             uv: local / size + 0.5,
+            time,
+            globals,
         }
     }
 }
@@ -197,7 +189,6 @@ impl SurfaceHandle {
 /// Describes the host-visible interface and fixed state of one shader.
 #[cfg(not(target_arch = "spirv"))]
 pub trait ShaderSpec {
-    type Shared: ShaderData;
     type Instance: ShaderData;
     const PIPELINE: PaintPipeline;
 }

@@ -1,34 +1,29 @@
 pub mod launcher;
 pub mod lyrics;
-pub mod particles;
-pub mod playhead;
+pub mod music;
 pub mod sdf;
 pub mod status;
 pub mod tempestas;
-pub mod track;
 
 use isthmus::{
-    FrameInfo,
+    ShaderData,
     glam::{Vec2, Vec3},
 };
 
 #[cfg(not(target_arch = "spirv"))]
-use self::{
-    launcher::LauncherState,
-    lyrics::LyricsView,
-    particles::Particles,
-    playhead::Playhead,
-    status::StatusPanel,
-    tempestas::{StatusSky, host::WeatherPanel},
-};
-#[cfg(not(target_arch = "spirv"))]
-use crate::app::{
-    Background,
-    config::Config,
-    music::{Enrichment, MusicBackend, PlaybackState},
-};
-pub const TEXT_COLOR: Vec3 = Vec3::splat(0.94);
+use isthmus::Frame;
 
+#[cfg(not(target_arch = "spirv"))]
+use crate::{
+    app::{
+        Background,
+        config::Config,
+        music::{Enrichment, Music},
+    },
+    interaction::Interaction,
+};
+
+pub const TEXT_COLOR: Vec3 = Vec3::splat(0.94);
 /// Gap between the top of the surface and the top of the bar.
 pub const PANEL_START: f32 = 6.0;
 /// Base spacing unit. Sizes and gaps should be whole multiples of it.
@@ -39,88 +34,112 @@ pub const GAP: f32 = UNIT * 2.0;
 pub const PADDING: f32 = UNIT * 3.0;
 
 #[repr(C)]
-#[derive(Clone, Copy, Default, isthmus::Program, isthmus::ShaderData)]
+#[derive(Clone, Copy, Default, ShaderData)]
 pub struct Globals {
-    pub info: FrameInfo,
-    pub panel_height: f32,
-    pub playhead_x: f32,
-    pub px_per_ms: f32,
+    pub pointer: Vec2,
+    pub pressure: f32,
+    pub bar_height: f32,
     pub ripples: [RipplePulse; 4],
 }
 
+pub type Fragment = isthmus::Fragment<Globals>;
+pub type TextFragment<'a> = isthmus::TextFragment<'a, Globals>;
+
+isthmus::program!();
+
 #[repr(C)]
-#[derive(Clone, Copy, Default, isthmus::ShaderData)]
+#[derive(Clone, Copy, Default, ShaderData)]
 pub struct RipplePulse {
     pub origin: Vec2,
     pub start_time: f32,
-    pub strength: f32,
 }
 
 #[cfg(not(target_arch = "spirv"))]
-impl Globals {
-    pub(crate) fn ripple(&mut self, position: Vec2) {
-        let pulse = RipplePulse {
-            origin: position,
-            start_time: self.info.time,
-            strength: 1.0,
-        };
-        if let Some(ripple) = self.ripples.iter_mut().min_by(|a, b| a.start_time.total_cmp(&b.start_time)) {
-            *ripple = pulse;
-        }
-    }
+pub struct RenderContext<'a> {
+    pub paint: Frame<'a>,
+    pub config: &'a Config,
+    pub interaction: &'a mut Interaction,
 }
 
 #[cfg(not(target_arch = "spirv"))]
 #[derive(Clone, Copy)]
-pub struct Services<'a> {
-    pub config: &'a Config,
-    pub music: &'a MusicBackend,
+pub struct BarLayout {
+    pub playhead_x: f32,
+    pub px_per_ms: f32,
 }
 
 #[cfg(not(target_arch = "spirv"))]
-pub type Frame<'frame, 'app> = isthmus::Frame<'frame, Globals, Services<'app>>;
+impl<'a> RenderContext<'a> {
+    pub fn new(paint: Frame<'a>, config: &'a Config, interaction: &'a mut Interaction) -> Self {
+        interaction.begin_frame(paint.delta_time, paint.time);
+        Self { paint, config, interaction }
+    }
 
-#[cfg(not(target_arch = "spirv"))]
-pub struct Interface {
-    pub(crate) launcher: LauncherState,
-    pub(crate) lyrics: Option<LyricsView>,
-    pub(crate) weather: Option<WeatherPanel>,
-    pub(crate) status: Option<StatusPanel>,
-    particles: Particles,
-    playhead: Playhead,
+    pub const fn globals(&self) -> Globals {
+        self.interaction.globals(self.config.height)
+    }
+
+    pub fn finish(mut self) {
+        self.paint.set_globals(self.globals());
+        self.interaction.end_frame();
+    }
 }
 
 #[cfg(not(target_arch = "spirv"))]
-impl Interface {
+pub struct Ui {
+    pub(crate) launcher: launcher::LauncherState,
+    pub(crate) bar: Bar,
+}
+
+#[cfg(not(target_arch = "spirv"))]
+pub struct Bar {
+    pub(crate) lyrics: Option<lyrics::LyricsView>,
+    pub(crate) weather: Option<tempestas::WeatherPanel>,
+    pub(crate) status: Option<status::StatusPanel>,
+    music_view: music::MusicView,
+}
+
+#[cfg(not(target_arch = "spirv"))]
+impl Ui {
     pub fn new(config: &Config, background: &Background, enrichment: &Enrichment) -> Self {
         Self {
-            launcher: LauncherState::new(background, &enrichment.http, config.search_providers.clone()),
-            lyrics: config.lyrics_enabled.then(|| LyricsView::new(enrichment.clone())),
-            weather: config.tempestas_enabled.then(|| WeatherPanel::new(&config.timezones, background, enrichment.http.clone())),
-            status: config.status_enabled.then(|| StatusPanel::new(background)),
-            particles: Particles::default(),
-            playhead: Playhead::default(),
+            launcher: launcher::LauncherState::new(background, &enrichment.http, config.search_providers.clone()),
+            bar: Bar::new(config, background, enrichment),
+        }
+    }
+}
+
+#[cfg(not(target_arch = "spirv"))]
+impl Bar {
+    fn new(config: &Config, background: &Background, enrichment: &Enrichment) -> Self {
+        Self {
+            lyrics: config.lyrics_enabled.then(|| lyrics::LyricsView::new(enrichment.clone())),
+            weather: config
+                .tempestas_enabled
+                .then(|| tempestas::WeatherPanel::new(&config.timezones, background, enrichment.http.clone())),
+            status: config.status_enabled.then(|| status::StatusPanel::new(background)),
+            music_view: music::MusicView::default(),
         }
     }
 
-    pub fn show(&mut self, frame: &mut Frame, playback: &mut PlaybackState) {
-        if let Some(position) = frame.press_position() {
-            frame.globals.ripple(position);
-        }
-        // Globals
+    pub fn show(&mut self, frame: &mut RenderContext, music: &mut Music) {
         let status_width = self.status.as_ref().map_or(0.0, |status| status.width() + GAP);
-        frame.globals.px_per_ms = frame.services.config.timeline_px_per_ms(frame.globals.info.screen_size.x, status_width);
-        frame.globals.playhead_x = frame.services.config.playhead_x(frame.globals.px_per_ms);
-        // Modules
+        let reserved = frame.config.history_width + GAP + f32::from(frame.config.tempestas_enabled) * (tempestas::WIDTH + GAP) + status_width;
+        let px_per_ms = (frame.paint.screen_size.x - reserved).max(84.0) / (frame.config.timeline_future_minutes * 60_000.0);
+        let layout = BarLayout {
+            playhead_x: frame.config.history_width + frame.config.timeline_past_minutes * 60_000.0 * px_per_ms,
+            px_per_ms,
+        };
         if let Some(lyrics) = self.lyrics.as_mut() {
-            lyrics.show(frame, playback);
+            lyrics.show(frame, music, layout);
         }
-        let sky = self.weather.as_mut().map_or_else(StatusSky::default, |weather| weather.show(frame, status_width));
+        let sky = self
+            .weather
+            .as_mut()
+            .map_or_else(tempestas::StatusSky::default, |weather| weather.show(frame, status_width));
         if let Some(status) = self.status.as_mut() {
             status.show(frame, sky);
         }
-        track::show(frame, playback, &mut self.particles);
-        self.particles.show(frame, playback);
-        self.playhead.show(frame, playback);
+        self.music_view.show(frame, music, layout);
     }
 }

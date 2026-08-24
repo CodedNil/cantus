@@ -3,50 +3,76 @@ use super::{
     context::{Context, Inner, RenderFrame, SetupError, transition_image},
     surface::{Present, SurfaceFrame, SurfaceTarget},
 };
-use crate::{Frame, InputEvent, Rect, ShaderData, SurfaceHandle, contract::Program, glam::Vec3, input::Input, text::Text};
+use crate::{
+    Frame, SurfaceHandle,
+    contract::{Program, PushBlock},
+    glam::{Vec2, Vec3},
+    text::Text,
+};
 use ash::{util::read_spv, vk};
-use core::slice::from_ref;
+use core::{error::Error, fmt, slice::from_ref};
 use raw_window_handle::{HasDisplayHandle, HasWindowHandle};
 use std::{io::Cursor, rc::Rc, time::Instant, vec, vec::Vec};
 
-pub struct Renderer<Shared: ShaderData> {
+pub struct Renderer {
     context: Context,
-    surfaces: Vec<SurfaceEntry<Shared>>,
-    canvas: Canvas<Shared>,
+    surfaces: Vec<SurfaceEntry>,
+    canvas: Canvas,
     text: Text,
     started: Instant,
     last_frame: f32,
-    frame_info_mut: fn(&mut Shared) -> &mut crate::FrameInfo,
 }
 
-struct SurfaceEntry<Shared> {
+struct SurfaceEntry {
     generation: u32,
-    slot: Option<SurfaceSlot<Shared>>,
+    slot: Option<SurfaceSlot>,
 }
 
-struct SurfaceSlot<Shared> {
+struct SurfaceSlot {
     target: SurfaceTarget,
-    globals: Shared,
-    input: Input,
+    push: PushBlock,
 }
 
-pub struct Render<'a, Shared: ShaderData> {
-    surfaces: &'a mut [SurfaceEntry<Shared>],
+fn surface_slot(entries: &mut [SurfaceEntry], handle: SurfaceHandle) -> Option<&mut SurfaceSlot> {
+    entries.get_mut(handle.index()).filter(|entry| entry.generation == handle.generation())?.slot.as_mut()
+}
+
+pub struct Render<'a> {
+    surfaces: &'a mut [SurfaceEntry],
+    time: f32,
     delta_time: f32,
     text: &'a mut Text,
-    canvas: &'a mut Canvas<Shared>,
+    canvas: &'a mut Canvas,
 }
 
-impl<Shared: ShaderData> Render<'_, Shared> {
-    pub fn surface<Services>(&mut self, surface: SurfaceHandle, services: Services, draw: impl FnOnce(&mut Frame<'_, Shared, Services>)) {
-        let Some(entry) = self.surfaces.get_mut(surface.index()).filter(|entry| entry.generation == surface.generation()) else {
+#[derive(Debug)]
+pub enum RenderError {
+    Upload(SetupError),
+    SurfaceLost,
+    Validation,
+}
+
+impl fmt::Display for RenderError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Upload(error) => error.fmt(f),
+            Self::SurfaceLost => f.write_str("presentation surface was lost"),
+            Self::Validation => f.write_str("frame failed Vulkan validation"),
+        }
+    }
+}
+
+impl Error for RenderError {}
+
+impl Render<'_> {
+    pub fn surface(&mut self, surface: SurfaceHandle, screen_size: Vec2, draw: impl FnOnce(Frame<'_>)) {
+        let Some(slot) = surface_slot(self.surfaces, surface) else {
             return;
         };
-        let Some(slot) = entry.slot.as_mut() else {
-            return;
-        };
-        let mut frame = Frame::new(&mut slot.globals, &mut slot.input, self.delta_time, self.text, self.canvas, surface, services);
-        draw(&mut frame);
+        slot.push.screen_size = screen_size;
+        slot.push.time = self.time;
+        draw(Frame::new(&slot.push, self.time, self.delta_time, self.text, self.canvas, surface));
+        self.canvas.ensure_globals(surface);
     }
 }
 
@@ -61,13 +87,13 @@ impl ShaderModule {
     }
 }
 
-impl<Shared: ShaderData + Default> Renderer<Shared> {
+impl Renderer {
     /// Creates the Vulkan renderer and its primary presentation surface.
     ///
     /// # Errors
     /// Returns an error when Vulkan initialization or shader loading fails.
     pub fn new(
-        program: Program<Shared>,
+        program: Program,
         surface: &(impl HasDisplayHandle + HasWindowHandle),
         [width, height]: [u32; 2],
         font: &[u8],
@@ -86,15 +112,13 @@ impl<Shared: ShaderData + Default> Renderer<Shared> {
                     generation: 0,
                     slot: Some(SurfaceSlot {
                         target,
-                        globals: Shared::default(),
-                        input: Input::default(),
+                        push: PushBlock::default(),
                     }),
                 }],
                 canvas,
                 text,
                 started: Instant::now(),
                 last_frame: 0.0,
-                frame_info_mut: program.frame_info_mut,
             },
             SurfaceHandle::new(0, 0),
         ))
@@ -118,29 +142,17 @@ impl<Shared: ShaderData + Default> Renderer<Shared> {
     ///
     /// # Errors
     /// Returns an error when the next mapped upload arena is still in use.
-    pub fn render(&mut self, draw: impl FnOnce(&mut Render<'_, Shared>)) {
-        let Ok((elapsed, delta)) = self.begin_frame() else {
-            tracing::error!("GPU frame could not begin");
-            return;
-        };
-        for surface in self.surfaces.iter_mut().filter_map(|entry| entry.slot.as_mut()) {
-            surface.input.begin_frame(delta);
-            let info = (self.frame_info_mut)(&mut surface.globals);
-            info.time = elapsed;
-            info.mouse_pos = surface.input.pointer();
-            info.mouse_pressure = surface.input.pressure();
-        }
+    pub fn render(&mut self, draw: impl FnOnce(&mut Render<'_>)) -> Result<(), RenderError> {
+        let (elapsed, delta) = self.begin_frame().map_err(RenderError::Upload)?;
         {
             let mut render = Render {
                 surfaces: &mut self.surfaces,
+                time: elapsed,
                 delta_time: delta,
                 text: &mut self.text,
                 canvas: &mut self.canvas,
             };
             draw(&mut render);
-        }
-        for surface in self.surfaces.iter_mut().filter_map(|entry| entry.slot.as_mut()) {
-            surface.input.end_frame();
         }
         let placed_glyphs = self.text.finish_frame();
         self.canvas.prepare(placed_glyphs);
@@ -153,21 +165,19 @@ impl<Shared: ShaderData + Default> Renderer<Shared> {
                 continue;
             }
             match self.present(surface) {
-                Present::Lost => tracing::error!("Vulkan presentation surface was lost"),
-                Present::Validation => tracing::error!("Vulkan frame failed validation"),
+                Present::Lost => return Err(RenderError::SurfaceLost),
+                Present::Validation => return Err(RenderError::Validation),
                 Present::Rendered | Present::Unavailable => {}
             }
         }
+        Ok(())
     }
 
     fn present(&mut self, surface: SurfaceHandle) -> Present {
-        let Some(entry) = self.surfaces.get_mut(surface.index()).filter(|entry| entry.generation == surface.generation()) else {
+        let Some(slot) = surface_slot(&mut self.surfaces, surface) else {
             return Present::Unavailable;
         };
-        let Some(slot) = entry.slot.as_mut() else {
-            return Present::Unavailable;
-        };
-        let frame = FrameEncoder::new(&self.context, &mut slot.target, bytemuck::bytes_of(&slot.globals));
+        let frame = FrameEncoder::new(&self.context, &mut slot.target, bytemuck::bytes_of(&slot.push));
         match frame {
             Ok(frame) => {
                 self.canvas.draw_surface(&frame.frame, surface);
@@ -181,22 +191,8 @@ impl<Shared: ShaderData + Default> Renderer<Shared> {
         self.context.device_name()
     }
 
-    pub fn input(&mut self, surface: SurfaceHandle, event: InputEvent) {
-        if let Some(slot) = self.slot_mut(surface) {
-            slot.input.apply(event);
-        }
-    }
-
-    pub fn dragging(&self, surface: SurfaceHandle) -> bool {
-        self.slot(surface).is_some_and(|slot| slot.input.dragging())
-    }
-
-    pub fn take_input_regions(&mut self, surface: SurfaceHandle) -> Vec<Rect> {
-        self.slot_mut(surface).map(|slot| slot.input.take_regions().collect()).unwrap_or_default()
-    }
-
     pub fn resize(&mut self, surface: SurfaceHandle, [width, height]: [u32; 2]) {
-        if let Some(slot) = self.slot_mut(surface) {
+        if let Some(slot) = surface_slot(&mut self.surfaces, surface) {
             slot.target.resize(width, height);
         }
     }
@@ -212,8 +208,7 @@ impl<Shared: ShaderData + Default> Renderer<Shared> {
         }
         let slot = SurfaceSlot {
             target,
-            globals: Shared::default(),
-            input: Input::default(),
+            push: PushBlock::default(),
         };
         if let Some((index, entry)) = self.surfaces.iter_mut().enumerate().find(|(_, entry)| entry.slot.is_none()) {
             entry.slot = Some(slot);
@@ -232,18 +227,6 @@ impl<Shared: ShaderData + Default> Renderer<Shared> {
             entry.slot = None;
             entry.generation = entry.generation.wrapping_add(1);
         }
-    }
-
-    fn slot(&self, surface: SurfaceHandle) -> Option<&SurfaceSlot<Shared>> {
-        self.surfaces.get(surface.index()).filter(|entry| entry.generation == surface.generation())?.slot.as_ref()
-    }
-
-    fn slot_mut(&mut self, surface: SurfaceHandle) -> Option<&mut SurfaceSlot<Shared>> {
-        self.surfaces
-            .get_mut(surface.index())
-            .filter(|entry| entry.generation == surface.generation())?
-            .slot
-            .as_mut()
     }
 }
 

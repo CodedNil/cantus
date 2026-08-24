@@ -1,66 +1,42 @@
 use crate::{
-    Image, Rect, Response, ShaderData,
+    Image,
     backend::canvas::Canvas,
-    contract::{Quad, ShaderSpec, SurfaceHandle},
+    contract::{PushBlock, Quad, ShaderSpec, SurfaceHandle},
     data::ImageHandle,
-    input::Input,
     text::{Line, Text, TextScope},
 };
-pub struct Frame<'a, Shared: ShaderData, Services = ()> {
-    pub globals: &'a mut Shared,
+use core::ops::{Deref, DerefMut};
+
+pub struct Frame<'a> {
+    pub time: f32,
+    pub screen_size: glam::Vec2,
     pub delta_time: f32,
-    pub services: Services,
     text: &'a mut Text,
-    canvas: &'a mut Canvas<Shared>,
-    input: &'a mut Input,
+    canvas: &'a mut Canvas,
     surface: SurfaceHandle,
 }
 
-impl<'a, Shared: ShaderData, Services> Frame<'a, Shared, Services> {
-    pub(crate) const fn new(
-        globals: &'a mut Shared,
-        input: &'a mut Input,
-        delta_time: f32,
-        text: &'a mut Text,
-        canvas: &'a mut Canvas<Shared>,
-        surface: SurfaceHandle,
-        services: Services,
-    ) -> Self {
+impl<'a> Frame<'a> {
+    pub(crate) const fn new(push: &'a PushBlock, time: f32, delta_time: f32, text: &'a mut Text, canvas: &'a mut Canvas, surface: SurfaceHandle) -> Self {
         Self {
-            globals,
+            time,
+            screen_size: push.screen_size,
             delta_time,
-            services,
             text,
             canvas,
-            input,
             surface,
         }
     }
 
-    #[track_caller]
-    pub fn interact(&mut self, rect: Rect) -> Response {
-        self.input.interact(rect)
+    /// Sets app-defined shader data shared by every paint on this surface frame.
+    pub fn set_globals<T: crate::ShaderData>(&mut self, globals: T) {
+        self.canvas.set_globals(self.surface, globals);
     }
 
-    #[track_caller]
-    pub fn drag(&mut self, rect: Rect) -> Response {
-        self.input.drag(rect)
-    }
-
-    pub const fn press_position(&self) -> Option<glam::Vec2> {
-        self.input.press_position()
-    }
-
-    pub const fn pointer(&self) -> glam::Vec2 {
-        self.input.pointer()
-    }
-
-    pub fn pointer_in(&mut self, rect: Rect) -> bool {
-        self.input.pointer_in(rect)
-    }
-
-    pub fn input_region(&mut self, rect: Rect) {
-        self.input.input_region(rect);
+    /// Starts a bounded group whose layers are composited before later paints.
+    pub fn group(&mut self) -> PaintGroup<'_, 'a> {
+        self.canvas.begin_group(self.surface);
+        PaintGroup { frame: self }
     }
 
     #[doc(hidden)]
@@ -74,14 +50,12 @@ impl<'a, Shared: ShaderData, Services> Frame<'a, Shared, Services> {
 
     /// Paints a quad with an inline Rust-GPU fragment shader.
     ///
-    /// In source, the closure receives [`crate::Fragment`] first, the program's push-constant
-    /// globals second, then explicitly typed values inferred from its surrounding host function.
-    /// [`crate::paint`] lowers that closure to the private payload builder accepted here.
-    /// Example: `frame.paint_quad(quad, |fragment: Fragment, globals: Globals, alpha: f32| { ... })`.
+    /// The inline closure receives [`crate::Fragment`], followed by explicitly typed
+    /// values inferred from its surrounding host function.
     ///
     pub fn paint_quad<S, Geometry, Payload>(&mut self, geometry: Geometry, payload: Payload)
     where
-        S: ShaderSpec<Shared = Shared>,
+        S: ShaderSpec,
         Geometry: Copy + Into<Quad>,
         Payload: FnOnce(&mut Self, Geometry) -> S::Instance,
     {
@@ -91,15 +65,95 @@ impl<'a, Shared: ShaderData, Services> Frame<'a, Shared, Services> {
 
     /// Paints shaped text with an inline Rust-GPU fragment shader.
     ///
-    /// The closure receives [`crate::TextFragment`] first, the program's push-constant
-    /// globals second, then inferred draw values, matching [`Self::paint_quad`].
+    /// The closure inputs match [`Self::paint_quad`], starting with [`crate::TextFragment`].
     ///
     pub fn paint_text<S, Payload>(&mut self, line: Line, payload: Payload)
     where
-        S: ShaderSpec<Shared = Shared>,
+        S: ShaderSpec,
         Payload: FnOnce(&mut Self, Line) -> S::Instance,
     {
         let value = payload(self, line);
         self.canvas.emit::<S>(self.surface, line.quad(), value);
+    }
+}
+
+/// A bounded set of sibling paints that may be ordered into layers.
+pub struct PaintGroup<'frame, 'canvas> {
+    frame: &'frame mut Frame<'canvas>,
+}
+
+impl<'canvas> PaintGroup<'_, 'canvas> {
+    /// Paints through the front or ordinary layer of this group.
+    pub fn front(&mut self, front: bool) -> PaintLayer<'_, 'canvas> {
+        PaintLayer {
+            frame: self.frame,
+            layer: u8::from(front),
+        }
+    }
+
+    /// Finishes the group, returning subsequent paints to immediate order.
+    pub fn finish(self) {
+        drop(self);
+    }
+}
+
+impl<'canvas> Deref for PaintGroup<'_, 'canvas> {
+    type Target = Frame<'canvas>;
+
+    fn deref(&self) -> &Self::Target {
+        self.frame
+    }
+}
+
+impl DerefMut for PaintGroup<'_, '_> {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        self.frame
+    }
+}
+
+impl Drop for PaintGroup<'_, '_> {
+    fn drop(&mut self) {
+        self.frame.canvas.end_group();
+    }
+}
+
+/// Paint access fixed to one layer of a [`PaintGroup`].
+pub struct PaintLayer<'frame, 'canvas> {
+    frame: &'frame mut Frame<'canvas>,
+    layer: u8,
+}
+
+impl<'canvas> PaintLayer<'_, 'canvas> {
+    pub fn paint_quad<S, Geometry, Payload>(&mut self, geometry: Geometry, payload: Payload)
+    where
+        S: ShaderSpec,
+        Geometry: Copy + Into<Quad>,
+        Payload: FnOnce(&mut Frame<'canvas>, Geometry) -> S::Instance,
+    {
+        let value = payload(self.frame, geometry);
+        self.frame.canvas.emit_layer::<S>(self.layer, geometry.into(), value);
+    }
+
+    pub fn paint_text<S, Payload>(&mut self, line: Line, payload: Payload)
+    where
+        S: ShaderSpec,
+        Payload: FnOnce(&mut Frame<'canvas>, Line) -> S::Instance,
+    {
+        let value = payload(self.frame, line);
+        self.frame.canvas.emit_layer::<S>(self.layer, line.quad(), value);
+    }
+}
+
+impl<'canvas> Deref for PaintLayer<'_, 'canvas> {
+    type Target = Frame<'canvas>;
+
+    fn deref(&self) -> &Self::Target {
+        self.frame
+    }
+}
+
+impl DerefMut for PaintLayer<'_, '_> {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        self.frame
     }
 }

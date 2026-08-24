@@ -1,6 +1,9 @@
-use crate::render::{Globals, Interface, Services, TEXT_COLOR};
+use crate::{
+    interaction::Interaction,
+    render::{RenderContext, TEXT_COLOR, Ui, program},
+};
 use isthmus::{Renderer, SurfaceHandle, glam::vec2};
-use music::{Enrichment, MusicBackend, PlaybackState};
+use music::{Enrichment, Music};
 use platform::{Linux as Platform, Platform as _};
 use raw_window_handle::{HasDisplayHandle, HasWindowHandle};
 use std::{
@@ -11,7 +14,7 @@ use std::{
 };
 use tokio::runtime::{Builder as RuntimeBuilder, Handle, Runtime};
 use tracing::{Level, level_filters::LevelFilter};
-use tracing_subscriber::{filter::Targets, fmt, layer::SubscriberExt, util::SubscriberInitExt};
+use tracing_subscriber::{Layer as _, filter::Targets, fmt, layer::SubscriberExt, util::SubscriberInitExt};
 
 #[path = "config.rs"]
 pub(crate) mod config;
@@ -60,14 +63,14 @@ impl Background {
 }
 
 pub struct CantusApp {
-    pub(crate) gpu: Option<Renderer<Globals>>,
+    pub(crate) gpu: Option<Renderer>,
     pub(crate) bar_surface: Option<SurfaceHandle>,
-    pub(crate) playback: PlaybackState,
-    pub(crate) ui: Interface,
+    pub(crate) music: Music,
+    pub(crate) ui: Ui,
     pub(crate) app_updates: mpsc::Receiver<Update<Self>>,
     pub(crate) config: config::Config,
     pub(crate) enrichment: Enrichment,
-    pub(crate) music: MusicBackend,
+    pub(crate) interaction: Interaction,
     _runtime: Runtime,
 }
 
@@ -87,17 +90,17 @@ impl Default for CantusApp {
         let background = Background::new(&runtime, &updater);
         let enrichment = Enrichment::new(background.clone());
         let config = config::load();
-        let music = MusicBackend::spotify(&config, &updater, &background);
+        let music = Music::spotify(&config, &updater, &background);
         Platform::start_launcher_listener(&background, &updater);
-        let ui = Interface::new(&config, &background, &enrichment);
+        let ui = Ui::new(&config, &background, &enrichment);
         Self {
             gpu: None,
             bar_surface: None,
-            playback: PlaybackState::default(),
             ui,
             app_updates,
             enrichment,
             music,
+            interaction: Interaction::default(),
             config,
             _runtime: runtime,
         }
@@ -111,14 +114,8 @@ impl CantusApp {
     /// Panics if initialized twice or Vulkan setup fails.
     pub fn initialize_renderer(&mut self, surface: &(impl HasDisplayHandle + HasWindowHandle), width: u32, height: u32) {
         assert!(self.gpu.is_none(), "GPU initialized twice");
-        let (gpu, bar_surface) = Renderer::new(
-            Globals::program(),
-            surface,
-            [width, height],
-            include_bytes!("../../../assets/NotoSans-Variable.ttf"),
-            TEXT_COLOR,
-        )
-        .expect("failed to initialize renderer");
+        let (gpu, bar_surface) =
+            Renderer::new(program(), surface, [width, height], include_bytes!("../../../assets/NotoSans-Variable.ttf"), TEXT_COLOR).expect("failed to initialize renderer");
         tracing::info!("Using Vulkan device: {}", gpu.device_name());
         self.gpu = Some(gpu);
         self.bar_surface = Some(bar_surface);
@@ -137,29 +134,27 @@ impl CantusApp {
         let Some(bar_surface) = self.bar_surface else {
             return;
         };
-        let screen_size = vec2(screen_size[0], screen_size[1]);
-        let services = Services {
-            config: &self.config,
-            music: &self.music,
-        };
-        gpu.render(|render| {
-            if let Some((surface, size)) = launcher {
-                render.surface(surface, services, |frame| {
-                    frame.globals.panel_height = self.config.height;
-                    frame.globals.info.screen_size = vec2(size[0], size[1]);
-                    if let Some(position) = frame.press_position() {
-                        frame.globals.ripple(position);
-                    }
-                    self.ui.launcher.show(frame);
-                });
-            } else {
-                render.surface(bar_surface, services, |frame| {
-                    frame.globals.panel_height = self.config.height;
-                    frame.globals.info.screen_size = screen_size;
-                    self.ui.show(frame, &mut self.playback);
-                });
-            }
+        let launcher_open = launcher.is_some();
+        let (surface, [width, height]) = launcher.unwrap_or((bar_surface, screen_size));
+        let screen_size = vec2(width, height);
+        let config = &self.config;
+        let interaction = &mut self.interaction;
+        let ui = &mut self.ui;
+        let music = &mut self.music;
+        let result = gpu.render(|render| {
+            render.surface(surface, screen_size, |gpu| {
+                let mut frame = RenderContext::new(gpu, config, interaction);
+                if launcher_open {
+                    ui.launcher.show(&mut frame);
+                } else {
+                    ui.bar.show(&mut frame, music);
+                }
+                frame.finish();
+            });
         });
+        if let Err(error) = result {
+            tracing::error!(%error, "Could not render frame");
+        }
     }
 }
 
@@ -175,10 +170,12 @@ pub fn run() {
     #[cfg(all(debug_assertions, feature = "generate-nix"))]
     config::nix_options::generate();
 
-    tracing_subscriber::registry()
-        .with(Targets::new().with_default(LevelFilter::WARN).with_target("cantus", Level::INFO))
-        .with(fmt::layer().with_writer(io::stderr))
-        .init();
+    let filter = Targets::new()
+        .with_default(LevelFilter::WARN)
+        .with_target("cantus", Level::INFO)
+        .with_target("simplecss", LevelFilter::ERROR)
+        .with_target("zbus::proxy", LevelFilter::ERROR);
+    tracing_subscriber::registry().with(fmt::layer().with_writer(io::stderr).with_filter(filter)).init();
 
     platform::run();
 }

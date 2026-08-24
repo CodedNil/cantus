@@ -9,7 +9,8 @@ macro_rules! gpu_math_binary {
 }
 
 pub trait FloatExt {
-    fn approach(&mut self, target: Self, max_delta: Self);
+    #[must_use]
+    fn move_towards(self, target: Self, max_delta: Self) -> Self;
     #[must_use]
     fn saturate(self) -> Self;
     #[must_use]
@@ -21,16 +22,16 @@ pub trait FloatExt {
 }
 
 impl FloatExt for f32 {
-    fn approach(&mut self, target: Self, max_delta: Self) {
-        *self += (target - *self).clamp(-max_delta, max_delta);
+    fn move_towards(self, target: Self, max_delta: Self) -> Self {
+        self + (target - self).clamp(-max_delta, max_delta)
     }
 
     fn saturate(self) -> Self {
-        glam::FloatExt::saturate(self)
+        self.clamp(0.0, 1.0)
     }
 
     fn lerp(self, other: Self, factor: Self) -> Self {
-        glam::FloatExt::lerp(self, other, factor)
+        self + (other - self) * factor
     }
 
     fn smoothstep(self, edge0: Self, edge1: Self) -> Self {

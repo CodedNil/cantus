@@ -1,7 +1,4 @@
-use crate::{
-    app::music::MAX_PLAYLIST_TARGETS,
-    render::{GAP, tempestas},
-};
+use crate::{app::music::MAX_PLAYLIST_TARGETS, render::tempestas};
 use arrayvec::ArrayVec;
 use serde::{Deserialize, Serialize};
 use std::{env, fs, path::PathBuf};
@@ -53,6 +50,8 @@ pub struct SearchProvider {
     pub name: String,
     /// URL containing one `{searchTerms}` placeholder.
     pub url: String,
+    /// URL of the provider icon displayed by the launcher.
+    pub icon: String,
     /// Prefix which selects this provider, such as `!gh`.
     pub alias: String,
 }
@@ -94,20 +93,10 @@ impl Default for Config {
             search_providers: vec![SearchProvider {
                 name: "DuckDuckGo".into(),
                 url: "https://duckduckgo.com/?q={searchTerms}".into(),
+                icon: "https://duckduckgo.com/assets/logo_header.v109.svg".into(),
                 alias: "!ddg".into(),
             }],
         }
-    }
-}
-
-impl Config {
-    pub fn timeline_px_per_ms(&self, screen_width: f32, status_width: f32) -> f32 {
-        let reserved = self.history_width + GAP + f32::from(self.tempestas_enabled) * (tempestas::WIDTH + GAP) + status_width;
-        (screen_width - reserved).max(84.0) / (self.timeline_future_minutes * 60_000.0)
-    }
-
-    pub fn playhead_x(&self, px_per_ms: f32) -> f32 {
-        self.history_width + self.timeline_past_minutes * 60_000.0 * px_per_ms
     }
 }
 

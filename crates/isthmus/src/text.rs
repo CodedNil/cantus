@@ -3,17 +3,16 @@ use crate::glam::Vec3;
 use crate::{
     Fragment, Quad, Unorm8x4,
     glam::{Vec2, Vec4, vec2},
+    rgba,
 };
 
 #[cfg(target_arch = "spirv")]
-use crate::float::FloatExt;
+use crate::FloatExt;
 
 #[cfg(not(target_arch = "spirv"))]
 use {
-    crate::{
-        ShaderData,
-        backend::{buffer::BufferRange, canvas::Canvas, context::Context},
-    },
+    crate::backend::{buffer::BufferRange, canvas::Canvas, context::Context},
+    smallvec::SmallVec,
     std::{ops::Range, sync::Arc, vec::Vec},
     ttf_parser::{Face, GlyphId, OutlineBuilder, Tag},
 };
@@ -24,12 +23,38 @@ const GLYPH_CAPACITY: usize = 16_384;
 
 #[repr(C)]
 #[derive(Clone, Copy, crate::ShaderData)]
+struct F16x2 {
+    value: u32,
+}
+
+impl F16x2 {
+    #[cfg(not(target_arch = "spirv"))]
+    fn new(value: Vec2) -> Self {
+        Self {
+            value: u32::from(half::f16::from_f32(value.x).to_bits()) | u32::from(half::f16::from_f32(value.y).to_bits()) << 16,
+        }
+    }
+
+    fn get(self) -> Vec2 {
+        #[cfg(target_arch = "spirv")]
+        {
+            spirv_std::float::f16x2_to_vec2(self.value)
+        }
+        #[cfg(not(target_arch = "spirv"))]
+        {
+            vec2(half::f16::from_bits(self.value as u16).to_f32(), half::f16::from_bits((self.value >> 16) as u16).to_f32())
+        }
+    }
+}
+
+#[repr(C)]
+#[derive(Clone, Copy, crate::ShaderData)]
 #[doc(hidden)]
 pub struct Edge {
-    start: Vec2,
-    end: Vec2,
-    start_delta: Vec2,
-    end_delta: Vec2,
+    start: F16x2,
+    end: F16x2,
+    start_delta: F16x2,
+    end_delta: F16x2,
 }
 
 #[repr(C)]
@@ -88,23 +113,27 @@ impl Line {
 }
 
 /// Shader-side text geometry plus the fragment coordinates of its raster quad.
-pub struct TextFragment<'a> {
+pub struct TextFragment<'a, Globals = ()> {
     pub pixel: Vec2,
     pub local: Vec2,
     pub uv: Vec2,
+    pub time: f32,
+    pub globals: Globals,
     pub line: Line,
     placed_glyphs: &'a [PlacedGlyph],
     glyphs: &'a [Glyph],
     edges: &'a [Edge],
 }
 
-impl<'a> TextFragment<'a> {
+impl<'a, Globals: Copy> TextFragment<'a, Globals> {
     #[doc(hidden)]
-    pub const fn new(fragment: Fragment, line: Line, placed_glyphs: &'a [PlacedGlyph], glyphs: &'a [Glyph], edges: &'a [Edge]) -> Self {
+    pub const fn new(fragment: Fragment<Globals>, line: Line, placed_glyphs: &'a [PlacedGlyph], glyphs: &'a [Glyph], edges: &'a [Edge]) -> Self {
         Self {
             pixel: fragment.pixel,
             local: fragment.local,
             uv: fragment.uv,
+            time: fragment.time,
+            globals: fragment.globals,
             line,
             placed_glyphs,
             glyphs,
@@ -136,7 +165,7 @@ impl<'a> TextFragment<'a> {
 
     pub fn color(&self, coverage: f32) -> Vec4 {
         let alpha = coverage * self.line.color.to_vec4().w;
-        (self.line.color.to_vec3() * alpha).extend(alpha)
+        rgba(self.line.color.to_vec3(), alpha)
     }
 }
 
@@ -188,8 +217,8 @@ impl TextStyle {
 }
 
 fn edge_distance(edge: Edge, weight: f32, point: Vec2, best_distance: f32) -> (f32, i32) {
-    let a = edge.start + edge.start_delta * weight;
-    let b = edge.end + edge.end_delta * weight;
+    let a = edge.start.get() + edge.start_delta.get() * weight;
+    let b = edge.end.get() + edge.end_delta.get() * weight;
     let segment = b - a;
     let winding = if (a.y <= point.y && point.y < b.y) || (b.y <= point.y && point.y < a.y) {
         let crossing = a.x + (point.y - a.y) * segment.x / segment.y;
@@ -300,7 +329,7 @@ struct Outline {
 #[cfg(not(target_arch = "spirv"))]
 impl Outline {
     fn segment(&mut self, point: Vec2) {
-        self.edges.push([self.current, (self.current + point) * 0.5, point]);
+        self.edges.push([self.current, self.current.midpoint(point), point]);
         self.current = point;
     }
 }
@@ -343,7 +372,7 @@ impl OutlineBuilder for Outline {
 #[cfg(not(target_arch = "spirv"))]
 #[derive(Default)]
 pub struct ShapedLine {
-    glyphs: Vec<PlacedGlyph>,
+    glyphs: SmallVec<[PlacedGlyph; 32]>,
     min: Vec2,
     max: Vec2,
     pub width: f32,
@@ -447,7 +476,7 @@ impl Text {
     /// # Panics
     ///
     /// Panics if the supplied variable font cannot be parsed or its outlines cannot be read.
-    pub(crate) fn new<Shared: ShaderData>(canvas: &mut Canvas<Shared>, font: &[u8], color: Vec3) -> Self {
+    pub(crate) fn new(canvas: &mut Canvas, font: &[u8], color: Vec3) -> Self {
         let mut face = Face::parse(font, 0).expect("parse variable font");
         let characters = RANGES
             .iter()
@@ -505,10 +534,10 @@ impl Text {
                     let high_start = point(d, e, f, t0);
                     let high_end = point(d, e, f, t1);
                     curves.push(Edge {
-                        start: low_start,
-                        end: low_end,
-                        start_delta: high_start - low_start,
-                        end_delta: high_end - low_end,
+                        start: F16x2::new(low_start),
+                        end: F16x2::new(low_end),
+                        start_delta: F16x2::new(high_start - low_start),
+                        end_delta: F16x2::new(high_end - low_end),
                     });
                 }
             }
@@ -632,7 +661,7 @@ impl Shaper {
         let mut max = Vec2::splat(f32::MIN);
         let weight = style.normalized_weight();
         let mut width: f32 = 0.0;
-        let mut glyphs = Vec::new();
+        let mut glyphs = SmallVec::new();
         for (text, position) in parts {
             let mut x = position / style.size;
             for meta in text.chars().filter_map(|character| self.glyph(character)) {

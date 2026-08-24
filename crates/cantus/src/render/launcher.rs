@@ -1,16 +1,18 @@
 use crate::render::{
-    GAP, Globals, PADDING, TEXT_COLOR,
-    sdf::{VISIBLE_ALPHA, fill, fill_rounded_box, pill_margin, presence, ripple_flash, sample_pill, sd_rounded_box, segment_distance, stroke},
+    Fragment, GAP, PADDING, TEXT_COLOR, TextFragment,
+    sdf::{VISIBLE_ALPHA, fill, fill_rounded_box, pill_margin, presence, ripple_flash, ripple_light, sample_pill, sd_rounded_box, segment_distance, stroke},
 };
 use isthmus::{
-    Fragment, Image, Quad, TextFragment,
-    float::FloatExt,
+    FloatExt, Image, Quad,
     glam::{Vec2, Vec3, Vec4, vec2, vec3},
+    rgba,
     spirv_std::arch::kill,
     text::{self, TextStyle},
 };
 
 const PANEL_WIDTH: f32 = 520.0;
+const ROW_HEIGHT: f32 = 50.0;
+const HEADER_HEIGHT: f32 = ROW_HEIGHT + PADDING;
 pub const BACKGROUND_RADIUS: i32 = 16;
 /// Matched-app/calculator rows shown below the search bar.
 pub const MAX_VISIBLE: usize = 8;
@@ -31,11 +33,6 @@ const DETAIL_COLOR: Vec4 = Vec4::new(0.56, 0.63, 0.86, 1.0);
 const MUTED_COLOR: Vec4 = Vec4::new(0.52, 0.55, 0.64, 1.0);
 const CALCULATOR_ICON: u32 = 1;
 const SEARCH_ICON: u32 = 2;
-
-/// Height of the search field, which sits flush at the top of the panel instead of in a pill.
-fn header_height(frame: &Globals) -> f32 {
-    frame.panel_height + PADDING
-}
 
 /// Coverage of a magnifying glass centered on the origin.
 fn magnifier_icon(point: Vec2) -> f32 {
@@ -83,22 +80,22 @@ fn action_badge(point: Vec2, half_width: f32, shift: bool) -> Vec4 {
     color.extend(body.max(edge).max(glyph))
 }
 
-/// The search query with a caret and selection, edited like an ordinary text box.
 #[isthmus::paint]
 mod host {
     use super::*;
+
+    use crate::interaction::Rect;
     use crate::{
         app::{
             Background,
             config::SearchProvider,
             platform::{DesktopApp, Linux as Platform, Platform as _},
         },
-        render::Frame,
+        render::RenderContext,
     };
     use fend_core::Context;
     use image::imageops::FilterType;
-    use isthmus::Rect;
-    use reqwest::{Client, Url};
+    use reqwest::Client;
     use resvg::{
         render,
         tiny_skia::{Pixmap, Transform},
@@ -231,7 +228,7 @@ mod host {
     pub struct LauncherState {
         pub open: bool,
         pub field: TextField,
-        pub matches: Vec<u32>,
+        pub matches: Vec<usize>,
         /// The fend answer for the current query, if any.
         pub calc_result: Option<String>,
         /// Index of the highlighted entry, which enter and shift+enter act on.
@@ -239,7 +236,8 @@ mod host {
         /// Text waiting to be put on the system clipboard by the platform layer.
         pub pending_copy: Option<String>,
         calc: Context,
-        catalog: LauncherCatalog,
+        apps: Vec<DesktopApp>,
+        providers: Vec<SearchEngine>,
         updates: Receiver<LauncherUpdate>,
     }
 
@@ -247,11 +245,6 @@ mod host {
         config: SearchProvider,
         label: String,
         icon: Option<Image>,
-    }
-
-    struct LauncherCatalog {
-        apps: Vec<DesktopApp>,
-        providers: Vec<SearchEngine>,
     }
 
     enum LauncherUpdate {
@@ -330,7 +323,8 @@ mod host {
                 selected: 0,
                 pending_copy: None,
                 calc,
-                catalog: LauncherCatalog { apps: Vec::new(), providers },
+                apps: Vec::new(),
+                providers,
                 updates: inbox,
             }
         }
@@ -387,17 +381,16 @@ mod host {
                 .filter(|result| !result.is_empty() && result != &query);
 
             let lower_query = query.to_lowercase();
-            let has_search = !self.catalog.providers.is_empty() && (!lower_query.is_empty() || explicit_search);
+            let has_search = !self.providers.is_empty() && (!lower_query.is_empty() || explicit_search);
             let visible = MAX_VISIBLE - usize::from(self.calc_result.is_some()) - usize::from(has_search);
             let mut scored = self
-                .catalog
                 .apps
                 .iter()
                 .enumerate()
                 .filter(|_| !explicit_search)
                 .filter_map(|(index, app)| {
                     let name = app.name.to_lowercase();
-                    name.contains(&lower_query).then(|| (index as u32, name.starts_with(&lower_query)))
+                    name.contains(&lower_query).then(|| (index, name.starts_with(&lower_query)))
                 })
                 .collect::<Vec<_>>();
             scored.sort_by_key(|&(_, prefix_match)| !prefix_match);
@@ -419,9 +412,9 @@ mod host {
             }
             self.matches
                 .get(row)
-                .and_then(|&app| self.catalog.apps.get(app as usize))
+                .and_then(|&app| self.apps.get(app))
                 .map(LauncherEntry::App)
-                .or_else(|| (row == self.matches.len()).then(|| self.search_provider()).flatten().map(LauncherEntry::Search))
+                .or_else(|| self.search_provider().filter(|_| row == self.matches.len()).map(LauncherEntry::Search))
         }
 
         /// Moves the highlight by `delta` rows, stopping at either end.
@@ -448,23 +441,20 @@ mod host {
 
         fn search_query(&self) -> (Option<usize>, &str) {
             let query = self.field.text.trim();
-            self.catalog
-                .providers
+            self.providers
                 .iter()
                 .position(|provider| query == provider.config.alias || query.strip_prefix(&provider.config.alias).is_some_and(|rest| rest.starts_with(char::is_whitespace)))
-                .map_or((None, query), |index| (Some(index), query[self.catalog.providers[index].config.alias.len()..].trim()))
+                .map_or((None, query), |index| (Some(index), query[self.providers[index].config.alias.len()..].trim()))
         }
 
         fn search_provider(&self) -> Option<&SearchEngine> {
             let (provider, query) = self.search_query();
-            (!query.is_empty() || provider.is_some())
-                .then(|| self.catalog.providers.get(provider.unwrap_or(0)))
-                .flatten()
+            self.providers.get(provider.unwrap_or_default()).filter(|_| provider.is_some() || !query.is_empty())
         }
 
-        pub(crate) fn bounds(&self, screen_size: Vec2, panel_height: f32) -> (Vec2, Vec2) {
+        pub(crate) fn bounds(&self, screen_size: Vec2) -> (Vec2, Vec2) {
             let rows = self.entry_count();
-            let height = panel_height + PADDING * 3.0 + rows as f32 * panel_height + rows.saturating_sub(1) as f32 * GAP;
+            let height = HEADER_HEIGHT + PADDING * 2.0 + rows as f32 * ROW_HEIGHT + rows.saturating_sub(1) as f32 * GAP;
             let size = vec2(PANEL_WIDTH, height);
             ((screen_size - size) * 0.5, size)
         }
@@ -501,212 +491,8 @@ mod host {
         rates: HashMap<String, f64>,
     }
 
-    impl LauncherState {
-        /// Draws the panel and its search field, then the rows beneath it.
-        pub fn show(&mut self, frame: &mut Frame) {
-            let mut refreshed = false;
-            while let Ok(update) = self.updates.try_recv() {
-                match update {
-                    LauncherUpdate::Apps(apps) => {
-                        self.catalog.apps = apps;
-                    }
-                    LauncherUpdate::ProviderIcon(index, pixels) => {
-                        self.catalog.providers[index].icon = Some(pixels);
-                    }
-                }
-                refreshed = true;
-            }
-            if refreshed {
-                self.refresh_matches();
-            }
-            if !self.open {
-                return;
-            }
-            let (origin, size) = self.bounds(frame.globals.info.screen_size, frame.globals.panel_height);
-            frame.input_region(Rect::new(0.0, 0.0, frame.globals.info.screen_size.x, frame.globals.info.screen_size.y));
-            let header = header_height(frame.globals);
-            let (left, right) = (PADDING + 34.0, size.x - PADDING);
-            if self.field.touched {
-                self.field.touched = false;
-                self.field.blink_start = frame.globals.info.time;
-            }
-            let line = if self.field.text.is_empty() {
-                frame.text().line("Search anything…", SEARCH_STYLE).left(vec2(left, header * 0.5)).with_color(MUTED_COLOR)
-            } else {
-                frame.text().line(&self.field.text, SEARCH_STYLE).visible(vec2(left, header * 0.5), left..right)
-            };
-            let selection_range = self.field.selection();
-            let blink = ((frame.globals.info.time - self.field.blink_start) * 1.4).fract();
-            let (caret, selection) = {
-                let text = frame.text();
-                // Long queries are clipped rather than scrolled, so every offset maps straight to an x.
-                let at = |offset: usize| (left + text.width(&self.field.text[..offset], SEARCH_STYLE)).min(right);
-                let caret = vec2(at(self.field.cursor), blink.smoothstep(0.62, 0.5));
-                let selection = if selection_range.is_empty() {
-                    Vec2::ZERO
-                } else {
-                    vec2(at(selection_range.start), at(selection_range.end))
-                };
-                (caret, selection)
-            };
-            let quad = Quad::from_min_max(origin, origin + size);
-            // GPU: Launcher panel and search selection.
-            frame.paint_quad(quad, |fragment: Fragment, frame: Globals, size: Vec2, caret: Vec2, selection: Vec2| {
-                let mask = fill_rounded_box(fragment.local, size * 0.5, BACKGROUND_RADIUS as f32);
-                if mask <= 0.0 {
-                    kill();
-                }
-                let panel = fragment.local + size * 0.5;
-                let header = header_height(&frame);
-                let mut color = Vec3::splat(0.09).lerp(Vec3::splat(0.17), fill_rounded_box(panel - vec2(size.x * 0.5, header - 0.5), vec2(size.x * 0.5, 0.5), 0.0));
-                color = color.lerp(color * 1.5 + 0.1, ripple_flash(fragment.pixel, &frame));
-                color = color.lerp(ICON_COLOR, magnifier_icon(panel - vec2(PADDING + 11.0, header * 0.5)));
-
-                let selection_width = selection.y - selection.x;
-                let highlight = fill_rounded_box(panel - vec2(f32::midpoint(selection.x, selection.y), header * 0.5), vec2(selection_width * 0.5, 13.0), 3.0);
-                color = color.lerp(vec3(0.24, 0.28, 0.52), highlight * presence(selection_width));
-                let caret_mask = fill_rounded_box(panel - vec2(caret.x, header * 0.5), vec2(0.9, 12.0), 0.9);
-                color = color.lerp(TEXT_COLOR, caret_mask * caret.y);
-
-                let opacity = mask * 0.82;
-                (color * opacity).extend(opacity)
-            });
-            let padding = line.size * 0.5 + 2.0;
-            // GPU: Launcher query text.
-            frame.paint_text(
-                line.expanded(padding).translated(origin),
-                |text: TextFragment, _frame: Globals, origin: Vec2, size: Vec2| {
-                    let clip = fill_rounded_box(text.pixel - origin - size * 0.5, size * 0.5, BACKGROUND_RADIUS as f32);
-                    text.color(text.alpha() * clip)
-                },
-            );
-
-            self.show_entries(frame, origin, size, frame.services.config.height);
-        }
-
-        /// Draws and interacts with calculator, application and search rows in visual order.
-        fn show_entries(&mut self, frame: &mut Frame, origin: Vec2, size: Vec2, row_height: f32) {
-            let (x, width) = (origin.x + PADDING, size.x - PADDING * 2.0);
-            let mut y = origin.y + header_height(frame.globals) + PADDING;
-            let text_left = row_height * 0.5 + ICON_SIZE * 0.5 + GAP * 2.0;
-
-            let mut activated = None;
-            for index in 0..self.entry_count() {
-                let pill = Rect::new(x, y, x + width, y + row_height);
-                let response = frame.interact(pill);
-                if response.hovered() {
-                    self.selected = index;
-                }
-                if response.clicked() {
-                    activated = Some(index);
-                }
-                let pill: Quad = pill.into();
-                let entry = self.entry(index).unwrap().view(self.search_query().1);
-
-                // Only the highlighted row spells out what enter and shift+enter would do.
-                let mut edge = width - GAP * 2.0 - 4.0;
-                let mut badge = |label: Option<&str>, width: f32| {
-                    let Some(label) = label.filter(|_| self.selected == index) else {
-                        return (Vec2::ZERO, text::Line::default());
-                    };
-                    let badge = vec2(edge - width * 0.5, width * 0.5);
-                    edge -= width + GAP;
-                    let line = frame.text().line(label, DETAIL_STYLE).right(vec2(edge, row_height * 0.5)).with_color(MUTED_COLOR);
-                    edge -= frame.text().width(label, DETAIL_STYLE) + GAP * 2.0;
-                    (badge, line)
-                };
-                let (enter_badge, action_line) = badge(Some(entry.action), ENTER_BADGE_WIDTH);
-                let (alternate_badge, alternate_line) = badge(entry.alternate, ALTERNATE_BADGE_WIDTH);
-
-                let clip = text_left..edge.max(text_left);
-                let (name_y, detail_y) = if entry.detail.is_empty() {
-                    (row_height * 0.5, 0.0)
-                } else {
-                    (row_height * 0.34, row_height * 0.68)
-                };
-                let name_line = frame.text().line(entry.name, NAME_STYLE).visible(vec2(text_left, name_y), clip.clone());
-                let detail_line = if entry.detail.is_empty() {
-                    text::Line::default()
-                } else {
-                    frame
-                        .text()
-                        .line(entry.detail, DETAIL_STYLE)
-                        .visible(vec2(text_left, detail_y), clip)
-                        .with_color(DETAIL_COLOR)
-                };
-
-                let (image, icon_kind) = match entry.icon {
-                    EntryIcon::Image(image) => (Some(image), 0),
-                    EntryIcon::Calculator => (None, CALCULATOR_ICON),
-                    EntryIcon::Search => (None, SEARCH_ICON),
-                };
-                let quad = pill.expanded(pill_margin(frame.globals));
-                // GPU: Launcher result row.
-                frame.paint_quad(
-                    quad,
-                    |fragment: Fragment, frame: Globals, pill: Quad, icon_kind: u32, enter_badge: Vec2, alternate_badge: Vec2| {
-                        let surface = sample_pill(pill, fragment.pixel, &frame);
-                        if surface.alpha <= VISIBLE_ALPHA {
-                            kill();
-                        }
-                        // Only the highlighted row carries an enter badge, so it doubles as its highlight flag.
-                        let mut color = Vec3::splat(0.15)
-                            .lerp(Vec3::splat(0.235), presence(enter_badge.y))
-                            .lerp(Vec3::splat(0.3), (surface.bulge() / 8.0).min(1.0));
-
-                        let icon_point = surface.local - Vec2::splat(surface.size.y * 0.5);
-                        if icon_kind == CALCULATOR_ICON {
-                            let calculator = calculator_icon(icon_point);
-                            color = color.lerp(calculator.truncate(), calculator.w);
-                        } else if icon_kind == SEARCH_ICON {
-                            color = color.lerp(ICON_COLOR, magnifier_icon(icon_point));
-                        }
-
-                        let enter = action_badge(surface.refracted - vec2(enter_badge.x, surface.size.y * 0.5), enter_badge.y, false);
-                        color = color.lerp(enter.truncate(), enter.w);
-                        let alternate = action_badge(surface.refracted - vec2(alternate_badge.x, surface.size.y * 0.5), alternate_badge.y, true);
-                        color = color.lerp(alternate.truncate(), alternate.w);
-
-                        surface.color(color)
-                    },
-                );
-                if let Some(image) = image {
-                    let icon = Quad::new(pill.center - vec2((pill.size.x - pill.size.y) * 0.5, 0.0), Vec2::splat(ICON_SIZE), Vec2::X);
-                    // GPU: Launcher result image.
-                    frame.paint_quad(icon, |fragment: Fragment, _frame: Globals, image: Image| {
-                        let texture = image.sample(fragment.uv);
-                        (texture.truncate() * texture.w).extend(texture.w)
-                    });
-                }
-
-                let origin = vec2(x, y);
-                for line in [name_line, detail_line, action_line, alternate_line] {
-                    if !line.is_empty() {
-                        // GPU: Launcher result text.
-                        frame.paint_text(line.expanded(line.size * 0.5 + 2.0).translated(origin), |text: TextFragment, frame: Globals, pill: Quad| {
-                            let surface = sample_pill(pill, text.pixel, &frame);
-                            text.color(text.alpha() * surface.mask)
-                        });
-                    }
-                }
-                y += row_height + GAP;
-            }
-            if let Some(index) = activated {
-                self.activate(index, false);
-            }
-        }
-    }
-
     /// Scans installed apps and decodes their icons on a background thread, then applies the result.
     fn start_scan(background: &Background, http: &Client, providers: &[SearchEngine], updates: &Sender<LauncherUpdate>) {
-        let provider_icons = providers
-            .iter()
-            .enumerate()
-            .filter_map(|(index, provider)| {
-                let url = Url::parse(&provider.config.url.replace("{searchTerms}", "")).ok()?;
-                Some((index, url))
-            })
-            .collect::<Vec<_>>();
         let app_updates = updates.clone();
         background.spawn(async move {
             let apps = spawn_blocking(move || {
@@ -729,70 +515,36 @@ mod host {
             let _ = app_updates.send(LauncherUpdate::Apps(apps));
         });
 
-        for (index, url) in provider_icons {
+        for (index, provider) in providers.iter().enumerate() {
+            let icon = provider.config.icon.clone();
             let http = http.clone();
             let updates = updates.clone();
             background.spawn(async move {
-                if let Some(pixels) = fetch_favicon(&http, url).await {
+                if let Some(pixels) = fetch_icon(&http, &icon).await {
                     let _ = updates.send(LauncherUpdate::ProviderIcon(index, Image::rgba8([ICON_PX; 2], pixels)));
                 }
             });
         }
     }
 
-    async fn fetch_favicon(http: &Client, page: Url) -> Option<Vec<u8>> {
-        let html = http.get(page.clone()).send().await.ok()?.text().await.ok()?;
-        let advertised = html
-            .split("<link")
-            .skip(1)
-            .filter_map(|tag| tag.split_once('>').map(|pair| pair.0))
-            .find(|tag| attribute(tag, "rel").is_some_and(|rel| rel.contains("icon")))
-            .and_then(|tag| attribute(tag, "href"))
-            .and_then(|href| page.join(href).ok());
-        let fallback = (|| {
-            let mut labels = page.host_str()?.rsplit('.');
-            let (suffix, name) = (labels.next()?, labels.next()?);
-            Url::parse(&format!("https://{name}.{suffix}/favicon.ico")).ok()
-        })();
-        for icon in advertised.into_iter().chain(fallback) {
-            let Some(bytes) = http.get(icon).send().await.ok().and_then(|response| response.error_for_status().ok()) else {
-                continue;
-            };
-            let Ok(bytes) = bytes.bytes().await else { continue };
-            if let Ok(Some(pixels)) = spawn_blocking(move || load_raster(&bytes)).await {
-                return Some(pixels);
-            }
-        }
-        None
-    }
-
-    fn attribute<'a>(tag: &'a str, name: &str) -> Option<&'a str> {
-        let value = tag.split_once(name)?.1.trim_start().strip_prefix('=')?.trim_start();
-        match value.as_bytes().first()? {
-            quote @ (b'\'' | b'"') => value[1..].split_once(char::from(*quote)).map(|pair| pair.0),
-            _ => value.split_whitespace().next(),
-        }
+    async fn fetch_icon(http: &Client, url: &str) -> Option<Vec<u8>> {
+        let bytes = http.get(url).send().await.ok()?.error_for_status().ok()?.bytes().await.ok()?;
+        spawn_blocking(move || load_raster(&bytes)).await.ok().flatten()
     }
 
     /// Rasterizes an icon to `ICON_PX` square, straight-alpha RGBA.
     fn load_icon_pixels(path: &Path) -> Option<Vec<u8>> {
         if path.extension().is_some_and(|extension| extension == "svg") {
-            let tree = Tree::from_data(&fs::read(path).ok()?, &usvg::Options::default()).ok()?;
-            let mut pixmap = Pixmap::new(ICON_PX, ICON_PX)?;
-            let source = tree.size();
-            let square = ICON_PX as f32;
-            let fit = Transform::from_scale(square / source.width(), square / source.height());
-            render(&tree, fit, &mut pixmap.as_mut());
-            return Some(pixmap.take_demultiplied());
+            return rasterize_svg(&fs::read(path).ok()?);
         }
-        let raster = image::open(path).ok()?;
-        Some(resize_icon(&raster))
+        image::open(path).ok().map(|image| resize_icon(&image))
     }
 
     fn load_raster(bytes: &[u8]) -> Option<Vec<u8>> {
-        if let Ok(image) = image::load_from_memory(bytes) {
-            return Some(resize_icon(&image));
-        }
+        image::load_from_memory(bytes).map(|image| resize_icon(&image)).ok().or_else(|| rasterize_svg(bytes))
+    }
+
+    fn rasterize_svg(bytes: &[u8]) -> Option<Vec<u8>> {
         let tree = Tree::from_data(bytes, &usvg::Options::default()).ok()?;
         let mut pixmap = Pixmap::new(ICON_PX, ICON_PX)?;
         let source = tree.size();
@@ -805,7 +557,215 @@ mod host {
         let raster = image.resize_to_fill(ICON_PX, ICON_PX, FilterType::Triangle);
         raster.into_rgba8().into_raw()
     }
-}
+    /// The search query with a caret and selection, edited like an ordinary text box.
+    impl LauncherState {
+        /// Draws the panel and its search field, then the rows beneath it.
+        pub fn show(&mut self, frame: &mut RenderContext) {
+            let mut refreshed = false;
+            while let Ok(update) = self.updates.try_recv() {
+                match update {
+                    LauncherUpdate::Apps(apps) => {
+                        self.apps = apps;
+                    }
+                    LauncherUpdate::ProviderIcon(index, pixels) => {
+                        self.providers[index].icon = Some(pixels);
+                    }
+                }
+                refreshed = true;
+            }
+            if refreshed {
+                self.refresh_matches();
+            }
+            if !self.open {
+                return;
+            }
+            let (origin, size) = self.bounds(frame.paint.screen_size);
+            frame.interaction.input_region(Rect::new(0.0, 0.0, frame.paint.screen_size.x, frame.paint.screen_size.y));
+            let (left, right) = (PADDING + 34.0, size.x - PADDING);
+            if self.field.touched {
+                self.field.touched = false;
+                self.field.blink_start = frame.paint.time;
+            }
+            let line = if self.field.text.is_empty() {
+                frame
+                    .paint
+                    .text()
+                    .line("Search anything…", SEARCH_STYLE)
+                    .left(vec2(left, HEADER_HEIGHT * 0.5))
+                    .with_color(MUTED_COLOR)
+            } else {
+                frame
+                    .paint
+                    .text()
+                    .line(&self.field.text, SEARCH_STYLE)
+                    .visible(vec2(left, HEADER_HEIGHT * 0.5), left..right)
+            };
+            let selection_range = self.field.selection();
+            let blink = ((frame.paint.time - self.field.blink_start) * 1.4).fract();
+            let (caret, selection) = {
+                let text = frame.paint.text();
+                // Long queries are clipped rather than scrolled, so every offset maps straight to an x.
+                let at = |offset: usize| (left + text.width(&self.field.text[..offset], SEARCH_STYLE)).min(right);
+                let caret = vec2(at(self.field.cursor), blink.smoothstep(0.62, 0.5));
+                let selection = if selection_range.is_empty() {
+                    Vec2::ZERO
+                } else {
+                    vec2(at(selection_range.start), at(selection_range.end))
+                };
+                (caret, selection)
+            };
+            let quad = Quad::from_min_max(origin, origin + size);
+            // GPU: Launcher panel and search selection.
+            frame.paint.paint_quad(quad, |fragment: Fragment, size: Vec2, caret: Vec2, selection: Vec2| {
+                let mask = fill_rounded_box(fragment.local, size * 0.5, BACKGROUND_RADIUS as f32);
+                if mask <= 0.0 {
+                    kill();
+                }
+                let panel = fragment.local + size * 0.5;
+                let mut color = Vec3::splat(0.09).lerp(
+                    Vec3::splat(0.17),
+                    fill_rounded_box(panel - vec2(size.x * 0.5, HEADER_HEIGHT - 0.5), vec2(size.x * 0.5, 0.5), 0.0),
+                );
+                color = ripple_light(color, ripple_flash(fragment.pixel, fragment.globals, fragment.time));
+                color = color.lerp(ICON_COLOR, magnifier_icon(panel - vec2(PADDING + 11.0, HEADER_HEIGHT * 0.5)));
 
-#[cfg(not(target_arch = "spirv"))]
-pub use host::{LauncherKey, LauncherState};
+                let selection_width = selection.y - selection.x;
+                let highlight = fill_rounded_box(
+                    panel - vec2(f32::midpoint(selection.x, selection.y), HEADER_HEIGHT * 0.5),
+                    vec2(selection_width * 0.5, 13.0),
+                    3.0,
+                );
+                color = color.lerp(vec3(0.24, 0.28, 0.52), highlight * presence(selection_width));
+                let caret_mask = fill_rounded_box(panel - vec2(caret.x, HEADER_HEIGHT * 0.5), vec2(0.9, 12.0), 0.9);
+                color = color.lerp(TEXT_COLOR, caret_mask * caret.y);
+
+                let opacity = mask * 0.82;
+                rgba(color, opacity)
+            });
+            let padding = line.size * 0.5 + 2.0;
+            // GPU: Launcher query text.
+            frame
+                .paint
+                .paint_text(line.expanded(padding).translated(origin), |text: TextFragment, origin: Vec2, size: Vec2| {
+                    let clip = fill_rounded_box(text.pixel - origin - size * 0.5, size * 0.5, BACKGROUND_RADIUS as f32);
+                    text.color(text.alpha() * clip)
+                });
+
+            self.show_entries(frame, origin);
+        }
+
+        /// Draws and interacts with calculator, application and search rows in visual order.
+        fn show_entries(&mut self, frame: &mut RenderContext, origin: Vec2) {
+            let (x, width) = (origin.x + PADDING, PANEL_WIDTH - PADDING * 2.0);
+            let mut y = origin.y + HEADER_HEIGHT + PADDING;
+            let text_left = ROW_HEIGHT * 0.5 + ICON_SIZE * 0.5 + GAP * 2.0;
+
+            let mut activated = None;
+            for index in 0..self.entry_count() {
+                let pill = Rect::new(x, y, x + width, y + ROW_HEIGHT);
+                let response = frame.interaction.interact(pill);
+                if response.hovered() {
+                    self.selected = index;
+                }
+                if response.clicked() {
+                    activated = Some(index);
+                }
+                let pill: Quad = pill.into();
+                let entry = self.entry(index).unwrap().view(self.search_query().1);
+
+                // Only the highlighted row spells out what enter and shift+enter would do.
+                let mut edge = width - GAP * 2.0 - 4.0;
+                let mut badge = |label: Option<&str>, width: f32| {
+                    let Some(label) = label.filter(|_| self.selected == index) else {
+                        return (Vec2::ZERO, text::Line::default());
+                    };
+                    let badge = vec2(edge - width * 0.5, width * 0.5);
+                    edge -= width + GAP;
+                    let line = frame.paint.text().line(label, DETAIL_STYLE).right(vec2(edge, ROW_HEIGHT * 0.5)).with_color(MUTED_COLOR);
+                    edge -= frame.paint.text().width(label, DETAIL_STYLE) + GAP * 2.0;
+                    (badge, line)
+                };
+                let (enter_badge, action_line) = badge(Some(entry.action), ENTER_BADGE_WIDTH);
+                let (alternate_badge, alternate_line) = badge(entry.alternate, ALTERNATE_BADGE_WIDTH);
+
+                let clip = text_left..edge.max(text_left);
+                let (name_y, detail_y) = if entry.detail.is_empty() {
+                    (ROW_HEIGHT * 0.5, 0.0)
+                } else {
+                    (ROW_HEIGHT * 0.34, ROW_HEIGHT * 0.68)
+                };
+                let name_line = frame.paint.text().line(entry.name, NAME_STYLE).visible(vec2(text_left, name_y), clip.clone());
+                let detail_line = if entry.detail.is_empty() {
+                    text::Line::default()
+                } else {
+                    frame
+                        .paint
+                        .text()
+                        .line(entry.detail, DETAIL_STYLE)
+                        .visible(vec2(text_left, detail_y), clip)
+                        .with_color(DETAIL_COLOR)
+                };
+
+                let (image, icon_kind) = match entry.icon {
+                    EntryIcon::Image(image) => (Some(image), 0),
+                    EntryIcon::Calculator => (None, CALCULATOR_ICON),
+                    EntryIcon::Search => (None, SEARCH_ICON),
+                };
+                let quad = pill.expanded(pill_margin(frame.globals(), frame.paint.time));
+                // GPU: Launcher result row.
+                frame
+                    .paint
+                    .paint_quad(quad, |fragment: Fragment, pill: Quad, icon_kind: u32, enter_badge: Vec2, alternate_badge: Vec2| {
+                        let surface = sample_pill(pill, fragment.pixel, fragment.globals, fragment.time);
+                        if surface.alpha <= VISIBLE_ALPHA {
+                            kill();
+                        }
+                        // Only the highlighted row carries an enter badge, so it doubles as its highlight flag.
+                        let mut color = Vec3::splat(0.15)
+                            .lerp(Vec3::splat(0.235), presence(enter_badge.y))
+                            .lerp(Vec3::splat(0.3), (surface.bulge() / 8.0).min(1.0));
+
+                        let icon_point = surface.local - Vec2::splat(surface.size.y * 0.5);
+                        if icon_kind == CALCULATOR_ICON {
+                            let calculator = calculator_icon(icon_point);
+                            color = color.lerp(calculator.truncate(), calculator.w);
+                        } else if icon_kind == SEARCH_ICON {
+                            color = color.lerp(ICON_COLOR, magnifier_icon(icon_point));
+                        }
+
+                        let enter = action_badge(surface.refracted - vec2(enter_badge.x, surface.size.y * 0.5), enter_badge.y, false);
+                        color = color.lerp(enter.truncate(), enter.w);
+                        let alternate = action_badge(surface.refracted - vec2(alternate_badge.x, surface.size.y * 0.5), alternate_badge.y, true);
+                        color = color.lerp(alternate.truncate(), alternate.w);
+
+                        surface.color(color)
+                    });
+                if let Some(image) = image {
+                    let icon = Quad::new(pill.center - vec2((pill.size.x - pill.size.y) * 0.5, 0.0), Vec2::splat(ICON_SIZE), Vec2::X);
+                    // GPU: Launcher result image.
+                    frame.paint.paint_quad(icon, |fragment: Fragment, image: Image| {
+                        let texture = image.sample(fragment.uv);
+                        rgba(texture.truncate(), texture.w)
+                    });
+                }
+
+                let origin = vec2(x, y);
+                for line in [name_line, detail_line, action_line, alternate_line] {
+                    if !line.is_empty() {
+                        // GPU: Launcher result text.
+                        frame
+                            .paint
+                            .paint_text(line.expanded(line.size * 0.5 + 2.0).translated(origin), |text: TextFragment, pill: Quad| {
+                                let surface = sample_pill(pill, text.pixel, text.globals, text.time);
+                                text.color(text.alpha() * surface.mask)
+                            });
+                    }
+                }
+                y += ROW_HEIGHT + GAP;
+            }
+            if let Some(index) = activated {
+                self.activate(index, false);
+            }
+        }
+    }
+}

@@ -53,19 +53,22 @@ impl Unorm8x4 {
 /// Plain data whose Rust representation is also its scalar-layout SPIR-V ABI.
 ///
 /// # Safety
-/// Implementations must have identical Rust and scalar-layout SPIR-V representations.
+/// Implementations must have identical Rust and scalar-layout SPIR-V representations,
+/// four-byte alignment or less, and a size divisible by four.
 #[cfg(target_arch = "spirv")]
 pub unsafe trait ShaderData: Copy {}
 /// Plain data whose Rust representation is also its scalar-layout SPIR-V ABI.
 ///
 /// # Safety
-/// Implementations must have identical Rust and scalar-layout SPIR-V representations.
+/// Implementations must have identical Rust and scalar-layout SPIR-V representations,
+/// four-byte alignment or less, and a size divisible by four.
 #[cfg(not(target_arch = "spirv"))]
 pub unsafe trait ShaderData: Copy + bytemuck::Pod {}
 
 unsafe impl ShaderData for u32 {}
 unsafe impl ShaderData for i32 {}
 unsafe impl ShaderData for f32 {}
+unsafe impl ShaderData for () {}
 unsafe impl ShaderData for Unorm8x4 {}
 unsafe impl ShaderData for ImageHandle {}
 unsafe impl ShaderData for Vec2 {}

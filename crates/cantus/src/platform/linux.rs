@@ -1,3 +1,4 @@
+use crate::interaction::InputEvent;
 use crate::{
     app::{
         AppUpdater, Background, CantusApp,
@@ -14,7 +15,7 @@ use crate::{
 };
 use freedesktop_desktop_entry::{desktop_entries, get_languages_from_env};
 use isthmus::glam::vec2;
-use isthmus::{Image, InputEvent, SurfaceHandle};
+use isthmus::{FloatExt, Image, SurfaceHandle};
 use microfft::real::rfft_1024;
 use raw_window_handle::{
     DisplayHandle, HandleError, HasDisplayHandle, HasWindowHandle, RawDisplayHandle, RawWindowHandle, WaylandDisplayHandle, WaylandWindowHandle, WindowHandle,
@@ -422,7 +423,7 @@ fn capture_playback(levels: &[AtomicU32; AUDIO_SPECTRUM_BANDS]) -> io::Result<()
             let bin = |frequency: f32| (frequency * AUDIO_WINDOW_SIZE as f32 / AUDIO_SAMPLE_RATE as f32).ceil() as usize;
             let bins = &spectrum[bin(AUDIO_BAND_EDGES[band])..bin(AUDIO_BAND_EDGES[band + 1])];
             let rms = (bins.iter().map(microfft::Complex32::norm_sqr).sum::<f32>() / bins.len() as f32 / AUDIO_WINDOW_SIZE as f32).sqrt();
-            let value = ((20.0 * rms.log10() + 30.0) / 30.0).clamp(0.0, 1.0);
+            let value = ((20.0 * rms.log10() + 30.0) / 30.0).saturate();
             level.store(value.to_bits(), Ordering::Relaxed);
         }
     }
@@ -714,6 +715,7 @@ impl LayerShellApp {
 
     fn sync_launcher_surface(&mut self, qhandle: &QueueHandle<Self>) {
         let open = self.cantus.ui.launcher.open;
+        self.cantus.interaction.set_launcher_active(open);
         if open == self.launcher_layer_surface.is_some() {
             return;
         }
@@ -855,11 +857,9 @@ impl LayerShellApp {
         let wl_surface = self.active_surface().clone();
         let compositor = self.compositor.as_ref().unwrap();
         let region = compositor.create_region(qhandle, ());
-        if let Some(gpu) = self.cantus.gpu.as_mut() {
-            let Some(surface) = self.launcher_surface.or(self.cantus.bar_surface) else {
-                return;
-            };
-            for rect in gpu.take_input_regions(surface) {
+        if self.cantus.gpu.is_some() {
+            let interaction = &mut self.cantus.interaction;
+            for rect in interaction.take_regions() {
                 let [x, y, width, height] = [rect.min.x, rect.min.y, rect.max.x - rect.min.x, rect.max.y - rect.min.y].map(|value| value.round() as i32);
                 region.add(x, y, width, height);
             }
@@ -880,7 +880,7 @@ impl LayerShellApp {
         let compositor = self.compositor.as_ref().unwrap();
         let region = compositor.create_region(qhandle, ());
         let (width, height) = self.launcher_surface_size();
-        let (origin, size) = self.cantus.ui.launcher.bounds(vec2(width, height), self.cantus.config.height);
+        let (origin, size) = self.cantus.ui.launcher.bounds(vec2(width, height));
         // Keep the integer input region one pixel inside the shader's antialiased edge.
         let x = origin.x.ceil() as i32 + 1;
         let y = origin.y.ceil() as i32 + 1;
@@ -1147,12 +1147,13 @@ fn handle_launcher_key(state: &mut LayerShellApp, keycode: xkb::Keycode) {
 dispatch!(WlPointer, |state, _proxy, event, _qhandle| {
     let surface_id = state.active_surface().id();
     let surface = state.launcher_surface;
-    let Some(gpu) = state.cantus.gpu.as_mut() else {
+    if state.cantus.gpu.is_none() {
         return;
-    };
-    let Some(surface) = surface.or(state.cantus.bar_surface) else {
+    }
+    if surface.or(state.cantus.bar_surface).is_none() {
         return;
-    };
+    }
+    let interaction = &mut state.cantus.interaction;
     match event {
         wl_pointer::Event::Enter {
             surface: wl_surface,
@@ -1160,24 +1161,24 @@ dispatch!(WlPointer, |state, _proxy, event, _qhandle| {
             surface_y,
             ..
         } if surface_id == wl_surface.id() => {
-            gpu.input(surface, InputEvent::Enter(vec2(surface_x as f32, surface_y as f32)));
+            interaction.apply(InputEvent::Enter(vec2(surface_x as f32, surface_y as f32)));
         }
         wl_pointer::Event::Motion { surface_x, surface_y, .. } => {
             let position = vec2(surface_x as f32, surface_y as f32);
-            gpu.input(surface, InputEvent::Motion(position));
+            interaction.apply(InputEvent::Motion(position));
         }
         wl_pointer::Event::Leave { .. } => {
-            gpu.input(surface, InputEvent::Leave);
+            interaction.apply(InputEvent::Leave);
         }
         wl_pointer::Event::Button { button, state: button_state, .. } => match (button, button_state) {
             (0x110, WEnum::Value(wl_pointer::ButtonState::Pressed)) => {
-                gpu.input(surface, InputEvent::Press);
+                interaction.apply(InputEvent::Press);
             }
             (0x110, WEnum::Value(wl_pointer::ButtonState::Released)) => {
-                gpu.input(surface, InputEvent::Release);
+                interaction.apply(InputEvent::Release);
             }
-            (0x111, WEnum::Value(wl_pointer::ButtonState::Pressed)) if gpu.dragging(surface) => {
-                gpu.input(surface, InputEvent::CancelDrag);
+            (0x111, WEnum::Value(wl_pointer::ButtonState::Pressed)) if interaction.dragging() => {
+                interaction.apply(InputEvent::CancelDrag);
             }
             _ => {}
         },
@@ -1191,7 +1192,7 @@ dispatch!(WlPointer, |state, _proxy, event, _qhandle| {
             value120: discrete,
             ..
         } if discrete != 0 => {
-            gpu.input(surface, InputEvent::Scroll(discrete.signum()));
+            interaction.apply(InputEvent::Scroll(discrete.signum()));
         }
         _ => {}
     }

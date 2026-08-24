@@ -119,21 +119,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "ashpd"
-version = "0.13.13"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "fb8421aaa9644a5faf26735f258b669b15f063313ef8f8e2bdb28912a1a6f111"
-dependencies = [
- "enumflags2",
- "futures-util",
- "getrandom 0.4.3",
- "serde",
- "serde_repr",
- "tokio",
- "zbus",
-]
-
-[[package]]
 name = "async-broadcast"
 version = "0.7.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -312,7 +297,6 @@ name = "cantus"
 version = "0.8.0"
 dependencies = [
  "arrayvec",
- "ashpd",
  "bytemuck",
  "fastrand",
  "fend-core",
@@ -321,11 +305,11 @@ dependencies = [
  "freedesktop-desktop-entry",
  "freedesktop-icons",
  "futures-util",
- "hex",
  "image",
  "isthmus",
  "jiff",
  "librespot-core",
+ "librespot-metadata",
  "librespot-oauth",
  "librespot-protocol",
  "microfft",
@@ -1703,11 +1687,11 @@ dependencies = [
  "ash-window",
  "bytemuck",
  "glam",
+ "half",
  "isthmus_macros",
  "raw-window-handle",
  "smallvec",
  "spirv-std",
- "tracing",
  "ttf-parser",
 ]
 
@@ -1919,6 +1903,24 @@ dependencies = [
  "url",
  "uuid",
  "vergen-gitcl",
+]
+
+[[package]]
+name = "librespot-metadata"
+version = "0.8.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "9a9c688aa2acd3ed2498e31a95d6f2be49c0f18128db8958450ffd628aa88532"
+dependencies = [
+ "async-trait",
+ "bytes",
+ "librespot-core",
+ "librespot-protocol",
+ "log",
+ "protobuf",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.20",
+ "uuid",
 ]
 
 [[package]]

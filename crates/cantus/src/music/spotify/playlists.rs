@@ -3,7 +3,7 @@ use crate::app::{
     music::{ArtState, CondensedPlaylist, PlaylistId, TrackId},
     send_update,
 };
-use librespot_core::{Session, SpotifyId};
+use librespot_core::{FileId, Session, SpotifyId};
 use librespot_protocol::playlist4_external::{Add, Delta, Item, ListAttributes, ListChanges, Op, Rem, SelectedListContent, op};
 use protobuf::{Message as _, MessageField};
 use reqwest::Method;
@@ -133,13 +133,13 @@ impl SpotifyWorker {
         cache_changed |= cached != self.playlist_cache.len();
         send_update(&self.updater, move |app| {
             for playlist in &mut updates {
-                if let Some(old) = app.playback.playlists.iter().find(|old| old.id == playlist.id && old.image_url == playlist.image_url) {
+                if let Some(old) = app.music.playlists.iter().find(|old| old.id == playlist.id && old.image_url == playlist.image_url) {
                     playlist.art = old.art.clone();
                 }
             }
             updates.sort_unstable_by(|a, b| a.name.cmp(&b.name));
-            app.playback.playlists = updates;
-            app.refresh_art();
+            app.music.playlists = updates;
+            app.refresh_enrichment(false);
         });
         if cache_changed && let Err(err) = write_cache(&config_path(PLAYLIST_TRACKS_CACHE), &self.playlist_cache) {
             warn!("Failed to persist playlist cache: {err}");
@@ -181,7 +181,7 @@ fn playlist_image(attributes: &ListAttributes) -> Option<String> {
                 .ok()
                 .and_then(|picture| picture.strip_prefix("spotify:image:"))
                 .map(str::to_owned)
-                .or_else(|| (picture.len() == 20).then(|| hex::encode(picture)))?;
+                .or_else(|| (picture.len() == 20).then(|| FileId::from_raw(picture).to_string()))?;
             Some(format!("https://i.scdn.co/image/{id}"))
         })
 }

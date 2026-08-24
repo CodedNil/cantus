@@ -1,4 +1,4 @@
-use isthmus_build::artifact::{shader_artifact, shader_dependency, shader_is_fresh, shader_source};
+use isthmus_build::artifact::shader_artifact;
 use proc_macro::TokenStream;
 use proc_macro_crate::{FoundCrate, crate_name};
 use proc_macro2::TokenStream as TokenStream2;
@@ -10,8 +10,13 @@ use syn::visit_mut::{VisitMut, visit_expr_mut};
 mod buffer;
 mod paint;
 
-fn fragment_entry(frame: &TokenStream2, text: bool, payload: bool, images: bool, body: &TokenStream2) -> TokenStream2 {
+fn fragment_entry(text: bool, payload: bool, images: bool, shader_input: &syn::Type, shader_name: &syn::Ident, body: &TokenStream2) -> TokenStream2 {
     let isthmus = isthmus_path();
+    let fragment = if text {
+        quote!(let fragment = #isthmus::Fragment::new(pixel, local, draw.quad.size, frame.time, unsafe { #isthmus::spirv_std::ByteAddressableBuffer::from_slice(globals).load(0) });)
+    } else {
+        quote!(let #shader_name: #shader_input = #isthmus::Fragment::new(pixel, local, draw.quad.size, frame.time, unsafe { #isthmus::spirv_std::ByteAddressableBuffer::from_slice(globals).load(0) });)
+    };
     let text_resources = text.then(|| {
         quote! {
             #[spirv(storage_buffer, descriptor_set = 0, binding = 2)] placed_glyphs: &[#isthmus::text::PlacedGlyph],
@@ -26,17 +31,18 @@ fn fragment_entry(frame: &TokenStream2, text: bool, payload: bool, images: bool,
         pub fn fragment(
             #[spirv(location = 0)] pixel: #isthmus::glam::Vec2,
             #[spirv(location = 1, flat)] draw_index: u32,
-            #[spirv(push_constant)] __isthmus_frame: &#frame,
             #[spirv(storage_buffer, descriptor_set = 0, binding = 0)] draws: &[#isthmus::__private::DrawRecord],
+            #[spirv(storage_buffer, descriptor_set = 0, binding = 6)] globals: &[u32],
+            #[spirv(push_constant)] frame: &#isthmus::__private::PushBlock,
             #payload_resource
             #text_resources
             #image_resource
             #[spirv(location = 0)] out_color: &mut #isthmus::glam::Vec4,
         ) {
-            let _ = (&__isthmus_frame, draws);
+            let _ = draws;
             let draw = draws[draw_index as usize];
             let local = draw.quad.local(pixel);
-            let fragment = #isthmus::Fragment::new(pixel, local, draw.quad.size);
+            #fragment
             #body
         }
     }
@@ -59,10 +65,26 @@ pub fn derive_shader_data(input: TokenStream) -> TokenStream {
     buffer::derive(&input).into()
 }
 
-#[proc_macro_derive(Program)]
-pub fn derive_program(input: TokenStream) -> TokenStream {
-    let input = syn::parse_macro_input!(input as syn::DeriveInput);
-    program_items(&input).unwrap_or_else(syn::Error::into_compile_error).into()
+/// Declares the shader program owned by the surrounding module.
+#[proc_macro]
+pub fn program(input: TokenStream) -> TokenStream {
+    if !input.is_empty() {
+        return syn::Error::new(proc_macro2::Span::call_site(), "program takes no arguments").to_compile_error().into();
+    }
+    let module = match program_module() {
+        Ok(module) => module,
+        Err(error) => return error.to_compile_error().into(),
+    };
+    let isthmus = isthmus_path();
+    quote! {
+        #module
+
+        #[cfg(not(target_arch = "spirv"))]
+        pub const fn program() -> #isthmus::__private::Program {
+            #isthmus::__private::Program::new(__ISTHMUS_SHADER)
+        }
+    }
+    .into()
 }
 
 /// Extracts inline paint closures and keeps their surrounding implementation on the host.
@@ -72,20 +94,31 @@ pub fn derive_program(input: TokenStream) -> TokenStream {
 #[proc_macro_attribute]
 pub fn paint(args: TokenStream, input: TokenStream) -> TokenStream {
     if !args.is_empty() {
-        return syn::Error::new(proc_macro2::Span::call_site(), "paint takes no options").to_compile_error().into();
+        return syn::Error::new(proc_macro2::Span::call_site(), "paint takes no arguments").to_compile_error().into();
     }
     extract_paints(input)
 }
 
 fn extract_paints(input: TokenStream) -> TokenStream {
     let mut item = syn::parse_macro_input!(input as syn::Item);
+    let host_module = match &item {
+        syn::Item::Mod(module) => Some(module.ident.clone()),
+        _ => None,
+    };
     let mut inline = InlinePaints::default();
     inline.visit_item_mut(&mut item);
     if let Some(error) = inline.error {
         return error.to_compile_error().into();
     }
     let shaders = inline.shaders;
-    quote!(#(#shaders)* #[cfg(not(target_arch = "spirv"))] #[allow(clippy::wildcard_imports)] #item).into()
+    let exports = host_module.map(|module| {
+        quote! {
+            #[cfg(not(target_arch = "spirv"))]
+            #[allow(unused_imports)]
+            pub use #module::*;
+        }
+    });
+    quote!(#(#shaders)* #[cfg(not(target_arch = "spirv"))] #[allow(clippy::wildcard_imports)] #item #exports).into()
 }
 
 #[derive(Default)]
@@ -148,13 +181,10 @@ impl InlinePaints {
         if !closure.inputs.iter().all(|input| matches!(input, syn::Pat::Type(_))) {
             return Err(syn::Error::new_spanned(&closure.inputs, "inline paint closure parameters require explicit types"));
         }
-        if closure.inputs.len() < 2 {
-            return Err(syn::Error::new_spanned(
-                &closure.inputs,
-                "inline paint closures require the fragment input followed by the program globals",
-            ));
+        if closure.inputs.is_empty() {
+            return Err(syn::Error::new_spanned(&closure.inputs, "inline paint closures require the fragment input"));
         }
-        let input_start = 2;
+        let input_start = 1;
         let input_values = self.input_values(&closure, input_start)?;
         let block = match closure.body.as_ref() {
             syn::Expr::Block(body) => body.block.clone(),
@@ -164,7 +194,6 @@ impl InlinePaints {
         self.next += 1;
         let mut inputs = closure.inputs.iter();
         let syn::Pat::Type(shader_input) = inputs.next().unwrap() else { unreachable!() };
-        let syn::Pat::Type(frame) = inputs.next().unwrap() else { unreachable!() };
         let syn::Pat::Ident(shader_name) = shader_input.pat.as_ref() else {
             return Err(syn::Error::new_spanned(&shader_input.pat, "shader fragment requires an identifier"));
         };
@@ -189,7 +218,7 @@ impl InlinePaints {
             })
             .collect::<Vec<_>>();
         let captures = shader_inputs.iter().map(paint::Capture::new).collect::<syn::Result<Vec<_>>>()?;
-        let expansion = paint::expand(&name, frame, shader_input, &captures, &block, text)?;
+        let expansion = paint::expand(&name, shader_input, &captures, &block, text)?;
         let paint::Expansion { items, instance, pipeline } = expansion;
         self.shaders.push(items);
         let geometry = call.args.first().unwrap().clone();
@@ -248,13 +277,20 @@ fn rewrite_call(call: &syn::ExprMethodCall, rewrite: &Rewrite<'_>) -> syn::Expr 
         instance,
         pipeline,
     } = rewrite;
+    let capture_names = input_values
+        .iter()
+        .enumerate()
+        .map(|(index, _)| format_ident!("__isthmus_capture_{index}"))
+        .collect::<Vec<_>>();
+    let capture_bindings = capture_names.iter().zip(input_values.iter()).map(|(name, value)| quote!(let #name = #value;));
     let values = captures
         .iter()
-        .zip(input_values.iter())
+        .zip(capture_names.iter())
         .map(|(capture, value)| {
             let frame: syn::Expr = syn::parse_quote!(__isthmus_frame);
             let field = &capture.name;
-            let value = capture.encode(value, &frame);
+            let value: syn::Expr = syn::parse_quote!(#value);
+            let value = capture.encode(&value, &frame);
             quote!(#field: #value)
         })
         .collect::<Vec<_>>();
@@ -273,13 +309,14 @@ fn rewrite_call(call: &syn::ExprMethodCall, rewrite: &Rewrite<'_>) -> syn::Expr 
     };
     let receiver = &call.receiver;
     let method = &call.method;
-    syn::parse2(quote!(
+    syn::parse2(quote!({
+        #(#capture_bindings)*
         #receiver.#method #generics (#geometry, |__isthmus_frame, __isthmus_geometry| {
-            use #isthmus::float::FloatExt as _;
+            use #isthmus::FloatExt as _;
             let _ = #closure;
             #payload
         })
-    ))
+    }))
     .unwrap()
 }
 
@@ -308,38 +345,7 @@ impl<'ast> Visit<'ast> for HostBindings {
     fn visit_expr_closure(&mut self, _closure: &'ast syn::ExprClosure) {}
 }
 
-fn program_items(input: &syn::DeriveInput) -> syn::Result<TokenStream2> {
-    let name = input.ident.clone();
-    let syn::Data::Struct(data) = &input.data else {
-        return Err(syn::Error::new_spanned(input, "program globals require a struct"));
-    };
-    let syn::Fields::Named(fields) = &data.fields else {
-        return Err(syn::Error::new_spanned(input, "program globals require named fields"));
-    };
-    if !fields.named.iter().any(|field| field.ident.as_ref().is_some_and(|field| field == "info")) {
-        return Err(syn::Error::new_spanned(input, "program globals require an `info: FrameInfo` field"));
-    }
-    let module = program_module(&name)?;
-    let isthmus = isthmus_path();
-    Ok(quote! {
-        #module
-
-        #[cfg(not(target_arch = "spirv"))]
-        impl #name {
-            fn __isthmus_frame_info_mut(&mut self) -> &mut #isthmus::FrameInfo {
-                let _: &mut #isthmus::FrameInfo = &mut self.info;
-                &mut self.info
-            }
-
-            pub const fn program() -> #isthmus::__private::Program<Self> {
-                #isthmus::__private::Program::new(__ISTHMUS_SHADER, Self::__isthmus_frame_info_mut)
-            }
-        }
-
-    })
-}
-
-fn program_module(shared: &syn::Ident) -> syn::Result<TokenStream2> {
+fn program_module() -> syn::Result<TokenStream2> {
     let Ok(crate_dir) = env::var("CARGO_MANIFEST_DIR") else {
         return Err(syn::Error::new(proc_macro2::Span::call_site(), "missing package directory"));
     };
@@ -347,31 +353,26 @@ fn program_module(shared: &syn::Ident) -> syn::Result<TokenStream2> {
         Ok(artifact) => artifact,
         Err(error) => return Err(syn::Error::new(proc_macro2::Span::call_site(), error)),
     };
-    if env::var("CARGO_PKG_NAME").as_deref() != Ok("isthmus-shader") {
-        let source = shader_source(Path::new(&crate_dir)).map_err(|error| syn::Error::new(proc_macro2::Span::call_site(), error))?;
-        let dependency = shader_dependency(Path::new(&crate_dir)).map_err(|error| syn::Error::new(proc_macro2::Span::call_site(), error))?;
-        ensure_fresh(&artifact, &source, dependency.as_deref())?;
-    }
     let artifact = artifact.to_string_lossy();
     let isthmus = isthmus_path();
     Ok(quote! {
         #[doc(hidden)]
         pub mod __isthmus_quad {
             use super::*;
-            use #isthmus::float::FloatExt as _;
+            use #isthmus::FloatExt as _;
 
             #[#isthmus::spirv_std::spirv(vertex)]
             pub fn vertex(
                 #[spirv(vertex_index)] vertex: u32,
                 #[spirv(instance_index)] draw_index: u32,
-                #[spirv(push_constant)] frame: &#shared,
+                #[spirv(push_constant)] frame: &#isthmus::__private::PushBlock,
                 #[spirv(storage_buffer, descriptor_set = 0, binding = 0)] draws: &[#isthmus::__private::DrawRecord],
                 #[spirv(position)] out_position: &mut #isthmus::glam::Vec4,
                 #[spirv(location = 0)] out_pixel: &mut #isthmus::glam::Vec2,
                 #[spirv(location = 1, flat)] out_draw_index: &mut u32,
             ) {
                 let draw = draws[draw_index as usize];
-                let sample = draw.quad.sample(vertex, frame.info.screen_size);
+                let sample = draw.quad.sample(vertex, frame.screen_size);
                 *out_position = sample.position;
                 *out_pixel = sample.pixel;
                 *out_draw_index = draw_index;
@@ -385,11 +386,4 @@ fn program_module(shared: &syn::Ident) -> syn::Result<TokenStream2> {
                 #isthmus::__private::shader_module_name(module_path!()),
             );
     })
-}
-
-fn ensure_fresh(artifact: &Path, source: &Path, dependency: Option<&Path>) -> syn::Result<()> {
-    if !shader_is_fresh(artifact, source, dependency) {
-        return Err(syn::Error::new(proc_macro2::Span::call_site(), "shader artifact is missing or stale; run `isthmus build`"));
-    }
-    Ok(())
 }

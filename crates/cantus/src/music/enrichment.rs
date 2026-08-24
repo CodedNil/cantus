@@ -1,28 +1,26 @@
-use super::{MusicBackend, PlaybackState, Track, TrackId};
+use super::{AudioFeatures, Backend, Music, MusicResult, Track, TrackId};
 use crate::{
     app::{Background, CantusApp, update},
     render::{
         lyrics::{self, LyricsRequest},
-        track::{AudioFeatures, PALETTE_COLORS},
+        music::PALETTE_COLORS,
     },
 };
 use arrayvec::ArrayVec;
+use futures_util::future::join_all;
 use image::{RgbaImage, imageops};
 use isthmus::{Image, Unorm8x4, glam::Vec3, text};
 use palette::{Clamp, IntoColor, Lch, color_theory::Analogous};
 use reqwest::Client;
-use serde::Deserialize;
 use std::{
     array,
     collections::HashMap,
-    error::Error,
     ops::Range,
     time::{Duration, Instant},
 };
 use tokio::task::spawn_blocking;
 use tracing::warn;
 
-const RECCO_FEATURES_URL: &str = "https://api.reccobeats.com/v1/audio-features";
 const RETRY_DELAY: Duration = Duration::from_secs(30);
 const IMAGE_SIZE: u32 = 64;
 pub type ArtState = Fetch<AlbumArt>;
@@ -44,7 +42,7 @@ impl Enrichment {
         }
     }
 
-    pub(crate) fn request_lyrics(&self, track: &Track, music: MusicBackend, shaper: text::Shaper) {
+    pub(crate) fn request_lyrics(&self, track: &Track, backend: Backend, shaper: text::Shaper) {
         let request = LyricsRequest {
             uri: track.uri.clone(),
             track_id: track.id,
@@ -56,14 +54,9 @@ impl Enrichment {
         let http = self.http.clone();
         self.background.spawn_update(async move {
             let uri = request.uri.clone();
-            let state = fetch_lyrics(&request, &http, &music, &shaper).await;
+            let state = fetch_lyrics(&request, &http, &backend, &shaper).await;
             Some(update(move |app| {
-                if let Some(track) = app
-                    .playback
-                    .queue
-                    .iter_mut()
-                    .find(|track| track.uri == uri && matches!(track.runtime.lyrics, Fetch::Fetching))
-                {
+                if let Some(track) = app.music.queue.iter_mut().find(|track| track.uri == uri && matches!(track.runtime.lyrics, Fetch::Fetching)) {
                     track.runtime.lyrics = state;
                 }
             }))
@@ -111,30 +104,17 @@ pub struct AlbumArt {
     palette: [Unorm8x4; PALETTE_COLORS],
 }
 
-#[derive(Deserialize)]
-struct ReccoResponse {
-    #[serde(alias = "content")]
-    items: Vec<ReccoFeatures>,
-}
-
-#[derive(Deserialize)]
-struct ReccoFeatures {
-    href: String,
-    #[serde(flatten)]
-    features: AudioFeatures,
-}
-
 impl Fetch<AlbumArt> {
     pub fn palette(&self) -> [Unorm8x4; PALETTE_COLORS] {
         self.ready().map_or_else(|| [Unorm8x4::default(); PALETTE_COLORS], |art| art.palette)
     }
 }
 
-async fn fetch_lyrics(request: &LyricsRequest, http: &Client, music: &MusicBackend, shaper: &text::Shaper) -> Fetch<lyrics::Lyrics> {
+async fn fetch_lyrics(request: &LyricsRequest, http: &Client, backend: &Backend, shaper: &text::Shaper) -> Fetch<lyrics::Lyrics> {
     let result = if let Some(lyrics) = request.fetch(http).await {
         Ok(lyrics)
     } else if let Some(id) = request.track_id {
-        music.lyrics(id).await
+        backend.lyrics(id).await
     } else {
         Ok(Vec::new())
     };
@@ -148,7 +128,7 @@ async fn fetch_lyrics(request: &LyricsRequest, http: &Client, music: &MusicBacke
 }
 
 async fn fetch_art(http: &Client, url: &str) -> ArtState {
-    let result: Result<_, Box<dyn Error + Send + Sync>> = async {
+    let result: MusicResult<_> = async {
         let bytes = http.get(url).send().await?.error_for_status()?.bytes().await?;
         Ok(spawn_blocking(move || {
             let image = image::load_from_memory(&bytes)?
@@ -171,13 +151,13 @@ async fn fetch_art(http: &Client, url: &str) -> ArtState {
     }
 }
 
-fn art_slots(playback: &mut PlaybackState) -> impl Iterator<Item = (&str, &mut ArtState)> {
-    playback
+fn art_slots(music: &mut Music) -> impl Iterator<Item = (&str, &mut ArtState)> {
+    music
         .queue
         .iter_mut()
         .filter_map(|track| track.image.as_deref().map(|url| (url, &mut track.runtime.art)))
         .chain(
-            playback
+            music
                 .playlists
                 .iter_mut()
                 .filter_map(|playlist| playlist.image_url.as_deref().map(|url| (url, &mut playlist.art))),
@@ -185,18 +165,10 @@ fn art_slots(playback: &mut PlaybackState) -> impl Iterator<Item = (&str, &mut A
 }
 
 impl CantusApp {
-    pub fn refresh_track_enrichment(&mut self) {
-        self.refresh_enrichment(true);
-    }
-
-    pub fn refresh_art(&mut self) {
-        self.refresh_enrichment(false);
-    }
-
-    fn refresh_enrichment(&mut self, include_audio: bool) {
+    pub(crate) fn refresh_enrichment(&mut self, include_audio: bool) {
         let now = Instant::now();
         let mut audio = if include_audio {
-            self.playback
+            self.music
                 .queue
                 .iter_mut()
                 .filter_map(|track| track.id.filter(|_| track.runtime.audio_features.request(now)))
@@ -208,21 +180,25 @@ impl CantusApp {
         audio.dedup();
 
         if !audio.is_empty() {
-            let http = self.enrichment.http.clone();
+            let backend = self.music.backend.clone();
             self.enrichment.background.spawn_update(async move {
-                let features = resolve_audio_features(&http, &audio).await;
+                let features = resolve_audio_features(&backend, &audio).await;
+                let loudness = backend.loudness(&audio).await.unwrap_or_default();
                 Some(update(move |app| {
-                    for track in &mut app.playback.queue {
+                    for track in &mut app.music.queue {
                         let Some(features) = track.id.and_then(|id| features.get(&id)) else {
                             continue;
                         };
                         track.runtime.audio_features = features.map_or_else(Fetch::default, Fetch::Ready);
+                        if let Some(timeline) = track.id.and_then(|id| loudness.get(&id)) {
+                            track.runtime.loudness = Fetch::Ready(timeline.clone());
+                        }
                     }
                 }))
             });
         }
 
-        let mut art = art_slots(&mut self.playback)
+        let mut art = art_slots(&mut self.music)
             .filter_map(|(url, state)| state.request(now).then(|| url.to_owned()))
             .collect::<Vec<_>>();
         art.sort_unstable();
@@ -237,7 +213,7 @@ impl CantusApp {
     }
 
     fn set_art_state(&mut self, url: &str, state: &ArtState) {
-        for (slot_url, slot) in art_slots(&mut self.playback) {
+        for (slot_url, slot) in art_slots(&mut self.music) {
             if slot_url == url {
                 *slot = state.clone();
             }
@@ -245,35 +221,18 @@ impl CantusApp {
     }
 }
 
-async fn resolve_audio_features(http: &Client, track_ids: &[TrackId]) -> HashMap<TrackId, Option<AudioFeatures>> {
-    let mut output = track_ids.iter().map(|&id| (id, None)).collect::<HashMap<_, _>>();
-    for batch in track_ids.chunks(40) {
-        let ids = batch.iter().map(TrackId::as_str).collect::<Vec<_>>().join(",");
-        let Ok(features) = http
-            .get(RECCO_FEATURES_URL)
-            .query(&[("ids", &ids)])
-            .send()
+async fn resolve_audio_features(backend: &Backend, track_ids: &[TrackId]) -> HashMap<TrackId, Option<AudioFeatures>> {
+    join_all(track_ids.iter().map(|&id| async move {
+        let features = backend
+            .audio_features(id)
             .await
-            .and_then(reqwest::Response::error_for_status)
-            .inspect_err(|err| warn!("Failed to fetch ReccoBeats audio features: {err}"))
-        else {
-            continue;
-        };
-        let Ok(features) = features
-            .json::<ReccoResponse>()
-            .await
-            .inspect_err(|err| warn!("Failed to decode ReccoBeats audio features: {err}"))
-        else {
-            continue;
-        };
-        output.extend(
-            features
-                .items
-                .into_iter()
-                .filter_map(|item| Some((item.href.rsplit('/').next()?.parse().ok()?, Some(item.features.normalized())))),
-        );
-    }
-    output
+            .inspect_err(|error| warn!(%error, %id, "Failed to fetch Spotify audio features"))
+            .ok();
+        (id, features)
+    }))
+    .await
+    .into_iter()
+    .collect()
 }
 
 fn complete_palette(colors: &mut ArrayVec<(Lch, f32), PALETTE_COLORS>) {

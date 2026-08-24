@@ -1,4 +1,4 @@
-use super::{LyricSegment, MAX_PLAYLIST_TARGETS, MusicResult, PlaybackCommand, PlaylistId, PlaylistTracks, Track, TrackId, TrackRuntime};
+use super::{AudioFeatures, LoudnessTimeline, LyricSegment, MAX_PLAYLIST_TARGETS, MusicResult, PlaybackCommand, PlaylistId, PlaylistTracks, Track, TrackId, TrackRuntime};
 use crate::app::{
     AppUpdater, Background,
     config::{self, Config},
@@ -7,7 +7,9 @@ use crate::app::{
 use arrayvec::ArrayVec;
 use flate2::{Compression, write::GzEncoder};
 use futures_util::StreamExt;
-use librespot_core::{Session, SessionConfig, SpotifyId, authentication::Credentials, cache::Cache, dealer::protocol::Message as DealerMessage};
+use isthmus::FloatExt;
+use librespot_core::{FileId, Session, SessionConfig, SpotifyId, authentication::Credentials, cache::Cache, dealer::protocol::Message as DealerMessage, error::ErrorKind};
+use librespot_metadata::{Lyrics, lyrics::SyncType};
 use librespot_oauth::OAuthClientBuilder;
 use librespot_protocol::{
     connect::{Capabilities, Cluster, ClusterUpdate, Device as ConnectDevice, DeviceInfo, MemberType, PutStateReason, PutStateRequest},
@@ -67,24 +69,6 @@ fn read_cache<T: DeserializeOwned>(path: &Path) -> Option<T> {
         .ok()
 }
 
-#[derive(Deserialize)]
-struct SpotifyLyrics {
-    lyrics: SpotifyLyricsInner,
-}
-
-#[derive(Deserialize)]
-#[serde(rename_all = "camelCase")]
-struct SpotifyLyricsInner {
-    lines: Vec<SpotifyLyricLine>,
-}
-
-#[derive(Deserialize)]
-#[serde(rename_all = "camelCase")]
-struct SpotifyLyricLine {
-    start_time_ms: String,
-    words: String,
-}
-
 pub struct SpotifyBackend {
     events: UnboundedSender<WorkerEvent>,
     session: Arc<Mutex<Option<Session>>>,
@@ -137,12 +121,12 @@ impl SpotifyBackend {
     pub(super) async fn lyrics(&self, track_id: TrackId) -> MusicResult<Vec<LyricSegment>> {
         let session = self.session.lock().clone().ok_or_else(|| io::Error::other("Spotify is not connected"))?;
         let id = SpotifyId::from_base62(&track_id)?;
-        let response = match session.spclient().get_lyrics(&id).await {
-            Ok(response) => response,
-            Err(error) if error.to_string().contains("404") => return Ok(Vec::new()),
+        let lines = match Lyrics::get(&session, &id).await {
+            Ok(lyrics) if lyrics.lyrics.sync_type == SyncType::LineSynced => lyrics.lyrics.lines,
+            Ok(_) => return Ok(Vec::new()),
+            Err(error) if error.kind == ErrorKind::NotFound => return Ok(Vec::new()),
             Err(error) => return Err(error.into()),
         };
-        let lines = serde_json::from_slice::<SpotifyLyrics>(&response)?.lyrics.lines;
         Ok(lines
             .iter()
             .enumerate()
@@ -150,7 +134,13 @@ impl SpotifyBackend {
                 let start_ms = line.start_time_ms.parse().ok()?;
                 Some(LyricSegment {
                     start_ms,
-                    end_ms: lines.get(index + 1).and_then(|next| next.start_time_ms.parse().ok()).unwrap_or(start_ms + 1_000.0),
+                    end_ms: line
+                        .end_time_ms
+                        .parse()
+                        .ok()
+                        .filter(|end| *end > start_ms)
+                        .or_else(|| lines.get(index + 1)?.start_time_ms.parse().ok())
+                        .unwrap_or(start_ms + 1_000.0),
                     text: line.words.clone(),
                     lane: 0,
                     line_end: true,
@@ -158,6 +148,98 @@ impl SpotifyBackend {
             })
             .collect())
     }
+
+    pub(super) async fn audio_features(&self, track_id: TrackId) -> MusicResult<AudioFeatures> {
+        #[derive(Deserialize)]
+        struct Features {
+            energy: f32,
+            danceability: f32,
+            acousticness: f32,
+            tempo: f32,
+            valence: f32,
+            instrumentalness: f32,
+        }
+
+        let session = self.session.lock().clone().ok_or_else(|| io::Error::other("Spotify is not connected"))?;
+        let path = format!("/audio-attributes/v1/audio-features/{track_id}?format=json");
+        let features: Features = serde_json::from_slice(&session.spclient().request(&Method::GET, &path, None, None).await?)?;
+        Ok(AudioFeatures {
+            energy: features.energy.saturate(),
+            danceability: features.danceability.saturate(),
+            acousticness: features.acousticness.saturate(),
+            tempo: (features.tempo / 300.0).saturate(),
+            valence: features.valence.saturate(),
+            instrumentalness: features.instrumentalness.saturate(),
+        })
+    }
+
+    pub(super) async fn loudness(&self, track_ids: &[TrackId]) -> MusicResult<HashMap<TrackId, LoudnessTimeline>> {
+        let session = self.session.lock().clone().ok_or_else(|| io::Error::other("Spotify is not connected"))?;
+        let response = session
+            .spclient()
+            .get_extended_metadata(BatchedEntityRequest {
+                entity_request: track_ids
+                    .iter()
+                    .map(|id| EntityRequest {
+                        entity_uri: format!("spotify:track:{id}"),
+                        query: vec![ExtensionQuery {
+                            extension_kind: EnumOrUnknown::new(ExtensionKind::LIST_TUNER_AUDIO_ANALYSIS),
+                            ..Default::default()
+                        }],
+                        ..Default::default()
+                    })
+                    .collect(),
+                ..Default::default()
+            })
+            .await?;
+        Ok(response
+            .extended_metadata
+            .into_iter()
+            .flat_map(|array| array.extension_data)
+            .filter_map(|data| {
+                let id = data.entity_uri.rsplit(':').next()?.parse().ok()?;
+                let bytes = data.extension_data.into_option()?.value;
+                Some((id, decode_loudness(&bytes)?))
+            })
+            .collect())
+    }
+}
+
+fn decode_loudness(bytes: &[u8]) -> Option<LoudnessTimeline> {
+    let mut cursor = 0;
+    let mut period_ms = 0;
+    let mut samples = Vec::new();
+    while cursor < bytes.len() {
+        let tag = read_varint(bytes, &mut cursor)?;
+        match (tag >> 3, tag & 7) {
+            (2, 0) => period_ms = read_varint(bytes, &mut cursor)? as u32,
+            (3, 2) => {
+                let end = cursor.checked_add(read_varint(bytes, &mut cursor)? as usize)?;
+                while cursor < end {
+                    samples.push(read_varint(bytes, &mut cursor)? as u32 as i32);
+                }
+            }
+            (_, 0) => _ = read_varint(bytes, &mut cursor)?,
+            (_, 1) => cursor = cursor.checked_add(8)?,
+            (_, 2) => cursor = cursor.checked_add(read_varint(bytes, &mut cursor)? as usize)?,
+            (_, 5) => cursor = cursor.checked_add(4)?,
+            _ => return None,
+        }
+    }
+    (!samples.is_empty()).then_some(LoudnessTimeline { period_ms, samples })
+}
+
+fn read_varint(bytes: &[u8], cursor: &mut usize) -> Option<u64> {
+    let mut value = 0;
+    for shift in (0..64).step_by(7) {
+        let byte = *bytes.get(*cursor)?;
+        *cursor += 1;
+        value |= u64::from(byte & 0x7f) << shift;
+        if byte & 0x80 == 0 {
+            return Some(value);
+        }
+    }
+    None
 }
 
 async fn connect() -> ClientResult<Session> {
@@ -287,12 +369,8 @@ impl SpotifyWorker {
 
     async fn command(&mut self, command: PlaybackCommand) {
         match command {
-            PlaybackCommand::SetPlaying(playing) => {
-                self.player_command(PlayerCommand::Playing(playing)).await;
-            }
-            PlaybackCommand::Seek(position_ms) => {
-                self.player_command(PlayerCommand::Seek(position_ms)).await;
-            }
+            PlaybackCommand::SetPlaying(playing) => self.player_command(PlayerCommand::Playing(playing)).await,
+            PlaybackCommand::Seek(position_ms) => self.player_command(PlayerCommand::Seek(position_ms)).await,
             PlaybackCommand::Skip(count) => {
                 for _ in 0..count.unsigned_abs() {
                     self.player_command(PlayerCommand::Skip(count > 0)).await;
@@ -402,18 +480,18 @@ impl SpotifyWorker {
         let playback = snapshot.playback;
         send_update(&self.updater, move |app| {
             let queue_changed = if let Some(queue) = queue {
-                app.playback.replace_queue(queue, index, playback.position_ms, playback.rate, playback.observed_at);
+                app.music.replace_queue(queue, index, playback.position_ms, playback.rate, playback.observed_at);
                 true
             } else {
-                app.playback.observe(index, playback.position_ms, playback.rate, playback.observed_at);
+                app.music.observe(index, playback.position_ms, playback.rate, playback.observed_at);
                 false
             };
-            if playback.playing && !app.playback.playing {
-                app.playback.mark_toggle();
+            if playback.playing && !app.music.playing {
+                app.music.last_toggle = Instant::now();
             }
-            app.playback.playing = playback.playing;
+            app.music.playing = playback.playing;
             if queue_changed {
-                app.refresh_track_enrichment();
+                app.refresh_enrichment(true);
             }
         });
     }
@@ -586,6 +664,7 @@ fn track_from_provided(track: &ProvidedTrack, track_metadata: Option<&TrackDetai
             .or(fallback_duration_ms)
             .or_else(|| track_metadata.map(|details| details.duration_ms))
             .unwrap_or_default(),
+        interaction_id: Track::next_interaction_id(),
         runtime: TrackRuntime::default(),
     }
 }
@@ -599,6 +678,6 @@ fn track_image_url(track: &metadata::Track) -> Option<String> {
         .flat_map(|group| &group.image)
         .chain(&album.cover)
         .max_by_key(|image| image.width());
-    let id = image?.file_id();
-    (!id.is_empty()).then(|| format!("https://i.scdn.co/image/{}", hex::encode(id)))
+    let image = image?;
+    (!image.file_id().is_empty()).then(|| format!("https://i.scdn.co/image/{}", FileId::from(image)))
 }
