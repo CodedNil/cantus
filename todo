@@ -9,15 +9,12 @@ render active timer under the date
 activate commands like: timer 30m
 other command such as timer cancel
 
-the caustics doesnt look properly like caustics
-
 mouse gestures generic across programs
 
 
 bugs:
 text on the weather widget top needs outline so it doesnt blend into clouds
 outline still doesnt work perfectly for example for M
-make the playhead clickable surface shorter so its only around the button, then stars are still clickable
 
 tracks:
 2026-08-24T11:04:48.568408Z ERROR cantus::app::music::spotify::playlists: Failed to update Spotify library error=Client specified an invalid argument { Response status code: 405 Method Not Allowed } track_id=5a6p56me3eFdKXcWnsPtLE
@@ -33,7 +30,5 @@ do a pass through everything, cantus and isthmus, identify cruft and legacy stuf
 have the paint output give you the options for blending? and then it auto handles premultiply etc? custom Rgba struct instead of vec4?
 
 replace isthmus build with cargo gpu
-
-make sure we are relying on libspotify to its absolute maximum potential, not doing any code manually that libspotify provides
 
 blur behind playhead?
